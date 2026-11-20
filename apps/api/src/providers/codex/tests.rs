@@ -10,7 +10,7 @@ impl Codex {
             models: Models::new(&DEFINITION),
             ready: Ok(Ready {
                 host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
-                program: PathBuf::new(),
+                program: PathBuf::new().into(),
                 auth: PathBuf::new(),
                 version: "codex-cli 9.0.0".into(),
             }),

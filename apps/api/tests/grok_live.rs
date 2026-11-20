@@ -15,6 +15,8 @@ fn installed() -> PathBuf {
     else_api::providers::executable::executable(configured.as_deref(), "grok")
         .expect("resolve Grok CLI")
         .expect("Grok CLI on PATH or ELSE_GROK_BIN")
+        .path()
+        .to_owned()
 }
 
 async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, String) {

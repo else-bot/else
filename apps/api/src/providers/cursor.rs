@@ -76,7 +76,10 @@ fn build(wiring: &super::Wiring) -> super::Built {
 /// `~/.local/bin`, which a service's `PATH` often lacks, else
 /// `cursor-agent` on `PATH`. A link is kept, not resolved: an update points
 /// it at a new versioned directory and removes the old one.
-fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
+fn lookup(
+    configured: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<Option<super::Program>, String> {
     use std::os::unix::fs::PermissionsExt;
     let runs = |file: &PathBuf| {
         file.metadata()
@@ -98,12 +101,7 @@ fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathB
     else {
         return Ok(None);
     };
-    // Turns start in the bot's project, where a relative path means
-    // another file.
-    let given = std::path::absolute(&given).map_err(|e| e.to_string())?;
-    let resolved = super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")?;
-    let linked = std::fs::canonicalize(&given).ok() == resolved;
-    Ok(if linked { Some(given) } else { resolved })
+    super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")
 }
 
 /// The models `cursor-agent models` prints after "Available models", one
@@ -124,7 +122,7 @@ fn listed_models(printed: &str) -> Vec<Listed> {
 /// A CLI that runs and is new enough, and how it finds the host's login.
 struct Ready {
     host: Host,
-    program: PathBuf,
+    program: super::Program,
     version: String,
     login: Login,
 }
@@ -139,24 +137,26 @@ impl Cursor {
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program), login),
+            ready: Self::ready(host, Ok(program.map(Into::into)), login),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Result<Option<PathBuf>, String>,
+        program: Result<Option<super::Program>, String>,
         login: Login,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Cursor CLI is not configured on this host.")?;
         let program = program?.ok_or(cursor_home::NOT_INSTALLED)?;
-        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
-            format!(
-                "Cursor CLI does not run (`{} --version`: {why}).",
-                program.display()
-            )
-        })?;
+        let version = host
+            .probe(program.path(), &["--version"], &[])
+            .map_err(|why| {
+                format!(
+                    "Cursor CLI does not run (`{} --version`: {why}).",
+                    program.path().display()
+                )
+            })?;
         if !cursor_home::supported(&version) {
             return Err(format!(
                 "Cursor CLI {version} is older than {}. Run `cursor-agent update` on this server.",
@@ -209,7 +209,11 @@ impl Cursor {
         mut dirs: BotDirs,
         workspace: PathBuf,
         turn: &PreparedTurn<'_>,
-    ) -> LaunchSpec {
+    ) -> Result<LaunchSpec, String> {
+        let program = ready
+            .program
+            .current()
+            .map_err(|why| format!("Could not start Cursor CLI: {why}"))?;
         let mut args: Vec<OsString> = [
             "--print",
             "--output-format",
@@ -243,13 +247,13 @@ impl Cursor {
         if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
             env.push((GRANT_ENV.into(), grant.clone()));
         }
-        LaunchSpec {
+        Ok(LaunchSpec {
             turn_id: input.turn_id,
             dirs,
-            program: ready.program.clone(),
+            program,
             args,
             env,
-        }
+        })
     }
 }
 
@@ -358,7 +362,7 @@ impl Provider for Cursor {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
         // Listing runs no agent, so it reads the host login where it is.
         // `probe` keeps the line that says why it failed.
-        let (host, program) = (ready.host.clone(), ready.program.clone());
+        let (host, program) = (ready.host.clone(), ready.program.current()?);
         let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
         if let Some(store) = &ready.login.store {
             env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
@@ -436,7 +440,10 @@ impl Provider for Cursor {
         {
             return failed("provider_unavailable", e.to_string());
         }
-        let spec = self.launch(ready, &input, profile, dirs, workspace, &turn);
+        let spec = match self.launch(ready, &input, profile, dirs, workspace, &turn) {
+            Ok(spec) => spec,
+            Err(why) => return failed("provider_unavailable", why),
+        };
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }

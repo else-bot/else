@@ -96,7 +96,10 @@ fn installed(home: &Path) -> Option<PathBuf> {
 /// `ELSE_GROK_BIN` or `PATH`, under the same rule as [`choose`]: the
 /// installer writes `ELSE_GROK_BIN` from its own `PATH`, so it can name the
 /// npm package's script too. A setting that does not resolve stays an error.
-fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
+fn lookup(
+    configured: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<Option<super::Program>, String> {
     let found = super::executable(configured, "grok");
     match configured {
         Some(_) if found.is_err() => found,
@@ -108,12 +111,12 @@ fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathB
 /// `PATH` can hold the npm package's script, which needs node and would
 /// unpack its own copy into each bot's `GROK_HOME`.
 fn choose(
-    on_path: Result<Option<PathBuf>, String>,
+    on_path: Result<Option<super::Program>, String>,
     installed: Option<PathBuf>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<super::Program>, String> {
     match on_path {
-        Ok(Some(found)) if !is_script(&found) => Ok(Some(found)),
-        other => installed.map_or(other, |path| Ok(Some(path))),
+        Ok(Some(found)) if !is_script(found.path()) => Ok(Some(found)),
+        other => installed.map_or(other, |path| Ok(Some(path.into()))),
     }
 }
 
@@ -128,7 +131,7 @@ fn is_script(path: &Path) -> bool {
 /// A CLI that runs, and the host's Grok home, which holds its login.
 struct Ready {
     host: Host,
-    program: PathBuf,
+    program: super::Program,
     version: String,
     login: PathBuf,
 }
@@ -143,24 +146,26 @@ impl Grok {
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Option<PathBuf>) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program), login),
+            ready: Self::ready(host, Ok(program.map(Into::into)), login),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Result<Option<PathBuf>, String>,
+        program: Result<Option<super::Program>, String>,
         login: Option<PathBuf>,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Grok CLI is not configured on this host.")?;
         let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
-        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
-            format!(
-                "Grok CLI does not run (`{} --version`: {why}).",
-                program.display()
-            )
-        })?;
+        let version = host
+            .probe(program.path(), &["--version"], &[])
+            .map_err(|why| {
+                format!(
+                    "Grok CLI does not run (`{} --version`: {why}).",
+                    program.path().display()
+                )
+            })?;
         let login = login.ok_or("Grok CLI's home directory is unknown on the host.")?;
         Ok(Ready {
             host,
@@ -202,7 +207,11 @@ impl Grok {
         profile: &Profile,
         dirs: BotDirs,
         turn: &PreparedTurn<'_>,
-    ) -> LaunchSpec {
+    ) -> Result<LaunchSpec, String> {
+        let program = ready
+            .program
+            .current()
+            .map_err(|why| format!("Could not start Grok CLI: {why}"))?;
         let host_tools = input.delegation.host_tools();
         let system = format!(
             "{}\n{}",
@@ -254,13 +263,13 @@ impl Grok {
         if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
             env.push((GRANT_ENV.into(), grant.clone()));
         }
-        LaunchSpec {
+        Ok(LaunchSpec {
             turn_id: input.turn_id,
             dirs,
-            program: ready.program.clone(),
+            program,
             args,
             env,
-        }
+        })
     }
 }
 
@@ -300,7 +309,7 @@ impl Provider for Grok {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
         let printed = ready
             .host
-            .output(&ready.program, &["models"], &[], 1024 * 1024)
+            .output(&ready.program.current()?, &["models"], &[], 1024 * 1024)
             .await
             .map_err(|why| format!("`grok models` failed: {why}"))?;
         listed_models(&printed)
@@ -356,7 +365,10 @@ impl Provider for Grok {
         ) {
             return failed("provider_unavailable", e.to_string());
         }
-        let spec = self.launch(ready, &input, profile, dirs, &turn);
+        let spec = match self.launch(ready, &input, profile, dirs, &turn) {
+            Ok(spec) => spec,
+            Err(why) => return failed("provider_unavailable", why),
+        };
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }

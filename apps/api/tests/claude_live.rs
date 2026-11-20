@@ -25,6 +25,8 @@ fn installed(name: &str) -> PathBuf {
     else_api::providers::executable::executable(configured.as_deref(), name)
         .unwrap_or_else(|reason| panic!("{reason}"))
         .unwrap_or_else(|| panic!("{name} on PATH or {setting}"))
+        .path()
+        .to_owned()
 }
 
 fn claude(data: &Path, tool_url: &str) -> Claude {

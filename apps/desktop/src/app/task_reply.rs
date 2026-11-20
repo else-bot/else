@@ -327,6 +327,7 @@ impl ElseApp {
         // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
             let remedy = super::message_row::model_remedy(turn, view.bot_id, cx);
+            let retry = self.routine_retry(turn, view.bot_id, cx);
             card.children(earlier)
                 .children(reply)
                 .children(explanation)
@@ -335,7 +336,8 @@ impl ElseApp {
                         .items_center()
                         .gap_2()
                         .children(status)
-                        .children(remedy),
+                        .children(remedy)
+                        .children(retry),
                 )
         } else {
             card.children(status).children(earlier).children(reply)

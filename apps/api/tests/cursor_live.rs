@@ -24,6 +24,8 @@ fn installed() -> PathBuf {
     else_api::providers::executable::executable(None, "cursor-agent")
         .expect("resolve Cursor CLI")
         .expect("Cursor CLI in ~/.local/bin, on PATH, or in ELSE_CURSOR_BIN")
+        .path()
+        .to_owned()
 }
 
 fn live() -> bool {

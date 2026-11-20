@@ -48,12 +48,19 @@ fn a_native_grok_on_path_wins_and_the_installed_binary_replaces_anything_else() 
     assert_eq!(installed(&home), Some(binary.clone()));
 
     let some = |path: &PathBuf| Some(path.clone());
-    assert_eq!(choose(Ok(some(&native)), some(&binary)), Ok(some(&native)));
-    assert_eq!(choose(Ok(some(&script)), some(&binary)), Ok(some(&binary)));
-    assert_eq!(choose(Ok(None), some(&binary)), Ok(some(&binary)));
-    assert_eq!(choose(Err("shim".into()), some(&binary)), Ok(some(&binary)));
-    assert_eq!(choose(Ok(some(&script)), None), Ok(some(&script)));
-    assert_eq!(choose(Err("shim".into()), None), Err("shim".into()));
+    let chosen = |on_path: Result<Option<PathBuf>, String>, installed| {
+        paths(choose(on_path.map(|p| p.map(Into::into)), installed))
+    };
+    assert_eq!(chosen(Ok(some(&native)), some(&binary)), Ok(some(&native)));
+    assert_eq!(chosen(Ok(some(&script)), some(&binary)), Ok(some(&binary)));
+    assert_eq!(chosen(Ok(None), some(&binary)), Ok(some(&binary)));
+    assert_eq!(chosen(Err("shim".into()), some(&binary)), Ok(some(&binary)));
+    assert_eq!(chosen(Ok(some(&script)), None), Ok(some(&script)));
+    assert_eq!(chosen(Err("shim".into()), None), Err("shim".into()));
+}
+
+fn paths(found: Result<Option<super::super::Program>, String>) -> Result<Option<PathBuf>, String> {
+    found.map(|p| p.map(|p| p.path().to_owned()))
 }
 
 #[test]
@@ -70,11 +77,14 @@ fn a_configured_npm_script_gives_way_to_the_installed_binary() {
     let script = file("npm/.bin/grok", "#!/bin/sh\nexec node grok.js\n");
     let native = file("opt/grok", "\x7fELF");
     let home = dir.path().join("home");
-    assert_eq!(lookup(Some(&script), Some(&home)), Ok(Some(script.clone())));
+    assert_eq!(
+        paths(lookup(Some(&script), Some(&home))),
+        Ok(Some(script.clone()))
+    );
     let binary = file("home/bin/grok", "\x7fELF");
     let home = std::fs::canonicalize(home).unwrap();
-    assert_eq!(lookup(Some(&script), Some(&home)), Ok(Some(binary)));
-    assert_eq!(lookup(Some(&native), Some(&home)), Ok(Some(native)));
+    assert_eq!(paths(lookup(Some(&script), Some(&home))), Ok(Some(binary)));
+    assert_eq!(paths(lookup(Some(&native), Some(&home))), Ok(Some(native)));
     let missing = dir.path().join("missing/grok");
     assert!(lookup(Some(&missing), Some(&home)).is_err());
 }
@@ -439,7 +449,7 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
         models: Models::new(&DEFINITION),
         ready: Ok(Ready {
             host: Host::new(&root.path().join("data"), &root.path().join("bots")),
-            program: PathBuf::new(),
+            program: PathBuf::new().into(),
             version: "grok 1.0".into(),
             login: login.clone(),
         }),
@@ -553,7 +563,7 @@ async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
         models: Models::new(&DEFINITION),
         ready: Ok(Ready {
             host: Host::new(&root.path().join("data"), &root.path().join("bots")),
-            program: root.path().join("missing-grok"),
+            program: root.path().join("missing-grok").into(),
             version: "grok 1.0".into(),
             login: login.clone(),
         }),

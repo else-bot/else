@@ -9,13 +9,80 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+/// A provider CLI to launch. One found by [`executable`] remembers how: a
+/// version manager's upgrade can remove the version a shim resolved to,
+/// and a reinstall can move the CLI to another `PATH` directory, while the
+/// API runs. [`Program::current`] looks it up again then.
+#[derive(Debug, Clone)]
+pub struct Program {
+    path: PathBuf,
+    found: Option<Lookup>,
+}
+
+#[derive(Debug, Clone)]
+struct Lookup {
+    given: PathBuf,
+    configured: bool,
+    name: String,
+    setting: String,
+}
+
+impl Program {
+    /// The executable as resolved when the provider was set up.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The executable to launch now, or why there is none, naming the file
+    /// tried and the setting that overrides it.
+    pub fn current(&self) -> Result<PathBuf, String> {
+        self.current_in(std::env::var_os("PATH").as_deref())
+    }
+
+    fn current_in(&self, path: Option<&OsStr>) -> Result<PathBuf, String> {
+        let Some(found) = &self.found else {
+            return Ok(self.path.clone());
+        };
+        if is_executable(&self.path) {
+            return Ok(self.path.clone());
+        }
+        let given = if is_executable(&found.given) || found.configured {
+            Some(found.given.clone())
+        } else {
+            find(None, &found.name, &found.setting, path)?
+        };
+        if let Some(given) = given.filter(|given| is_executable(given)) {
+            return locate(&given, &found.name, &found.setting, path);
+        }
+        Err(format!(
+            "`{}` was not found at {}. Install it or set {}.",
+            found.name,
+            found.given.display(),
+            found.setting
+        ))
+    }
+}
+
+/// Exactly this executable, never looked up again.
+impl From<PathBuf> for Program {
+    fn from(path: PathBuf) -> Self {
+        Self { path, found: None }
+    }
+}
+
 /// The executable for the CLI `name`: the configured path, else the first
 /// executable `name` on `PATH`, with a mise or asdf shim resolved through
-/// its manager's `which`. `Ok(None)` means it is not on `PATH`. An error
-/// says why the found or configured file cannot be used; a configured path
-/// never falls back to `PATH`.
-pub fn executable(configured: Option<&Path>, name: &str) -> Result<Option<PathBuf>, String> {
-    resolve(configured, name, std::env::var_os("PATH").as_deref())
+/// its manager's `which`. A found link is kept, not resolved: a package
+/// manager's upgrade repoints it and removes the version it named.
+/// `Ok(None)` means it is not on `PATH`. An error says why the found or
+/// configured file cannot be used; a configured path never falls back to
+/// `PATH`.
+pub fn executable(configured: Option<&Path>, name: &str) -> Result<Option<Program>, String> {
+    executable_as(
+        configured,
+        name,
+        &format!("ELSE_{}_BIN", name.to_uppercase()),
+    )
 }
 
 /// [`executable`] for a CLI configured by a `setting` not named after it.
@@ -23,8 +90,8 @@ pub fn executable_as(
     configured: Option<&Path>,
     name: &str,
     setting: &str,
-) -> Result<Option<PathBuf>, String> {
-    resolve_as(
+) -> Result<Option<Program>, String> {
+    program(
         configured,
         name,
         setting,
@@ -32,20 +99,30 @@ pub fn executable_as(
     )
 }
 
-fn resolve(
+fn program(
     configured: Option<&Path>,
     name: &str,
+    setting: &str,
     path: Option<&OsStr>,
-) -> Result<Option<PathBuf>, String> {
-    resolve_as(
-        configured,
-        name,
-        &format!("ELSE_{}_BIN", name.to_uppercase()),
-        path,
-    )
+) -> Result<Option<Program>, String> {
+    let Some(given) = find(configured, name, setting, path)? else {
+        return Ok(None);
+    };
+    Ok(Some(Program {
+        path: locate(&given, name, setting, path)?,
+        found: Some(Lookup {
+            given,
+            configured: configured.is_some(),
+            name: name.to_owned(),
+            setting: setting.to_owned(),
+        }),
+    }))
 }
 
-fn resolve_as(
+/// The configured file, else the first executable `name` on `path`, as an
+/// absolute path: turns start in the bot's project, where a relative path
+/// means another file.
+fn find(
     configured: Option<&Path>,
     name: &str,
     setting: &str,
@@ -64,7 +141,19 @@ fn resolve_as(
             None => return Ok(None),
         },
     };
-    native(&found, name, path).map(Some).map_err(|why| {
+    std::path::absolute(&found)
+        .map(Some)
+        .map_err(|e| format!("{} cannot be read ({e})", found.display()))
+}
+
+/// The executable `found` runs: itself, or the version its shim selects.
+fn locate(
+    found: &Path,
+    name: &str,
+    setting: &str,
+    path: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    native(found, name, path).map_err(|why| {
         format!(
             "`{name}` at {} {why}; set {setting} to the {name} executable itself",
             found.display()
@@ -90,7 +179,7 @@ impl Manager {
 }
 
 enum Found {
-    Native(PathBuf),
+    Native,
     Link(Manager, PathBuf),
     Script(Manager),
 }
@@ -120,12 +209,12 @@ fn classify(path: &Path) -> Result<Found, String> {
             return Ok(Found::Script(manager));
         }
     }
-    Ok(Found::Native(file))
+    Ok(Found::Native)
 }
 
 fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
     let (manager, binary) = match classify(found)? {
-        Found::Native(file) => return Ok(file),
+        Found::Native => return Ok(found.to_path_buf()),
         Found::Link(manager, binary) => (manager, binary),
         Found::Script(manager) => {
             let binary = search(path, manager.name())
@@ -166,7 +255,7 @@ fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, Str
         ));
     }
     match classify(&target)? {
-        Found::Native(file) => Ok(file),
+        Found::Native => Ok(target),
         Found::Link(..) | Found::Script(_) => Err(format!(
             "is a shim and {which} printed {}, another shim",
             target.display()
@@ -190,6 +279,15 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     const NAMES: [&str; 3] = ["codex", "claude", "grok"];
+
+    fn resolve(
+        configured: Option<&Path>,
+        name: &str,
+        path: Option<&OsStr>,
+    ) -> Result<Option<PathBuf>, String> {
+        let setting = format!("ELSE_{}_BIN", name.to_uppercase());
+        program(configured, name, &setting, path).map(|p| p.map(|p| p.path))
+    }
 
     struct Tree(tempfile::TempDir);
 
@@ -311,16 +409,84 @@ mod tests {
     }
 
     #[test]
-    fn a_link_to_a_native_binary_is_kept() {
+    fn a_link_to_a_native_binary_is_kept_across_an_upgrade() {
         let tree = Tree::new();
-        let native = tree.native("claude");
-        let link = tree.link("local/bin/claude", &native);
-        let path = tree.path(&["local/bin"]);
-        assert_eq!(
-            resolve(None, "claude", Some(&path)),
-            Ok(Some(native.clone()))
+        let old = tree.file("Caskroom/codex/0.142.0/bin/codex", "old", 0o755);
+        let link = tree.link("homebrew/bin/codex", &old);
+        let path = tree.path(&["homebrew/bin"]);
+        assert_eq!(resolve(None, "codex", Some(&path)), Ok(Some(link.clone())));
+        let program = executable(Some(&link), "codex").unwrap().unwrap();
+        assert_eq!(program.path(), link);
+
+        let new = tree.file(
+            "Caskroom/codex/0.171.0/bin/codex",
+            "#!/bin/sh\necho 0.171.0\n",
+            0o755,
         );
-        assert_eq!(resolve(Some(&link), "claude", None), Ok(Some(native)));
+        std::fs::remove_dir_all(tree.at("Caskroom/codex/0.142.0")).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&new, &link).unwrap();
+        let ran = std::process::Command::new(program.current().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "0.171.0\n");
+    }
+
+    #[test]
+    fn a_cli_reinstalled_elsewhere_on_path_is_found_again() {
+        let tree = Tree::new();
+        let old = tree.file("npm/bin/codex", "old", 0o755);
+        let path = tree.path(&["npm/bin", "homebrew/bin"]);
+        let program = program(None, "codex", "ELSE_CODEX_BIN", Some(&path))
+            .unwrap()
+            .unwrap();
+        assert_eq!(program.current_in(Some(&path)), Ok(old.clone()));
+
+        std::fs::remove_file(&old).unwrap();
+        let new = tree.file("homebrew/bin/codex", "new", 0o755);
+        assert_eq!(program.current_in(Some(&path)), Ok(new.clone()));
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(
+            program.current_in(Some(&path)),
+            Err(format!(
+                "`codex` was not found at {}. Install it or set ELSE_CODEX_BIN.",
+                old.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_shim_is_resolved_again_once_its_version_is_removed() {
+        let tree = Tree::new();
+        let answer =
+            |version: &str| format!("echo {}/installs/{version}/codex", tree.at("").display());
+        let mise = tree.manager("bin/mise", &answer("1.0"));
+        let old = tree.file("installs/1.0/codex", "old", 0o755);
+        let shim = tree.link("shims/codex", &mise);
+        let program = executable(Some(&shim), "codex").unwrap().unwrap();
+        assert_eq!(program.current(), Ok(old));
+
+        let new = tree.file("installs/2.0/codex", "new", 0o755);
+        std::fs::remove_dir_all(tree.at("installs/1.0")).unwrap();
+        tree.manager("bin/mise", &answer("2.0"));
+        assert_eq!(program.current(), Ok(new));
+    }
+
+    #[test]
+    fn a_removed_cli_names_the_file_and_the_setting() {
+        let tree = Tree::new();
+        let found = tree.file("bin/cursor-agent", "native", 0o755);
+        let program = executable_as(Some(&found), "cursor-agent", "ELSE_CURSOR_BIN")
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(&found).unwrap();
+        assert_eq!(
+            program.current(),
+            Err(format!(
+                "`cursor-agent` was not found at {}. Install it or set ELSE_CURSOR_BIN.",
+                found.display()
+            ))
+        );
     }
 
     #[test]

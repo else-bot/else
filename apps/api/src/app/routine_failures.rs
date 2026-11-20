@@ -152,7 +152,8 @@ pub enum Attempt {
     First,
     /// An automatic retry of a failed run.
     Retry,
-    /// The owner's retry of a paused routine; a success switches it back on.
+    /// The owner's retry of a failed or paused routine; a success switches
+    /// a paused routine back on.
     Resume,
 }
 

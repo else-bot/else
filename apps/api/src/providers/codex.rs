@@ -102,7 +102,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
 /// A CLI that runs and a host login.
 struct Ready {
     host: Host,
-    program: PathBuf,
+    program: super::Program,
     auth: PathBuf,
     version: String,
 }
@@ -120,14 +120,14 @@ impl Codex {
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program), auth),
+            ready: Self::ready(host, Ok(program.map(Into::into)), auth),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Result<Option<PathBuf>, String>,
+        program: Result<Option<super::Program>, String>,
         auth: Option<PathBuf>,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Codex is not configured on this host")?;
@@ -136,13 +136,15 @@ impl Codex {
         if !auth.is_file() {
             return Err("Codex is not logged in on the host (run `codex login`)".into());
         }
-        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
-            format!(
-                "the codex executable does not run (`{} --version`: {why}); \
+        let version = host
+            .probe(program.path(), &["--version"], &[])
+            .map_err(|why| {
+                format!(
+                    "the codex executable does not run (`{} --version`: {why}); \
                  set ELSE_CODEX_BIN to the native codex binary",
-                program.display()
-            )
-        })?;
+                    program.path().display()
+                )
+            })?;
         Ok(Ready {
             host,
             program,
@@ -196,6 +198,10 @@ impl Codex {
             .host
             .bot_dirs(input.bot_id, ID)
             .map_err(|e| unavailable(e.to_string()))?;
+        let program = ready
+            .program
+            .current()
+            .map_err(|why| unavailable(format!("Could not start Codex: {why}")))?;
         let host_tools = input.delegation.host_tools();
         codex_home::prepare(&dirs, &ready.auth, self.tool_url.as_deref(), host_tools)
             .map_err(|e| unavailable(e.to_string()))?;
@@ -216,7 +222,7 @@ impl Codex {
         }
         let mut spec = LaunchSpec {
             turn_id: input.turn_id,
-            program: ready.program.clone(),
+            program,
             args: vec![OsString::from("app-server")],
             env,
             dirs,
@@ -302,9 +308,10 @@ impl Provider for Codex {
 
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let program = ready.program.current()?;
         let exported = ready
             .host
-            .output(&ready.program, &["debug", "models"], &[], 16 * 1024 * 1024)
+            .output(&program, &["debug", "models"], &[], 16 * 1024 * 1024)
             .await
             .map_err(|why| format!("`codex debug models` failed: {why}"))?;
         codex_home::listed_models(exported.as_bytes())

@@ -91,8 +91,10 @@ pub enum RoutineError {
          another model for the routine"
     )]
     ProviderUnavailable,
-    #[error("the routine is not paused by a failure; switch it on with its toggle instead")]
-    NotPaused,
+    #[error(
+        "the routine's last run did not fail and it is not paused, so there is nothing to retry"
+    )]
+    NothingToRetry,
     #[error(transparent)]
     Invalid(#[from] InvalidRoutine),
     #[error(transparent)]
@@ -320,7 +322,9 @@ const SELECT: &str =
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         r.failed_runs, r.paused_reason, r.quiet,
-        coalesce(lr.resumes AND NOT lr.reviewed, false) AS retrying, lr.due_at AS run_due_at, lr.skip_reason,
+        EXISTS (SELECT 1 FROM routine_runs x WHERE x.routine_id = r.id
+                  AND x.resumes AND NOT x.reviewed) AS retrying,
+        lr.due_at AS run_due_at, lr.skip_reason,
         lr.report, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r
@@ -774,7 +778,7 @@ struct OnDemand {
     prompt: String,
     prompt_revision: i64,
     model: Option<Json<RoutineModel>>,
-    paused: bool,
+    retryable: bool,
     queued: bool,
     busy: bool,
     last_due_at: Option<DateTime<Utc>>,
@@ -786,8 +790,8 @@ pub enum RunNow {
     /// The bot, for an owner request; one turn queues at most one run of
     /// each routine.
     Turn(Caller),
-    /// The owner's Retry of a routine else.bot paused; a success switches
-    /// it back on.
+    /// The owner's Retry of a routine whose last run failed or that
+    /// else.bot paused; a success switches a paused routine back on.
     Resume { bot_id: Uuid, request_id: Uuid },
 }
 
@@ -837,7 +841,7 @@ pub async fn run_now(
     );
     let row: Option<OnDemand> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
-                NOT r.enabled AND r.paused_reason IS NOT NULL AS paused,
+                (NOT r.enabled AND r.paused_reason IS NOT NULL) OR r.failed_runs > 0 AS retryable,
                 EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3) AS queued,
                 (EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                          WHERE rr.routine_id = r.id
@@ -859,7 +863,7 @@ pub async fn run_now(
         prompt,
         prompt_revision,
         model,
-        paused,
+        retryable,
         queued,
         busy,
         last_due_at,
@@ -872,8 +876,8 @@ pub async fn run_now(
         tx.commit().await?;
         return Ok((routine, false));
     }
-    if resumes && !paused {
-        return Err(RoutineError::NotPaused);
+    if resumes && !retryable {
+        return Err(RoutineError::NothingToRetry);
     }
     // An ended run awaiting review may still be retried; wait for it too.
     if busy {
