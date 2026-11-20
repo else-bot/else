@@ -102,7 +102,7 @@ fn text(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 fn address(value: &str) -> bool {
-    text(value, 254) && value.contains('@') && !value.contains([' ', '<', '>'])
+    text(value, 320) && value.contains('@') && !value.contains([' ', '<', '>'])
 }
 fn folder(value: &str) -> bool {
     text(value, 512)
@@ -111,10 +111,10 @@ fn folder(value: &str) -> bool {
 impl MailConfig {
     pub fn validate(&self) -> Result<(), MailError> {
         if !address(&self.address)
-            || !text(&self.username, 254)
+            || !text(&self.username, 255)
             || [&self.imap, &self.smtp].iter().any(|e| {
                 e.port == 0
-                    || !text(&e.host, 253)
+                    || !text(&e.host, 255)
                     || !e.host.is_ascii()
                     || e.host.contains(['/', ':', ' ', '@'])
             })
@@ -150,27 +150,37 @@ impl Credential {
         let valid = match self {
             Self::Password { password } => {
                 !password.is_empty()
-                    && password.len() <= 4096
+                    && password.len() <= 8192
                     && !matches!(provider, Provider::Gmail | Provider::Microsoft)
             }
             Self::OAuth2 {
                 client_id,
                 refresh_token,
                 client_secret,
+                access_token,
                 ..
             } => {
                 provider.oauth_endpoints().is_ok()
                     && text(client_id, 1024)
                     && !refresh_token.is_empty()
                     && refresh_token.len() <= 8192
-                    && client_secret.as_ref().is_none_or(|s| s.len() <= 4096)
+                    && client_secret.as_ref().is_none_or(|s| s.len() <= 8192)
+                    && access_token.as_ref().is_none_or(|s| s.len() <= 8192)
             }
         };
-        if valid {
+        if valid && self.sealed_size_fits() {
             Ok(())
         } else {
             Err(MailError::new("invalid_mail_credential"))
         }
+    }
+
+    /// Whether the sealed credential fits `connector_accounts.credential`,
+    /// which holds 16,384 bytes; age adds a few hundred to the JSON.
+    fn sealed_size_fits(&self) -> bool {
+        serde_json::to_vec(self)
+            .map(zeroize::Zeroizing::new)
+            .is_ok_and(|plain| plain.len() <= 16_000)
     }
 }
 
@@ -362,6 +372,25 @@ impl MailCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_is_refused_when_sealed_it_would_not_fit_its_column() {
+        let oauth = |secret: usize, access: usize| Credential::OAuth2 {
+            client_id: "desktop".into(),
+            client_secret: Some("s".repeat(secret)),
+            refresh_token: "r".repeat(8192),
+            access_token: Some("a".repeat(access)),
+            expires_at: None,
+        };
+        assert!(oauth(4096, 2048).validate(Provider::Gmail).is_ok());
+        assert_eq!(
+            oauth(8192, 8192)
+                .validate(Provider::Gmail)
+                .unwrap_err()
+                .code,
+            "invalid_mail_credential"
+        );
+    }
 
     #[test]
     fn provider_endpoints_and_mail_headers_are_validated_at_input() {

@@ -1,5 +1,3 @@
-use std::io::{Read, Write};
-
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use zeroize::Zeroizing;
@@ -308,38 +306,20 @@ impl Settings {
     }
 }
 
-fn identity(key: &SecretKey, salt: &[u8], revision: i64) -> Result<age::x25519::Identity, Error> {
-    let salt = salt.try_into().map_err(|_| Error::Crypto)?;
-    super::identity_for_purpose(
-        key,
-        &salt,
-        &format!("else.bot/remote-backup-settings/v1/{revision}"),
-    )
-    .map_err(|_| Error::Crypto)
+fn purpose(revision: i64) -> String {
+    format!("else.bot/remote-backup-settings/v1/{revision}")
 }
 
 pub async fn save(pool: &SqlitePool, key: &SecretKey, settings: &Settings) -> Result<(), Error> {
     let (destination, salt, cipher) = match &settings.destination {
         None => (None, None, None),
         Some(d) => {
-            let mut salt = [0u8; 32];
-            getrandom::fill(&mut salt).map_err(|_| Error::Crypto)?;
-            let recipient = identity(key, &salt, settings.revision)?.to_public();
-            let encryptor =
-                age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-                    .map_err(|_| Error::Crypto)?;
-            let mut cipher = Vec::new();
-            let mut writer = encryptor
-                .wrap_output(&mut cipher)
-                .map_err(|_| Error::Crypto)?;
-            writer
-                .write_all(d.secret.as_bytes())
-                .and_then(|()| writer.finish().map(drop))
+            let sealed = crate::sealed::seal(key, &purpose(settings.revision), d.secret.as_bytes())
                 .map_err(|_| Error::Crypto)?;
             (
                 Some(serde_json::to_string(&d.view).map_err(|_| Error::Crypto)?),
-                Some(salt.to_vec()),
-                Some(cipher),
+                Some(sealed.salt.to_vec()),
+                Some(sealed.cipher),
             )
         }
     };
@@ -368,13 +348,8 @@ pub async fn load(pool: &SqlitePool, key: &SecretKey) -> Result<Option<Settings>
             let view = serde_json::from_str(&value).map_err(|_| Error::Crypto)?;
             let salt: Vec<u8> = row.get("secret_salt");
             let cipher: Vec<u8> = row.get("secret_cipher");
-            let identity = identity(key, &salt, revision)?;
-            let decryptor = age::Decryptor::new(cipher.as_slice()).map_err(|_| Error::Crypto)?;
-            let mut reader = decryptor
-                .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            let plain = crate::sealed::open(key, &purpose(revision), &salt, &cipher)
                 .map_err(|_| Error::Crypto)?;
-            let mut plain = Zeroizing::new(Vec::new());
-            reader.read_to_end(&mut plain).map_err(|_| Error::Crypto)?;
             let secret =
                 Zeroizing::new(String::from_utf8(plain.to_vec()).map_err(|_| Error::Crypto)?);
             Some(Destination { view, secret })

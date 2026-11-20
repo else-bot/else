@@ -4,11 +4,13 @@ pub mod providers;
 pub mod store;
 pub mod types;
 
+use crate::connector_core::actions::Start;
+use crate::connector_core::workers::{Inbox, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use types::*;
 use uuid::Uuid;
@@ -64,10 +66,10 @@ struct Request {
     turn: Uuid,
     action: Option<Uuid>,
     operation: Operation,
-    reply: oneshot::Sender<Result<Value, Error>>,
 }
+type Reply = oneshot::Sender<Result<Value, Error>>;
 enum WorkerRequest {
-    Action(Request),
+    Action(Request, Reply),
     Discover {
         generation: i64,
         reply: oneshot::Sender<Result<Vec<Destination>, Error>>,
@@ -81,8 +83,8 @@ enum WorkerRequest {
 impl WorkerRequest {
     fn reject(self) {
         match self {
-            Self::Action(request) => {
-                let _ = request.reply.send(Err(Error::Inactive));
+            Self::Action(_, reply) => {
+                let _ = reply.send(Err(Error::Inactive));
             }
             Self::Discover { reply, .. } => {
                 let _ = reply.send(Err(Error::Inactive));
@@ -92,13 +94,6 @@ impl WorkerRequest {
             }
         }
     }
-}
-#[derive(Clone)]
-struct Worker {
-    commands: mpsc::Sender<WorkerRequest>,
-    changed: watch::Sender<u64>,
-    stop: CancellationToken,
-    done: watch::Receiver<bool>,
 }
 /// How long a listener must stay up before its connection counts as connected.
 const LISTEN_SETTLE: Duration = Duration::from_secs(3);
@@ -110,7 +105,7 @@ pub struct Manager {
     pub key: Arc<SecretKey>,
     transport: Arc<dyn providers::Transport>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
-    workers: Actor<HashMap<Uuid, Worker>>,
+    workers: Workers<WorkerRequest>,
     pairings: Actor<HashMap<pairing::Purpose, pairing::Live>>,
 }
 impl Manager {
@@ -127,7 +122,7 @@ impl Manager {
             key,
             transport,
             scheduler: None,
-            workers: Actor::default(),
+            workers: Workers::default(),
             pairings: Actor::default(),
         }
     }
@@ -135,39 +130,17 @@ impl Manager {
         self.scheduler = Some(scheduler);
         self
     }
-    async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker, Error> {
+    async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker<WorkerRequest>, Error> {
         let manager = self.clone();
         self.workers
-            .call(move |workers| {
-                workers.retain(|_, w| !*w.done.borrow());
-                if let Some(w) = workers.get(&id) {
-                    return Ok(w.clone());
-                }
-                if workers.len() >= 32 {
-                    return Err(Error::Busy);
-                }
-                let (tx, rx) = mpsc::channel(16);
-                let (changed, revision) = watch::channel(0);
-                let (done, completed) = watch::channel(false);
-                let w = Worker {
-                    commands: tx,
-                    changed,
-                    stop: CancellationToken::new(),
-                    done: completed,
-                };
-                workers.insert(id, w.clone());
-                let running = w.clone();
-                tokio::spawn(async move {
-                    manager.worker_loop(id, rx, revision, running.stop).await;
-                    let _ = done.send(true);
-                });
-                Ok(w)
-            })
+            .get_or_spawn(id, move |inbox| manager.worker_loop(id, inbox))
             .await
+            .map(|(worker, _)| worker)
+            .map_err(|_| Error::Busy)
     }
     pub async fn changed(self: &Arc<Self>, id: Uuid) {
         if let Ok(w) = self.worker(id).await {
-            w.changed.send_modify(|n| *n += 1);
+            w.changed();
         }
     }
     pub async fn validate(&self, p: Provider, t: &Token) -> Result<Identity, Error> {
@@ -180,7 +153,6 @@ impl Manager {
         let worker = self.worker(id).await?;
         let (reply, result) = oneshot::channel();
         worker
-            .commands
             .try_send(WorkerRequest::Discover {
                 generation: c.generation,
                 reply,
@@ -242,7 +214,6 @@ impl Manager {
         let worker = self.worker(id).await?;
         let (reply, result) = oneshot::channel();
         worker
-            .commands
             .try_send(WorkerRequest::Resolve {
                 generation: c.generation,
                 username,
@@ -307,16 +278,17 @@ impl Manager {
             CancellationToken::new()
         };
         worker
-            .commands
-            .try_send(WorkerRequest::Action(Request {
-                cancel,
-                generation: c.generation,
-                bot,
-                turn,
-                action,
-                operation,
-                reply: tx,
-            }))
+            .try_send(WorkerRequest::Action(
+                Request {
+                    cancel,
+                    generation: c.generation,
+                    bot,
+                    turn,
+                    action,
+                    operation,
+                },
+                tx,
+            ))
             .map_err(|_| Error::Busy)?;
         tokio::time::timeout(Duration::from_secs(60), rx)
             .await
@@ -346,13 +318,12 @@ impl Manager {
         self.request(id, bot, turn, Some(action), Operation::Send(message))
             .await
     }
-    async fn worker_loop(
-        self: Arc<Self>,
-        id: Uuid,
-        mut requests: mpsc::Receiver<WorkerRequest>,
-        mut changed: watch::Receiver<u64>,
-        stop: CancellationToken,
-    ) {
+    async fn worker_loop(self: Arc<Self>, id: Uuid, inbox: Inbox<WorkerRequest>) {
+        let Inbox {
+            mut requests,
+            mut changed,
+            stop,
+        } = inbox;
         loop {
             changed.borrow_and_update();
             let loaded = async {
@@ -389,7 +360,7 @@ impl Manager {
                     },
                     request = requests.recv() => {
                         let Some(message) = request else { break false };
-                        let request = match message {
+                        let (request, mut reply) = match message {
                             WorkerRequest::Discover { generation, reply } => {
                                 if generation != c.generation {
                                     let _ = reply.send(Err(Error::Inactive));
@@ -421,10 +392,10 @@ impl Manager {
                                 if reload { break true; }
                                 continue;
                             }
-                            WorkerRequest::Action(request) => request,
+                            WorkerRequest::Action(request, reply) => (request, reply),
                         };
                         if request.generation != c.generation || c.state != ConnectionState::Active {
-                            let _ = request.reply.send(Err(Error::Inactive));
+                            let _ = reply.send(Err(Error::Inactive));
                             continue;
                         }
                         let (result, reload) = tokio::select! {
@@ -432,7 +403,9 @@ impl Manager {
                             _ = stop.cancelled() => (Err(Error::Inactive), true),
                             _ = changed.changed() => (Err(Error::Inactive), true),
                             _ = request.cancel.cancelled() => (Err(Error::Inactive), false),
-                            _ = self.revoked(&c, &request) => (Err(Error::Inactive), false),
+                            // The caller timed out or went away: its turn may
+                            // already have moved on.
+                            _ = reply.closed() => (Err(Error::Inactive), false),
                             result = self.dispatch(&c, &session, &request) => (result, false),
                         };
                         if result.is_err()
@@ -441,7 +414,7 @@ impl Manager {
                         {
                             let _ = store::uncertain(&self.db, c.id, Some(action)).await;
                         }
-                        let _ = request.reply.send(result);
+                        let _ = reply.send(result);
                         if reload {
                             break true;
                         }
@@ -457,29 +430,6 @@ impl Manager {
         }
         while let Ok(r) = requests.try_recv() {
             r.reject();
-        }
-    }
-    async fn revoked(&self, c: &Connection, r: &Request) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let check = async {
-                let mut conn = self.db.acquire().await?;
-                store::authorize(
-                    &mut conn,
-                    c,
-                    r.bot,
-                    r.turn,
-                    r.operation.destination(),
-                    r.operation.mutates(),
-                    r.operation.sends(),
-                )
-                .await
-                .map(|_| ())
-            }
-            .await;
-            if check.is_err() {
-                return;
-            }
         }
     }
     async fn dispatch(
@@ -504,7 +454,7 @@ impl Manager {
             let id = r
                 .action
                 .ok_or(Error::Invalid("Mutations require a stable action_id."))?;
-            if let Some(result) = store::begin_action(
+            if let Start::Existing(result) = store::begin_action(
                 &self.db,
                 c,
                 store::Action {
@@ -709,23 +659,9 @@ impl Manager {
             }
         }
         stop.cancelled().await;
-        let workers = self
-            .workers
-            .call(|workers| workers.values().cloned().collect::<Vec<_>>())
-            .await;
-        for w in &workers {
-            w.stop.cancel()
-        }
         self.pairings
             .call(|pairings| pairings.values().for_each(|live| live.stop.cancel()))
             .await;
-        futures_util::future::join_all(workers.into_iter().map(|mut w| async move {
-            while !*w.done.borrow() {
-                if w.done.changed().await.is_err() {
-                    break;
-                }
-            }
-        }))
-        .await;
+        self.workers.shutdown().await;
     }
 }

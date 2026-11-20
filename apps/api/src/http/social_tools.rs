@@ -270,7 +270,11 @@ async fn status(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let input: Status = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use connection_id and action_id."))?;
     let connection = store::connection(&s.db, input.connection_id).await?;
-    let row: Option<(Option<String>, String, Option<sqlx::types::Json<Value>>)> = sqlx::query_as(
+    let row: Option<(
+        Option<String>,
+        crate::connector_core::actions::Status,
+        Option<sqlx::types::Json<Value>>,
+    )> = sqlx::query_as(
         "SELECT destination,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2 AND bot_id=?3",
     ).bind(input.connection_id).bind(input.action_id).bind(g.bot_id).fetch_optional(&s.db).await.map_err(Error::from)?;
     let (destination, status, result) = row.ok_or(Error::NotFound)?;
@@ -284,7 +288,9 @@ async fn status(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         false,
     )
     .await?;
-    Ok(Done::json(
-        json!({"action_id": input.action_id, "status": status, "result": result.map(|x| x.0)}),
-    ))
+    Ok(Done::json(crate::connector_core::actions::receipt(
+        input.action_id,
+        status,
+        result,
+    )))
 }

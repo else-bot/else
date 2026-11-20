@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,22 +194,12 @@ struct Envelope {
     ciphertext: String,
 }
 
-fn identity(
-    key: &SecretKey,
-    salt: &[u8; 32],
-    path: &Path,
-    bot: Uuid,
-) -> Result<age::x25519::Identity, Error> {
+fn purpose(path: &Path, bot: Uuid) -> Result<String, Error> {
     let package = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(Error::Connection)?;
-    crate::backup::identity_for_purpose(
-        key,
-        salt,
-        &format!("else.bot/mcp-oauth/v1/{package}/{bot}"),
-    )
-    .map_err(|_| Error::Invalid("The MCP credentials could not be encrypted or decrypted."))
+    Ok(format!("else.bot/mcp-oauth/v1/{package}/{bot}"))
 }
 
 fn filename(bot: Uuid) -> String {
@@ -223,23 +213,12 @@ pub(super) fn save(
     credential: &impl Serialize,
 ) -> Result<(), Error> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut salt = [0u8; 32];
-    getrandom::fill(&mut salt).expect("OS entropy");
-    let identity = identity(key, &salt, path, bot)?;
-    let recipient = identity.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .map_err(|_| Error::Connection)?;
     let plain = Zeroizing::new(serde_json::to_vec(credential).map_err(|_| Error::Connection)?);
-    let mut ciphertext = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut ciphertext)
-        .map_err(|_| Error::Connection)?;
-    writer.write_all(&plain)?;
-    writer.finish()?;
+    let sealed = crate::sealed::seal(key, &purpose(path, bot)?, &plain)
+        .map_err(|_| Error::Invalid("The MCP credentials could not be encrypted or decrypted."))?;
     let bytes = serde_json::to_vec(&Envelope {
-        salt: URL_SAFE_NO_PAD.encode(salt),
-        ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+        salt: URL_SAFE_NO_PAD.encode(sealed.salt),
+        ciphertext: URL_SAFE_NO_PAD.encode(sealed.cipher),
     })
     .map_err(|_| Error::Connection)?;
     if bytes.len() > MAX_BODY {
@@ -278,21 +257,14 @@ fn load(path: &Path, bot: Uuid, key: Option<&SecretKey>) -> Result<Option<Creden
     ))?;
     let envelope: Envelope = serde_json::from_str(&text)
         .map_err(|_| Error::Invalid("Invalid encrypted MCP credentials."))?;
-    let salt: [u8; 32] = URL_SAFE_NO_PAD
+    let salt = URL_SAFE_NO_PAD
         .decode(envelope.salt)
-        .map_err(|_| Error::Connection)?
-        .try_into()
         .map_err(|_| Error::Connection)?;
     let ciphertext = URL_SAFE_NO_PAD
         .decode(envelope.ciphertext)
         .map_err(|_| Error::Connection)?;
-    let identity = identity(key, &salt, path, bot)?;
-    let decryptor = age::Decryptor::new(ciphertext.as_slice()).map_err(|_| Error::Connection)?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+    let plain = crate::sealed::open(key, &purpose(path, bot)?, &salt, &ciphertext)
         .map_err(|_| Error::Invalid("The MCP credentials could not be decrypted."))?;
-    let mut plain = Zeroizing::new(Vec::new());
-    reader.read_to_end(&mut plain)?;
     let credential = match serde_json::from_slice(&plain)
         .map_err(|_| Error::Invalid("Invalid decrypted MCP credentials."))?
     {

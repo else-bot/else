@@ -1,30 +1,16 @@
 use super::types::*;
+use crate::connector_core::actions::{BeginError, Column, Columns, Ledger, Outcome, Start};
 use crate::credentials::SecretKey;
 use crate::db::in_ids;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool, types::Json};
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_triggers st WHERE st.connection_id=social_connections.id AND st.enabled AND st.wake='all') AS message_content";
-fn identity(
-    key: &SecretKey,
-    id: Uuid,
-    provider: Provider,
-    version: i64,
-    salt: &[u8; 32],
-) -> Result<age::x25519::Identity, Error> {
-    crate::backup::identity_for_purpose(
-        key,
-        salt,
-        &format!("else.bot/socials/v1\0{id}\0{}\0{version}", provider.name()),
-    )
-    .map_err(|_| Error::Crypto)
+fn purpose(id: Uuid, provider: Provider, version: i64) -> String {
+    format!("else.bot/socials/v1\0{id}\0{}\0{version}", provider.name())
 }
 fn seal(
     key: &SecretKey,
@@ -36,21 +22,9 @@ fn seal(
     if secret.kind() != provider.setup() {
         return Err(Error::Unsupported);
     }
-    let mut salt = [0; 32];
-    getrandom::fill(&mut salt).map_err(|_| Error::Crypto)?;
-    let recipient = identity(key, id, provider, version, &salt)?.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .map_err(|_| Error::Crypto)?;
-    let mut cipher = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut cipher)
+    let sealed = crate::sealed::seal(key, &purpose(id, provider, version), secret.bytes())
         .map_err(|_| Error::Crypto)?;
-    writer
-        .write_all(secret.bytes())
-        .map_err(|_| Error::Crypto)?;
-    writer.finish().map_err(|_| Error::Crypto)?;
-    Ok((salt.to_vec(), cipher))
+    Ok((sealed.salt.to_vec(), sealed.cipher))
 }
 pub async fn credential(
     pool: &SqlitePool,
@@ -58,14 +32,8 @@ pub async fn credential(
     c: &Connection,
 ) -> Result<Credential, Error> {
     let (version,salt,cipher):(i64,Vec<u8>,Vec<u8>)=sqlx::query_as("SELECT credential_version,credential_salt,credential FROM social_connections WHERE id=?1 AND state<>'removed'").bind(c.id).fetch_one(pool).await?;
-    let salt: [u8; 32] = salt.try_into().map_err(|_| Error::Crypto)?;
-    let identity = identity(key, c.id, c.provider, version, &salt)?;
-    let decryptor = age::Decryptor::new(&cipher[..]).map_err(|_| Error::Crypto)?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+    let bytes = crate::sealed::open(key, &purpose(c.id, c.provider, version), &salt, &cipher)
         .map_err(|_| Error::Crypto)?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    reader.read_to_end(&mut bytes).map_err(|_| Error::Crypto)?;
     Credential::open(c.provider, bytes)
 }
 pub async fn connections(pool: &SqlitePool) -> Result<Vec<Connection>, Error> {
@@ -539,6 +507,18 @@ pub async fn authorize(
     }
     Ok(access)
 }
+/// The social action table's own column.
+pub struct SocialAction {
+    destination: Option<String>,
+}
+impl Columns for SocialAction {
+    const NAMES: &'static [&'static str] = &["destination"];
+    fn values(&self) -> Vec<Column<'_>> {
+        vec![Column::Text(self.destination.as_deref())]
+    }
+}
+pub const ACTIONS: Ledger<SocialAction> =
+    Ledger::new("social_actions", "connection_id", "social", None);
 pub struct Action<'a> {
     pub bot: Uuid,
     pub turn: Uuid,
@@ -559,53 +539,51 @@ pub async fn begin_action(
         payload,
         send,
     }: Action<'_>,
-) -> Result<Option<Value>, Error> {
-    let mut h = Sha256::new();
-    h.update(bot.as_bytes());
-    h.update(turn.as_bytes());
-    h.update(serde_json::to_vec(payload).map_err(|_| Error::Conflict)?);
-    let hash = h.finalize().to_vec();
+) -> Result<Start, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize(&mut tx, c, bot, turn, destination, true, send).await?;
-    let old:Option<(Vec<u8>,ActionStatus,Option<Json<Value>>)>=sqlx::query_as("SELECT fingerprint,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2").bind(c.id).bind(id).fetch_optional(&mut *tx).await?;
-    if let Some((old, status, result)) = old {
-        if old != hash {
-            return Err(Error::Conflict);
-        }
-        return Ok(Some(
-            json!({"action_id":id,"status":status,"result":result.map(|r|r.0)}),
-        ));
-    }
-    sqlx::query("INSERT INTO social_actions(connection_id,action_id,bot_id,turn_id,fingerprint,destination,status) VALUES(?1,?2,?3,?4,?5,?6,'dispatching')").bind(c.id).bind(id).bind(bot).bind(turn).bind(hash).bind(destination).execute(&mut *tx).await?;
+    let start = ACTIONS
+        .begin(
+            &mut tx,
+            c.id,
+            id,
+            bot,
+            turn,
+            payload,
+            &SocialAction {
+                destination: destination.map(str::to_owned),
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            BeginError::Conflict => Error::Conflict,
+            BeginError::Db(error) => error.into(),
+        })?;
     tx.commit().await?;
-    Ok(None)
+    Ok(start)
 }
 /// Settle a dispatching action and return its stored receipt, which keeps
-/// an earlier settlement, such as recovery marking it uncertain.
+/// an earlier settlement, such as an interruption marking it uncertain.
 pub async fn finish_action(
     pool: &SqlitePool,
     connection: Uuid,
     action: Uuid,
     result: &Result<Value, Error>,
 ) -> Result<Value, Error> {
-    let value = match result {
-        Ok(v) => v.clone(),
-        Err(e) => json!({"error":e.to_string()}),
+    let (outcome, fields) = match result {
+        Ok(value) => (Outcome::Succeeded, json!({ "result": value })),
+        Err(e @ (Error::Invalid(_) | Error::Unsupported | Error::Forbidden)) => (
+            Outcome::Failed,
+            json!({ "result": { "error": e.to_string() } }),
+        ),
+        Err(e) => (
+            Outcome::Uncertain,
+            json!({ "result": { "error": e.to_string() } }),
+        ),
     };
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let settled=sqlx::query("UPDATE social_actions SET status=?3,result=?4 WHERE connection_id=?1 AND action_id=?2 AND status=?5").bind(connection).bind(action).bind(ActionStatus::settled(result)).bind(Json(&value)).bind(ActionStatus::Dispatching).execute(&mut *tx).await?;
-    if settled.rows_affected() > 0 {
-        announce_drafts(&mut tx, connection, Some(action)).await?;
-    }
-    let (status, result): (ActionStatus, Option<Json<Value>>) = sqlx::query_as(
-        "SELECT status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2",
-    )
-    .bind(connection)
-    .bind(action)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(json!({"action_id":action,"status":status,"result":result.map(|r|r.0)}))
+    Ok(ACTIONS
+        .finish(pool, connection, action, outcome, fields)
+        .await?)
 }
 pub async fn record(
     pool: &SqlitePool,
@@ -664,11 +642,7 @@ pub async fn local_messages(
     )
 }
 pub async fn recover(pool: &SqlitePool) -> Result<(), Error> {
-    sqlx::query(
-        "UPDATE social_actions SET status='uncertain',result='{}' WHERE status='dispatching'",
-    )
-    .execute(pool)
-    .await?;
+    ACTIONS.recover(&mut *pool.acquire().await?).await?;
     Ok(())
 }
 pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
@@ -846,25 +820,12 @@ pub async fn setup_outcomes(
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SETUP_COLUMNS} FROM social_setups WHERE turn_id=?1 AND status<>'pending' AND delivered_attempt IS NULL"))).bind(turn).fetch_all(conn).await
 }
 
-pub async fn announce_drafts(
-    conn: &mut SqliteConnection,
-    connection: Uuid,
-    action: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    let rows:Vec<(Uuid,Uuid)>=sqlx::query_as("SELECT bot_id,turn_id FROM outgoing_drafts WHERE json_extract(delivery,'$.via')='social' AND replace(json_extract(delivery,'$.account_id'),'-','')=lower(hex(?1)) AND (?2 IS NULL OR replace(json_extract(delivery,'$.action_id'),'-','')=lower(hex(?2)))").bind(connection).bind(action).fetch_all(&mut *conn).await?;
-    for (bot, turn) in rows {
-        crate::db::events::turn_changed(conn, bot, turn).await?;
-    }
-    Ok(())
-}
+/// Mark an interrupted action, or with `None` every action of the
+/// connection still dispatching, uncertain.
 pub async fn uncertain(
     pool: &SqlitePool,
     connection: Uuid,
     action: Option<Uuid>,
 ) -> Result<(), Error> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("UPDATE social_actions SET status='uncertain',result='{}' WHERE connection_id=?1 AND status='dispatching' AND (?2 IS NULL OR action_id=?2)").bind(connection).bind(action).execute(&mut *tx).await?;
-    announce_drafts(&mut tx, connection, action).await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(ACTIONS.mark_uncertain(pool, connection, action).await?)
 }

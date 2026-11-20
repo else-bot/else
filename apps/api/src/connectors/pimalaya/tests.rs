@@ -1078,7 +1078,7 @@ async fn a_send_losing_the_reply_after_the_whole_message_may_have_gone_out() {
     let (status, receipt) = tracing::subscriber::with_default(subscriber, || {
         super::super::failure_receipt(uuid::Uuid::nil(), uuid::Uuid::nil(), &error)
     });
-    assert_eq!(status, super::super::store::ActionStatus::Uncertain);
+    assert_eq!(status, crate::connector_core::actions::Outcome::Uncertain);
     assert_eq!(receipt["phase"], "reply");
     let logged = String::from_utf8(capture.lock().unwrap().clone()).unwrap();
     assert!(logged.contains("WARN"), "{logged}");

@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestDb;
+use else_api::connector_core::actions::{Outcome, Start};
 use else_api::connectors::delivery;
-use else_api::connectors::store::{self, ActionStart, ActionStatus, StoreError};
+use else_api::connectors::store::{self, StoreError};
 use else_api::connectors::types::{
     Arrival, Credential, Cursor, Draft, Endpoint, MailCommand, MailConfig, MessageRef, Permissions,
     Provider, Scan,
@@ -995,11 +996,11 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     };
     assert_eq!(
         begin(action, archive.clone()).await.unwrap(),
-        ActionStart::Dispatch
+        Start::Dispatch
     );
     assert_eq!(
         begin(action, archive.clone()).await.unwrap(),
-        ActionStart::Existing(json!({ "action_id": action, "status": "dispatching" })),
+        Start::Existing(json!({ "action_id": action, "status": "dispatching" })),
         "a retry while in flight is not sent again"
     );
     assert!(matches!(
@@ -1015,13 +1016,21 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     let receipt =
         json!({ "action_id": action, "status": "succeeded", "result": { "moved": true } });
     assert_eq!(
-        store::finish_action(&db.pool, account, action, ActionStatus::Succeeded, &receipt)
+        store::ACTIONS
+            .finish(
+                &db.pool,
+                account,
+                action,
+                Outcome::Succeeded,
+                json!({ "result": { "moved": true } })
+            )
             .await
             .unwrap(),
         receipt
     );
     assert_eq!(
-        store::finish_action(&db.pool, account, action, ActionStatus::Failed, &json!({}))
+        store::ACTIONS
+            .finish(&db.pool, account, action, Outcome::Failed, json!({}))
             .await
             .unwrap(),
         receipt,
@@ -1029,10 +1038,11 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     );
     assert_eq!(
         begin(action, archive.clone()).await.unwrap(),
-        ActionStart::Existing(receipt.clone())
+        Start::Existing(receipt.clone())
     );
     assert_eq!(
-        store::action_status(&db.pool, account, bot, action)
+        store::ACTIONS
+            .receipt(&db.pool, account, bot, action)
             .await
             .unwrap(),
         Some(receipt)
@@ -1041,23 +1051,18 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     let crashed = Uuid::new_v4();
     assert_eq!(
         begin(crashed, archive.clone()).await.unwrap(),
-        ActionStart::Dispatch
+        Start::Dispatch
     );
     assert_eq!(store::recover(&db.pool).await.unwrap(), 1);
     assert_eq!(
         begin(crashed, archive.clone()).await.unwrap(),
-        ActionStart::Existing(json!({ "action_id": crashed, "status": "uncertain" }))
+        Start::Existing(json!({ "action_id": crashed, "status": "uncertain" }))
     );
     assert_eq!(
-        store::finish_action(
-            &db.pool,
-            account,
-            crashed,
-            ActionStatus::Succeeded,
-            &json!({ "action_id": crashed, "status": "succeeded" })
-        )
-        .await
-        .unwrap(),
+        store::ACTIONS
+            .finish(&db.pool, account, crashed, Outcome::Succeeded, json!({}))
+            .await
+            .unwrap(),
         json!({ "action_id": crashed, "status": "uncertain" }),
         "settling after recovery reports what recovery recorded"
     );
@@ -1140,7 +1145,8 @@ async fn a_restored_database_stays_passive_until_resumed() {
     assert_eq!(store::cursor(&db.pool, account).await.unwrap(), None);
     assert_eq!(deliveries(&db, bot).await, vec![(11, "cancelled".into())]);
     assert_eq!(
-        store::action_status(&db.pool, account, bot, action)
+        store::ACTIONS
+            .receipt(&db.pool, account, bot, action)
             .await
             .unwrap(),
         Some(json!({ "action_id": action, "status": "uncertain" }))
@@ -1188,4 +1194,22 @@ async fn a_restored_database_stays_passive_until_resumed() {
         None,
         "a re-added account starts quiet"
     );
+}
+
+#[tokio::test]
+async fn the_store_accepts_every_config_the_mail_validator_accepts() {
+    let db = TestDb::migrated().await;
+    let mut long = config("long@example.test");
+    long.archive_folder = "a".repeat(300);
+    long.validate().unwrap();
+    let account = store::create(&db.pool, &key(), &long, &password(PASSWORD))
+        .await
+        .unwrap();
+    let mut moved = account.config.clone();
+    moved.trash_folder = "t".repeat(300);
+    moved.validate().unwrap();
+    let configured = store::configure_folders(&db.pool, account.id, &moved)
+        .await
+        .unwrap();
+    assert_eq!(configured.config.trash_folder, "t".repeat(300));
 }

@@ -2,6 +2,7 @@ use crate::common;
 
 use async_trait::async_trait;
 use common::TestDb;
+use else_api::connector_core::actions::Start;
 use else_api::{
     credentials::SecretKey,
     socials::{
@@ -467,7 +468,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
         )
         .await
         .unwrap()
-        .is_none()
+            == Start::Dispatch
     );
     assert_eq!(
         store::begin_action(
@@ -483,9 +484,8 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
             }
         )
         .await
-        .unwrap()
-        .unwrap()["status"],
-        "dispatching"
+        .unwrap(),
+        Start::Existing(json!({"action_id": id, "status": "dispatching"}))
     );
     assert!(matches!(
         store::begin_action(
@@ -518,9 +518,8 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
             }
         )
         .await
-        .unwrap()
-        .unwrap()["status"],
-        "uncertain"
+        .unwrap(),
+        Start::Existing(json!({"action_id": id, "status": "uncertain"}))
     );
 }
 
@@ -751,21 +750,24 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
 }
 
 #[tokio::test]
-async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
-    let db = TestDb::migrated().await;
+async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
+    let fake = Arc::new(Fake::default());
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
     let c = account(&db, "stop").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
-    let fake = Arc::new(Fake::default());
+    let turn = running_turn(&app, bot).await;
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let running = manager.clone();
     let id = Uuid::new_v4();
+    let running = app.state.socials.clone();
     let task = tokio::spawn(async move {
         running
             .send(
@@ -782,21 +784,82 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
+    tokio::time::timeout(common::SETTLE, fake.started.notified())
         .await
         .unwrap();
-    sqlx::query("UPDATE turns SET status='cancelling' WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
+    let (status, body) = http(
+        &app.router,
+        "POST",
+        &format!("/v1/bots/{bot}/cancel"),
+        common::TOKEN,
+        json!({ "request_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let sent = tokio::time::timeout(common::SETTLE, task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(sent.is_err(), "{sent:?}");
+    fake.release.notify_one();
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, id)
+            .await
+            .unwrap(),
+        Some(json!({"action_id": id, "status": "uncertain"}))
+    );
+}
+
+#[tokio::test]
+async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "gave-up").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let fake = Arc::new(Fake::default());
+    fake.blocked.store(true, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let id = Uuid::new_v4();
+    let running = manager.clone();
+    let task = tokio::spawn(async move {
+        running
+            .send(
+                c.id,
+                bot,
+                turn,
+                id,
+                SendMessage {
+                    destination: "100".into(),
+                    body: "body".into(),
+                    reply_to: None,
+                    files: Vec::new(),
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(common::SETTLE, fake.started.notified())
         .await
         .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), task)
+    task.abort();
+    tokio::time::timeout(common::SETTLE, async {
+        while store::ACTIONS
+            .receipt(&db.pool, c.id, bot, id)
             .await
             .unwrap()
-            .unwrap()
-            .is_err()
-    );
+            != Some(json!({"action_id": id, "status": "uncertain"}))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the abandoned send is recorded uncertain");
     fake.release.notify_one();
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
 }
@@ -956,7 +1019,7 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     );
     assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
     let body: String = sqlx::query_scalar(
-        "SELECT json_extract(result,'$.body') FROM social_actions WHERE connection_id=?1",
+        "SELECT json_extract(result,'$.result.body') FROM social_actions WHERE connection_id=?1",
     )
     .bind(connection)
     .fetch_one(&db.pool)
@@ -1475,14 +1538,7 @@ async fn finishing_an_action_after_recovery_returns_the_stored_receipt() {
     let receipt = store::finish_action(&db.pool, c.id, id, &Ok(json!({"deleted":true})))
         .await
         .unwrap();
-    assert_eq!(receipt["status"], "uncertain");
-    let (status, result): (String, String) =
-        sqlx::query_as("SELECT status,result FROM social_actions WHERE action_id=?1")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!((status.as_str(), result.as_str()), ("uncertain", "{}"));
+    assert_eq!(receipt, json!({"action_id": id, "status": "uncertain"}));
 }
 
 #[test]
@@ -1671,4 +1727,55 @@ async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled()
         .find(|b| b["id"] == bot)
         .unwrap();
     assert_ne!(shown["sidebar_status"]["kind"], "needs_credentials");
+}
+
+#[tokio::test]
+async fn upgrading_keeps_recorded_social_receipts_readable() {
+    use std::borrow::Cow;
+    let db = TestDb::empty().await;
+    let before = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            else_api::db::MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version < 83)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&db.pool).await.unwrap();
+    let (bot, turn, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (sent, unsure, open) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let mut conn = db.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for (action, status, result) in [
+        (sent, "succeeded", Some(r#"{"id":"5"}"#)),
+        (unsure, "uncertain", Some("{}")),
+        (open, "dispatching", None),
+    ] {
+        sqlx::query("INSERT INTO social_actions(connection_id,action_id,bot_id,turn_id,fingerprint,destination,status,result) VALUES(?1,?2,?3,?4,x'00','100',?5,?6)")
+            .bind(c).bind(action).bind(bot).bind(turn).bind(status).bind(result)
+            .execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+
+    else_api::db::MIGRATOR.run(&db.pool).await.unwrap();
+
+    let receipt = |action| store::ACTIONS.receipt(&db.pool, c, bot, action);
+    assert_eq!(
+        receipt(sent).await.unwrap(),
+        Some(json!({"action_id": sent, "status": "succeeded", "result": {"id": "5"}}))
+    );
+    assert_eq!(
+        receipt(unsure).await.unwrap(),
+        Some(json!({"action_id": unsure, "status": "uncertain", "result": {}}))
+    );
+    assert_eq!(
+        receipt(open).await.unwrap(),
+        Some(json!({"action_id": open, "status": "dispatching"}))
+    );
 }

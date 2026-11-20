@@ -260,25 +260,6 @@ impl Health {
         self != Self::SignedOut
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[serde(rename_all = "lowercase")]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
-pub enum ActionStatus {
-    Dispatching,
-    Succeeded,
-    Failed,
-    /// The platform may or may not have applied the action.
-    Uncertain,
-}
-impl ActionStatus {
-    pub fn settled(result: &Result<Value, Error>) -> Self {
-        match result {
-            Ok(_) => Self::Succeeded,
-            Err(Error::Invalid(_) | Error::Unsupported | Error::Forbidden) => Self::Failed,
-            Err(_) => Self::Uncertain,
-        }
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Connection {
     pub id: Uuid,
