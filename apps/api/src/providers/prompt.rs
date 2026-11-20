@@ -511,7 +511,7 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          written in one are in the other. Keep your work there and do it in your computer by \
          default (code, scripts, background jobs, browsing); use the host tools on your \
          project directory when that is simpler. Each attempt ends after {attempt_minutes} \
-         minutes and continues in a new one, so run long loops as jobs. Act on \
+         minutes, so run long work as jobs and park on them. Act on \
          the owner's machine outside your \
          project only when the owner, in their own words, asked for that work there, and only \
          on what it needs. Never read or change else.bot's own installation or data, other \

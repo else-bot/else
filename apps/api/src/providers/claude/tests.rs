@@ -619,6 +619,11 @@ fn a_notice_is_awaited_like_a_steer_and_its_echo_reports_nothing() {
     let sent = t.notice_input("[else.bot] 5 minutes are left.").unwrap();
     assert_eq!(sent["type"], json!("user"));
     assert!(
+        !t.continues(&info(true, Some(1))),
+        "nothing owed before it is written"
+    );
+    t.notice_sent(&sent);
+    assert!(
         t.continues(&info(true, Some(1))),
         "a result before the echo"
     );

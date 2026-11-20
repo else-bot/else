@@ -24,7 +24,7 @@ struct Seen {
 /// the owner's stop and then reports the limit, as an attempt the owner
 /// stopped just as its time ran out would.
 struct Limited {
-    inner: Synthetic,
+    inner: Arc<Synthetic>,
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
@@ -82,7 +82,7 @@ impl Provider for Limited {
     }
 }
 
-async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>) {
+async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>, Arc<Synthetic>) {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
@@ -90,8 +90,9 @@ async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>) {
         .await
         .unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = Arc::new(Synthetic::new(Duration::from_millis(1)));
     let provider = Arc::new(Limited {
-        inner: Synthetic::new(Duration::from_millis(1)),
+        inner: inner.clone(),
         seen: seen.clone(),
     });
     let app = TestApp::with_registry(
@@ -99,7 +100,7 @@ async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>) {
         2,
         else_api::providers::Registry::new(vec![provider]),
     );
-    (app, seen)
+    (app, seen, inner)
 }
 
 async fn send(app: &TestApp, bot: &str, text: &str) -> String {
@@ -120,7 +121,7 @@ async fn ended(app: &TestApp, turn: &str) -> (String, Option<String>, Option<Str
 
 #[tokio::test]
 async fn an_attempt_cut_at_the_limit_continues_with_its_progress() {
-    let (app, seen) = app().await;
+    let (app, seen, synthetic) = app().await;
     let bot = app.main_bot().await;
     let turn = send(&app, &bot, "Benchmark the four models. [limit:2]").await;
 
@@ -141,6 +142,23 @@ async fn an_attempt_cut_at_the_limit_continues_with_its_progress() {
             "attempt {attempt}: {outcomes}"
         );
     }
+    // The completing attempt runs in a fresh session: it gets the note and
+    // the progress the cut attempts wrote.
+    let packet = synthetic.packets().await.pop().unwrap();
+    assert!(
+        packet.contains("continuation 2 of 4")
+            && packet.contains("Benchmarked batch 1.")
+            && packet.contains("Benchmarked batch 2."),
+        "{packet}"
+    );
+    let delivered: Vec<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT attempt, delivered_attempt FROM turn_limit_cuts WHERE turn_id = ?1 ORDER BY attempt",
+    )
+    .bind(turn.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(delivered, [(1, Some(2)), (2, Some(3))]);
     let view = app
         .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
         .await;
@@ -160,7 +178,7 @@ async fn an_attempt_cut_at_the_limit_continues_with_its_progress() {
 
 #[tokio::test]
 async fn the_continuation_cap_ends_the_request_as_failed_with_its_count() {
-    let (app, seen) = app().await;
+    let (app, seen, _) = app().await;
     let bot = app.main_bot().await;
     let turn = send(&app, &bot, "Benchmark until done. [limit:always]").await;
 
@@ -182,7 +200,7 @@ async fn the_continuation_cap_ends_the_request_as_failed_with_its_count() {
 
 #[tokio::test]
 async fn the_owner_stop_is_never_continued() {
-    let (app, seen) = app().await;
+    let (app, seen, _) = app().await;
     let bot = app.main_bot().await;
     let request = Uuid::new_v4();
     let reply = app
@@ -200,9 +218,39 @@ async fn the_owner_stop_is_never_continued() {
         .await;
     assert!(stopped.status.is_success(), "{:?}", stopped.body);
 
-    let (status, _, _, attempt) = ended(&app, &turn).await;
-    assert_ne!(status, "queued");
-    assert_eq!(attempt, 1);
+    let (status, code, _, attempt) = ended(&app, &turn).await;
+    assert_eq!(
+        (status.as_str(), code.as_deref(), attempt),
+        ("interrupted", Some("stopped"), 1),
+        "the stop's outcome, not the limit's"
+    );
+    let cuts: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_limit_cuts")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(cuts, 0);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(seen.lock().unwrap().len(), 1, "no attempt follows a stop");
+}
+
+#[tokio::test]
+async fn a_bot_takes_at_most_twelve_continuations_a_day() {
+    let (app, _, _) = app().await;
+    let bot = app.main_bot().await;
+    for _ in 0..3 {
+        let turn = send(&app, &bot, "Benchmark until done. [limit:always]").await;
+        assert_eq!(ended(&app, &turn).await.3, 5);
+    }
+
+    let turn = send(&app, &bot, "One more benchmark. [limit:always]").await;
+
+    let (status, _, message, attempt) = ended(&app, &turn).await;
+    assert_eq!((status.as_str(), attempt), ("failed", 1));
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            "Stopped at the 30-minute attempt limit. Background jobs it started may still be \
+             running."
+        )
+    );
 }

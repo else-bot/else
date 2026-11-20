@@ -335,7 +335,7 @@ impl Protocol for TurnEvents<'_> {
 
     /// A notice is a `turn/steer` request of its own; its echo carries an
     /// ID no steered message has, so it reports nothing.
-    fn notice_input(&mut self, text: &str) -> Option<Value> {
+    fn notice_input(&self, text: &str) -> Option<Value> {
         Some(json!({
             "threadId": self.thread_id,
             "expectedTurnId": self.native_turn,

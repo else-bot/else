@@ -414,14 +414,19 @@ impl Protocol for Tracker {
         self.steers.insert(steer.turn_id);
     }
 
-    /// A notice is a user line like a steered message, awaited the same way.
-    fn notice_input(&mut self, text: &str) -> Option<Value> {
-        let id = uuid::Uuid::new_v4();
-        self.notices.insert(id);
+    /// A notice is a user line like a steered message, awaited the same way
+    /// once written.
+    fn notice_input(&self, text: &str) -> Option<Value> {
         Some(super::user_value(
-            &id.to_string(),
+            &uuid::Uuid::new_v4().to_string(),
             super::message_content(&[crate::providers::prompt::Segment::Text(text.to_owned())]),
         ))
+    }
+
+    fn notice_sent(&mut self, input: &Value) {
+        if let Some(id) = input["uuid"].as_str().and_then(|id| id.parse().ok()) {
+            self.notices.insert(id);
+        }
     }
 
     /// A result before a written steer's echo means the CLI will answer it

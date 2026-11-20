@@ -1288,12 +1288,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         )
         .await?,
         earlier_replies: earlier_replies(&mut conn, turn_id).await?,
-        limit_continuation: crate::db::limit_cuts::continuation(
-            &mut conn,
-            turn_id,
-            i64::from(turn.attempt),
-        )
-        .await?,
+        limit_continuation: crate::db::limit_cuts::undelivered(&mut conn, turn_id).await?,
     };
     let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);

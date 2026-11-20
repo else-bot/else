@@ -208,12 +208,13 @@ impl Lifecycle {
         }
     }
 
-    /// The outcome of a terminal result the protocol interpreted.
+    /// The outcome of a terminal result the protocol interpreted. Only a
+    /// confirmed interruption is a cut: a turn that completed or failed on
+    /// its own as the deadline fired keeps that outcome.
     pub fn settled(&self, outcome: TurnOutcome) -> TurnOutcome {
-        match (self.cause(), &outcome) {
-            (_, TurnOutcome::Uncertain { .. }) => outcome,
-            (Some(StopCause::Deadline), _) => deadline_failure(),
-            _ => outcome,
+        match (self.cause(), outcome) {
+            (Some(StopCause::Deadline), TurnOutcome::Interrupted) => deadline_failure(),
+            (_, outcome) => outcome,
         }
     }
 }
@@ -324,9 +325,14 @@ pub trait Protocol {
     /// The input that gives the running turn else.bot's own `text`, for
     /// [`Channel::send`]; its echo is not an owner message. `None` when this
     /// provider takes no input mid-turn.
-    fn notice_input(&mut self, text: &str) -> Option<Value> {
+    fn notice_input(&self, text: &str) -> Option<Value> {
         let _ = text;
         None
+    }
+
+    /// The input from [`Protocol::notice_input`] reached the provider.
+    fn notice_sent(&mut self, input: &Value) {
+        let _ = input;
     }
 
     /// Whether the provider still owes an answer to a steered message after
@@ -375,22 +381,39 @@ async fn interrupt<C: Channel>(channel: &mut C, stop: &Stop) -> bool {
 }
 
 /// Tell the provider its attempt is about to be cut, when it takes input
-/// mid-turn. A refused or lost warning only costs the warning: the cut
-/// attempt continues either way.
-async fn warn<C, P>(channel: &mut C, protocol: &mut P, stop: &Stop)
-where
+/// mid-turn, giving up at `until`. A refused or lost warning only costs the
+/// warning, since the cut attempt continues either way; a write that may be
+/// partial closes steering, as a lost steered message does.
+async fn warn<C, P>(
+    channel: &mut C,
+    protocol: &mut P,
+    steering: &mut Steering,
+    stop: &Stop,
+    until: Instant,
+) where
     C: Channel,
     P: Protocol<Message = C::Message>,
 {
+    if *steering == Steering::Closed {
+        return;
+    }
     let Some(input) = protocol.notice_input(&deadline_warning()) else {
         return;
     };
     let sent = tokio::select! {
         sent = channel.send(&input) => sent,
         () = stop.requested() => Err(SendError::Unknown("stopped while writing".into())),
+        () = tokio::time::sleep_until(until) => Err(SendError::Unknown("timed out".into())),
     };
-    if let Err(err) = sent {
-        tracing::info!(?err, "the provider did not take the attempt limit warning");
+    match sent {
+        Ok(()) => protocol.notice_sent(&input),
+        Err(SendError::Refused(why)) => {
+            tracing::info!(%why, "the provider refused the attempt limit warning");
+        }
+        Err(SendError::Unknown(why)) => {
+            tracing::warn!(%why, "writing the attempt limit warning failed");
+            *steering = Steering::Closed;
+        }
     }
 }
 
@@ -440,7 +463,7 @@ where
                         return Ended::Abandoned(life.abandoned(not_stopped()));
                     }
                     Tick::GiveUp => return Ended::Abandoned(life.abandoned(not_stopped())),
-                    Tick::Warn => warn(channel, protocol, stop).await,
+                    Tick::Warn => warn(channel, protocol, &mut steering, stop, life.wake_at()).await,
                     Tick::Interrupt | Tick::Wait => {}
                 }
                 continue;
@@ -1034,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_deadline_interrupts_and_overrides_a_terminal_result() {
+    async fn the_deadline_interrupts_and_a_confirmed_interruption_is_a_cut() {
         let mut life = Lifecycle::start();
         tokio::time::advance(TURN_DEADLINE).await;
         assert_eq!(life.on_timer(), Tick::Interrupt);
@@ -1042,6 +1065,11 @@ mod tests {
             life.settled(TurnOutcome::Interrupted),
             TurnOutcome::Failed { code, .. } if code == "turn_deadline"
         ));
+        assert_eq!(
+            life.settled(TurnOutcome::Completed),
+            TurnOutcome::Completed,
+            "a turn that completed as the deadline fired is not cut"
+        );
         let unknown = TurnOutcome::Uncertain {
             message: "x".into(),
         };
@@ -1082,7 +1110,7 @@ mod tests {
             Plain.outcome((), stopping, accepted)
         }
 
-        fn notice_input(&mut self, text: &str) -> Option<Value> {
+        fn notice_input(&self, text: &str) -> Option<Value> {
             Some(json!(text))
         }
     }
