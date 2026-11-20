@@ -1181,10 +1181,11 @@ impl Conversation {
             "item.upsert" => {
                 let item: Item =
                     serde_json::from_value(data["item"].clone()).map_err(|_| Reset::Malformed)?;
-                if !self.seq_of.contains_key(&item.id) {
-                    self.split_gap(item.seq);
+                if self.seq_of.contains_key(&item.id) {
+                    self.upsert_item(item);
+                } else {
+                    self.insert_unseen(item);
                 }
-                self.upsert_item(item);
             }
             "item.delta" => {
                 let item_id: Uuid = serde_json::from_value(data["item_id"].clone())
@@ -1312,19 +1313,30 @@ impl Conversation {
         true
     }
 
-    /// Keep both sides of a gap loadable when a live item lands inside it.
-    fn split_gap(&mut self, seq: i64) {
+    /// Insert an item not loaded yet, keeping both sides of an unloaded
+    /// stretch it lands in loadable.
+    fn insert_unseen(&mut self, item: Item) {
+        let seq = item.seq;
+        self.upsert_item(item);
         let (below, Some(above)) = self.loaded_around(seq) else {
             return;
         };
-        if self.gaps.remove(&above).is_none() {
+        let unloaded = match below {
+            Some(_) => self.gaps.remove(&above).is_some(),
+            None => self.older_before_seq.is_some(),
+        };
+        if !unloaded {
             return;
         }
         if above > seq + 1 {
             self.gaps.insert(above, GapSize::Uncounted);
         }
-        if below.is_none_or(|below| below < seq - 1) {
-            self.gaps.insert(seq, GapSize::Uncounted);
+        match below {
+            Some(below) if below < seq - 1 => {
+                self.gaps.insert(seq, GapSize::Uncounted);
+            }
+            Some(_) => {}
+            None => self.older_before_seq = Some(seq),
         }
     }
 
@@ -1345,7 +1357,7 @@ impl Conversation {
     /// arrives. Idempotent: the later upsert replaces it by ID.
     pub fn insert_item(&mut self, item: Item) {
         if !self.seq_of.contains_key(&item.id) {
-            self.upsert_item(item);
+            self.insert_unseen(item);
         }
     }
 
@@ -1911,6 +1923,38 @@ mod tests {
         );
         assert_eq!(c.gap_below(90), None);
         assert_eq!(c.gap_below(89), Some(GapSize::Uncounted));
+    }
+
+    #[test]
+    fn a_late_send_response_inside_a_gap_keeps_both_sides_loadable() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let found = vec![item(20, 20, "user", "a")];
+        assert!(c.merge_window(window(found, 0, 69), None, Some(90)));
+        let sent: Item = serde_json::from_value(item(50, 50, "user", "sent")).unwrap();
+        c.insert_item(sent);
+        assert_eq!(c.gap_below(90), Some(GapSize::Uncounted));
+        assert_eq!(c.gap_below(50), Some(GapSize::Uncounted));
+    }
+
+    #[test]
+    fn a_live_edit_below_the_oldest_row_keeps_older_rows_loadable() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let edit = frame(
+            6,
+            "item.upsert",
+            json!({ "item": item(50, 50, "user", "undone") }),
+        );
+        assert_eq!(c.apply(&edit), Ok(Applied::Changed));
+        assert_eq!(c.older_before_seq, Some(50));
+        assert_eq!(c.gap_below(90), Some(GapSize::Uncounted));
+
+        let found = vec![item(20, 20, "user", "a")];
+        assert!(c.merge_window(window(found, 4, 29), None, Some(50)));
+        assert_eq!(c.gap_below(90), Some(GapSize::Uncounted));
+        assert_eq!(c.gap_below(50), Some(GapSize::Counted(29)));
+        assert_eq!(c.older_before_seq, Some(20));
     }
 
     #[test]
