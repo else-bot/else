@@ -322,7 +322,9 @@ const SELECT: &str =
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         r.failed_runs, r.paused_reason, r.quiet,
-        coalesce(lr.resumes AND NOT lr.reviewed, false) AS retrying, lr.due_at AS run_due_at, lr.skip_reason,
+        EXISTS (SELECT 1 FROM routine_runs x WHERE x.routine_id = r.id
+                  AND x.resumes AND NOT x.reviewed) AS retrying,
+        lr.due_at AS run_due_at, lr.skip_reason,
         lr.report, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r

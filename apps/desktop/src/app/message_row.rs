@@ -261,8 +261,39 @@ impl ElseApp {
                         })
                         .child(label),
                 )
-                .children(model_remedy(turn, bot, cx)),
+                .children(model_remedy(turn, bot, cx))
+                .children(self.routine_retry(turn, bot, cx)),
         )
+    }
+
+    /// Retry beside the failure of a routine's latest run, as in bot
+    /// details, which it opens to show how the retry goes.
+    pub(super) fn routine_retry(
+        &self,
+        turn: &crate::model::Turn,
+        bot: uuid::Uuid,
+        cx: &Context<Self>,
+    ) -> Option<Button> {
+        let run = turn.routine.as_ref()?;
+        let conversation = self.view.as_ref()?.conversation.as_ref()?;
+        let routine = (conversation.routines().iter()).find(|r| r.id == run.routine_id)?;
+        let latest = (routine.last_run.as_ref()).is_some_and(|last| last.due_at == run.due_at);
+        let id = routine.id;
+        (latest && super::settings::retryable(routine)).then(|| {
+            Button::new(SharedString::from(format!("routine-retry-{}", turn.id)))
+                .control(
+                    Tier::Ghost,
+                    Scale::Compact,
+                    self.connection != super::Connection::Connected,
+                    cx,
+                )
+                .label("Retry")
+                .accessibility_label(format!("Retry {} now", routine.name))
+                .on_click(cx.listener(move |app, event, window, cx| {
+                    app.retry_routine(bot, id, window, cx);
+                    open_routines(app, event, window, cx);
+                }))
+        })
     }
 
     pub(super) fn render_row_content(

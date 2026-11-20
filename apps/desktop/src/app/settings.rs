@@ -629,7 +629,7 @@ impl ElseApp {
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
-    fn retry_routine(
+    pub(super) fn retry_routine(
         &mut self,
         bot: Uuid,
         routine: Uuid,
@@ -2597,9 +2597,10 @@ fn describe_hours(hours: &crate::model::ActiveHours) -> String {
     format!("{days} {} to {}", hours.start, hours.end)
 }
 
-/// Whether the owner may run the routine again now: its last run failed,
-/// or else.bot paused it. The API accepts a Retry under the same rule.
-fn retryable(routine: &Routine) -> bool {
+/// Whether the owner may run the routine again now: it has failures the
+/// owner has not dismissed, or else.bot paused it. The API accepts a Retry
+/// under the same rule.
+pub(super) fn retryable(routine: &Routine) -> bool {
     routine.failed_runs > 0 || (!routine.enabled && routine.paused_reason.is_some())
 }
 
