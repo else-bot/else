@@ -4,6 +4,15 @@ use uuid::Uuid;
 
 use crate::connectors::types::{Draft, MailCommand, MessageRef, OutgoingAttachment};
 
+pub mod send;
+
+/// The connected transports a caller may send a draft through.
+#[derive(Debug, Clone, Copy)]
+pub struct Channels {
+    pub mail: bool,
+    pub social: bool,
+}
+
 pub const MAX_ADDRESS: usize = 320;
 pub const MAX_RECIPIENTS: usize = 50;
 pub const MAX_SUBJECT: usize = 998;

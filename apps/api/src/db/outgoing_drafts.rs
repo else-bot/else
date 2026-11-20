@@ -28,7 +28,7 @@ use uuid::Uuid;
 use super::events;
 use super::turns;
 use crate::app::outgoing::{
-    self, ApprovalSource, Content, Delivery, DraftKind, Edits, Outcome, Status,
+    self, ApprovalSource, Channels, Content, Delivery, DraftKind, Edits, Outcome, Status,
 };
 use crate::app::questions::GrantReach;
 use crate::db::in_ids;
@@ -170,6 +170,8 @@ pub enum DraftError {
     Connected,
     #[error("this draft has no connected account: send it with a computer tool or your host tools")]
     NotConnected,
+    #[error("native sending is unavailable for this task and account")]
+    NoTransport,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -197,6 +199,7 @@ impl DraftError {
             Self::Held => "DRAFT_HELD",
             Self::Connected => "CONNECTED_ACCOUNT",
             Self::NotConnected => "NOT_CONNECTED",
+            Self::NoTransport => "NATIVE_UNAVAILABLE",
             Self::Db(_) => "UNAVAILABLE",
         }
     }
@@ -792,10 +795,8 @@ pub async fn confirm(
 
 /// Claim an approved draft for the one call that sends it, atomically, in
 /// the request allowed to send it. A second claim is refused: sending again
-/// needs a new approval. An email bound to a connected account is claimed
-/// only for that account's mail action. A repeated mail claim in the same
-/// request returns the first, so its retry reuses the same action ID and
-/// the connector's receipt.
+/// needs a new approval. A draft bound to a connected account is claimed
+/// only by [`claim_connected`].
 pub async fn claim(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -806,32 +807,133 @@ pub async fn claim(
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
     match (draft.content.account(), delivery) {
-        (Some(bound), Delivery::Mail { account_id, .. })
-            if bound == *account_id && matches!(draft.content.0, Content::Email(_)) => {}
-        (Some(bound), Delivery::Social { account_id, .. })
-            if bound == *account_id && matches!(draft.content.0, Content::Message(_)) => {}
         (None, Delivery::Tool { .. } | Delivery::Host) => {}
         (Some(_), _) => return Err(DraftError::Connected),
         (None, Delivery::Mail { .. } | Delivery::Social { .. }) => {
             return Err(DraftError::NotConnected);
         }
     }
-    if draft.status == Status::Sending
-        && draft.send_turn_id == Some(turn_id)
-        && matches!(
-            draft.delivery.as_deref(),
-            Some(Delivery::Mail { .. } | Delivery::Social { .. })
-        )
-    {
-        return Ok(draft);
+    let draft = mark_sending(&mut tx, caller.bot_id, turn_id, draft, delivery).await?;
+    tx.commit().await?;
+    Ok(draft)
+}
+
+/// What a connected send claimed, and what it sends.
+#[derive(Debug)]
+pub struct Claimed {
+    pub draft: OutgoingDraft,
+    pub account_id: Uuid,
+    /// The stable ID of the send: a retry of the claim reuses it, so the
+    /// connector's receipt deduplicates it.
+    pub action_id: Uuid,
+    pub payload: Payload,
+}
+
+/// The approved content a connected send carries.
+#[derive(Debug)]
+pub enum Payload {
+    Mail(outgoing::Email),
+    Social {
+        message: outgoing::Message,
+        destination: String,
+    },
+}
+
+/// How a connected send's claim found the draft.
+#[derive(Debug)]
+pub enum Claim {
+    /// This call claimed it: nothing was sent yet.
+    Fresh(Claimed),
+    /// An earlier call of this request claimed it and may have sent it.
+    Resumed(Claimed),
+    /// An earlier call of this request already settled it.
+    Settled(OutgoingDraft),
+}
+
+/// Claim a draft bound to a connected account for its account's send, in
+/// the request allowed to send it, if `channels` allow that account's
+/// transport. A repeated claim in the same request resumes the first, with
+/// its action ID, or returns the draft it settled.
+pub async fn claim_connected(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    draft_id: Uuid,
+    channels: Channels,
+) -> Result<Claim, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let caller = caller(&mut tx, turn_id).await?;
+    let draft = load(&mut tx, caller.bot_id, draft_id).await?;
+    let account_id = draft.content.account().ok_or(DraftError::NotConnected)?;
+    let payload = match &draft.content.0 {
+        Content::Email(email) if channels.mail => Payload::Mail(email.clone()),
+        Content::Message(message) if channels.social => Payload::Social {
+            destination: message
+                .destination
+                .clone()
+                .ok_or(DraftError::NotConnected)?,
+            message: message.clone(),
+        },
+        _ => return Err(DraftError::NoTransport),
+    };
+    let earlier = match draft.delivery.as_deref() {
+        Some(Delivery::Mail { action_id, .. } | Delivery::Social { action_id, .. })
+            if draft.send_turn_id == Some(turn_id) =>
+        {
+            Some(*action_id)
+        }
+        _ => None,
+    };
+    match (draft.status, earlier) {
+        (Status::Sending, Some(action_id)) => {
+            return Ok(Claim::Resumed(Claimed {
+                draft,
+                account_id,
+                action_id,
+                payload,
+            }));
+        }
+        (Status::Sent | Status::Failed | Status::Uncertain, Some(_)) => {
+            return Ok(Claim::Settled(draft));
+        }
+        _ => {}
     }
+    let action_id = Uuid::new_v4();
+    let delivery = match payload {
+        Payload::Mail(_) => Delivery::Mail {
+            account_id,
+            action_id,
+        },
+        Payload::Social { .. } => Delivery::Social {
+            account_id,
+            action_id,
+        },
+    };
+    let draft = mark_sending(&mut tx, caller.bot_id, turn_id, draft, &delivery).await?;
+    tx.commit().await?;
+    Ok(Claim::Fresh(Claimed {
+        draft,
+        account_id,
+        action_id,
+        payload,
+    }))
+}
+
+/// Move an approved draft of request `turn_id` to `sending` through
+/// `delivery`.
+async fn mark_sending(
+    tx: &mut SqliteConnection,
+    bot_id: Uuid,
+    turn_id: Uuid,
+    draft: OutgoingDraft,
+    delivery: &Delivery,
+) -> Result<OutgoingDraft, DraftError> {
     if draft.status != Status::Approved {
         return Err(DraftError::Settled(draft.status));
     }
     if draft.send_turn_id != Some(turn_id) {
         return Err(DraftError::OtherRequest);
     }
-    sqlx::query(
+    let moved = sqlx::query(
         "UPDATE outgoing_drafts SET status = 'sending', delivery = ?2,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'approved'",
@@ -839,11 +941,14 @@ pub async fn claim(
     .bind(draft.id)
     .bind(Json(delivery))
     .execute(&mut *tx)
-    .await?;
-    events::turn_changed(&mut tx, caller.bot_id, draft.turn_id).await?;
-    let draft = reload(&mut tx, draft_id).await?;
-    tx.commit().await?;
-    Ok(draft)
+    .await?
+    .rows_affected();
+    let current = reload(&mut *tx, draft.id).await?;
+    if moved == 0 {
+        return Err(DraftError::Settled(current.status));
+    }
+    events::turn_changed(&mut *tx, bot_id, draft.turn_id).await?;
+    Ok(current)
 }
 
 /// A send this request just claimed stopped before any external effect,

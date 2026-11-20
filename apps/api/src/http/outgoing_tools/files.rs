@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::super::AppState;
 use crate::app::messages::{MAX_ATTACHMENT_BYTES, media_type, validate_name};
+use crate::app::outgoing::send::Approved;
 use crate::app::outgoing::{DraftFile, EmailPart, FileSource};
 use crate::connectors::types::MailCommand;
 use crate::grants::{Grant, Tool};
@@ -211,44 +212,6 @@ pub(super) async fn stage(
             "FILE_UNAVAILABLE: the attachments could not be staged".to_owned()
         })
 }
-
-/// A draft file's approved bytes.
-pub(crate) struct Approved {
-    pub file: DraftFile,
-    pub data: Vec<u8>,
-}
-
-/// The approved bytes of every file, in order, or the name of the first
-/// one missing or changed since approval.
-pub(crate) async fn approved(
-    state: &AppState,
-    bot_id: Uuid,
-    files: &[DraftFile],
-) -> Result<Vec<Approved>, FileChanged> {
-    let mut out = Vec::with_capacity(files.len());
-    for file in files {
-        let read = crate::db::attachments::read(&state.db, bot_id, file.id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "reading a draft attachment failed");
-                FileChanged(file.name.clone())
-            })?;
-        match read {
-            Some((_, data)) if hex::encode(Sha256::digest(&data)) == file.sha256 => {
-                out.push(Approved {
-                    file: file.clone(),
-                    data,
-                });
-            }
-            _ => return Err(FileChanged(file.name.clone())),
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("the attachment {0} changed or is missing since the owner approved it; nothing was sent")]
-pub(crate) struct FileChanged(pub String);
 
 /// The `attachments` argument, parsed.
 pub(super) fn sources(args: &Value) -> Result<Vec<FileSource>, String> {

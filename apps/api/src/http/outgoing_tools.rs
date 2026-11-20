@@ -12,15 +12,17 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
+use crate::app::outgoing::send::{self, Connected, SendError};
 use crate::app::outgoing::{
-    self, ApprovalSource, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
+    self, ApprovalSource, Channels, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
 };
 use crate::connectors::{
     store,
     types::{MailCommand, MailError},
 };
-use crate::db::outgoing_drafts::{self, DraftError, MailSend, OutgoingDraft, SentCheck};
+use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
 use crate::grants::{Grant, Tool};
+use crate::socials::types::{self as socials, SendMessage};
 
 pub const TOOL_NAMES: &[&str] = &[
     "draft_email",
@@ -476,192 +478,112 @@ async fn start(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         )))
 }
 
-enum ConnectedPayload<'a> {
-    Mail {
-        account_id: Uuid,
-        action_id: Uuid,
-        email: &'a Email,
-    },
-    Social {
-        account_id: Uuid,
-        action_id: Uuid,
-        message: &'a Message,
-        destination: &'a str,
-    },
+/// The connected accounts this grant's caller sends through.
+struct Accounts<'a> {
+    state: &'a AppState,
+    grant: &'a Grant,
 }
 
-fn connected_payload(draft: &OutgoingDraft) -> Result<ConnectedPayload<'_>, DraftError> {
-    match (&draft.content.0, draft.delivery.as_deref()) {
-        (
-            Content::Email(email),
-            Some(Delivery::Mail {
+#[async_trait::async_trait]
+impl Connected for Accounts<'_> {
+    async fn send_mail(
+        &self,
+        account_id: Uuid,
+        action_id: Uuid,
+        command: MailCommand,
+    ) -> Result<(), MailError> {
+        self.state
+            .connectors
+            .execute(
                 account_id,
-                action_id,
-            }),
-        ) if email.account_id == Some(*account_id) => Ok(ConnectedPayload::Mail {
-            account_id: *account_id,
-            action_id: *action_id,
-            email,
-        }),
-        (
-            Content::Message(message),
-            Some(Delivery::Social {
+                self.grant.bot_id,
+                self.grant.turn_id,
+                Some(action_id),
+                command,
+            )
+            .await
+            .map(drop)
+    }
+
+    async fn find_sent(&self, account_id: Uuid, message_id: String) -> Result<bool, MailError> {
+        let found = self
+            .state
+            .connectors
+            .execute(
                 account_id,
+                self.grant.bot_id,
+                self.grant.turn_id,
+                None,
+                MailCommand::FindSent { message_id },
+            )
+            .await?;
+        Ok(found["found"] == true)
+    }
+
+    async fn send_social(
+        &self,
+        account_id: Uuid,
+        action_id: Uuid,
+        platform: Platform,
+        message: SendMessage,
+    ) -> Result<(), socials::Error> {
+        let connection = crate::socials::store::connection(&self.state.db, account_id).await?;
+        let connected = match connection.provider {
+            socials::Provider::Telegram => Platform::Telegram,
+            socials::Provider::Discord => Platform::Discord,
+            socials::Provider::WhatsApp => Platform::WhatsApp,
+        };
+        if platform != connected {
+            return Err(socials::Error::Invalid(
+                "The connection belongs to another platform.",
+            ));
+        }
+        self.state
+            .socials
+            .send(
+                account_id,
+                self.grant.bot_id,
+                self.grant.turn_id,
                 action_id,
-            }),
-        ) if message.account_id == Some(*account_id) => Ok(ConnectedPayload::Social {
-            account_id: *account_id,
-            action_id: *action_id,
-            message,
-            destination: message
-                .destination
-                .as_deref()
-                .ok_or(DraftError::NotConnected)?,
-        }),
-        _ => Err(DraftError::NotConnected),
+                message,
+            )
+            .await
+            .map(drop)
+    }
+}
+
+impl From<SendError> for Refusal {
+    fn from(err: SendError) -> Self {
+        match err {
+            SendError::Draft(err) => err.into(),
+            SendError::FileChanged(changed) => Refusal::text(format!(
+                "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
+            ))
+            .logged("rejected FILE_CHANGED"),
+            SendError::FileChangedAfterClaim(changed) => Refusal::text(format!(
+                "FILE_CHANGED: {changed}. An earlier call already started this send and its \
+                 result is not known; never send it again without the owner's new approval."
+            ))
+            .logged("rejected FILE_CHANGED"),
+        }
     }
 }
 
 async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
-    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id).await?;
-    let account_id = draft.content.account().ok_or(DraftError::NotConnected)?;
-    let delivery = match &draft.content.0 {
-        Content::Email(_) if grant.allows(Tool::Mail) => Delivery::Mail {
-            account_id,
-            action_id: Uuid::new_v4(),
-        },
-        Content::Message(_) if grant.allows(Tool::Social) => Delivery::Social {
-            account_id,
-            action_id: Uuid::new_v4(),
-        },
-        _ => {
-            return Err(Refusal::text(
-                "Native sending is unavailable for this task and account.",
-            ));
-        }
+    let channels = Channels {
+        mail: grant.allows(Tool::Mail),
+        social: grant.allows(Tool::Social),
     };
-    let settled = matches!(
-        draft.status,
-        Status::Sent | Status::Failed | Status::Uncertain
-    ) && draft.send_turn_id == Some(grant.turn_id)
-        && matches!(
-            (draft.delivery.as_deref(), &delivery),
-            (Some(Delivery::Mail { .. }), Delivery::Mail { .. })
-                | (Some(Delivery::Social { .. }), Delivery::Social { .. })
-        );
-    let row = if settled {
-        draft
-    } else {
-        let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery).await?;
-        let fresh = row.delivery.as_deref() == Some(&delivery);
-        let approved = claimed_files(state, &row, fresh).await?;
-        match connected_payload(&row)? {
-            ConnectedPayload::Mail {
-                account_id,
-                action_id,
-                email,
-            } => {
-                let manager = &state.connectors;
-                match outgoing_drafts::next_mail_send(&state.db, id, &email.message_id(row.id))
-                    .await?
-                {
-                    MailSend::Dispatch { message_id } => {
-                        let result = manager
-                            .execute(
-                                account_id,
-                                grant.bot_id,
-                                grant.turn_id,
-                                Some(action_id),
-                                email.send_command(
-                                    approved.iter().map(mail_file).collect(),
-                                    Some(message_id),
-                                ),
-                            )
-                            .await;
-                        let refusal = result.as_ref().err().map(|err: &MailError| err.code);
-                        outgoing_drafts::after_mail_send(&state.db, id, refusal).await?
-                    }
-                    MailSend::Sent(row) => *row,
-                    MailSend::CheckSent {
-                        message_id,
-                        earlier,
-                    } => {
-                        let check =
-                            match message_id {
-                                None => Err("an earlier send carried no Message-ID to search for"
-                                    .to_owned()),
-                                Some(message_id) => manager
-                                    .execute(
-                                        account_id,
-                                        grant.bot_id,
-                                        grant.turn_id,
-                                        None,
-                                        MailCommand::FindSent { message_id },
-                                    )
-                                    .await
-                                    .map(|found| {
-                                        if found["found"] == true {
-                                            SentCheck::Found
-                                        } else {
-                                            SentCheck::Absent
-                                        }
-                                    })
-                                    .map_err(|error| error.reason()),
-                            };
-                        outgoing_drafts::record_sent_check(
-                            &state.db, id, action_id, &earlier, check,
-                        )
-                        .await?
-                    }
-                }
-            }
-            ConnectedPayload::Social {
-                account_id,
-                action_id,
-                message,
-                destination,
-            } => {
-                let manager = &state.socials;
-                let result = async {
-                    let connection =
-                        crate::socials::store::connection(&state.db, account_id).await?;
-                    let platform = match connection.provider {
-                        crate::socials::types::Provider::Telegram => Platform::Telegram,
-                        crate::socials::types::Provider::Discord => Platform::Discord,
-                        crate::socials::types::Provider::WhatsApp => Platform::WhatsApp,
-                    };
-                    if message.platform != platform {
-                        return Err(crate::socials::types::Error::Invalid(
-                            "The connection belongs to another platform.",
-                        ));
-                    }
-                    manager
-                        .send(
-                            account_id,
-                            grant.bot_id,
-                            grant.turn_id,
-                            action_id,
-                            crate::socials::types::SendMessage {
-                                destination: destination.to_owned(),
-                                body: message.body.clone(),
-                                reply_to: message.reply_to.clone(),
-                                files: approved.into_iter().map(social_file).collect(),
-                            },
-                        )
-                        .await
-                }
-                .await;
-                outgoing_drafts::after_social_send(
-                    &state.db,
-                    id,
-                    result.err().map(|e| e.to_string()).as_deref(),
-                )
-                .await?
-            }
-        }
-    };
+    let row = send::send_connected(
+        &state.db,
+        grant.turn_id,
+        id,
+        channels,
+        &Accounts { state, grant },
+    )
+    .await?;
     let next = match row.status {
         Status::Sent => "It was sent. Tell the owner briefly.",
         Status::Sending => {
@@ -696,54 +618,16 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     )))
 }
 
-fn mail_file(file: &files::Approved) -> crate::connectors::types::OutgoingAttachment {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    crate::connectors::types::OutgoingAttachment {
-        name: file.file.name.clone(),
-        media_type: file.file.media_type.clone(),
-        data_base64: STANDARD.encode(&file.data),
-    }
-}
-
-fn social_file(file: files::Approved) -> crate::socials::types::SendFile {
-    crate::socials::types::SendFile {
-        name: file.file.name,
-        media_type: file.file.media_type,
-        sha256: file.file.sha256,
-        data: file.data.into(),
-    }
-}
-
-/// The approved bytes of the draft this call claimed. A fresh claim whose
-/// files changed fails before any external effect. A claim an earlier call
-/// made may already have sent, so its state stays as it is.
-async fn claimed_files(
-    state: &AppState,
-    row: &OutgoingDraft,
-    fresh: bool,
-) -> Result<Vec<files::Approved>, Refusal> {
-    let changed = match files::approved(state, row.bot_id, row.content.files()).await {
-        Ok(approved) => return Ok(approved),
-        Err(changed) => changed.to_string(),
-    };
-    if !fresh {
-        return Err(Refusal::text(format!(
-            "FILE_CHANGED: {changed}. An earlier call already started this send and its \
-                 result is not known; never send it again without the owner's new approval."
-        ))
-        .logged("rejected FILE_CHANGED"));
-    }
-    outgoing_drafts::fail_unsent(&state.db, row.id, &changed).await?;
-    Err(Refusal::text(format!(
-        "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
-    ))
-    .logged("rejected FILE_CHANGED"))
-}
-
 /// Stage the files of an unconnected draft this call just claimed for the
 /// bot's own send; nothing was sent if that fails.
 async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Refusal> {
-    let approved = claimed_files(state, row, true).await?;
+    let approved = match send::approved(&state.db, row).await {
+        Ok(approved) => approved,
+        Err(changed) => {
+            outgoing_drafts::fail_unsent(&state.db, row.id, &changed.to_string()).await?;
+            return Err(SendError::FileChanged(changed).into());
+        }
+    };
     if let Err(message) = files::stage(state, row.bot_id, &approved).await {
         outgoing_drafts::fail_unsent(&state.db, row.id, &message).await?;
         return Err(Refusal::text(message).logged("rejected FILE_UNAVAILABLE"));
@@ -803,5 +687,3 @@ pub(super) async fn claim_for_tool(
 }
 
 mod files;
-#[cfg(test)]
-mod tests;
