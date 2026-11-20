@@ -1340,6 +1340,63 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
 
 /// A desktop whose startup fails is not admitted: the use is told it
 /// failed, the failure is recorded, and the next use starts it again.
+/// A computer can grow to the desktop size however its row was first
+/// recorded: by a reserved background job or an owner stop as much as by
+/// a first use.
+#[tokio::test(flavor = "multi_thread")]
+async fn computers_first_recorded_by_a_job_or_an_owner_stop_can_grow() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(
+        &app,
+        &fake,
+        ComputerConfig {
+            desktop: true,
+            state_dir: dir.path().to_owned(),
+            ..config(4)
+        },
+    )
+    .await;
+    let job: Uuid = app.create_bot("Job").await.parse().unwrap();
+    let stopped: Uuid = app.create_bot("Stopped").await.parse().unwrap();
+    let mut conn = app.db.pool.acquire().await.unwrap();
+    manager
+        .reserve_job(
+            &mut conn,
+            job,
+            None,
+            "true",
+            None,
+            Duration::from_secs(60),
+            &[],
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("reserved");
+    drop(conn);
+    manager.owner_stop(stopped).await.unwrap();
+    manager.owner_resume(stopped).await.unwrap();
+
+    ready(&manager, job, "test:job").await;
+    ready(&manager, stopped, "test:stopped").await;
+    let limits: Vec<(String, u32, u32)> = fake
+        .specs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|spec| (spec.name.clone(), spec.max_cpus, spec.max_memory_mib))
+        .collect();
+    assert_eq!(
+        limits,
+        vec![
+            (ComputerManager::runtime_name(job), 2, 2048),
+            (ComputerManager::runtime_name(stopped), 2, 2048),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_desktop_startup_is_not_reported_ready() {
     use std::sync::atomic::Ordering::SeqCst;
