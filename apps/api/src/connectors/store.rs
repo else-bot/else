@@ -36,8 +36,8 @@ pub const MAX_GRANTS: i64 = 128;
 /// Events one scan records; the cursor stops at the last one recorded.
 pub const MAX_ARRIVALS: usize = 100;
 const MAX_CONFIG: usize = 8192;
-const MAX_FIELD: usize = 255;
-const MAX_SECRET: usize = 8192;
+/// Bytes of a recorded event's folder, as `connector_events` allows.
+const MAX_EVENT_FOLDER: usize = 255;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -131,54 +131,13 @@ fn open(key: &SecretKey, b: Binding, salt: &[u8], cipher: &[u8]) -> Result<Crede
     serde_json::from_slice(&plain).map_err(|_| StoreError::Crypto)
 }
 
-fn field(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= MAX_FIELD && !value.contains('\0')
-}
-
-fn secret(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_SECRET
-}
-
 fn validate(config: &MailConfig, credential: &Credential) -> Result<(), StoreError> {
-    let folders = [
-        &config.archive_folder,
-        &config.trash_folder,
-        &config.drafts_folder,
-        &config.sent_folder,
-    ];
-    let texts = [&config.username, &config.imap.host, &config.smtp.host];
-    if !config.address.contains('@') || config.address.len() > 320 || !field(&config.address) {
-        return Err(StoreError::Invalid("the mail address is not valid"));
-    }
-    if !texts.into_iter().chain(folders).all(|v| field(v)) {
-        return Err(StoreError::Invalid(
-            "the username, hosts and folder names need 1 to 255 bytes",
-        ));
-    }
-    if config.imap.port == 0 || config.smtp.port == 0 {
-        return Err(StoreError::Invalid("a mail server port cannot be 0"));
-    }
-    let credential_ok = match credential {
-        Credential::Password { password } => secret(password),
-        Credential::OAuth2 {
-            client_id,
-            client_secret,
-            refresh_token,
-            access_token,
-            ..
-        } => {
-            field(client_id)
-                && secret(refresh_token)
-                && client_secret.as_deref().is_none_or(secret)
-                && access_token.as_deref().is_none_or(secret)
-        }
-    };
-    if !credential_ok {
-        return Err(StoreError::Invalid(
-            "the mail credential is empty or too long",
-        ));
-    }
-    Ok(())
+    config
+        .validate()
+        .map_err(|_| StoreError::Invalid("invalid mail configuration"))?;
+    credential
+        .validate(config.provider)
+        .map_err(|_| StoreError::Invalid("invalid mail credential"))
 }
 
 #[derive(sqlx::FromRow)]
@@ -310,17 +269,6 @@ pub async fn configure_folders(
     }
     if config == &current.config {
         return Ok(current);
-    }
-    if [
-        &config.archive_folder,
-        &config.trash_folder,
-        &config.drafts_folder,
-        &config.sent_folder,
-    ]
-    .iter()
-    .any(|value| !field(value))
-    {
-        return Err(StoreError::Invalid("Folder names need 1 to 255 bytes."));
     }
     let changed = sqlx::query("UPDATE connector_accounts SET config=?3,generation=generation+1,health='unknown',health_version=health_version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND generation=?2 AND state <> 'removed'")
         .bind(id).bind(current.generation).bind(Json(config)).execute(pool).await?.rows_affected();
@@ -536,7 +484,7 @@ pub async fn set_health(
     health: &Health,
 ) -> Result<bool, StoreError> {
     let code = health.code();
-    if !field(code) || code.len() > 64 {
+    if code.trim().is_empty() || code.len() > 64 || code.contains('\0') {
         return Err(StoreError::Invalid("a health code needs 1 to 64 bytes"));
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -1089,7 +1037,8 @@ pub async fn record_scan(
                 m.uid_validity == cursor.uid_validity
                     && m.uid > old.last_uid
                     && m.uid <= cursor.last_uid
-                    && field(&m.folder)
+                    && !m.folder.is_empty()
+                    && m.folder.len() <= MAX_EVENT_FOLDER
             })
             .collect();
         arrivals.sort_by(|a, b| {
