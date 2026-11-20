@@ -411,6 +411,11 @@ impl ProfileStore {
         self.path.with_extension(format!("{id}.layout.json"))
     }
 
+    /// Where a server's bots' latest conversation pages are saved.
+    pub(crate) fn saved_conversations_dir(&self, id: ServerId) -> PathBuf {
+        self.path.with_extension(format!("{id}.conversations"))
+    }
+
     pub(crate) fn quick_switcher_path(&self) -> PathBuf {
         self.path.with_extension("switcher.json")
     }

@@ -619,8 +619,22 @@ pub(super) struct ConversationView {
     pub(super) find: Option<super::find::Find>,
     /// The gap row being loaded, by the loaded item just above it.
     pub(super) loading_gap: Option<(i64, Task<()>)>,
-    pub(super) _load: Option<Task<()>>,
+    pub(super) load: Load,
     pub(super) _older: Option<Task<()>>,
+}
+
+/// Where a view stands with the server's newest page.
+pub(super) enum Load {
+    /// Its conversation, if any, is the server's and follows the stream.
+    Settled,
+    Running {
+        _task: Task<()>,
+    },
+    /// The last load or stream event failed; a shown view retries after
+    /// a pause, a warm one when shown again.
+    Failed {
+        _retry: Option<Task<()>>,
+    },
 }
 
 /// A message the owner jumped to, flashed until it fades out.
@@ -734,9 +748,28 @@ impl ConversationView {
             pending_reveal: None,
             find: None,
             loading_gap: None,
-            _load: None,
+            load: Load::Settled,
             _older: None,
         }
+    }
+
+    /// Settles what only the shown view finishes, before switching away:
+    /// older pages and gaps that were loading, a pending jump and the
+    /// unread divider. Its newest page keeps loading.
+    pub(super) fn park(&mut self) {
+        // Forms hold typed credentials and in-flight checks; showing the
+        // view again builds them anew.
+        self.connections.clear();
+        self._reply_clock = None;
+        self.unread_since = None;
+        self._unread_dismissal = None;
+        self.loading_older = false;
+        self._older = None;
+        self.loading_gap = None;
+        self.pending_reveal = None;
+        self.revealed = None;
+        self._reveal_clock = None;
+        self.landing = None;
     }
 }
 
@@ -751,20 +784,77 @@ impl ElseApp {
     }
 
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (client, Some(view)) = (self.client.clone(), self.view.as_mut()) else {
-            return;
-        };
-        let bot = view.bot_id;
-        view._load = Some(cx.spawn_in(window, async move |this, cx| {
-            let snapshot = client.snapshot(bot, None).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
-                    app.live_command(LiveCommand::Subscribe { bot, cursor });
-                }
-            });
-        }));
+        if let Some(bot) = self.view.as_ref().map(|view| view.bot_id) {
+            self.load_into(bot, window, cx);
+        }
     }
 
+    /// Loads `bot`'s newest page into its view, shown or warm. A view with
+    /// nothing to draw shows the saved page while the server's loads.
+    pub(super) fn load_into(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let (client, saved) = (self.client.clone(), self.saved.clone());
+        let Some(view) = self.view_of(bot) else {
+            return;
+        };
+        let cold = view.conversation.is_none();
+        view.load = Load::Running {
+            _task: cx.spawn_in(window, async move |this, cx| {
+                let fetch = cx.background_executor().spawn(client.latest(bot));
+                if cold
+                    && let Some(saved) = saved.clone()
+                    && let Some(page) = cx
+                        .background_executor()
+                        .spawn(async move { saved.load(bot) })
+                        .await
+                {
+                    let _ = this
+                        .update_in(cx, |app, window, cx| app.apply_saved(bot, page, window, cx));
+                }
+                let snapshot = fetch.await.map(|crate::api::Latest { snapshot, raw }| {
+                    if let Some(saved) = saved {
+                        let ticket = saved.ticket();
+                        cx.background_executor()
+                            .spawn(async move {
+                                if let Err(err) = saved.save(bot, &raw, ticket) {
+                                    eprintln!("{err}");
+                                }
+                            })
+                            .detach();
+                    }
+                    snapshot
+                });
+                let _ = this.update_in(cx, |app, window, cx| {
+                    if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
+                        app.live_command(LiveCommand::Subscribe { bot, cursor });
+                    }
+                });
+            }),
+        };
+    }
+
+    /// Shows the saved page of a view still waiting for its first one.
+    fn apply_saved(
+        &mut self,
+        bot: Uuid,
+        page: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shows(bot);
+        let Some(view) = self.view_of(bot).filter(|v| v.conversation.is_none()) else {
+            return;
+        };
+        let Ok(conversation) = Conversation::from_saved(page) else {
+            return;
+        };
+        view.conversation = Some(conversation);
+        if shown {
+            self.sync_rows(window, cx);
+        }
+    }
+
+    /// Applies `bot`'s newest page to its view, and returns the cursor to
+    /// follow if the view is shown.
     fn apply_snapshot(
         &mut self,
         bot: Uuid,
@@ -772,13 +862,19 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let view = self.view.as_mut().filter(|v| v.bot_id == bot)?;
+        let shown = self.shows(bot);
+        let view = self.view_of(bot)?;
+        view.load = Load::Failed { _retry: None };
         match snapshot.map(Conversation::from_snapshot) {
             Ok(Ok(conversation)) => {
                 let cursor = conversation.cursor();
                 view.conversation = Some(conversation);
+                view.load = Load::Settled;
                 view.loading_gap = None;
                 view.stream_problem = None;
+                if !shown {
+                    return None;
+                }
                 self.sync_rows(window, cx);
                 self.ensure_rules(bot, window, cx);
                 Some(cursor)
@@ -795,15 +891,18 @@ impl ElseApp {
             Err(err) => {
                 view.stream_problem = Some(format!("Could not load history: {err}"));
                 cx.notify();
-                let retry = cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_secs(2)).await;
-                    let _ = this.update_in(cx, |app, window, cx| {
-                        if app.view.as_ref().is_some_and(|v| v.bot_id == bot) {
-                            app.load_conversation(window, cx);
-                        }
-                    });
-                });
-                retry.detach();
+                if shown {
+                    view.load = Load::Failed {
+                        _retry: Some(cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_secs(2)).await;
+                            let _ = this.update_in(cx, |app, window, cx| {
+                                if app.shows(bot) {
+                                    app.load_conversation(window, cx);
+                                }
+                            });
+                        })),
+                    };
+                }
                 None
             }
         }
@@ -816,16 +915,25 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+        // A warm view keeps applying what arrives until its unsubscribe
+        // lands, so the cursor it resumes from is the one it applied.
+        let shown = self.shows(bot);
+        let Some(view) = self.view_of(bot) else {
             return;
         };
-        match message {
+        let failed = match message {
             StreamMessage::Frame(frame) => {
                 let Some(conversation) = view.conversation.as_mut() else {
                     return;
                 };
                 match conversation.apply(&frame) {
-                    Ok(Applied::Duplicate) => {}
+                    Ok(Applied::Duplicate) => false,
+                    // The bot list stays authoritative for a warm bot's
+                    // activity: its last frames can trail the list.
+                    Ok(Applied::Changed) if !shown => {
+                        self.prune_pending(bot);
+                        false
+                    }
                     Ok(Applied::Changed) => {
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
@@ -838,15 +946,43 @@ impl ElseApp {
                         }
                         self.sync_rows(window, cx);
                         self.ensure_rules(bot, window, cx);
+                        false
                     }
-                    Err(_) => {
-                        self.live_command(LiveCommand::Unsubscribe { bot });
-                        self.load_conversation(window, cx);
-                    }
+                    Err(_) => true,
                 }
             }
-            StreamMessage::Reset => self.load_conversation(window, cx),
-            StreamMessage::Deleted => self.refresh_now(window, cx),
+            StreamMessage::Reset => true,
+            StreamMessage::Deleted => {
+                self.refresh_now(window, cx);
+                false
+            }
+        };
+        if !failed {
+            return;
+        }
+        // Dropped so the reloaded page's cursor subscribes anew, even when
+        // it equals the one asked for before.
+        self.live_command(LiveCommand::Unsubscribe { bot });
+        if shown {
+            self.load_conversation(window, cx);
+        } else if let Some(view) = self.view_of(bot)
+            && matches!(view.load, Load::Settled)
+        {
+            view.load = Load::Failed { _retry: None };
+        }
+    }
+
+    /// Drops `bot`'s pending sends its conversation now holds.
+    pub(super) fn prune_pending(&mut self, bot: Uuid) {
+        let view = match self.view.as_ref() {
+            Some(view) if view.bot_id == bot => Some(view),
+            _ => self.warm.get(bot),
+        };
+        if let (Some(conversation), Some(pending)) = (
+            view.and_then(|v| v.conversation.as_ref()),
+            self.pending.get_mut(&bot),
+        ) {
+            pending.retain(|p| !conversation.has_request(p.request_id));
         }
     }
 

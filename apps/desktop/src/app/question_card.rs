@@ -269,7 +269,7 @@ impl ElseApp {
         if matches!(&result, Err(ClientError::Unauthorized)) {
             self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
         }
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+        let Some(view) = self.view_of(bot) else {
             return;
         };
         let Some(submit) = view.question_submits.get_mut(&question) else {

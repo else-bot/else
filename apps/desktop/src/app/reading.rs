@@ -32,10 +32,13 @@ impl ElseApp {
 
     fn dismiss_unread_after_viewing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let attending = self.viewing_transcript(window, cx);
+        let latest = self.latest_loaded();
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        if !attending || !view.latest_seen {
+        // A kept view can show its old tail before the unread reply arrives.
+        let unread_loaded = view.unread_since.is_some_and(|since| latest > Some(since));
+        if !attending || !view.latest_seen || !unread_loaded {
             view._unread_dismissal = None;
             return;
         }

@@ -990,6 +990,8 @@ pub struct Conversation {
     webhooks: Vec<Webhook>,
     draft_grants: Vec<serde_json::Value>,
     rules_version: i64,
+    /// Read from the page saved on disk, so possibly behind the server.
+    saved: bool,
 }
 
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
@@ -1016,6 +1018,7 @@ impl Conversation {
             webhooks: snapshot.webhooks,
             draft_grants: snapshot.draft_grants,
             rules_version: snapshot.rules_version,
+            saved: false,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -1024,6 +1027,18 @@ impl Conversation {
             conversation.turns.insert(turn.id, turn);
         }
         Ok(conversation)
+    }
+
+    /// A conversation from a page saved on disk, shown until the server's.
+    pub fn from_saved(snapshot: Snapshot) -> Result<Self, Reset> {
+        Ok(Self {
+            saved: true,
+            ..Self::from_snapshot(snapshot)?
+        })
+    }
+
+    pub fn is_saved(&self) -> bool {
+        self.saved
     }
 
     /// The cursor of the last applied event, for `Last-Event-ID`.

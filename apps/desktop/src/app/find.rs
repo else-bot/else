@@ -166,12 +166,7 @@ impl ElseApp {
                 cx.background_executor().timer(DEBOUNCE).await;
                 let hits = client.search(bot, query).await;
                 let _ = this.update_in(cx, |app, window, cx| {
-                    let Some(find) = app
-                        .view
-                        .as_mut()
-                        .filter(|view| view.bot_id == bot)
-                        .and_then(|view| view.find.as_mut())
-                    else {
+                    let Some(find) = app.view_of(bot).and_then(|view| view.find.as_mut()) else {
                         return;
                     };
                     find.phase = match hits {
@@ -185,7 +180,9 @@ impl ElseApp {
                         }),
                         Err(_) => Phase::Failed,
                     };
-                    app.show_match(window, cx);
+                    if app.shows(bot) {
+                        app.show_match(window, cx);
+                    }
                 });
             }),
         };
@@ -209,6 +206,19 @@ impl ElseApp {
         found.landed = false;
         found._load = None;
         self.show_match(window, cx);
+    }
+
+    /// Shows the current match of a view shown again, if it was found or
+    /// its messages loaded while the view was warm.
+    pub(super) fn resume_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unlanded = self
+            .view
+            .as_ref()
+            .and_then(|view| view.find.as_ref())
+            .is_some_and(|find| matches!(&find.phase, Phase::Found(found) if !found.landed));
+        if unlanded {
+            self.show_match(window, cx);
+        }
     }
 
     /// Scrolls to the current match, unfolding what hides it, or first

@@ -1023,7 +1023,11 @@ impl Shell {
                                                 Ok(()) => {
                                                     if let Ok(store) = &shell.launch.store
                                                         && let Err(err) =
-                                                            shell.rail.icons.forget(store, id)
+                                                            shell.rail.icons.forget(store, id).and(
+                                                                crate::saved_conversations::SavedConversations::forget(
+                                                                    &store.saved_conversations_dir(id),
+                                                                ),
+                                                            )
                                                     {
                                                         shell.connection_error = Some(err);
                                                     }

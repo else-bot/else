@@ -192,7 +192,7 @@ impl ElseApp {
             cx.notify();
             return;
         }
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+        let Some(view) = self.view_of(bot) else {
             return;
         };
         match result {

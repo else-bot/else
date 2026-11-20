@@ -114,12 +114,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_install(bot, id).await;
             let _ = this.update_in(cx, |app, _, cx| {
-                let Some(card) = app
-                    .view
-                    .as_mut()
-                    .filter(|v| v.bot_id == bot)
-                    .and_then(|v| v.skill_cards.get_mut(&id))
-                else {
+                let Some(card) = app.view_of(bot).and_then(|v| v.skill_cards.get_mut(&id)) else {
                     return;
                 };
                 card.files.loading = false;
@@ -217,7 +212,7 @@ impl ElseApp {
             cx.notify();
             return;
         }
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+        let Some(view) = self.view_of(bot) else {
             return;
         };
         if let Some(card) = view.skill_cards.get_mut(&id) {

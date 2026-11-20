@@ -578,6 +578,13 @@ impl ElseApp {
                 })
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.sidebar_accent).opacity(1.))
+                .on_hover(cx.listener(move |app, hovered: &bool, window, cx| {
+                    if *hovered && !selected {
+                        app.dwell_on(id, window, cx);
+                    } else {
+                        app.leave(id);
+                    }
+                }))
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.open_bot(id, window, cx);
                     app.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -824,6 +831,17 @@ impl ElseApp {
                 .into_any_element(),
         };
         let mut notices = v_flex().gap_1();
+        if view
+            .and_then(|v| v.conversation.as_ref())
+            .is_some_and(crate::model::Conversation::is_saved)
+        {
+            notices = notices.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Updating…"),
+            );
+        }
         if let Some(problem) = view.and_then(|v| v.stream_problem.clone()) {
             notices = notices.child(div().text_xs().text_color(theme.warning).child(problem));
         }
