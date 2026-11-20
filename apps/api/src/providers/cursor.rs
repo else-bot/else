@@ -537,4 +537,4 @@ fn instructions(input: &TurnInput, project: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

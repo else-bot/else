@@ -880,3 +880,43 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
     assert!(!ended(Value::Null).resumable(&TurnOutcome::Completed));
     assert!(!ended(json!(0)).resumable(&TurnOutcome::Interrupted));
 }
+
+pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
+    let mut cursor = Cursor {
+        models: Models::new(&DEFINITION),
+        ready: Ok(Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "2026.08.11".into(),
+            login: Login {
+                macos: false,
+                store: None,
+                file: None,
+            },
+        }),
+        tool_url: Some("http://127.0.0.1:9/mcp".into()),
+    };
+    let mut input = crate::providers::cli::session::tests::input();
+    input.bot_name = "Golden".into();
+    input.delegation.registry = vec![(Uuid::from_u128(7), "Other".into())];
+    let profile = Profile {
+        model: MODEL.into(),
+        reasoning_effort: "default".into(),
+        service_tier: "default".into(),
+    };
+    crate::providers::fingerprints::each_case(
+        &mut input,
+        [
+            "6af7c5dd6f9f79213a040834575580c3",
+            "2e26d0c1972fb8512fda34db6145b045",
+            "5d8355ccde5ffa2b77111ae64bc1bbb5",
+            "e217587a431378fbbbcbb806d3836f30",
+        ],
+        |input, tools| {
+            if !tools {
+                cursor.tool_url = None;
+            }
+            cursor.fingerprint(cursor.ready.as_ref().unwrap(), input, &profile)
+        },
+    )
+}

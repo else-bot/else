@@ -428,4 +428,4 @@ pub(crate) fn tool_note() -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

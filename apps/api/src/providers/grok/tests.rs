@@ -607,3 +607,39 @@ async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
         "a login read mid-write is not a sign-out"
     );
 }
+
+pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
+    let mut grok = Grok {
+        models: Models::new(&DEFINITION),
+        ready: Ok(Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "grok 1.0".into(),
+            login: PathBuf::from("/nonexistent-grok-login"),
+        }),
+        tool_url: Some("http://127.0.0.1:1/mcp".into()),
+    };
+    let mut input = crate::providers::cli::session::tests::input();
+    input.bot_name = "Golden".into();
+    input.delegation.registry = vec![(Uuid::from_u128(7), "Other".into())];
+    let profile = Profile {
+        model: "grok-4.7".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    crate::providers::fingerprints::each_case(
+        &mut input,
+        [
+            "e64ddd27a41dbc4be4d537dea26e8d9c",
+            "7cda1561948c0939ddff36e3532677cc",
+            "266993374504c5b9dfdbb6d1de8618e4",
+            "6da951cc652b462267413106803eb5a3",
+        ],
+        |input, tools| {
+            if !tools {
+                grok.tool_url = None;
+            }
+            grok.fingerprint(grok.ready.as_ref().unwrap(), input, &profile)
+        },
+    )
+}
