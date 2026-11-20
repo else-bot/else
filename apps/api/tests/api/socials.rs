@@ -750,21 +750,24 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
 }
 
 #[tokio::test]
-async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
-    let db = TestDb::migrated().await;
+async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
+    let fake = Arc::new(Fake::default());
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
     let c = account(&db, "stop").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
-    let fake = Arc::new(Fake::default());
+    let turn = running_turn(&app, bot).await;
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let running = manager.clone();
     let id = Uuid::new_v4();
+    let running = app.state.socials.clone();
     let task = tokio::spawn(async move {
         running
             .send(
@@ -781,23 +784,32 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
+    tokio::time::timeout(common::SETTLE, fake.started.notified())
         .await
         .unwrap();
-    sqlx::query("UPDATE turns SET status='cancelling' WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
+    let (status, body) = http(
+        &app.router,
+        "POST",
+        &format!("/v1/bots/{bot}/cancel"),
+        common::TOKEN,
+        json!({ "request_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let sent = tokio::time::timeout(common::SETTLE, task)
         .await
+        .unwrap()
         .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err()
-    );
+    assert!(sent.is_err(), "{sent:?}");
     fake.release.notify_one();
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, id)
+            .await
+            .unwrap(),
+        Some(json!({"action_id": id, "status": "uncertain"}))
+    );
 }
 
 #[tokio::test]
