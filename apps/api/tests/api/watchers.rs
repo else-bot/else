@@ -30,14 +30,18 @@ async fn setup() -> Setup {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let guest = Arc::new(Guest::new());
-    let manager = Arc::new(ComputerManager::new(
-        db.pool.clone(),
-        guest.clone(),
-        ComputerConfig {
-            idle_after: Duration::from_secs(3600),
-            ..ComputerConfig::default()
-        },
-    ));
+    let key = Arc::new(else_api::credentials::SecretKey::parse(common::SECRET_KEY).unwrap());
+    let manager = Arc::new(
+        ComputerManager::new(
+            db.pool.clone(),
+            guest.clone(),
+            ComputerConfig {
+                idle_after: Duration::from_secs(3600),
+                ..ComputerConfig::default()
+            },
+        )
+        .with_secret_key(key),
+    );
     manager.reconcile_startup().await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic]);
@@ -101,6 +105,32 @@ async fn started(s: &Setup) -> Uuid {
     let called = start(s, CHECK, 240).await;
     assert!(!called.error, "{}", called.body);
     assert_eq!(called.result.get("parked"), None, "the turn is not parked");
+    called.result["watch_id"].as_str().unwrap().parse().unwrap()
+}
+
+const TOKEN: &str = "rgx-7f3a9c21-token";
+
+/// Save the Vault entry `registrar` and start a watcher whose checks get it.
+async fn started_with_token(s: &Setup) -> Uuid {
+    let saved = s
+        .app
+        .owner(
+            "PUT",
+            "/v1/task-secrets/registrar",
+            Some(json!({ "env": { "REGISTRAR_TOKEN": TOKEN } })),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", saved.body);
+    let called = tool(
+        &s.app,
+        &s.token,
+        "computer_watch_start",
+        json!({ "check": CHECK, "hours": 240, "purpose": "example.com becomes available",
+                "prompt": PROMPT, "secrets": ["registrar"] }),
+    )
+    .await;
+    assert!(!called.error, "{}", called.body);
+    assert_eq!(called.result["secrets"], json!(["registrar"]));
     called.result["watch_id"].as_str().unwrap().parse().unwrap()
 }
 
@@ -528,4 +558,121 @@ async fn a_job_longer_than_six_hours_is_refused_with_the_watcher_tool_named() {
         .await
         .unwrap();
     assert_eq!(jobs, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_check_gets_its_vault_entry_and_never_shows_its_value() {
+    use base64::Engine;
+    let s = setup().await;
+    let id = started_with_token(&s).await;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(TOKEN);
+    let mut job = running_check(&s, id).await;
+    for n in 1..=2 {
+        let (args, input) = s.guest.launches().pop().expect("the check launched");
+        assert!(
+            String::from_utf8_lossy(&input).contains(&format!("REGISTRAR_TOKEN {encoded}")),
+            "check {n} gets the token"
+        );
+        assert!(args.iter().all(|a| !a.contains(TOKEN)), "never an argument");
+        if n == 1 {
+            check_ends(
+                &s,
+                job,
+                &format!("done 0\nSTATUS: taken, asked with {TOKEN}\n"),
+            )
+            .await;
+            let waiting = settled(&s, id, "waiting").await;
+            assert_eq!(
+                waiting.last_status.as_deref(),
+                Some("taken, asked with [secret REGISTRAR_TOKEN]")
+            );
+            job = checking(&s, id).await;
+        }
+    }
+    check_ends(
+        &s,
+        job,
+        &format!("done 0\nexample.com is free; key {TOKEN}\n"),
+    )
+    .await;
+    let ended = settled(&s, id, "ended").await;
+    assert_eq!(ended.outcome.as_deref(), Some("met"));
+    let text = wake_text(&s.app, ended.wake_turn_id.unwrap()).await;
+    assert!(
+        text.contains("example.com is free; key [secret REGISTRAR_TOKEN]"),
+        "{text}"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT json_object('w', (SELECT json_group_array(json_array(secrets, last_status,
+                    last_output)) FROM watchers),
+                'j', (SELECT json_group_array(json_array(output_tail, error)) FROM guest_jobs))",
+    )
+    .fetch_one(&s.app.db.pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains(TOKEN), "{stored}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_whose_vault_entry_was_deleted_fails_and_says_why() {
+    let s = setup().await;
+    let id = started_with_token(&s).await;
+    let job = running_check(&s, id).await;
+    check_ends(&s, job, "done 0\n").await;
+    settled(&s, id, "waiting").await;
+    let deleted = s
+        .app
+        .owner("DELETE", "/v1/task-secrets/registrar", None)
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+    let launched = s.guest.launches().len();
+
+    for failures in 1..=3_i64 {
+        sqlx::query(
+            "UPDATE watchers SET next_check_at = '2000-01-01T00:00:00.000+00:00'
+             WHERE id = ?1 AND status = 'waiting'",
+        )
+        .bind(id)
+        .execute(&s.app.db.pool)
+        .await
+        .unwrap();
+        s.app.scheduler.wake();
+        let (status, outcome, last_status): (String, Option<String>, Option<String>) =
+            until("counted the failed check", || async {
+                let (status, outcome, last, counted): (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    i64,
+                ) = sqlx::query_as(
+                    "SELECT status, outcome, last_status, failures FROM watchers WHERE id = ?1",
+                )
+                .bind(id)
+                .fetch_one(&s.app.db.pool)
+                .await
+                .unwrap();
+                (counted == failures).then_some((status, outcome, last))
+            })
+            .await;
+        assert_eq!(
+            last_status.as_deref(),
+            Some(
+                "check failed: the Vault entry registrar was deleted; save it again or stop this \
+                 watcher"
+            )
+        );
+        if failures < 3 {
+            assert_eq!((status.as_str(), outcome), ("waiting", None));
+        } else {
+            assert_ne!(status, "waiting");
+            assert_eq!(outcome.as_deref(), Some("failed"));
+        }
+    }
+    assert_eq!(
+        s.guest.launches().len(),
+        launched,
+        "no check ran without it"
+    );
+    let ended = settled(&s, id, "ended").await;
+    assert!(ended.wake_turn_id.is_some(), "the bot is woken to say why");
 }

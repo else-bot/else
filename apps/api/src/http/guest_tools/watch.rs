@@ -9,6 +9,7 @@ use crate::app::providers::Origin;
 use crate::app::watchers::{
     DEFAULT_EVERY_MINUTES, MAX_EVERY_MINUTES, MAX_HOURS, MAX_PER_BOT, MIN_EVERY_MINUTES,
 };
+use crate::db::task_secrets;
 use crate::db::watchers::{self, NewWatcher, Started, StopBy, Stopped};
 
 pub(super) const START: &str = "computer_watch_start";
@@ -39,7 +40,11 @@ pub(super) fn tools(guest: &Value) -> Vec<Value> {
                         becomes available." },
                 "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT,
                     "description": "Your instructions to yourself for when it finds it, e.g. \
-                        Register example.com, then tell the owner." } },
+                        Register example.com, then tell the owner." },
+                "secrets": { "type": "array", "maxItems": 4, "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$" },
+                    "description": "Vault entry names (see computer_secrets) whose variables every \
+                        check gets. Read them from the environment; never print them." } },
                 "required": ["check", "hours", "purpose", "prompt"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -133,6 +138,11 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 }
                 Err(err) => return failed(err),
             }
+            let secrets = match super::secrets_for(state, grant, args, task_secrets::Use::Job).await
+            {
+                Ok((_, names)) => names,
+                Err(outcome) => return outcome,
+            };
             let until = chrono::Utc::now() + chrono::Duration::hours(hours);
             let started = watchers::start(
                 &state.db,
@@ -142,6 +152,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                     purpose: &purpose,
                     check: &check,
                     prompt: &prompt,
+                    secrets: &secrets,
                     every_minutes: every,
                     until,
                 },
@@ -169,7 +180,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Ok(Started::Conflict(watcher)) => {
                     let mut result = tool_result(fit(json!({
                         "error": "CONFLICT: this request already started a watcher with this \
-                            check and purpose but another prompt or interval. Stop it first to \
+                            check and purpose but another prompt, interval or secrets. Stop it first to \
                             change it. No watcher was started.",
                         "watcher": watcher_result(&watcher),
                     })));

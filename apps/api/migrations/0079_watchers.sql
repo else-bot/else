@@ -12,6 +12,10 @@ CREATE TABLE watchers (
     check_command TEXT NOT NULL
         CHECK (trim(check_command) <> '' AND length(CAST(check_command AS BLOB)) <= 8000),
     prompt TEXT NOT NULL CHECK (trim(prompt) <> '' AND length(CAST(prompt AS BLOB)) <= 8000),
+    -- Vault entry names every check gets in its environment; never values.
+    secrets TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(secrets) AND json_type(secrets) = 'array'
+               AND json_array_length(secrets) <= 4),
     every_minutes INTEGER NOT NULL CHECK (every_minutes BETWEEN 5 AND 1440),
     watch_until TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting'

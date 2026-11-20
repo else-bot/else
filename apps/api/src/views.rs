@@ -125,6 +125,7 @@ pub fn watcher_json(watcher: &crate::db::watchers::Watcher) -> Value {
         "id": watcher.id,
         "purpose": watcher.purpose,
         "check": watcher.check_command,
+        "secrets": watcher.secrets.0,
         "every_minutes": watcher.every_minutes,
         "until": watcher.watch_until,
         "status": watcher.status,

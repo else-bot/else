@@ -170,6 +170,21 @@ pub fn checked(
     })
 }
 
+/// A check that could not run because the Vault entry `name` it needs was
+/// deleted. It counts as failed, like a check that exits non-zero.
+pub fn missing_secret(name: &str, failures: i64) -> Checked {
+    let failures = failures + 1;
+    Checked {
+        status: format!(
+            "check failed: the Vault entry {name} was deleted; save it again or stop this watcher"
+        ),
+        output: String::new(),
+        failures,
+        ran: true,
+        ends: (failures >= MAX_FAILURES).then_some(Outcome::Failed),
+    }
+}
+
 /// The hidden task text of a watcher's wake: what the bot planned, then
 /// what the watcher last saw.
 pub fn wake_text(prompt: &str, last_status: Option<&str>, last_output: Option<&str>) -> String {

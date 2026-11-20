@@ -2,6 +2,8 @@
 //! owns every write to `watchers.status`:
 //!
 //! - `waiting` → `checking`: [`admit_due`] reserves the check job.
+//! - `waiting` → `waiting` or `waking`: [`admit_due`] counts a check
+//!   whose Vault entry was deleted as failed, without running it.
 //! - `checking` → `waiting` or `waking`: [`settle_checks`] reads how the
 //!   check job ended.
 //! - `waiting` or `checking` → `waking`: the deadline passes
@@ -14,13 +16,16 @@
 //! `bot.updated`.
 
 use chrono::{DateTime, Duration, Utc};
+use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
 use super::routines::{Check, RunOn, queue_saved_task, ts};
 use crate::app::providers::WatcherRun;
-use crate::app::watchers::{CHECK_DURATION, MAX_PER_BOT, Outcome, Status, checked, wake_text};
+use crate::app::watchers::{
+    CHECK_DURATION, Checked, MAX_PER_BOT, Outcome, Status, checked, missing_secret, wake_text,
+};
 use crate::computers::ComputerManager;
 use crate::computers::jobs::{JobStatus, MAX_JOBS};
 use crate::providers::Registry;
@@ -38,6 +43,8 @@ pub struct Watcher {
     pub purpose: String,
     pub check_command: String,
     pub prompt: String,
+    /// Vault entry names every check gets in its environment.
+    pub secrets: Json<Vec<String>>,
     pub every_minutes: i64,
     pub watch_until: DateTime<Utc>,
     pub status: Status,
@@ -51,7 +58,8 @@ pub struct Watcher {
     pub created_at: DateTime<Utc>,
 }
 
-const COLUMNS: &str = "id, bot_id, created_turn_id, purpose, check_command, prompt, every_minutes,
+const COLUMNS: &str = "id, bot_id, created_turn_id, purpose, check_command, prompt, secrets,
+    every_minutes,
     watch_until, status, outcome, next_check_at, checks, failures, last_status, last_output,
     last_checked_at, created_at";
 
@@ -63,6 +71,7 @@ pub struct NewWatcher<'a> {
     pub purpose: &'a str,
     pub check: &'a str,
     pub prompt: &'a str,
+    pub secrets: &'a [String],
     pub every_minutes: i64,
     pub until: DateTime<Utc>,
 }
@@ -72,8 +81,8 @@ pub enum Started {
     Created(Watcher),
     /// A retry of a call that already started this watcher.
     Existing(Watcher),
-    /// The same turn started this check and purpose with another prompt or
-    /// interval.
+    /// The same turn started this check and purpose with another prompt,
+    /// interval or secrets.
     Conflict(Watcher),
     TooMany(Vec<Watcher>),
     /// The turn no longer runs, or the owner stopped the bot.
@@ -106,7 +115,9 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(existing) = existing {
-        let same = existing.prompt == new.prompt && existing.every_minutes == new.every_minutes;
+        let same = existing.prompt == new.prompt
+            && existing.every_minutes == new.every_minutes
+            && existing.secrets.0 == new.secrets;
         return Ok(if same {
             Started::Existing(existing)
         } else {
@@ -123,8 +134,8 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     let id = Uuid::new_v4();
     let watcher: Watcher = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO watchers (id, bot_id, conversation_id, created_turn_id, purpose, check_command,
-             prompt, every_minutes, watch_until, next_check_at)
-         SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             prompt, every_minutes, watch_until, secrets, next_check_at)
+         SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          FROM conversations c WHERE c.bot_id = ?2 AND c.kind = 'owner'
          RETURNING {COLUMNS}"
     )))
@@ -136,6 +147,7 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     .bind(new.prompt)
     .bind(new.every_minutes)
     .bind(ts(new.until))
+    .bind(Json(new.secrets))
     .fetch_one(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, new.bot_id).await?;
@@ -329,6 +341,10 @@ async fn expire(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
 struct Due {
     bot_id: Uuid,
     check_command: String,
+    secrets: Json<Vec<String>>,
+    /// A Vault entry it names that no longer exists.
+    missing: Option<String>,
+    failures: i64,
     every_minutes: i64,
     watch_until: DateTime<Utc>,
     running: i64,
@@ -342,7 +358,9 @@ async fn admit(
 ) -> Result<Option<Check>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
-        "SELECT w.bot_id, w.check_command, w.every_minutes, w.watch_until,
+        "SELECT w.bot_id, w.check_command, w.secrets, w.failures, w.every_minutes, w.watch_until,
+                (SELECT s.value FROM json_each(w.secrets) s
+                 WHERE s.value NOT IN (SELECT name FROM task_secrets) LIMIT 1) AS missing,
                 (SELECT count(*) FROM guest_jobs j WHERE j.bot_id = w.bot_id
                    AND j.status IN ('starting', 'running', 'cancelling')) AS running
          FROM watchers w JOIN bots b ON b.id = w.bot_id
@@ -356,6 +374,12 @@ async fn admit(
     let Some(due) = row else {
         return Ok(None);
     };
+    if let Some(name) = &due.missing {
+        let check = missing_secret(name, due.failures);
+        record_unrun(&mut tx, id, due.bot_id, due.every_minutes, &check, now).await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
     let left = (due.watch_until - now).to_std().unwrap_or_default();
     let reserved = match computers {
         Some(_) if due.running >= MAX_JOBS - 1 => Err(RETRY),
@@ -367,7 +391,7 @@ async fn admit(
                 &due.check_command,
                 None,
                 CHECK_DURATION.min(left),
-                &[],
+                &due.secrets.0,
                 None,
             )
             .await?
@@ -415,7 +439,48 @@ async fn admit(
         bot_id: due.bot_id,
         job_id,
         command: due.check_command,
+        secrets: due.secrets.0,
     }))
+}
+
+/// Record a check that failed before any job could run, such as one whose
+/// Vault entry was deleted: wait for the next check, or end the watcher.
+async fn record_unrun(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    bot_id: Uuid,
+    every_minutes: i64,
+    check: &Checked,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let (status, next) = match check.ends {
+        Some(_) => (Status::Waking, None),
+        None => (
+            Status::Waiting,
+            Some(ts(now + Duration::minutes(every_minutes))),
+        ),
+    };
+    let recorded = sqlx::query(
+        "UPDATE watchers SET status = ?2, outcome = ?3, next_check_at = ?4, failures = ?5,
+             checks = checks + 1, last_status = ?6, last_output = ?7, last_checked_at = ?8,
+             ended_at = CASE WHEN ?3 IS NULL THEN NULL ELSE ?8 END
+         WHERE id = ?1 AND status = 'waiting'",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(check.ends)
+    .bind(next)
+    .bind(check.failures)
+    .bind(&check.status)
+    .bind(&check.output)
+    .bind(ts(now))
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if recorded == 1 {
+        events::bot_updated(conn, bot_id).await?;
+    }
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]

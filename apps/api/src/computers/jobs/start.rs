@@ -181,6 +181,41 @@ impl ComputerManager {
         Ok(Some(id))
     }
 
+    /// Launch a reserved routine or watcher check with the Vault entries
+    /// `secrets` in its environment. A check whose entries cannot be read
+    /// is failed before it starts.
+    pub async fn launch_check(
+        &self,
+        bot_id: Uuid,
+        id: Uuid,
+        command: &str,
+        secrets: &[String],
+    ) -> Result<(), ComputerError> {
+        let env =
+            match crate::db::task_secrets::resolve(&self.pool, self.secret_key.as_deref(), secrets)
+                .await
+            {
+                Ok(env) => env,
+                Err(err) => {
+                    self.fail_start(id, &format!("its Vault entries could not be read: {err}"))
+                        .await?;
+                    return Ok(());
+                }
+            };
+        if !secrets.is_empty() {
+            crate::db::task_secrets::record_use(
+                &self.pool,
+                secrets,
+                bot_id,
+                None,
+                crate::db::task_secrets::Use::Job,
+            )
+            .await;
+        }
+        self.launch_reserved(bot_id, id, command, &env).await?;
+        Ok(())
+    }
+
     /// Hold the computer for a reserved job and launch it. A job stopped
     /// before it holds the computer is not launched.
     pub async fn launch_reserved(

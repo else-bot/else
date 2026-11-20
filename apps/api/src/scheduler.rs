@@ -390,9 +390,8 @@ impl Scheduler {
             return;
         };
         tokio::spawn(async move {
-            let env = crate::db::task_secrets::Env::default();
             if let Err(err) = computers
-                .launch_reserved(check.bot_id, check.job_id, &check.command, &env)
+                .launch_check(check.bot_id, check.job_id, &check.command, &check.secrets)
                 .await
             {
                 tracing::warn!(job = %check.job_id, error = %err, "launching a routine or watcher check failed");

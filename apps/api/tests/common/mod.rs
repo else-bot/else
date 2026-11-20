@@ -6,6 +6,8 @@ pub mod steer;
 /// How long a test waits for a state it expects to reach. It only bounds a
 /// hang: a passing wait returns as soon as the state appears, and several
 /// suites sharing one machine can slow a step tenfold.
+/// The `SECRET_KEY` every test app seals Vault entries with.
+pub const SECRET_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 /// A chunked local backup set rebuilt whole in a new directory, as a remote
 /// download leaves it, for tests that read or damage its files.
@@ -224,10 +226,7 @@ impl TestApp {
         if let Some(sources) = skill_sources {
             state.skill_sources = sources;
         }
-        let key = Arc::new(
-            else_api::credentials::SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
-                .unwrap(),
-        );
+        let key = Arc::new(else_api::credentials::SecretKey::parse(SECRET_KEY).unwrap());
         state = state.with_secret_key(key.clone());
         if let Some(mail) = mail {
             state = state.with_connectors(Arc::new(
