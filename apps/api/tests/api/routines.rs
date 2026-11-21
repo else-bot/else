@@ -2349,6 +2349,7 @@ async fn the_routines_migration_preserves_existing_data() {
             .await
             .unwrap();
     assert!(violations.is_empty(), "{violations:?}");
+    // The task's turn ends; the delegation trigger settles its task.
     sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
         .bind(child)
         .execute(&db.pool)

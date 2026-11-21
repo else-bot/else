@@ -2,6 +2,7 @@ use crate::common;
 
 use async_trait::async_trait;
 use common::TestDb;
+use else_api::db::turns::{ItemKind, TurnStatus};
 use else_api::{
     credentials::SecretKey,
     socials::{
@@ -137,23 +138,13 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
     )
     .await
     .unwrap();
-    let bot = Uuid::new_v4();
-    let conversation = Uuid::new_v4();
-    let turn = Uuid::new_v4();
-    let item = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots(id,name) VALUES(?1,'Session test')")
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations(id,bot_id) VALUES(?1,?2)")
-        .bind(conversation)
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO turns(id,bot_id,conversation_id,request_id,request_hash,turn_no,owner_item_id,provider_id,status,attempt) VALUES(?1,?2,?3,?4,zeroblob(32),1,?5,'synthetic','running',1)").bind(turn).bind(bot).bind(conversation).bind(Uuid::new_v4()).bind(item).execute(&db.pool).await.unwrap();
-    sqlx::query("INSERT INTO items(id,conversation_id,seq,turn_id,kind,text) VALUES(?1,?2,1,?3,'user','test')").bind(item).bind(conversation).bind(turn).execute(&db.pool).await.unwrap();
+    let bot = common::seed::bot(&db.pool, "Session test").await.id;
+    let turn = common::seed::turn(bot)
+        .status(TurnStatus::Running)
+        .attempt(1)
+        .message(ItemKind::User, "test")
+        .insert(&db.pool)
+        .await;
     store::save_destinations(
         &db.pool,
         c.id,

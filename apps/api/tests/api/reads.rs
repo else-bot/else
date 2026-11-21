@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use axum::http::StatusCode;
 use common::recorder::{self, GATE, GATE_AFTER_OPENING};
 use common::{TestApp, TestDb};
+use else_api::db::turns::TurnStatus;
 use serde_json::{Value, json};
 use sqlx::migrate::Migrator;
 use uuid::Uuid;
@@ -373,26 +374,12 @@ async fn owner_messages_task_replies_and_failures_are_not_unread_replies() {
     assert_eq!(read_state(&app, &bot).await, empty, "no reply was written");
 
     let bot_id: Uuid = bot.parse().unwrap();
-    let (task, task_turn) = (Uuid::new_v4(), Uuid::new_v4());
-    sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES (?1, ?2, 'task')")
-        .bind(task)
-        .bind(bot_id)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, status)
-         VALUES (?1, ?2, ?3, ?4, zeroblob(32), 1, ?5, 'synthetic', 'completed')",
-    )
-    .bind(task_turn)
-    .bind(bot_id)
-    .bind(task)
-    .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .execute(&app.db.pool)
-    .await
-    .unwrap();
+    let task = common::seed::task_conversation(&app.db.pool, bot_id).await;
+    let task_turn = common::seed::turn(bot_id)
+        .conversation(task)
+        .status(TurnStatus::Completed)
+        .insert(&app.db.pool)
+        .await;
     sqlx::query(
         "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
          VALUES (?1, ?2, 1, ?3, 'assistant', 'Delegated result')",

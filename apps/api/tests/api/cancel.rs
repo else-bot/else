@@ -1,4 +1,5 @@
 use crate::common;
+use else_api::db::turns::TurnStatus;
 
 use std::time::Duration;
 
@@ -491,19 +492,12 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id)
-         VALUES (?1, ?2, ?3, ?4, zeroblob(32), 1, ?5, 'synthetic')",
-    )
-    .bind(turn_id)
-    .bind(bot_id)
-    .bind(conversation)
-    .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .execute(&mut *tx)
-    .await
-    .unwrap();
+    common::seed::turn(bot_id)
+        .id(turn_id)
+        .conversation(conversation)
+        .turn_no(1)
+        .insert(&mut *tx)
+        .await;
     tx.commit().await.unwrap();
     assert_eq!(
         common::until("the stop to finish after the send commits", stop_task)
@@ -526,11 +520,13 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
     app.wait_turn(&turn_id(&hang), &["running"]).await;
-    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = ?1")
-        .bind(turn_id(&hang).parse::<Uuid>().unwrap())
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
+    // A stop whose interrupt never reached the running provider.
+    common::seed::force_status(
+        &app.db.pool,
+        turn_id(&hang).parse::<Uuid>().unwrap(),
+        TurnStatus::Cancelling,
+    )
+    .await;
     assert_eq!(
         app.wait_turn(&turn_id(&hang), &["interrupted"]).await,
         "interrupted"
@@ -550,6 +546,7 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         .interrupt(turn_id(&queued).parse().unwrap())
         .await;
     app.wait_turn(&turn_id(&queued), &["interrupted"]).await;
+    // Put back the running row an interrupt lost in a crash leaves.
     sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = ?1")
         .bind(turn_id(&queued).parse::<Uuid>().unwrap())
         .execute(&app.db.pool)

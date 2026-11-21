@@ -7,6 +7,7 @@ use else_api::app::outgoing::send::{Connected, send_connected};
 use else_api::app::outgoing::{Channels, Platform};
 use else_api::connector_core::actions::Start;
 use else_api::connectors::types::{MailCommand, MailError};
+use else_api::db::turns::{ItemKind, TurnStatus};
 use else_api::grants::Tool;
 use else_api::{
     credentials::SecretKey,
@@ -59,56 +60,27 @@ async fn account(db: &TestDb, name: &str) -> Connection {
     .unwrap()
 }
 pub(crate) async fn bot(db: &TestDb) -> Uuid {
-    let bot = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots(id,name) VALUES(?1,'Social test')")
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations(id,bot_id) VALUES(?1,?2)")
-        .bind(Uuid::new_v4())
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    bot
+    common::seed::bot(&db.pool, "Social test").await.id
 }
 /// An owner turn the scheduler runs until the app stops.
-pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
-    insert_turn(db, bot, kind, "running", "test").await
+pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: ItemKind) -> Uuid {
+    insert_turn(db, bot, kind, TurnStatus::Running, "test").await
 }
 
 /// A turn whose owner item has `kind`, inserted with `status`.
-async fn insert_turn(db: &TestDb, bot: Uuid, kind: &str, status: &str, text: &str) -> Uuid {
-    let (conversation, last, seq): (Uuid, i64, i64) =
-        sqlx::query_as("SELECT id,last_turn_no,last_item_seq FROM conversations WHERE bot_id=?1")
-            .bind(bot)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    let id = Uuid::new_v4();
-    let item = Uuid::new_v4();
-    sqlx::query("INSERT INTO turns(id,bot_id,conversation_id,request_id,request_hash,turn_no,owner_item_id,provider_id,status,attempt) VALUES(?1,?2,?3,?4,zeroblob(32),?5,?6,'synthetic',?7,1)").bind(id).bind(bot).bind(conversation).bind(Uuid::new_v4()).bind(last+1).bind(item).bind(status).execute(&db.pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO items(id,conversation_id,seq,turn_id,kind,text) VALUES(?1,?2,?3,?4,?5,?6)",
-    )
-    .bind(item)
-    .bind(conversation)
-    .bind(seq + 1)
-    .bind(id)
-    .bind(kind)
-    .bind(text)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_turn_no=?2,last_item_seq=?3 WHERE id=?1")
-        .bind(conversation)
-        .bind(last + 1)
-        .bind(seq + 1)
-        .execute(&db.pool)
+async fn insert_turn(
+    db: &TestDb,
+    bot: Uuid,
+    kind: ItemKind,
+    status: TurnStatus,
+    text: &str,
+) -> Uuid {
+    common::seed::turn(bot)
+        .status(status)
+        .attempt(1)
+        .message(kind, text)
+        .insert(&db.pool)
         .await
-        .unwrap();
-    id
 }
 async fn destinations(db: &TestDb, c: Uuid) {
     store::save_destinations(
@@ -225,7 +197,7 @@ async fn owner_work_uses_any_chat_and_a_woken_turn_reads_only_its_own() {
     let c = account(&db, "scope").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let owner = turn(&db, bot, "user").await;
+    let owner = turn(&db, bot, ItemKind::User).await;
     let trigger = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
         .await
         .unwrap()
@@ -241,12 +213,9 @@ async fn owner_work_uses_any_chat_and_a_woken_turn_reads_only_its_own() {
     authorize(&db, &c, bot, owner, Some("not-seen-yet"), false)
         .await
         .expect("owner work may name a chat the bot has not seen");
-    sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
-        .bind(owner)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let external = turn(&db, bot, "connector").await;
+    // End the turn by hand so the bot's next turn can take its active slot.
+    common::seed::force_status(&db.pool, owner, TurnStatus::Completed).await;
+    let external = turn(&db, bot, ItemKind::Connector).await;
     sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id,status,turn_id) VALUES(?1,'e',?2,?3,'100','1','delivered',?4)").bind(c.id).bind(bot).bind(trigger.id).bind(external).execute(&db.pool).await.unwrap();
     assert_eq!(
         authorize(&db, &c, bot, external, None, false)
@@ -274,16 +243,13 @@ async fn owner_work_uses_any_chat_and_a_woken_turn_reads_only_its_own() {
 async fn setup_needs_only_its_provider_connection_and_requeues() {
     let db = TestDb::migrated().await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Team support")
         .await
         .unwrap();
     let c = account(&db, "setup").await;
-    sqlx::query("UPDATE turns SET status='waiting' WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    // Park the turn on its setup, so settling the setup requeues it.
+    common::seed::force_status(&db.pool, turn, TurnStatus::Waiting).await;
     let done = store::settle_setup(&db.pool, request.id, Some(c.id), None)
         .await
         .unwrap();
@@ -316,7 +282,7 @@ async fn an_external_turn_sees_no_connection_it_was_not_delivered_from() {
     let c = account(&db, "unrelated").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let external = turn(&db, bot, "connector").await;
+    let external = turn(&db, bot, ItemKind::Connector).await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     assert!(
         authorize(&db, &c, bot, external, None, false)
@@ -337,7 +303,7 @@ async fn only_discord_intent_changes_restart_the_listener() {
         .unwrap();
     let telegram = account(&db, "no-intents").await;
     let bot = bot(&db).await;
-    let owner = turn(&db, bot, "user").await;
+    let owner = turn(&db, bot, ItemKind::User).await;
     let content = |id: Uuid| {
         let pool = db.pool.clone();
         async move { store::connection(&pool, id).await.unwrap().message_content }
@@ -381,19 +347,16 @@ async fn a_bot_sets_its_own_triggers_only_for_owner_work_and_one_per_chat() {
     let c = account(&db, "triggers").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let external = turn(&db, bot, "connector").await;
+    let external = turn(&db, bot, ItemKind::Connector).await;
     assert!(
         store::set_trigger(&db.pool, external, &watch(c.id, Some("100"), Wake::All))
             .await
             .is_err(),
         "an incoming message cannot set a trigger"
     );
-    sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
-        .bind(external)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let owner = turn(&db, bot, "user").await;
+    // End the turn by hand so the bot's next turn can take its active slot.
+    common::seed::force_status(&db.pool, external, TurnStatus::Completed).await;
+    let owner = turn(&db, bot, ItemKind::User).await;
     let first = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
         .await
         .unwrap()
@@ -440,7 +403,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
     let c = account(&db, "actions").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     let id = Uuid::new_v4();
     let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
@@ -710,7 +673,7 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
     let c = account(&db, "cancel").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
     let manager = Arc::new(Manager::with_transport(
@@ -825,7 +788,7 @@ async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
     let c = account(&db, "gave-up").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
     let manager = Arc::new(Manager::with_transport(
@@ -1012,11 +975,8 @@ async fn a_stopped_request_fails_a_message_its_worker_never_started() {
     else_api::db::outgoing_drafts::claim_connected(&db.pool, turn, draft, SOCIAL)
         .await
         .unwrap();
-    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = ?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    // The owner's stop, whose trigger fails a send no worker started.
+    common::seed::force_status(&db.pool, turn, TurnStatus::Cancelling).await;
     let (status, detail): (String, String) =
         sqlx::query_as("SELECT status, result_detail FROM outgoing_drafts WHERE id = ?1")
             .bind(draft)
@@ -1307,7 +1267,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     .await;
     assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{stopped}");
     app.wait_turn(turn, &["interrupted"]).await;
-    let woken = insert_turn(db, bot, "connector", "queued", GATE).await;
+    let woken = insert_turn(db, bot, ItemKind::Connector, TurnStatus::Queued, GATE).await;
     app.scheduler.wake();
     h.started(woken).await;
     let grant = h.grant_with(woken, vec![Tool::Social]).await;
@@ -1330,7 +1290,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
 async fn cancelled_setup_cannot_complete_or_touch_pending_deliveries() {
     let db = TestDb::migrated().await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let c = account(&db, "cancelled-setup").await;
     destinations(&db, c.id).await;
     let trigger = trigger_row(&db, c.id, bot, Some("100"), "all").await;
@@ -1677,7 +1637,7 @@ async fn finishing_an_action_after_recovery_returns_the_stored_receipt() {
     let c = account(&db, "settled").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let id = Uuid::new_v4();
     let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
     store::begin_action(

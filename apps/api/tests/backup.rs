@@ -11,6 +11,7 @@ use else_api::backup::restore::{RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
 use else_api::backup::{self, BackupError, Covered, DatabaseParams, VmState};
 use else_api::credentials::SecretKey;
+use else_api::db::turns::TurnStatus;
 use serde_json::json;
 use sqlx::Connection;
 use uuid::Uuid;
@@ -698,7 +699,7 @@ async fn a_restore_stops_the_tasks_of_the_email_turns_it_ends() {
         .bind(name)
         .fetch_one(&db.pool)
     };
-    let (parent, parent_conversation) = conversation("Planner").await.unwrap();
+    let (parent, _) = conversation("Planner").await.unwrap();
     let (target, target_conversation) = conversation("Helper").await.unwrap();
     let (account, event, root, child) = (
         Uuid::new_v4(),
@@ -706,22 +707,21 @@ async fn a_restore_stops_the_tasks_of_the_email_turns_it_ends() {
         Uuid::new_v4(),
         Uuid::new_v4(),
     );
-    let turn = "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-                    owner_item_id, provider_id, status)
-                VALUES (?1, ?2, ?3, randomblob(16), randomblob(32), 100, randomblob(16), 'synthetic', ?4)";
-    for (id, bot, conversation, status) in [
-        (root, parent, parent_conversation, "waiting"),
-        (child, target, target_conversation, "queued"),
-    ] {
-        sqlx::query(turn)
-            .bind(id)
-            .bind(bot)
-            .bind(conversation)
-            .bind(status)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-    }
+    common::seed::turn(parent)
+        .id(root)
+        .turn_no(100)
+        .status(TurnStatus::Waiting)
+        .insert(&db.pool)
+        .await;
+    common::seed::turn(target)
+        .id(child)
+        .turn_no(100)
+        .insert(&db.pool)
+        .await;
+    common::seed::delegation(root, parent, target, target_conversation, child)
+        .task("Summarize the email")
+        .insert(&db.pool)
+        .await;
     for sql in [
         "INSERT INTO connector_accounts (id, address, config, state, removed_at)
          VALUES (?1, 'inbox@example.test', '{}', 'removed', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
@@ -729,18 +729,12 @@ async fn a_restore_stops_the_tasks_of_the_email_turns_it_ends() {
          VALUES (?2, ?1, 'INBOX', 1, 1, 1)",
         "INSERT INTO connector_deliveries (event_id, bot_id, account_id, binding_id, status, turn_id, settled_at)
          VALUES (?2, ?3, ?1, randomblob(16), 'delivered', ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
-        "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id, task,
-             task_hash, conversation_id, child_turn_id)
-         VALUES (randomblob(16), ?4, 1, ?3, ?5, 'Summarize the email', randomblob(32), ?6, ?7)",
     ] {
         sqlx::query(sql)
             .bind(account)
             .bind(event)
             .bind(parent)
             .bind(root)
-            .bind(target)
-            .bind(target_conversation)
-            .bind(child)
             .execute(&db.pool)
             .await
             .unwrap();
