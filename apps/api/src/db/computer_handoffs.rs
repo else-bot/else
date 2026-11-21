@@ -22,7 +22,8 @@ use super::{events, in_ids};
 
 pub const MAX_REASON: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Status {
@@ -57,7 +58,7 @@ type Row = (
     Uuid,
     Uuid,
     String,
-    String,
+    Status,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
@@ -73,7 +74,7 @@ fn handoff(
         bot_id,
         turn_id,
         reason,
-        status: status.parse().unwrap_or(Status::Pending),
+        status,
         created_at,
         taken_at,
         settled_at,
@@ -239,7 +240,7 @@ pub async fn undelivered(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Vec<Outcome>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, Status)> = sqlx::query_as(
         "SELECT id, reason, status FROM computer_handoffs
          WHERE turn_id = ?1 AND attempt > 0 AND delivered_attempt IS NULL
            AND status IN ('handed_back', 'dismissed', 'skipped')
@@ -250,11 +251,7 @@ pub async fn undelivered(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, reason, status)| Outcome {
-            id,
-            reason,
-            status: status.parse().unwrap_or(Status::Pending),
-        })
+        .map(|(id, reason, status)| Outcome { id, reason, status })
         .collect())
 }
 

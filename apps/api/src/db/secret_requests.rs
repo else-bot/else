@@ -114,22 +114,13 @@ impl Spec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Pending,
     Stored,
     Cancelled,
-}
-
-impl Status {
-    fn parse(text: &str) -> Self {
-        match text {
-            "stored" => Self::Stored,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
-        }
-    }
 }
 
 /// Public metadata of a request. It never holds a value.
@@ -157,7 +148,7 @@ type Row = (
     Json<Vec<String>>,
     Option<String>,
     Option<String>,
-    String,
+    Status,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
 );
@@ -177,7 +168,7 @@ fn info(
         env: env.0,
         description,
         website: website.and_then(|w| Website::parse(&w).ok()),
-        status: Status::parse(&status),
+        status,
         created_at,
         settled_at,
     }
@@ -365,11 +356,7 @@ async fn settle_in(
          WHERE id = ?1 RETURNING {COLUMNS}"
     )))
     .bind(request.id)
-    .bind(if status == Status::Stored {
-        "stored"
-    } else {
-        "cancelled"
-    })
+    .bind(status)
     .fetch_one(&mut *conn)
     .await?;
     let requeued = super::turns::lifecycle::continue_waiting(conn, request.turn_id).await?;
@@ -439,7 +426,7 @@ pub async fn undelivered(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Vec<Outcome>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, Json<Vec<String>>, String)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, Json<Vec<String>>, Status)> = sqlx::query_as(
         "SELECT id, name, env_names, status FROM secret_requests
          WHERE turn_id = ?1 AND delivered_attempt IS NULL AND status <> 'pending'
          ORDER BY created_at, id",
@@ -453,7 +440,7 @@ pub async fn undelivered(
             id,
             name,
             env: env.0,
-            stored: status == "stored",
+            stored: status == Status::Stored,
         })
         .collect())
 }

@@ -54,7 +54,8 @@ impl From<Kind> for Need {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Kind {
@@ -70,7 +71,8 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Status {
@@ -106,10 +108,10 @@ type Row = (
     Uuid,
     Uuid,
     Uuid,
-    String,
+    Kind,
     String,
     Option<String>,
-    String,
+    Status,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
 );
@@ -123,10 +125,10 @@ fn notice(
         id,
         bot_id,
         turn_id,
-        kind: kind.parse().unwrap_or(Kind::Blocked),
+        kind,
         summary,
         tried,
-        status: status.parse().unwrap_or(Status::Pending),
+        status,
         created_at,
         settled_at,
     }
