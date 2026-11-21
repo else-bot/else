@@ -6,7 +6,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use else_wire::settings::Capabilities;
 
@@ -17,6 +18,15 @@ use else_wire::settings::ProfileChoice;
 use else_wire::settings::ProviderInfo;
 
 const FAST: &str = "priority";
+
+/// Asks the server to check provider `id`'s CLI again; the answer comes
+/// back through [`ProfilePicker::rechecked`].
+pub type Recheck = Rc<dyn Fn(String, WeakEntity<ProfilePicker>, &mut Window, &mut App)>;
+
+enum Check {
+    Running,
+    Failed(String),
+}
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
@@ -32,6 +42,8 @@ pub struct ProfilePicker {
     new: HashSet<(String, String)>,
     tabs: bool,
     disabled: bool,
+    recheck: Option<Recheck>,
+    checks: HashMap<String, Check>,
 }
 
 impl ProfilePicker {
@@ -65,7 +77,43 @@ impl ProfilePicker {
             new: HashSet::new(),
             tabs: false,
             disabled: false,
+            recheck: None,
+            checks: HashMap::new(),
         }
+    }
+
+    /// Offers Check again on a provider that needs setup.
+    pub fn with_recheck(mut self, recheck: Recheck) -> Self {
+        self.recheck = Some(recheck);
+        self
+    }
+
+    /// Shows the server's answer to a check of provider `id`.
+    pub fn rechecked(
+        &mut self,
+        id: &str,
+        answer: Result<ProviderInfo, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match answer {
+            Ok(info) => {
+                self.checks.remove(id);
+                if let Some(slot) = self.providers.iter_mut().find(|p| p.state.id == id) {
+                    *slot = info;
+                }
+                if self.choice.is_none() {
+                    self.choice = self
+                        .providers
+                        .iter()
+                        .find(|p| p.state.id == id && p.state.cli_available)
+                        .and_then(|p| catalog_choice(p, None));
+                }
+            }
+            Err(reason) => {
+                self.checks.insert(id.to_owned(), Check::Failed(reason));
+            }
+        }
+        cx.notify();
     }
 
     /// Badges these (provider, model) pairs as new.
@@ -502,6 +550,45 @@ impl ProfilePicker {
                         .child(reason),
                 )
             })
+            .children(self.recheck.clone().map(|recheck| {
+                let checking = matches!(self.checks.get(&provider.state.id), Some(Check::Running));
+                let failed = match self.checks.get(&provider.state.id) {
+                    Some(Check::Failed(reason)) => Some(reason.clone()),
+                    _ => None,
+                };
+                let id = provider.state.id.clone();
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new(SharedString::from(format!("recheck-{}", provider.state.id)))
+                            .control(
+                                Tier::Secondary,
+                                Scale::Compact,
+                                self.disabled || checking,
+                                cx,
+                            )
+                            .icon(IconName::RefreshCw)
+                            .label("Check again")
+                            .loading(checking)
+                            .on_click(cx.listener(move |picker, _, window, cx| {
+                                if matches!(picker.checks.get(&id), Some(Check::Running)) {
+                                    return;
+                                }
+                                picker.checks.insert(id.clone(), Check::Running);
+                                cx.notify();
+                                recheck(id.clone(), cx.entity().downgrade(), window, cx);
+                            })),
+                    )
+                    .children(failed.map(|reason| {
+                        div()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(theme.danger)
+                            .whitespace_normal()
+                            .child(format!("Couldn't check. {reason}"))
+                    }))
+            }))
             .children(command.map(|command| {
                 let provider_id = provider.state.id.clone();
                 let text = command.clone();

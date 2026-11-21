@@ -219,9 +219,10 @@ pub async fn start(
     };
     let model_cache = crate::providers::models::cache_path(&config.data_dir);
     crate::providers::models::restore(&registry, &model_cache);
+    let model_cache = crate::providers::models::Cache::new(model_cache);
     background.spawn(
         "model refresh",
-        crate::providers::models::run(registry.clone(), model_cache, shutdown.clone()),
+        crate::providers::models::run(registry.clone(), model_cache.clone(), shutdown.clone()),
     );
 
     let gate = Arc::new(crate::maintenance::Gate::default());
@@ -325,6 +326,7 @@ pub async fn start(
         db: pool,
         scheduler,
         registry,
+        model_cache,
         gate,
         grants,
         events,

@@ -72,6 +72,8 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     /// Provider adapters, shared with the scheduler.
     pub registry: crate::providers::Registry,
+    /// The provider model cache, written by every model refresh.
+    pub model_cache: crate::providers::models::Cache,
     /// The maintenance gate, shared with the scheduler and backups.
     pub gate: Arc<crate::maintenance::Gate>,
     /// Task grants issued to running turns. Revoked when a turn ends.
@@ -336,10 +338,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .registry
         .all()
         .iter()
-        .map(|provider| ProviderInfo {
-            state: provider_view(provider.as_ref(), configured.as_deref(), false),
-            catalog: provider.catalog().as_ref().clone(),
-        })
+        .map(|provider| provider_info(provider.as_ref(), configured.as_deref()))
         .collect();
     let default_provider_id = providers
         .iter()
@@ -364,6 +363,36 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             max_bot_name_chars: crate::app::bots::MAX_NAME_CHARS,
         },
     }))
+}
+
+/// A provider as capabilities list it, given the providers with a saved
+/// profile.
+fn provider_info(
+    provider: &dyn crate::app::providers::Provider,
+    configured: Option<&[String]>,
+) -> ProviderInfo {
+    ProviderInfo {
+        state: provider_view(provider, configured, false),
+        catalog: provider.catalog().as_ref().clone(),
+    }
+}
+
+/// Check one provider's CLI again, start listing its models if it can
+/// run, and return it as capabilities list it.
+pub(super) async fn recheck_provider(
+    state: &AppState,
+    provider: &Arc<dyn crate::app::providers::Provider>,
+) -> ProviderInfo {
+    let recheck = provider.reprobe();
+    let _ = tokio::time::timeout(crate::providers::RECHECK_WAIT, recheck).await;
+    if provider.availability() == Availability::Available {
+        let (provider, cache) = (provider.clone(), state.model_cache.clone());
+        tokio::spawn(async move {
+            crate::providers::models::refresh(std::slice::from_ref(&provider), &cache).await;
+        });
+    }
+    let configured = configured_profiles(&state.db).await;
+    provider_info(provider.as_ref(), configured.as_deref())
 }
 
 /// Provider IDs with a saved execution profile; `None` when they cannot be

@@ -930,7 +930,7 @@ pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
             if !tools {
                 cursor.tool_url = None;
             }
-            cursor.fingerprint(cursor.ready.as_ref().unwrap(), &profile, input)
+            cursor.fingerprint(&cursor.ready().unwrap(), &profile, input)
         },
     )
 }

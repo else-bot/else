@@ -7,6 +7,11 @@ use crate::model::outgoing::DraftAttachment;
 use else_wire::items::MessagePart;
 use else_wire::items::Reaction;
 
+/// The API's code for a message refused because its bot's provider cannot
+/// run now, such as a CLI signed out on the server. The server checks the
+/// CLI again when the same message is sent again.
+pub(super) const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
+
 /// An owner message the server has not yet confirmed, frozen under one request ID.
 #[derive(Debug, Clone)]
 pub(super) struct PendingSend {
@@ -134,8 +139,18 @@ impl PendingSend {
         }
     }
 
+    /// Whether sending again under the same request ID can settle it: its
+    /// delivery is unknown, or its provider could not run and may now.
+    pub(super) fn is_retryable(&self) -> bool {
+        match &self.delivery {
+            Delivery::Unknown { .. } => true,
+            Delivery::Rejected { code, .. } => code.as_deref() == Some(PROVIDER_UNAVAILABLE),
+            Delivery::Sending | Delivery::Resolving { .. } => false,
+        }
+    }
+
     pub(super) fn retry(&mut self) -> Option<SendRequest> {
-        if !matches!(self.delivery, Delivery::Unknown { .. }) {
+        if !self.is_retryable() {
             return None;
         }
         self.delivery = Delivery::Sending;
@@ -212,6 +227,30 @@ mod tests {
         assert!(pending.retry().is_none());
         pending.on_send_failure(Failure::Unknown("late".into()));
         assert!(pending.is_rejected());
+    }
+
+    #[test]
+    fn a_message_refused_for_its_provider_retries_once_under_its_request_id() {
+        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None, None);
+        pending.on_send_failure(Failure::Rejected {
+            reason: "Claude Code is not logged in on the host.".into(),
+            code: Some("provider_unavailable".into()),
+        });
+        let resent = pending.retry().map(|request| request.request_id);
+        assert_eq!(resent, Some(pending.request_id));
+        assert!(pending.retry().is_none(), "a second click while sending");
+        pending.on_send_failure(Failure::Rejected {
+            reason: "Claude Code is still not logged in.".into(),
+            code: Some("provider_unavailable".into()),
+        });
+        assert_eq!(
+            pending.delivery(),
+            &Delivery::Rejected {
+                reason: "Claude Code is still not logged in.".into(),
+                code: Some("provider_unavailable".into()),
+            }
+        );
+        assert!(pending.retry().is_some());
     }
 
     #[test]

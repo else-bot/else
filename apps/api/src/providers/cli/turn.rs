@@ -8,8 +8,12 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -34,6 +38,10 @@ pub struct Ready<L> {
     pub version: String,
     pub login: L,
 }
+
+/// Runs a CLI's readiness checks: where it is, that it runs, and its
+/// login. Called at startup and again on [`Provider::reprobe`].
+pub type Probe<L> = Box<dyn Fn() -> BoxFuture<'static, Result<Ready<L>, String>> + Send + Sync>;
 
 /// The CLI's version, which also proves that it runs. `product` names it
 /// in the error, such as "Claude Code".
@@ -129,7 +137,7 @@ pub struct Launch<P> {
 #[async_trait]
 pub trait Adapter: Send + Sync + Sized + 'static {
     /// The adapter's readiness beyond a running CLI, such as its login.
-    type Login: Send + Sync;
+    type Login: Send + Sync + 'static;
 
     const DEFINITION: &'static Definition;
     /// The CLI's name in messages, such as "Claude Code".
@@ -237,11 +245,37 @@ pub trait Stream: Adapter {
     }
 }
 
+/// A CLI's current readiness and the probe that replaces it. A probe runs
+/// on its own task, so it finishes and is published even when every
+/// caller that asked for it has gone.
+struct Readiness<L> {
+    /// A turn keeps the readiness it started with when a probe replaces it.
+    ready: watch::Sender<Result<Arc<Ready<L>>, String>>,
+    probe: Option<Probe<L>>,
+    probing: tokio::sync::Mutex<()>,
+    /// Probes that finished, so a recheck that waited on one shares it.
+    probes: AtomicU64,
+}
+
+impl<L: Send + Sync + 'static> Readiness<L> {
+    async fn reprobe(self: Arc<Self>) {
+        let Some(probe) = &self.probe else { return };
+        let seen = self.probes.load(Ordering::Acquire);
+        let _probing = self.probing.lock().await;
+        if self.probes.load(Ordering::Acquire) == seen {
+            let ready = probe().await;
+            self.ready
+                .send_modify(|current| *current = ready.map(Arc::new));
+            self.probes.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
 /// A streaming CLI provider.
 pub struct Cli<A: Adapter> {
     pub(in crate::providers) adapter: A,
     pub(in crate::providers) models: Models,
-    pub(in crate::providers) ready: Result<Ready<A::Login>, String>,
+    readiness: Arc<Readiness<A::Login>>,
     pub(in crate::providers) tool_url: Option<String>,
 }
 
@@ -250,9 +284,24 @@ impl<A: Adapter> Cli<A> {
         Self {
             adapter,
             models: Models::new(A::DEFINITION),
-            ready,
+            readiness: Arc::new(Readiness {
+                ready: watch::Sender::new(ready.map(Arc::new)),
+                probe: None,
+                probing: tokio::sync::Mutex::new(()),
+                probes: AtomicU64::new(0),
+            }),
             tool_url: None,
         }
+    }
+
+    /// Run `probe` now, and again on each [`Provider::reprobe`].
+    pub async fn probed(adapter: A, probe: Probe<A::Login>) -> Self {
+        let ready = probe().await;
+        let mut cli = Self::new(adapter, ready);
+        Arc::get_mut(&mut cli.readiness)
+            .expect("a new provider's readiness is unshared")
+            .probe = Some(probe);
+        cli
     }
 
     /// Offer else.bot's tools at this MCP URL.
@@ -261,8 +310,8 @@ impl<A: Adapter> Cli<A> {
         self
     }
 
-    pub(in crate::providers) fn ready(&self) -> Result<&Ready<A::Login>, String> {
-        self.ready.as_ref().map_err(Clone::clone)
+    pub(in crate::providers) fn ready(&self) -> Result<Arc<Ready<A::Login>>, String> {
+        self.readiness.ready.borrow().clone()
     }
 
     /// The session fingerprint, with the adapter's `policy` in order.
@@ -451,20 +500,25 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     fn project_dir(&self, bot_id: Uuid) -> Option<PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
+        self.ready().ok().map(|r| r.host.project_path(bot_id))
     }
 
     fn availability(&self) -> Availability {
         match self.ready() {
             Ok(ready) => self
                 .adapter
-                .unavailable(ready)
+                .unavailable(&ready)
                 .map_or(Availability::Available, Availability::Unavailable),
             Err(reason) => Availability::Unavailable(reason),
         }
+    }
+
+    async fn reprobe(&self) -> Availability {
+        let probe = tokio::spawn(self.readiness.clone().reprobe());
+        if let Err(err) = probe.await {
+            tracing::warn!(provider = A::DEFINITION.id, %err, "the readiness probe failed");
+        }
+        self.availability()
     }
 
     fn uses_profile(&self) -> bool {
@@ -480,7 +534,8 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        self.adapter.list_models(self.ready()?).await
+        let ready = self.ready()?;
+        self.adapter.list_models(&ready).await
     }
 
     async fn checkpoint(
@@ -497,7 +552,7 @@ impl<A: Adapter> Provider for Cli<A> {
             Ok(ready) => ready,
             Err(reason) => return unavailable(reason),
         };
-        if let Some(reason) = self.adapter.unavailable(ready) {
+        if let Some(reason) = self.adapter.unavailable(&ready) {
             return unavailable(reason);
         }
         let Some(profile) = &input.profile else {
@@ -509,8 +564,23 @@ impl<A: Adapter> Provider for Cli<A> {
         if let Err(reason) = self.models.validate(profile) {
             return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
-        self.adapter
-            .run(self, ready, profile, &input, sink, stop)
-            .await
+        let outcome = self
+            .adapter
+            .run(self, &ready, profile, &input, sink, stop)
+            .await;
+        // A login that lapsed or a CLI that moved since the last probe
+        // shows as unavailable from now on, not only in this turn. Claude
+        // reports an expired login as a failed API call.
+        if let TurnOutcome::Failed {
+            code:
+                FailureCode::ProviderUnavailable
+                | FailureCode::ProviderFailed
+                | FailureCode::StartFailed,
+            ..
+        } = &outcome
+        {
+            tokio::spawn(self.readiness.clone().reprobe());
+        }
+        outcome
     }
 }

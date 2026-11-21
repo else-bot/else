@@ -733,6 +733,20 @@ impl Client {
         .map(|v| v.profile)
     }
 
+    /// Check a provider's CLI again on the server, such as after the owner
+    /// logs in there, and return its state and models.
+    pub async fn recheck_provider(
+        self: Arc<Self>,
+        provider: String,
+    ) -> Result<else_wire::settings::ProviderInfo, ClientError> {
+        self.call(
+            Method::POST,
+            format!("/v1/settings/providers/{provider}/recheck"),
+            None,
+        )
+        .await
+    }
+
     /// Give the bot its own profile, used from its next message.
     pub async fn set_bot_profile(
         self: Arc<Self>,

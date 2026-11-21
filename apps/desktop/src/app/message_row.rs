@@ -1,5 +1,5 @@
 use super::conversation::Spot;
-use super::pending_send::Delivery;
+use super::pending_send::{Delivery, PROVIDER_UNAVAILABLE};
 use super::reply::Author;
 use super::reply::Feedback as _;
 use super::row_text::RowText;
@@ -580,7 +580,7 @@ impl ElseApp {
                                 .children(switch.then(|| {
                                     switch_model(format!("switch-model-{request_id}"), bot, cx)
                                 }))
-                                .children((mark.is_none() && !retry).then(|| {
+                                .children((mark.is_none() && pending.is_rejected()).then(|| {
                                     action("restore", "Edit").on_click(cx.listener(
                                         move |app, _, window, cx| {
                                             app.take_failed(request_id, true, window, cx)
@@ -613,7 +613,7 @@ impl ElseApp {
                             format!("Not sent. {reason}"),
                             theme.danger,
                             None,
-                            false,
+                            true,
                             true,
                         )
                     }
@@ -904,10 +904,6 @@ impl ElseApp {
             .is_some_and(|row| matches!(row.key, RowKey::Card(card) if card.is_boxed()))
     }
 }
-
-/// The API's code for a bot whose provider cannot run now, such as a CLI
-/// that is signed out on the server.
-const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 
 /// A Switch model action for a turn that failed because its provider
 /// cannot run now.

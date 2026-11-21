@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::routing::{get, patch, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use else_wire::settings::{
@@ -38,6 +38,7 @@ pub fn routes() -> Routes {
             .route("/settings/server/icon", get(show_server_icon)),
         gated: Router::new()
             .route("/settings/providers/{provider_id}", patch(update))
+            .route("/settings/providers/{provider_id}/recheck", post(recheck))
             .route("/settings/defaults", put(set_defaults))
             .route("/settings/server", put(name_server))
             .route(
@@ -159,6 +160,20 @@ fn profile_error(err: ProfileError) -> ApiError {
         ),
         ProfileError::Db(err) => err.into(),
     }
+}
+
+/// Check the provider's CLI again (where it is, that it runs, its login)
+/// and relist its models, so a fixed login shows without a restart.
+async fn recheck(
+    State(state): State<Arc<AppState>>,
+    ApiPath(provider_id): ApiPath<String>,
+) -> Result<Json<else_wire::settings::ProviderInfo>, ApiError> {
+    let provider = state
+        .registry
+        .get(&provider_id)
+        .ok_or_else(ApiError::not_found)?
+        .clone();
+    Ok(Json(super::recheck_provider(&state, &provider).await))
 }
 
 async fn show(

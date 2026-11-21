@@ -21,6 +21,8 @@ use gpui_kit::component::{
     h_flex, v_flex,
 };
 use gpui_kit::*;
+use std::rc::Rc;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// How far a clickable row's hover fill reaches past the text column.
@@ -372,7 +374,47 @@ impl ElseApp {
     ) -> ProfilePicker {
         let new = self.preferences.see_models(caps);
         self.save_preferences(cx);
-        ProfilePicker::new(caps, initial).with_new(new)
+        let app = cx.entity().downgrade();
+        let recheck: crate::profile_picker::Recheck = Rc::new(move |id, picker, window, cx| {
+            let _ = app.update(cx, |app, cx| app.recheck_provider(id, picker, window, cx));
+        });
+        ProfilePicker::new(caps, initial)
+            .with_new(new)
+            .with_recheck(recheck)
+    }
+
+    /// Check provider `id`'s CLI again on the server, such as after the
+    /// owner logged in there, and show the answer in `picker` and in every
+    /// later picker.
+    fn recheck_provider(
+        &mut self,
+        id: String,
+        picker: WeakEntity<ProfilePicker>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = client.recheck_provider(id.clone()).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = &answer {
+                    app.unauthorized(err, window, cx);
+                }
+                if let (Ok(info), Some(caps)) = (&answer, app.caps.as_mut())
+                    && let Some(slot) = Arc::make_mut(caps)
+                        .providers
+                        .iter_mut()
+                        .find(|p| p.state.id == id)
+                {
+                    *slot = info.clone();
+                    cx.notify();
+                }
+                let answer = answer.map_err(|err| err.to_string());
+                let _ = picker.update(cx, |picker, cx| picker.rechecked(&id, answer, cx));
+                window.refresh();
+            });
+        })
+        .detach();
     }
 }
 

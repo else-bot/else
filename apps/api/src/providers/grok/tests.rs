@@ -466,7 +466,7 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
         }),
     )
     .with_tools("http://127.0.0.1:1/mcp".into());
-    let ready = grok.ready.as_ref().unwrap();
+    let ready = &grok.ready().unwrap();
     let mut input = crate::providers::cli::session::tests::input();
     let profile = Profile {
         model: "grok-4.7".into(),
@@ -640,7 +640,7 @@ pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
             if !tools {
                 grok.tool_url = None;
             }
-            grok.fingerprint(grok.ready.as_ref().unwrap(), &profile, input)
+            grok.fingerprint(&grok.ready().unwrap(), &profile, input)
         },
     )
 }

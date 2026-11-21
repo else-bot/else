@@ -52,6 +52,7 @@ mod onboarding;
 mod outgoing_drafts;
 mod owner_notices;
 mod owner_questions;
+mod provider_recheck;
 mod quiet_routines;
 mod reads;
 mod reset;

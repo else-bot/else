@@ -77,19 +77,28 @@ pub static DEFINITION: Definition = Definition {
 
 /// The one Codex is both a provider and the memory summarizer.
 fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    let (host, bin) = (wiring.host.clone(), wiring.config.codex_bin.clone());
+    let probe: super::cli::turn::Probe<PathBuf> = Box::new(move || {
+        let (host, bin) = (host.clone(), bin.clone());
+        Box::pin(async move {
+            let auth = codex_home::host_auth_file(
+                std::env::var("CODEX_HOME").ok().as_deref(),
+                std::env::var("HOME").ok().as_deref(),
+            );
+            ready(
+                Some(host),
+                super::executable(bin.as_deref(), "codex").await,
+                auth,
+            )
+            .await
+        })
+    });
     Box::pin(async move {
-        let auth = codex_home::host_auth_file(
-            std::env::var("CODEX_HOME").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
+        let codex = std::sync::Arc::new(
+            Codex::probed(CodexServer, probe)
+                .await
+                .with_tools(wiring.tool_url.clone()),
         );
-        let ready = ready(
-            Some(wiring.host.clone()),
-            super::executable(wiring.config.codex_bin.as_deref(), "codex").await,
-            auth,
-        )
-        .await;
-        let codex =
-            std::sync::Arc::new(Codex::new(CodexServer, ready).with_tools(wiring.tool_url.clone()));
         super::Built {
             provider: codex.clone(),
             summarizer: Some(codex),
@@ -142,10 +151,14 @@ impl Codex {
         program: Option<PathBuf>,
         auth: Option<PathBuf>,
     ) -> Self {
-        Self::new(
+        Self::probed(
             CodexServer,
-            ready(host, Ok(program.map(Into::into)), auth).await,
+            Box::new(move || {
+                let (host, program, auth) = (host.clone(), program.clone(), auth.clone());
+                Box::pin(ready(host, Ok(program.map(Into::into)), auth))
+            }),
         )
+        .await
     }
 
     fn fingerprint(

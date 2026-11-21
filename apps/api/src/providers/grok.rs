@@ -48,14 +48,19 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    let (host, bin) = (wiring.host.clone(), wiring.config.grok_bin.clone());
+    let probe: turn::Probe<PathBuf> = Box::new(move || {
+        let (host, bin) = (host.clone(), bin.clone());
+        Box::pin(async move {
+            let home = grok_home::host_home();
+            let program = lookup(bin.as_deref(), home.as_deref()).await;
+            ready(Some(host), program, home).await
+        })
+    });
     Box::pin(async move {
-        let home = grok_home::host_home();
-        let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref()).await;
-        let grok = Grok::new(
-            GrokCli,
-            ready(Some(wiring.host.clone()), program, home).await,
-        )
-        .with_tools(wiring.tool_url.clone());
+        let grok = Grok::probed(GrokCli, probe)
+            .await
+            .with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(grok),
             summarizer: None,
@@ -137,10 +142,14 @@ impl Grok {
         program: Option<PathBuf>,
         login: Option<PathBuf>,
     ) -> Self {
-        Self::new(
+        Self::probed(
             GrokCli,
-            ready(host, Ok(program.map(Into::into)), login).await,
+            Box::new(move || {
+                let (host, program, login) = (host.clone(), program.clone(), login.clone());
+                Box::pin(ready(host, Ok(program.map(Into::into)), login))
+            }),
         )
+        .await
     }
 }
 

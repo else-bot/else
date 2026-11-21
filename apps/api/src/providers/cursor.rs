@@ -54,17 +54,22 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    let (host, bin) = (wiring.host.clone(), wiring.config.cursor_bin.clone());
+    let probe: turn::Probe<Login> = Box::new(move || {
+        let (host, bin) = (host.clone(), bin.clone());
+        Box::pin(async move {
+            let program = lookup(
+                bin.as_deref(),
+                std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            )
+            .await;
+            ready(Some(host), program, Login::host()).await
+        })
+    });
     Box::pin(async move {
-        let program = lookup(
-            wiring.config.cursor_bin.as_deref(),
-            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-        )
-        .await;
-        let cursor = Cursor::new(
-            CursorCli,
-            ready(Some(wiring.host.clone()), program, Login::host()).await,
-        )
-        .with_tools(wiring.tool_url.clone());
+        let cursor = Cursor::probed(CursorCli, probe)
+            .await
+            .with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(cursor),
             summarizer: None,
@@ -125,10 +130,14 @@ pub type Cursor = Cli<CursorCli>;
 
 impl Cursor {
     pub async fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
-        Self::new(
+        Self::probed(
             CursorCli,
-            ready(host, Ok(program.map(Into::into)), login).await,
+            Box::new(move || {
+                let (host, program, login) = (host.clone(), program.clone(), login.clone());
+                Box::pin(ready(host, Ok(program.map(Into::into)), login))
+            }),
         )
+        .await
     }
 }
 
