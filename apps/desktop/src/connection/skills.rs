@@ -184,19 +184,18 @@ impl View {
         if self.busy {
             return;
         }
-        let view = self;
-        view.clear_keys(window, cx);
-        if view.expanded.as_ref() == Some(&entry.id) {
-            view.expanded = None;
+        self.clear_keys(window, cx);
+        if self.expanded.as_ref() == Some(&entry.id) {
+            self.expanded = None;
             cx.notify();
             return;
         }
-        view.expanded = Some(entry.id.clone());
-        view.error = None;
+        self.expanded = Some(entry.id.clone());
+        self.error = None;
         if !entry.env.is_empty() && !entry.key_stored {
-            view.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
+            self.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
         }
-        let files = view.files.entry(entry.id.clone()).or_default();
+        let files = self.files.entry(entry.id.clone()).or_default();
         if files.selected.is_none() {
             files.selected = entry
                 .files
@@ -211,7 +210,7 @@ impl View {
         }
         files.loading = true;
         files.error = None;
-        let client = view.client.clone();
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_detail(entry.id.clone()).await;
             let _ = this.update(cx, |view, cx| {
@@ -243,10 +242,9 @@ impl View {
         if self.busy {
             return;
         }
-        let view = self;
-        view.clear_keys(window, cx);
-        view.replacing = true;
-        view.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
+        self.clear_keys(window, cx);
+        self.replacing = true;
+        self.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
         cx.notify();
     }
 
@@ -260,13 +258,12 @@ impl View {
         if self.busy {
             return;
         }
-        let view = self;
         let env = if save {
-            let Some(keys) = &view.keys else { return };
+            let Some(keys) = &self.keys else { return };
             match keys.read(cx).values(false, cx) {
                 Ok(env) => env,
                 Err(error) => {
-                    view.error = Some(error);
+                    self.error = Some(error);
                     cx.notify();
                     return;
                 }
@@ -274,16 +271,16 @@ impl View {
         } else {
             None
         };
-        view.busy = true;
-        view.entries.supersede();
-        view.error = None;
-        if let Some(keys) = &view.keys {
+        self.busy = true;
+        self.entries.supersede();
+        self.error = None;
+        if let Some(keys) = &self.keys {
             keys.update(cx, |keys, cx| {
                 keys.busy = true;
                 cx.notify();
             });
         }
-        let client = view.client.clone();
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.save_skill_key(entry.secret, env).await;
             let _ = this.update_in(cx, |view, window, cx| {
@@ -383,11 +380,10 @@ impl View {
         if self.busy {
             return;
         }
-        let view = self;
-        view.busy = true;
-        view.entries.supersede();
-        view.error = None;
-        let client = view.client.clone();
+        self.busy = true;
+        self.entries.supersede();
+        self.error = None;
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.remove_skill(id.clone()).await;
             let _ = this.update_in(cx, |view, window, cx| {

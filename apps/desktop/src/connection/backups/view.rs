@@ -119,8 +119,7 @@ pub(super) fn message(text: String, color: Hsla, theme: &Theme) -> Div {
 impl View {
     pub(super) fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let view = self;
-        let Some(snapshot) = &view.snapshot else {
+        let Some(snapshot) = &self.snapshot else {
             return v_flex()
                 .p_8()
                 .gap_5()
@@ -131,14 +130,14 @@ impl View {
                 ))
                 .child(
                     div().text_sm().text_color(theme.muted_foreground).child(
-                        view.error
+                        self.error
                             .clone()
-                            .or_else(|| view.poll_error.clone())
+                            .or_else(|| self.poll_error.clone())
                             .unwrap_or_else(|| "Loading backup settings…".into()),
                     ),
                 )
                 .when(
-                    view.error.is_some() || view.poll_error.is_some(),
+                    self.error.is_some() || self.poll_error.is_some(),
                     |content| {
                         content.child(
                             Button::new("backups-retry")
@@ -150,7 +149,7 @@ impl View {
                 )
                 .into_any_element();
         };
-        let busy = view.busy() || view.local_dirty(cx);
+        let busy = self.busy() || self.local_dirty(cx);
         let unavailable = snapshot.unavailable_reason.is_some();
         let stacked = window.viewport_size().width < px(850.);
         let has_destination = snapshot.destination.is_some();
@@ -201,7 +200,7 @@ impl View {
             } else {
                 "Back up now"
             })
-            .loading(view.operation == Operation::Starting)
+            .loading(self.operation == Operation::Starting)
             .on_click(cx.listener(|view, _, window, cx| view.run_remote(window, cx)));
         let mut content = v_flex()
             .gap_5()
@@ -232,12 +231,12 @@ impl View {
                                 )
                             }),
                     )
-                    .when(view.editor.is_none(), |row| row.child(run_now))
+                    .when(self.editor.is_none(), |row| row.child(run_now))
                     .child(
                         toggle(
                             "remote-backups-enabled",
                             snapshot.enabled,
-                            busy || unavailable || !has_destination || view.editor.is_some(),
+                            busy || unavailable || !has_destination || self.editor.is_some(),
                             cx,
                         )
                         .accessibility_label("Automatic remote backups")
@@ -259,7 +258,7 @@ impl View {
             .when_some(snapshot.last_error.clone(), |content, reason| {
                 content.child(message(reason, theme.warning, &theme))
             })
-            .when(view.editor.is_none(), |content| {
+            .when(self.editor.is_none(), |content| {
                 content.child(metrics(
                     [
                         metric(
@@ -297,7 +296,7 @@ impl View {
             });
         if let Some(destination) = &snapshot.destination {
             content = content.when(
-                !matches!(view.editor, Some(Editor::Destination(_))),
+                !matches!(self.editor, Some(Editor::Destination(_))),
                 |content| {
                     content.child(crate::panel_kit::grouped_list(
                         [crate::panel_kit::list_row()
@@ -330,7 +329,7 @@ impl View {
                                     .control(
                                         Tier::Secondary,
                                         Scale::Standard,
-                                        busy || view.editor.is_some(),
+                                        busy || self.editor.is_some(),
                                         cx,
                                     )
                                     .label("Edit destination")
@@ -366,7 +365,7 @@ impl View {
                                 .control(
                                     Tier::Primary,
                                     Scale::Standard,
-                                    busy || view.editor.is_some(),
+                                    busy || self.editor.is_some(),
                                     cx,
                                 )
                                 .label("Configure destination")
@@ -376,7 +375,7 @@ impl View {
                         ),
                 );
         }
-        if let Some(Editor::Destination(form)) = &view.editor {
+        if let Some(Editor::Destination(form)) = &self.editor {
             content = content.child(
                 form.render(busy, stacked, cx)
                     .p_4()
@@ -385,7 +384,7 @@ impl View {
             );
         }
         content = content.when(
-            !matches!(view.editor, Some(Editor::Destination(_))),
+            !matches!(self.editor, Some(Editor::Destination(_))),
             |content| {
                 content.child(crate::panel_kit::grouped_list(
                     [crate::panel_kit::list_row()
@@ -413,7 +412,7 @@ impl View {
                                 .control(
                                     Tier::Secondary,
                                     Scale::Standard,
-                                    busy || view.editor.is_some(),
+                                    busy || self.editor.is_some(),
                                     cx,
                                 )
                                 .label("Edit policy")
@@ -427,7 +426,7 @@ impl View {
                 ))
             },
         );
-        if let Some(Editor::Policy(form)) = &view.editor {
+        if let Some(Editor::Policy(form)) = &self.editor {
             content = content.child(
                 form.render(snapshot, busy, stacked, cx)
                     .p_4()
@@ -435,7 +434,7 @@ impl View {
                     .bg(theme.secondary.opacity(0.3)),
             );
         }
-        content = content.when(view.editor.is_none(), |content| content.child(v_flex().gap_2().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
+        content = content.when(self.editor.is_none(), |content| content.child(v_flex().gap_2().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Estimated first upload"))
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(snapshot.estimate.as_ref().map(|e| byte_size(e.bytes)).unwrap_or_else(|| "Not available yet".into())))
             .when_some(snapshot.estimate.as_ref(), |content, estimate| content
@@ -505,14 +504,14 @@ impl View {
                     }),
             );
         }
-        content = content.when(view.editor.is_none(), |content| content.child(history))
-            .when_some(view.poll_error.clone(), |content, err| {
+        content = content.when(self.editor.is_none(), |content| content.child(history))
+            .when_some(self.poll_error.clone(), |content, err| {
                 content.child(message(err, theme.warning, &theme))
             })
             .child(h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground).child(Icon::new(IconName::Lock).size_3()).child("Backups are encrypted before upload. Keep your installation's recovery key safe."));
         // Only an open editor keeps a footer bar, for its save and cancel.
         let mut footer = None;
-        if let Some(editor) = &view.editor {
+        if let Some(editor) = &self.editor {
             let mut bar = h_flex().w_full().gap_3().items_center();
             if let Editor::Destination(form) = editor {
                 bar = bar
@@ -520,7 +519,7 @@ impl View {
                         Button::new("backup-test-connection")
                             .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Test connection")
-                            .loading(view.operation == Operation::Testing)
+                            .loading(self.operation == Operation::Testing)
                             .on_click(
                                 cx.listener(|view, _, window, cx| {
                                     view.test_destination(window, cx)
@@ -532,7 +531,7 @@ impl View {
                         Button::new("backup-save-destination")
                             .control(Tier::Primary, Scale::Standard, busy || !form.verified, cx)
                             .label("Save changes")
-                            .loading(view.operation == Operation::Saving)
+                            .loading(self.operation == Operation::Saving)
                             .on_click(
                                 cx.listener(|view, _, window, cx| view.save_edit(window, cx)),
                             ),
@@ -542,7 +541,7 @@ impl View {
                     Button::new("backup-save-policy")
                         .control(Tier::Primary, Scale::Standard, busy, cx)
                         .label("Save changes")
-                        .loading(view.operation == Operation::Saving)
+                        .loading(self.operation == Operation::Saving)
                         .on_click(cx.listener(|view, _, window, cx| view.save_edit(window, cx))),
                 );
             }
@@ -570,10 +569,10 @@ impl View {
                     .child(div().py_8().child(settings_column(page.child(content)))),
                 cx,
             ))
-            .when_some(view.error.clone(), |content, text| {
+            .when_some(self.error.clone(), |content, text| {
                 content.child(status_line(text, theme.warning))
             })
-            .when_some(view.feedback.clone(), |content, text| {
+            .when_some(self.feedback.clone(), |content, text| {
                 content.child(status_line(text, theme.success))
             })
             .when_some(footer, |content, footer| {

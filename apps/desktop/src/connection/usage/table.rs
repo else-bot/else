@@ -19,7 +19,6 @@ impl View {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let view = self;
         let theme = cx.theme().clone();
         let mut bots: Vec<&BotUsage> = window.bots.iter().collect();
         bots.sort_by(|a, b| b.share.total_cmp(&a.share));
@@ -103,7 +102,7 @@ impl View {
         }
         for bot in bots
             .into_iter()
-            .filter(|bot| view.show_more || bot.share >= 0.01)
+            .filter(|bot| self.show_more || bot.share >= 0.01)
         {
             let id = bot.bot_id;
             let row = h_flex()
@@ -116,7 +115,7 @@ impl View {
                 .role(Role::Button)
                 .tab_index(0)
                 .aria_label(format!("Show sources for {}", bot.name))
-                .aria_expanded(view.expanded == Some(id))
+                .aria_expanded(self.expanded == Some(id))
                 .border_b_1()
                 .border_color(theme.border.opacity(0.5))
                 .hover(|row| row.bg(theme.muted_foreground.opacity(0.06)))
@@ -164,7 +163,7 @@ impl View {
                         .child(share(bot.share)),
                 );
             table = table.child(row);
-            if view.expanded == Some(id) {
+            if self.expanded == Some(id) {
                 table = table.child(
                     div()
                         .pl(px(AVATAR + 12.))
@@ -185,13 +184,13 @@ impl View {
                     .text_color(theme.primary)
                     .role(Role::Button)
                     .tab_index(0)
-                    .aria_expanded(view.show_more)
-                    .aria_label(if view.show_more {
+                    .aria_expanded(self.show_more)
+                    .aria_label(if self.show_more {
                         "Show fewer bots"
                     } else {
                         "Show more bots"
                     })
-                    .child(if view.show_more {
+                    .child(if self.show_more {
                         "Show fewer bots".into()
                     } else {
                         format!(

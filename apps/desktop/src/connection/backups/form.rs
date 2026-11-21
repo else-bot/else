@@ -300,8 +300,7 @@ impl View {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self;
-        let Some(Editor::Destination(form)) = &mut view.editor else {
+        let Some(Editor::Destination(form)) = &mut self.editor else {
             return;
         };
         if form.service == service {
@@ -318,8 +317,8 @@ impl View {
             .update(cx, |input, cx| input.set_value(endpoint, window, cx));
         form.region
             .update(cx, |input, cx| input.set_value(region, window, cx));
-        view.feedback = None;
-        view.error = None;
+        self.feedback = None;
+        self.error = None;
         cx.notify();
     }
 }

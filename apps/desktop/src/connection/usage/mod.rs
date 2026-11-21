@@ -156,11 +156,10 @@ impl View {
                 "How much of each AI subscription is used, and which bots use it.",
                 cx,
             ));
-        let view = self;
-        if view.state.pending() {
+        if self.state.pending() {
             return body.child("Loading usage…").into_any_element();
         }
-        let (report, error) = (view.state.value(), view.state.error());
+        let (report, error) = (self.state.value(), self.state.error());
         if let Some(error) = error {
             body = body.child(
                 h_flex()
@@ -205,7 +204,7 @@ impl View {
                 segment(
                     SharedString::from(format!("usage-provider-{id}")),
                     SharedString::from(self.provider_name(&id, cx)),
-                    view.provider.as_ref() == Some(&id),
+                    self.provider.as_ref() == Some(&id),
                     false,
                     cx,
                 )
@@ -221,7 +220,7 @@ impl View {
         let Some(provider) = report
             .providers
             .iter()
-            .find(|provider| Some(&provider.provider_id) == view.provider.as_ref())
+            .find(|provider| Some(&provider.provider_id) == self.provider.as_ref())
         else {
             return body.into_any_element();
         };
@@ -233,7 +232,7 @@ impl View {
                 .map(|bot| (bot.id, bot.avatar))
                 .collect(),
         };
-        let selected = provider.selected_window(view.window_minutes);
+        let selected = provider.selected_window(self.window_minutes);
         let reported: Vec<_> = provider
             .windows
             .iter()

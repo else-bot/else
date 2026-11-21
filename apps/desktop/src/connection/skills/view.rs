@@ -8,9 +8,8 @@ impl View {
             "Installed once. Shared skills are available to every bot.",
             cx,
         ));
-        let view = self;
-        let busy = view.busy || !view.connected;
-        let Some(entries) = view.entries.value() else {
+        let busy = self.busy || !self.connected;
+        let Some(entries) = self.entries.value() else {
             return body.child("Loading installed skills…").into_any_element();
         };
         if entries.is_empty() {
@@ -31,13 +30,13 @@ impl View {
         }
         body = body.child(
             div().max_w(px(340.)).child(
-                text_field(Input::new(&view.search), cx)
+                text_field(Input::new(&self.search), cx)
                     .aria_label("Search installed skills")
                     .small()
                     .prefix(Icon::new(IconName::Search).size_3()),
             ),
         );
-        if let Some(error) = view.error.as_ref().or(view.entries.error()) {
+        if let Some(error) = self.error.as_ref().or(self.entries.error()) {
             body = body.child(
                 h_flex()
                     .gap_3()
@@ -56,7 +55,7 @@ impl View {
                     ),
             );
         }
-        let query = view.search.read(cx).value().trim().to_lowercase();
+        let query = self.search.read(cx).value().trim().to_lowercase();
         let filtered: Vec<_> = entries
             .iter()
             .filter(|entry| {
@@ -96,7 +95,7 @@ impl View {
             );
         }
         for entry in filtered {
-            let expanded = view.expanded.as_ref() == Some(&entry.id);
+            let expanded = self.expanded.as_ref() == Some(&entry.id);
             let expand = entry.clone();
             let remove = entry.clone();
             let mut access = h_flex().gap_2().child(chip(entry.access(), theme.primary));
@@ -219,7 +218,7 @@ impl View {
                                 }
                             )),
                     );
-                if let Some(files) = view.files.get(&entry.id) {
+                if let Some(files) = self.files.get(&entry.id) {
                     let this = cx.weak_entity();
                     let id = entry.id.clone();
                     detail = detail.child(files.render(
@@ -251,7 +250,7 @@ impl View {
                                 .font_semibold()
                                 .child(if entry.env.len() == 1 { "Key" } else { "Keys" }),
                         );
-                    if entry.key_stored && !view.replacing {
+                    if entry.key_stored && !self.replacing {
                         key = key.child(
                             h_flex()
                                 .gap_2()
@@ -278,7 +277,7 @@ impl View {
                                         })),
                                 ),
                         );
-                    } else if let Some(keys) = &view.keys {
+                    } else if let Some(keys) = &self.keys {
                         key = key.child(keys.clone()).child(
                             h_flex().justify_end().child(
                                 Button::new("skill-key-save")

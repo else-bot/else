@@ -190,8 +190,7 @@ impl View {
             "Installed once. Available to every bot.",
             cx,
         ));
-        let view = self;
-        let error = view.error.as_ref().or(view.entries.error());
+        let error = self.error.as_ref().or(self.entries.error());
         if let Some(error) = error {
             body = body.child(
                 h_flex()
@@ -208,7 +207,7 @@ impl View {
                             .control(
                                 Tier::Secondary,
                                 Scale::Standard,
-                                view.removing.is_some(),
+                                self.removing.is_some(),
                                 cx,
                             )
                             .label("Retry")
@@ -216,7 +215,7 @@ impl View {
                     ),
             );
         }
-        let Some(entries) = view.entries.value() else {
+        let Some(entries) = self.entries.value() else {
             if error.is_none() {
                 body = body.child(
                     div()
@@ -251,12 +250,12 @@ impl View {
         );
         body = body.child(
             div().max_w(px(340.)).child(
-                text_field(Input::new(&view.search), cx)
+                text_field(Input::new(&self.search), cx)
                     .small()
                     .prefix(Icon::new(IconName::Search).size_3()),
             ),
         );
-        let query = view.search.read(cx).value().trim().to_lowercase();
+        let query = self.search.read(cx).value().trim().to_lowercase();
         let filtered = entries
             .iter()
             .filter(|entry| {
@@ -301,7 +300,7 @@ impl View {
             let icon = entry
                 .website
                 .as_ref()
-                .and_then(|website| view.icons.get(website).cloned().flatten());
+                .and_then(|website| self.icons.get(website).cloned().flatten());
             let installed = chrono::DateTime::parse_from_rfc3339(&entry.installed_at)
                 .map(|at| format!(" · {}", at.format("%b %-d")))
                 .unwrap_or_default();
@@ -371,7 +370,7 @@ impl View {
                                 .icon(IconName::Trash)
                                 .text_color(theme.danger)
                                 .accessibility_label(format!("Remove {} for all bots", entry.name))
-                                .disabled(view.removing.is_some())
+                                .disabled(self.removing.is_some())
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.confirm_remove(removal_entry.clone(), window, cx);
                                 })),
