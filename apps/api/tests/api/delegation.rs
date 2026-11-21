@@ -145,12 +145,13 @@ async fn a_delegation_receipt_is_shown_once_before_the_child_runs() {
         .await
         .unwrap()
         .unwrap();
-    let shown: Vec<(&str, Uuid)> = snapshot
-        .items
-        .iter()
-        .map(|i| (i.kind.as_str(), i.turn_id))
-        .collect();
-    assert_eq!(shown, [("status", child)], "one receipt, no owner message");
+    let shown: Vec<(else_api::db::turns::ItemKind, Uuid)> =
+        snapshot.items.iter().map(|i| (i.kind, i.turn_id)).collect();
+    assert_eq!(
+        shown,
+        [(else_api::db::turns::ItemKind::Status, child)],
+        "one receipt, no owner message"
+    );
     let task = snapshot.items[0].bot_task.as_ref().unwrap();
     assert_eq!(task.sender_bot_id, main);
     assert_eq!(task.sender_name, sender);

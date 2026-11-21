@@ -293,9 +293,20 @@ pub struct ExchangeAsk {
     pub settled_at: Option<DateTime<Utc>>,
 }
 
-/// What a conversation item is, as stored in `items.kind`.
+/// Whose conversation it is, as stored in `conversations.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum ConversationKind {
+    /// The bot's chat with the owner.
+    Owner,
+    /// A delegated task's conversation.
+    Task,
+}
+
+/// What a conversation item is, as stored in `items.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     /// The owner's message.
     User,
@@ -313,7 +324,7 @@ pub struct ItemRecord {
     pub conversation_id: Uuid,
     pub seq: i64,
     pub turn_id: Uuid,
-    pub kind: String,
+    pub kind: ItemKind,
     pub hidden: bool,
     pub text: String,
     pub provider_id: Option<String>,
@@ -541,13 +552,13 @@ pub async fn accept(
         });
     }
     if let Some(reaction) = req.reaction {
-        let target: Option<String> =
+        let target: Option<ItemKind> =
             sqlx::query_scalar("SELECT kind FROM items WHERE id = ?1 AND conversation_id = ?2")
                 .bind(reaction.item_id)
                 .bind(conversation_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-        if target.as_deref() != Some("assistant") {
+        if target != Some(ItemKind::Assistant) {
             return Err(AcceptError::InvalidReaction);
         }
     }

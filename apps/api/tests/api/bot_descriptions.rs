@@ -83,7 +83,10 @@ async fn upgrading_moves_each_active_description_into_memory_once() {
         .await
         .unwrap();
     assert_eq!(found.hits.len(), 1);
-    assert_eq!(found.hits[0].authority, "tool");
+    assert_eq!(
+        found.hits[0].authority,
+        else_api::db::memory::Authority::Tool
+    );
 
     assert!(entries(&db, gone).await.is_empty());
     assert_eq!(

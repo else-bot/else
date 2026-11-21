@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 use super::bots::{self, BotRecord};
 use super::in_ids;
-use super::turns::{ITEM_COLUMNS, ItemRecord, TURN_COLUMNS, TurnRecord, UNFINISHED_STATUSES};
+use super::turns::{
+    ITEM_COLUMNS, ItemKind, ItemRecord, TURN_COLUMNS, TurnRecord, UNFINISHED_STATUSES,
+};
 
 /// The items a conversation shows the owner.
 const SHOWN: &str = "i.kind NOT IN ('routine','connector') AND NOT i.hidden";
@@ -133,7 +135,7 @@ pub async fn search(
     conversation_id: Uuid,
     needle: Needle,
 ) -> Result<Vec<Hit>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let rows: Vec<(Uuid, i64, ItemKind, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT i.id, i.seq, i.kind, i.text FROM items i
          WHERE i.conversation_id = ?1 AND i.kind IN ('user','assistant') AND {SHOWN}
          ORDER BY i.seq DESC"
@@ -144,8 +146,8 @@ pub async fn search(
     let hits = tokio::task::spawn_blocking(move || {
         rows.into_iter()
             .filter_map(|(item_id, seq, kind, text)| {
-                let shown = match kind.as_str() {
-                    "user" => quoted_reply_body(&text).unwrap_or(&text),
+                let shown = match kind {
+                    ItemKind::User => quoted_reply_body(&text).unwrap_or(&text),
                     _ => &text,
                 };
                 let count = needle.count_in_markdown(shown);

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::db::turns::{ConversationKind, ItemKind};
 use crate::db::{bots, routines, turns};
 use crate::views::{bot_json, item_json, routine_json, turn_json};
 
@@ -89,7 +90,7 @@ pub async fn item_upsert(
 ) -> Result<(), sqlx::Error> {
     let item = turns::load_item(conn, item_id).await?;
     if item.hidden
-        || matches!(item.kind.as_str(), "routine" | "connector")
+        || matches!(item.kind, ItemKind::Routine | ItemKind::Connector)
         || is_task(conn, item.conversation_id).await?
     {
         return Ok(());
@@ -126,11 +127,12 @@ pub async fn item_delta(
 }
 
 async fn is_task(conn: &mut SqliteConnection, conversation_id: Uuid) -> Result<bool, sqlx::Error> {
-    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = ?1")
-        .bind(conversation_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    Ok(kind.as_deref() == Some("task"))
+    let kind: Option<ConversationKind> =
+        sqlx::query_scalar("SELECT kind FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(kind == Some(ConversationKind::Task))
 }
 
 /// A turn's status or outcome changed; the bot's activity changes with it.

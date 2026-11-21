@@ -1281,7 +1281,12 @@ async fn mail_event_origin_removes_computer_authority() {
         .await
         .unwrap()
         .unwrap();
-    assert!(snapshot.items.iter().all(|item| item.kind != "connector"));
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .all(|item| item.kind != else_api::db::turns::ItemKind::Connector)
+    );
     let mut conn = h.app.db.pool.acquire().await.unwrap();
     let source: Uuid = sqlx::query_scalar("SELECT owner_item_id FROM turns WHERE id=?1")
         .bind(turn)

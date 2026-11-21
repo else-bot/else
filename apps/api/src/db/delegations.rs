@@ -40,7 +40,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::TurnStatus;
+use super::turns::{ConversationKind, ItemKind, TurnStatus};
 use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
 use crate::db::bots::BotStatus;
@@ -283,7 +283,7 @@ async fn create_in(
         .bind(parent_bot)
         .execute(&mut *conn)
         .await?;
-    let caller: Option<(Uuid, TurnStatus, i32, String, BotStatus)> = sqlx::query_as(
+    let caller: Option<(Uuid, TurnStatus, i32, ConversationKind, BotStatus)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
          FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN bots b ON b.id = t.bot_id
@@ -301,7 +301,7 @@ async fn create_in(
     let chain = chain(conn, turn_id).await?;
     let origin = origin(conn, turn_id).await?;
     if (council && (chain.depth > 0 || origin == crate::app::providers::Origin::ConnectorEvent))
-        || (kind != "owner" && chain.depth == 0)
+        || (kind != ConversationKind::Owner && chain.depth == 0)
         || !origin.delegates_at(chain.depth)
     {
         return Err(DelegateError::NotAllowed);
@@ -1118,7 +1118,7 @@ use crate::app::providers::Origin;
 /// Never derived from text a model wrote.
 pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin, sqlx::Error> {
     let top = chain(conn, turn_id).await?.top;
-    let source: Option<String> = sqlx::query_scalar(
+    let source: Option<ItemKind> = sqlx::query_scalar(
         "SELECT i.kind FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN items i ON i.id = t.owner_item_id
          WHERE t.id = ?1 AND c.kind = 'owner'",
@@ -1126,11 +1126,11 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
     .bind(top)
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(match source.as_deref() {
-        Some("user") => Origin::OwnerRequest,
+    Ok(match source {
+        Some(ItemKind::User) => Origin::OwnerRequest,
         // A webhook wake also starts from a 'routine' item; only a
         // routine_runs row makes it a scheduled run.
-        Some("routine") => {
+        Some(ItemKind::Routine) => {
             let scheduled: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM routine_runs WHERE turn_id = ?1)")
                     .bind(top)
@@ -1142,7 +1142,7 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
                 Origin::WebhookWake
             }
         }
-        Some("connector") => {
+        Some(ItemKind::Connector) => {
             let social: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM social_deliveries WHERE turn_id=?1)",
             )
@@ -1175,7 +1175,7 @@ pub async fn carries_owner_answer(
 }
 
 pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Context, sqlx::Error> {
-    let (bot, kind, main): (Uuid, String, Option<Uuid>) = sqlx::query_as(
+    let (bot, kind, main): (Uuid, ConversationKind, Option<Uuid>) = sqlx::query_as(
         "SELECT t.bot_id, c.kind, (SELECT default_bot_id FROM installation)
          FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?1",
     )
@@ -1188,7 +1188,7 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         origin,
         ..Context::default()
     };
-    if kind == "task" {
+    if kind == ConversationKind::Task {
         let parent: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
             "SELECT d.parent_bot_id, b.name, d.owner_question_id
              FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
