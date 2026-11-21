@@ -347,12 +347,17 @@ fn create_hash(bot: &NewBot<'_>, profile: Option<(&str, &Profile)>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn create(
+/// Create a bot for the owner, or return the one an earlier send of this
+/// request made. `check` runs only for a new creation, inside the write
+/// transaction, so a resend still finds its bot after the model catalog
+/// changes, even while the first send is committing.
+pub async fn create<E: From<BotError>>(
     pool: &SqlitePool,
     request_id: Uuid,
     bot: NewBot<'_>,
-) -> Result<Created, BotError> {
-    create_as(pool, request_id, bot, None).await
+    check: impl FnOnce() -> Result<(), E>,
+) -> Result<Created, E> {
+    create_as(pool, request_id, bot, None, check).await?
 }
 
 /// Create a bot while an owner-request turn is running. Retries of the
@@ -384,7 +389,7 @@ pub async fn create_for_turn(
         purpose,
         model_request: model.map(|m| m.request),
     };
-    create_as(pool, request_id, bot, Some(creation)).await
+    create_as(pool, request_id, bot, Some(creation), || Ok(())).await?
 }
 
 /// A model a turn named for its new bot: the request as sent and the
@@ -422,12 +427,13 @@ async fn authorize(
     Ok(caller)
 }
 
-async fn create_as(
+async fn create_as<E>(
     pool: &SqlitePool,
     request_id: Uuid,
     bot: NewBot<'_>,
     creation: Option<Creation<'_>>,
-) -> Result<Created, BotError> {
+    check: impl FnOnce() -> Result<(), E>,
+) -> Result<Result<Created, E>, BotError> {
     let mut hash = create_hash(&bot, creation.is_none().then_some(bot.profile).flatten());
     if let Some(Creation {
         purpose: Some(purpose),
@@ -467,9 +473,12 @@ async fn create_as(
             return Err(BotError::RequestConflict);
         }
         tx.commit().await?;
-        return Ok(Created::Existing(
+        return Ok(Ok(Created::Existing(
             find(pool, bot_id).await?.ok_or(BotError::NotFound)?,
-        ));
+        )));
+    }
+    if let Err(err) = check() {
+        return Ok(Err(err));
     }
     let bot_id = Uuid::new_v4();
     if let Some(category) = bot.category_id {
@@ -524,9 +533,9 @@ async fn create_as(
     }
     super::events::notify(&mut tx, bot_id).await?;
     tx.commit().await?;
-    Ok(Created::New(
+    Ok(Ok(Created::New(
         find(pool, bot_id).await?.ok_or(BotError::NotFound)?,
-    ))
+    )))
 }
 
 async fn creation_receipt(

@@ -126,28 +126,23 @@ async fn create(
 ) -> Result<Response, ApiError> {
     let name = BotName::parse(&body.name)
         .map_err(|err| invalid_bot(err).with_request_id(body.request_id))?;
-    let choice = match &body.profile {
-        Some(choice) => Some((
-            super::settings::validate_choice(&state, choice)
-                .map_err(|err| err.with_request_id(body.request_id))?,
-            choice.profile(),
-        )),
-        None => None,
+    let profile = body.profile.as_ref().map(|choice| choice.profile());
+    let bot = bots::NewBot {
+        name: &name,
+        profile: body
+            .profile
+            .as_ref()
+            .zip(profile.as_ref())
+            .map(|(choice, profile)| (choice.provider_id.as_str(), profile)),
+        category_id: body.category_id,
+        avatar: body.avatar,
     };
-    let created = bots::create(
-        &state.db,
-        body.request_id,
-        bots::NewBot {
-            name: &name,
-            profile: choice
-                .as_ref()
-                .map(|(provider, profile)| (*provider, profile)),
-            category_id: body.category_id,
-            avatar: body.avatar,
-        },
-    )
+    let created = bots::create(&state.db, body.request_id, bot, || match &body.profile {
+        Some(choice) => super::settings::validate_choice(&state, choice).map(drop),
+        None => Ok(()),
+    })
     .await
-    .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
+    .map_err(|err: ApiError| err.with_request_id(body.request_id))?;
     Ok(match created {
         Created::New(bot) => {
             let location = HeaderValue::from_str(&format!("/v1/bots/{}", bot.id))
