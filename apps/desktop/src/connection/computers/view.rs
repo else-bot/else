@@ -1,6 +1,7 @@
 use super::*;
 use crate::ambient::looping;
 use chrono::{DateTime, Utc};
+use else_wire::computers::{Computer, ComputerUpgrade, DesiredState, RuntimeState};
 use gpui_kit::component::tooltip::Tooltip;
 
 impl View {
@@ -516,14 +517,15 @@ fn status(computer: &Computer, theme: &gpui_kit::component::Theme) -> (&'static 
         _ => {}
     }
     match computer.state {
-        ComputerStatus::Running => ("Running", theme.success),
-        ComputerStatus::Stopped => ("Stopped", theme.muted_foreground),
-        ComputerStatus::Starting | ComputerStatus::Creating | ComputerStatus::Resuming => {
+        RuntimeState::Running => ("Running", theme.success),
+        RuntimeState::Stopped => ("Stopped", theme.muted_foreground),
+        RuntimeState::Starting | RuntimeState::Creating | RuntimeState::Resuming => {
             ("Starting", theme.info)
         }
-        ComputerStatus::Stopping => ("Stopping", theme.info),
-        ComputerStatus::Pausing | ComputerStatus::Paused => ("Paused", theme.muted_foreground),
-        ComputerStatus::Missing | ComputerStatus::Error => ("Error", theme.danger),
+        RuntimeState::Stopping => ("Stopping", theme.info),
+        RuntimeState::Pausing | RuntimeState::Paused => ("Paused", theme.muted_foreground),
+        RuntimeState::Missing | RuntimeState::Error => ("Error", theme.danger),
+        RuntimeState::Absent | RuntimeState::Unknown => ("Unknown", theme.muted_foreground),
     }
 }
 
@@ -533,8 +535,8 @@ fn last_used(computer: &Computer, now: DateTime<Utc>) -> String {
     };
     let seconds = (now - at).num_seconds().max(0);
     if seconds < 60
-        && computer.state == ComputerStatus::Running
-        && computer.desired_state == ComputerDesiredState::Auto
+        && computer.state == RuntimeState::Running
+        && computer.desired_state == DesiredState::Auto
     {
         return "In use now".into();
     }

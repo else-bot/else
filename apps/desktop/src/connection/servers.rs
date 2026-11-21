@@ -11,7 +11,6 @@ use chrono::{DateTime, Utc};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::h_flex;
 use reqwest::Method;
-use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 

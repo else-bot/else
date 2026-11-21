@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+use else_wire::maintenance::Report;
 use reqwest::Method;
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{mpsc, watch};
@@ -772,12 +773,6 @@ enum Counter {
     AppOnly,
     Unavailable(String),
     Server(LocalServer, Arc<Client>, Duration),
-}
-
-#[derive(serde::Deserialize)]
-struct Report {
-    active_turns: u64,
-    running_commands: u64,
 }
 
 impl Counter {

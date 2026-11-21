@@ -28,24 +28,19 @@ mod attachments;
 mod backups;
 pub use backups::*;
 mod computers;
-pub use computers::*;
 mod usage;
 mod vault;
 pub use vault::*;
-mod mcp;
-pub use mcp::*;
 mod email;
 mod live;
+mod mcp;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
 mod skills;
 pub mod socials;
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
-pub use desktop::{
-    ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode,
-    MAX_CLIPBOARD_BYTES,
-};
+pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, MAX_CLIPBOARD_BYTES};
 use else_wire::bots::{
     Bot, BotEnvelope, BotList, Category, CategoryEnvelope, CategoryList, ReplyPosition,
 };

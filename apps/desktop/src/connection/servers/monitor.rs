@@ -2,6 +2,7 @@
 //! or on request.
 
 use super::*;
+use else_wire::maintenance::Report;
 use else_wire::settings::{Capabilities, ServerInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,13 +87,6 @@ pub(in crate::connection) struct Connections {
     monitors: HashMap<Uuid, Monitor>,
 }
 
-#[derive(Deserialize)]
-struct Report {
-    version: String,
-    active_turns: u64,
-    running_commands: u64,
-}
-
 struct Observed {
     version: Option<String>,
     working: Option<u64>,
@@ -137,11 +131,11 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ));
             }
             let (version, working) = match report {
-                Ok((_, report)) => (
-                    Some(report.version),
+                Ok((_, report)) if report.version.is_some() => (
+                    report.version,
                     Some(report.active_turns.saturating_add(report.running_commands)),
                 ),
-                Err(_) => (None, None),
+                _ => (None, None),
             };
             let list = bots.ok().map(|(_, list)| list.bots);
             let attention = list

@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
-use serde_json::Value;
+use else_wire::backups::{
+    BackupEstimate, BackupRun, BackupSnapshot, LocalBackupRun, LocalBackupSettings,
+    LocalBackupStatus,
+};
+use else_wire::maintenance::ServerPause;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -17,8 +20,7 @@ use super::replicate::{RemoteState, Replicator};
 use super::runs::LocalStatus;
 use super::s3::S3;
 use super::settings::{
-    self, Destination, DestinationInput, DestinationView, Error, LocalSchedule, LocalUpdate,
-    Settings, Update,
+    self, Destination, DestinationInput, Error, LocalSchedule, LocalUpdate, Settings, Update,
 };
 use super::worker::BackupWorker;
 use crate::config::Config;
@@ -28,7 +30,7 @@ use crate::credentials::SecretKey;
 pub struct Backups {
     tx: mpsc::Sender<Command>,
     pool: SqlitePool,
-    initial_estimate: Estimate,
+    initial_estimate: BackupEstimate,
     probe_slots: Arc<tokio::sync::Semaphore>,
     local_dir: std::path::PathBuf,
     cadence: Cadence,
@@ -36,101 +38,6 @@ pub struct Backups {
     /// schedule.
     env_keep: usize,
     gate: Option<Arc<crate::maintenance::Gate>>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Estimate {
-    pub bytes: u64,
-    pub basis: String,
-}
-
-#[derive(Serialize)]
-pub struct Recent {
-    pub set_id: String,
-    pub finished_at: Option<String>,
-    /// The encrypted size of the whole set.
-    pub bytes: Option<u64>,
-    /// What its remote run wrote to the bucket: only the chunks the bucket
-    /// lacked. Absent for sets replicated before incremental uploads.
-    pub uploaded_bytes: Option<u64>,
-    pub local_status: LocalStatus,
-    pub remote_status: Option<RemoteState>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct Snapshot {
-    pub revision: i64,
-    pub enabled: bool,
-    pub interval_secs: u64,
-    pub keep: usize,
-    pub destination: Option<DestinationView>,
-    pub running: bool,
-    pub next_backup_at: Option<String>,
-    pub estimate: Option<Estimate>,
-    pub recent: Vec<Recent>,
-    pub remote_count: usize,
-    /// Bytes stored under the destination's prefix after the last
-    /// retention, or the sum of the kept sets' sizes before one was measured.
-    pub remote_bytes: u64,
-    pub unavailable_reason: Option<String>,
-    pub last_error: Option<String>,
-    pub local: LocalView,
-    /// Why new work is paused right now, if it is.
-    pub pause: Option<Value>,
-}
-
-/// The daily local backup on this server.
-#[derive(Serialize)]
-pub struct LocalView {
-    pub enabled: bool,
-    /// `HH:MM` on the server's clock.
-    pub time: String,
-    pub timezone: String,
-    pub utc_offset_secs: i32,
-    pub keep: usize,
-    /// An environment variable sets the schedule; the owner cannot change it.
-    pub managed_by_env: bool,
-    pub next_at: Option<String>,
-    pub copies: usize,
-    pub bytes: u64,
-    pub free_bytes: Option<u64>,
-    pub recent: Vec<LocalRun>,
-}
-
-/// How a local set ended, from `backup_runs.local_status` and whether it
-/// covered the whole assistant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalResult {
-    Running,
-    Completed,
-    /// Completed without every computer.
-    Partial,
-    Failed,
-}
-
-impl LocalResult {
-    fn decode(status: LocalStatus, whole: bool) -> Self {
-        match status {
-            LocalStatus::Running => Self::Running,
-            LocalStatus::Completed if whole => Self::Completed,
-            LocalStatus::Completed => Self::Partial,
-            LocalStatus::Failed => Self::Failed,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct LocalRun {
-    pub set_id: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub status: LocalResult,
-    pub bytes: Option<u64>,
-    pub took_secs: Option<u64>,
-    pub paused_secs: Option<u64>,
-    pub error: Option<String>,
 }
 
 struct RuntimeView {
@@ -436,7 +343,7 @@ impl Backups {
                 .scheduler
                 .as_ref()
                 .map(|scheduler| scheduler.gate().clone()),
-            initial_estimate: Estimate {
+            initial_estimate: BackupEstimate {
                 bytes: initial_bytes,
                 basis: "Rough database, file, project and shared MCP size. Computer snapshots and encryption overhead are excluded until the first complete backup.".into(),
             },
@@ -457,12 +364,12 @@ impl Backups {
         rx.await.map_err(|_| Error::Unavailable)
     }
 
-    pub async fn save(&self, update: Update) -> Result<Snapshot, Error> {
+    pub async fn save(&self, update: Update) -> Result<BackupSnapshot, Error> {
         self.request(|tx| Command::Save(update, tx)).await??;
         self.snapshot().await
     }
 
-    pub async fn save_local(&self, update: LocalUpdate) -> Result<Snapshot, Error> {
+    pub async fn save_local(&self, update: LocalUpdate) -> Result<BackupSnapshot, Error> {
         self.request(|tx| Command::SaveLocal(update, tx)).await??;
         self.snapshot().await
     }
@@ -511,7 +418,7 @@ impl Backups {
         }).await.map_err(|_| Error::Unavailable)?
     }
 
-    pub async fn snapshot(&self) -> Result<Snapshot, Error> {
+    pub async fn snapshot(&self) -> Result<BackupSnapshot, Error> {
         let view = self.request(Command::Read).await?;
         let destination_id = view
             .settings
@@ -555,16 +462,18 @@ impl Backups {
         let local_recent = local_runs?
             .into_iter()
             .map(|row| {
-                let status = LocalResult::decode(
-                    row.try_get("local_status")?,
-                    row.get::<i64, _>("whole") != 0,
-                );
-                Ok(LocalRun {
-                    set_id: row.get("set_id"),
+                let status = match row.try_get::<LocalStatus, _>("local_status")? {
+                    LocalStatus::Completed if row.get::<i64, _>("whole") == 0 => {
+                        LocalBackupStatus::Partial
+                    }
+                    status => status.into(),
+                };
+                Ok(LocalBackupRun {
+                    set_id: Some(row.get("set_id")),
                     started_at: row.get("started_at"),
                     finished_at: row.get("finished_at"),
                     status,
-                    bytes: (status != LocalResult::Failed)
+                    bytes: (status != LocalBackupStatus::Failed)
                         .then(|| row.get::<Option<i64>, _>("ciphertext_bytes"))
                         .flatten()
                         .map(|n| n.max(0) as u64),
@@ -572,7 +481,7 @@ impl Backups {
                     paused_secs: row
                         .get::<Option<i64>, _>("paused_ms")
                         .map(|ms| (ms.max(0) as u64 + 500) / 1000),
-                    error: (status == LocalResult::Failed)
+                    error: (status == LocalBackupStatus::Failed)
                         .then(|| row.get::<Option<String>, _>("error"))
                         .flatten(),
                 })
@@ -581,7 +490,7 @@ impl Backups {
         let recent = history?
             .into_iter()
             .map(|row| {
-                Ok(Recent {
+                Ok(BackupRun {
                     set_id: row.get("set_id"),
                     finished_at: row.get("finished_at"),
                     bytes: row
@@ -590,8 +499,10 @@ impl Backups {
                     uploaded_bytes: row
                         .get::<Option<i64>, _>("uploaded_bytes")
                         .map(|n| n.max(0) as u64),
-                    local_status: row.try_get("local_status")?,
-                    remote_status: row.try_get("remote_status")?,
+                    local_status: row.try_get::<LocalStatus, _>("local_status")?.into(),
+                    remote_status: row
+                        .try_get::<Option<RemoteState>, _>("remote_status")?
+                        .map(Into::into),
                     error: row.get::<Option<String>, _>("error").map(|_| {
                         "Remote upload failed. Check the destination and credentials.".into()
                     }),
@@ -599,10 +510,10 @@ impl Backups {
             })
             .collect::<Result<_, sqlx::Error>>()?;
         let totals = totals?;
-        let estimate = latest?.map(|bytes| Estimate { bytes: bytes.max(0) as u64, basis: "Based on the latest complete encrypted backup. The next backup may differ in size.".into() })
+        let estimate = latest?.map(|bytes| BackupEstimate { bytes: bytes.max(0) as u64, basis: "Based on the latest complete encrypted backup. The next backup may differ in size.".into() })
             .unwrap_or_else(|| self.initial_estimate.clone());
         let settings = view.settings;
-        Ok(Snapshot {
+        Ok(BackupSnapshot {
             revision: settings.revision,
             enabled: settings.enabled,
             interval_secs: settings.interval_secs,
@@ -616,7 +527,7 @@ impl Backups {
             remote_bytes: totals.get::<i64, _>("bytes").max(0) as u64,
             unavailable_reason: None,
             last_error: view.last_error,
-            local: LocalView {
+            local: Some(LocalBackupSettings {
                 enabled: self.cadence != Cadence::Off && settings.local.enabled,
                 time: match self.cadence {
                     Cadence::Daily | Cadence::Off => settings.local.at.to_string(),
@@ -636,12 +547,13 @@ impl Backups {
                 bytes: local_bytes,
                 free_bytes,
                 recent: local_recent,
-            },
+            }),
             pause: self
                 .gate
                 .as_ref()
                 .and_then(|gate| gate.pause())
-                .map(|pause| pause.json()),
+                .as_ref()
+                .map(ServerPause::from),
         })
     }
 }

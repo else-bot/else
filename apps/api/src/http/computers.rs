@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use else_wire::computers::{
+    CancelledComputers, Computer, ComputerState, ComputerStateHeader, ComputerUpgrade, Computers,
+    DesiredState, QueuedComputers, RuntimeState, SettledHandoff,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::computers::upgrade_queue::UpgradeStatus;
 use crate::computers::{ComputerError, Desired, Observed, UpgradeState};
 use crate::db::computer_handoffs as handoffs;
 
@@ -57,21 +61,21 @@ pub fn routes() -> Routes {
 async fn take_handoff(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SettledHandoff>, ApiError> {
     settle_handoff(&state, bot_id, handoff_id, handoffs::Action::Take).await
 }
 
 async fn hand_back_handoff(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SettledHandoff>, ApiError> {
     settle_handoff(&state, bot_id, handoff_id, handoffs::Action::HandBack).await
 }
 
 async fn dismiss_handoff(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SettledHandoff>, ApiError> {
     settle_handoff(&state, bot_id, handoff_id, handoffs::Action::Dismiss).await
 }
 
@@ -80,9 +84,11 @@ async fn settle_handoff(
     bot_id: Uuid,
     handoff_id: Uuid,
     action: handoffs::Action,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SettledHandoff>, ApiError> {
     match handoffs::settle(&state.db, bot_id, handoff_id, action).await {
-        Ok(handoff) => Ok(Json(json!({ "handoff": handoff }))),
+        Ok(handoff) => Ok(Json(SettledHandoff {
+            handoff: (&handoff).into(),
+        })),
         Err(handoffs::SettleError::NotFound) => Err(ApiError::not_found()),
         Err(handoffs::SettleError::Settled(handoff)) => Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -123,7 +129,7 @@ pub(super) async fn require_bot(
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     require_bot(&state, bot_id, false).await?;
     // Before the row: an upgrade writes its row before its status ends, so
     // a status that has ended is never paired with the row it replaced.
@@ -168,10 +174,10 @@ async fn show(
             Some(computers.config().image.clone()),
             match status {
                 None => last_upgrade(&state, bot_id).await?,
-                Some(status) => upgrade_json(status),
+                Some(status) => Some(status.into()),
             },
         ),
-        None => (None, Value::Null),
+        None => (None, None),
     };
     let Some(ComputerRow {
         runtime_name: name,
@@ -186,39 +192,34 @@ async fn show(
         has_desktop,
     }) = row
     else {
-        return Ok(Json(json!({
-            "bot_id": bot_id,
-            "state": "absent",
-            "desired_state": "auto",
-            "desktop_available": desktop,
-            "default_memory_mib": default_memory,
-        })));
+        return Ok(Json(ComputerStateHeader {
+            bot_id: Some(bot_id),
+            state: RuntimeState::Absent,
+            desired_state: DesiredState::Auto,
+            desktop_available: desktop,
+            default_memory_mib: default_memory,
+        })
+        .into_response());
     };
-    Ok(Json(json!({
-        "bot_id": bot_id,
-        "runtime_name": name,
-        "image": image,
-        "cpus": cpus,
-        "memory_mib": memory,
-        "default_memory_mib": default_memory,
-        "desired_state": desired,
-        "state": observed,
-        "active_leases": leases,
-        "last_used_at": last_used,
-        "last_error": error,
-        "desktop_available": desktop && has_desktop,
-        "latest_image": latest_image,
-        "upgrade": upgrade,
-    })))
-}
-
-fn upgrade_json(status: UpgradeStatus) -> Value {
-    match status {
-        UpgradeStatus::Queued { position } => json!({ "state": "queued", "position": position }),
-        UpgradeStatus::Waiting(reason) => json!({ "state": "waiting", "reason": reason }),
-        UpgradeStatus::Running => json!({ "state": "running" }),
-        UpgradeStatus::Failed(error) => json!({ "state": "failed", "error": error }),
-    }
+    Ok(Json(ComputerState {
+        status: ComputerStateHeader {
+            bot_id: Some(bot_id),
+            default_memory_mib: default_memory,
+            desired_state: desired.into(),
+            state: observed.into(),
+            desktop_available: desktop && has_desktop,
+        },
+        runtime_name: Some(name),
+        image: Some(image),
+        cpus: Some(cpus),
+        memory_mib: Some(memory as u32),
+        active_leases: Some(leases),
+        last_used_at: last_used,
+        last_error: error,
+        latest_image,
+        upgrade,
+    })
+    .into_response())
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -228,7 +229,7 @@ const MIB: u64 = 1024 * 1024;
 /// as the guest reports them; otherwise the disk's host blocks, from a scan
 /// at most a minute old. `rollback_bytes` is the disk still held by the
 /// computers that upgrades and rollbacks kept.
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Computers>, ApiError> {
     let computers = manager(&state)?;
     // Before the rows: an upgrade writes its row before its status ends, so
     // a status that has ended is never paired with the row it replaced.
@@ -274,8 +275,8 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
     let mut listed = Vec::with_capacity(rows.len());
     for row in rows {
         let upgrade = match statuses.get(&row.bot_id) {
-            Some(status) => upgrade_json(status.clone()),
-            None => recorded.remove(&row.bot_id).unwrap_or(Value::Null),
+            Some(status) => Some(status.clone().into()),
+            None => recorded.remove(&row.bot_id),
         };
         let live = usage
             .get(&row.runtime_name)
@@ -287,61 +288,63 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
             Some((used, size)) => (Some(used), Some(size)),
             None => (disks.get(&row.runtime_name).copied(), None),
         };
-        listed.push(json!({
-            "bot_id": row.bot_id,
-            "state": row.observed_state,
-            "desired_state": row.desired_state,
-            "image": row.image,
-            "latest_image": latest,
-            "upgrade": upgrade,
-            "disk_used_bytes": disk_used,
-            "disk_size_bytes": disk_size,
-            "cpus": cpus,
-            "cpu_percent": live.map(|usage| (usage.cpu_percent / cpus as f32).clamp(0.0, 100.0)),
-            "memory_used_bytes": live.and_then(|usage| usage.memory_bytes),
-            "memory_limit_bytes": live
+        listed.push(Computer {
+            bot_id: row.bot_id,
+            state: row.observed_state.into(),
+            desired_state: row.desired_state.into(),
+            image: row.image,
+            latest_image: Some(latest.clone()),
+            upgrade,
+            disk_used_bytes: disk_used,
+            disk_size_bytes: disk_size,
+            cpus,
+            cpu_percent: live
+                .map(|usage| f64::from((usage.cpu_percent / cpus as f32).clamp(0.0, 100.0))),
+            memory_used_bytes: live.and_then(|usage| usage.memory_bytes),
+            memory_limit_bytes: live
                 .map(|usage| usage.memory_limit_bytes)
                 .unwrap_or(row.memory_mib.max(0) as u64 * MIB),
-            "last_used_at": row.last_used_at,
-        }));
+            last_used_at: row.last_used_at,
+        });
     }
-    Ok(Json(json!({
-        "latest_image": latest,
-        "rollback_bytes": rollback_bytes,
-        "computers": listed,
-    })))
+    Ok(Json(Computers {
+        latest_image: Some(latest.clone()),
+        rollback_bytes,
+        computers: listed,
+    }))
 }
 
 async fn upgrade_all(
     State(state): State<Arc<AppState>>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<(StatusCode, Json<QueuedComputers>), ApiError> {
     let queued = manager(&state)?
         .upgrade_all(state.gate.clone())
         .await
         .map_err(computer_error)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "queued": queued }))))
+    Ok((StatusCode::ACCEPTED, Json(QueuedComputers { queued })))
 }
 
-async fn cancel_upgrade_all(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn cancel_upgrade_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CancelledComputers>, ApiError> {
     let cancelled = manager(&state)?.cancel_upgrade_all().await;
-    Ok(Json(json!({ "cancelled": cancelled })))
+    Ok(Json(CancelledComputers { cancelled }))
 }
 
 /// The newest recorded upgrade, when it failed (one a restart interrupted,
 /// or one run offline), or when it made the current computer and left some
 /// of the bot's APT packages uninstalled.
-async fn last_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
+async fn last_upgrade(state: &AppState, bot_id: Uuid) -> Result<Option<ComputerUpgrade>, ApiError> {
     Ok(recorded_upgrades(state, Some(bot_id))
         .await?
-        .remove(&bot_id)
-        .unwrap_or(Value::Null))
+        .remove(&bot_id))
 }
 
 /// [`last_upgrade`] of one bot, or of every bot that has one.
 async fn recorded_upgrades(
     state: &AppState,
     bot_id: Option<Uuid>,
-) -> Result<std::collections::HashMap<Uuid, Value>, ApiError> {
+) -> Result<std::collections::HashMap<Uuid, ComputerUpgrade>, ApiError> {
     #[derive(sqlx::FromRow)]
     struct Recorded {
         bot_id: Uuid,
@@ -375,14 +378,14 @@ async fn recorded_upgrades(
                 current,
             } = recorded;
             let shown = match (state, packages) {
-                (UpgradeState::Failed, _) => json!({
-                    "state": "failed",
-                    "error": error.unwrap_or_else(|| "interrupted".into()),
-                }),
-                (UpgradeState::Completed, Some(packages)) if current => json!({
-                    "state": "completed",
-                    "unrestored_packages": serde_json::from_str::<Vec<String>>(&packages).unwrap_or_default(),
-                }),
+                (UpgradeState::Failed, _) => ComputerUpgrade::Failed {
+                    error: error.unwrap_or_else(|| "interrupted".into()),
+                },
+                (UpgradeState::Completed, Some(packages)) if current => {
+                    ComputerUpgrade::Completed {
+                        unrestored_packages: serde_json::from_str(&packages).unwrap_or_default(),
+                    }
+                }
                 _ => return None,
             };
             Some((bot_id, shown))

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use else_wire::mcp::{InstalledMcp, McpAuthorization, McpConnectionStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -45,7 +46,7 @@ pub enum Error {
     )]
     Http(u16),
     #[error("The owner needs to sign in to this MCP.")]
-    AuthRequired(Box<oauth::ConnectionStatus>),
+    AuthRequired(Box<McpConnectionStatus>),
     #[error("The MCP requires OAuth authorization.")]
     AuthChallenge(String),
     #[error("The MCP request timed out and may have completed. Check its outcome before retrying.")]
@@ -445,12 +446,18 @@ pub struct Summary {
     pub transport: String,
 }
 
-/// A package as the owner's settings list it.
-#[derive(Serialize)]
-pub struct Listing {
-    #[serde(flatten)]
-    pub manifest: Summary,
-    pub website: Option<String>,
+impl From<&Summary> for InstalledMcp {
+    fn from(summary: &Summary) -> Self {
+        Self {
+            id: summary.id.0.clone(),
+            name: summary.name.clone(),
+            description: summary.description.clone(),
+            installed_by: summary.installed_by.clone(),
+            installed_at: summary.installed_at.clone(),
+            transport: Some(summary.transport.clone()),
+            website: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -673,7 +680,7 @@ impl Library {
         installed(self.root.clone()).await
     }
 
-    pub async fn listings(&self) -> Result<Vec<Listing>, Error> {
+    pub async fn listings(&self) -> Result<Vec<InstalledMcp>, Error> {
         let manifests = self.list().await?;
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || {
@@ -684,7 +691,10 @@ impl Library {
                         .ok()
                         .and_then(|text| serde_json::from_str::<Transport>(&text).ok())
                         .and_then(|config| config.website());
-                    Listing { manifest, website }
+                    InstalledMcp {
+                        website,
+                        ..InstalledMcp::from(&manifest)
+                    }
                 })
                 .collect()
         })
@@ -855,10 +865,7 @@ impl Library {
             .map_err(missing)
     }
 
-    pub async fn connection_status(
-        &self,
-        id: &PackageId,
-    ) -> Result<oauth::ConnectionStatus, Error> {
+    pub async fn connection_status(&self, id: &PackageId) -> Result<McpConnectionStatus, Error> {
         self.installed_slot(id)
             .await?
             .actor
@@ -882,7 +889,7 @@ impl Library {
         &self,
         id: &PackageId,
         redirect_uri: String,
-    ) -> Result<oauth::Started, Error> {
+    ) -> Result<McpAuthorization, Error> {
         self.installed_slot(id)
             .await?
             .actor
@@ -939,7 +946,7 @@ impl Library {
     pub async fn cancel_pending_authorization(
         &self,
         id: &PackageId,
-    ) -> Result<oauth::ConnectionStatus, Error> {
+    ) -> Result<McpConnectionStatus, Error> {
         self.installed_slot(id)
             .await?
             .actor

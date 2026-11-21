@@ -6,9 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use else_wire::mcp::{McpAuthorization, McpConnectionStatus, McpState};
 use oauth2::TokenResponse;
 use rmcp::transport::auth::{AuthError, AuthorizationMetadata};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -19,22 +20,6 @@ pub(super) use store::Store;
 use store::{Credential, now};
 
 const AUTH_LIFETIME: Duration = Duration::from_secs(600);
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ConnectionStatus {
-    pub status: &'static str,
-    pub provider: Option<String>,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct Started {
-    pub request_id: Uuid,
-    pub authorization_url: String,
-    pub expires_in: u64,
-    pub provider: Option<String>,
-    pub scopes: Vec<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,7 +72,7 @@ impl Session {
         })
     }
 
-    pub(super) fn status(&mut self) -> ConnectionStatus {
+    pub(super) fn status(&mut self) -> McpConnectionStatus {
         if let State::Authorizing(pending) = &self.state
             && pending.expires <= Instant::now()
         {
@@ -98,18 +83,20 @@ impl Session {
             match &self.state {
                 State::Disconnected => (
                     if self.connection.is_some() {
-                        "connected"
+                        McpState::Connected
                     } else {
-                        "disconnected"
+                        McpState::Disconnected
                     },
                     None,
                     &[],
                 ),
-                State::Required(discovery) => {
-                    ("disconnected", Some(&discovery.metadata), &discovery.scopes)
-                }
+                State::Required(discovery) => (
+                    McpState::Disconnected,
+                    Some(&discovery.metadata),
+                    &discovery.scopes,
+                ),
                 State::Authorizing(pending) => (
-                    "authorizing",
+                    McpState::Authorizing,
                     Some(&pending.flow.discovery.metadata),
                     &pending.flow.discovery.scopes,
                 ),
@@ -117,21 +104,21 @@ impl Session {
                     let expired = credential.expires_at().is_some_and(|at| at <= now());
                     (
                         if expired && credential.token.refresh_token().is_none() {
-                            "reauth_required"
+                            McpState::ReauthRequired
                         } else {
-                            "connected"
+                            McpState::Connected
                         },
                         Some(&credential.metadata),
                         &credential.scopes,
                     )
                 }
                 State::ReauthRequired(discovery) => (
-                    "reauth_required",
+                    McpState::ReauthRequired,
                     Some(&discovery.metadata),
                     &discovery.scopes,
                 ),
             };
-        ConnectionStatus {
+        McpConnectionStatus {
             status,
             provider: metadata.and_then(|metadata| metadata.issuer.clone()),
             scopes: scopes.to_vec(),
@@ -288,7 +275,7 @@ impl Session {
         &mut self,
         config: &Transport,
         redirect_uri: String,
-    ) -> Result<Started, Error> {
+    ) -> Result<McpAuthorization, Error> {
         self.store.require_key()?;
         let redirect = reqwest::Url::parse(&redirect_uri).ok().filter(|url| {
             url.scheme() == "http"
@@ -333,7 +320,7 @@ impl Session {
         };
         let registered = self.registered_client(&discovery.metadata)?;
         let flow = protocol::begin(discovery, registered, redirect_uri).await?;
-        let started = Started {
+        let started = McpAuthorization {
             request_id: Uuid::new_v4(),
             authorization_url: flow.authorization_url().to_owned(),
             expires_in: AUTH_LIFETIME.as_secs(),
@@ -472,7 +459,7 @@ impl Session {
         }
     }
 
-    pub(super) fn cancel_pending(&mut self) -> ConnectionStatus {
+    pub(super) fn cancel_pending(&mut self) -> McpConnectionStatus {
         if let State::Authorizing(pending) = &self.state {
             let id = pending.id;
             self.cancel(id);

@@ -9,6 +9,7 @@ mod skills;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use else_wire::computers::ComputerHandoff;
 use else_wire::delegations::Delegation;
 use else_wire::email::{MailTrigger, TurnMail};
 use else_wire::items::ItemKind;
@@ -189,38 +190,6 @@ pub struct Reaction {
 pub enum ReactionKind {
     ThumbsUp,
     ThumbsDown,
-}
-
-/// A bot's request that the owner take over its computer. Its turn waits
-/// until the owner hands the computer back or declines.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ComputerHandoff {
-    pub id: Uuid,
-    pub reason: String,
-    pub status: HandoffStatus,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub taken_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HandoffStatus {
-    Pending,
-    /// The owner controls the computer and has not handed it back.
-    Taken,
-    HandedBack,
-    Dismissed,
-    Skipped,
-    Cancelled,
-}
-
-impl HandoffStatus {
-    pub fn is_open(self) -> bool {
-        matches!(self, Self::Pending | Self::Taken)
-    }
 }
 
 pub const APPROVE: &str = "approve";

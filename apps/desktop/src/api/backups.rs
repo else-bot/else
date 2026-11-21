@@ -1,54 +1,10 @@
 use super::{Client, ClientError};
-use else_wire::backups::RemoteBackupStatus;
+use else_wire::backups::{
+    BackupAccepted, BackupDestination, BackupService, BackupSnapshot, Tested,
+};
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackupService {
-    #[default]
-    R2,
-    S3,
-    Compatible,
-}
-
-impl BackupService {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::R2 => "Cloudflare R2",
-            Self::S3 => "Amazon S3",
-            Self::Compatible => "S3 compatible",
-        }
-    }
-}
-
-#[derive(Clone, Deserialize)]
-pub struct BackupDestination {
-    pub service: BackupService,
-    pub endpoint: String,
-    pub region: String,
-    pub bucket: String,
-    pub prefix: String,
-    pub access_key_id: String,
-    pub path_style: bool,
-    pub has_secret: bool,
-}
-
-impl BackupDestination {
-    pub fn input(&self) -> BackupDestinationInput {
-        BackupDestinationInput {
-            service: self.service,
-            endpoint: self.endpoint.clone(),
-            region: self.region.clone(),
-            bucket: self.bucket.clone(),
-            prefix: self.prefix.clone(),
-            access_key_id: self.access_key_id.clone(),
-            path_style: self.path_style,
-            secret_access_key: None,
-        }
-    }
-}
 
 #[derive(Clone, Serialize)]
 pub struct BackupDestinationInput {
@@ -60,102 +16,6 @@ pub struct BackupDestinationInput {
     pub access_key_id: String,
     pub path_style: bool,
     pub secret_access_key: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct BackupEstimate {
-    pub bytes: u64,
-    pub basis: String,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct BackupRun {
-    pub set_id: String,
-    pub finished_at: Option<String>,
-    pub bytes: Option<u64>,
-    pub uploaded_bytes: Option<u64>,
-    pub local_status: LocalBackupStatus,
-    pub remote_status: Option<RemoteBackupStatus>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct BackupSnapshot {
-    pub revision: i64,
-    /// Absent from servers that predate the daily local schedule.
-    #[serde(default)]
-    pub local: Option<LocalBackupSettings>,
-    #[serde(default)]
-    pub pause: Option<ServerPause>,
-    pub enabled: bool,
-    pub interval_secs: u64,
-    pub keep: usize,
-    pub destination: Option<BackupDestination>,
-    pub running: bool,
-    pub next_backup_at: Option<String>,
-    pub estimate: Option<BackupEstimate>,
-    pub recent: Vec<BackupRun>,
-    pub remote_count: usize,
-    pub remote_bytes: u64,
-    pub unavailable_reason: Option<String>,
-    pub last_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct LocalBackupSettings {
-    pub enabled: bool,
-    pub time: String,
-    pub timezone: String,
-    pub utc_offset_secs: i32,
-    pub keep: usize,
-    pub managed_by_env: bool,
-    pub next_at: Option<String>,
-    pub copies: usize,
-    pub bytes: u64,
-    pub free_bytes: Option<u64>,
-    pub recent: Vec<LocalBackupRun>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalBackupStatus {
-    Running,
-    Completed,
-    Partial,
-    Failed,
-    /// A status this desktop does not know yet.
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct LocalBackupRun {
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub status: LocalBackupStatus,
-    pub bytes: Option<u64>,
-    pub took_secs: Option<u64>,
-    pub paused_secs: Option<u64>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PauseReason {
-    Backup,
-    Update,
-    /// A reason this desktop does not know yet.
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ServerPause {
-    pub reason: PauseReason,
-    pub expected_secs: Option<u64>,
-    /// How long the pause had run when the server sent this.
-    #[serde(default)]
-    pub elapsed_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -175,14 +35,32 @@ pub struct BackupSettingsInput {
     pub destination: Option<BackupDestinationInput>,
 }
 
-impl BackupSnapshot {
-    pub fn input(&self) -> BackupSettingsInput {
-        BackupSettingsInput {
-            expected_revision: self.revision,
-            enabled: self.enabled,
-            interval_secs: self.interval_secs,
-            keep: self.keep,
-            destination: self.destination.as_ref().map(BackupDestination::input),
+impl From<&BackupSnapshot> for BackupSettingsInput {
+    fn from(snapshot: &BackupSnapshot) -> Self {
+        Self {
+            expected_revision: snapshot.revision,
+            enabled: snapshot.enabled,
+            interval_secs: snapshot.interval_secs,
+            keep: snapshot.keep,
+            destination: snapshot
+                .destination
+                .as_ref()
+                .map(BackupDestinationInput::from),
+        }
+    }
+}
+
+impl From<&BackupDestination> for BackupDestinationInput {
+    fn from(destination: &BackupDestination) -> Self {
+        Self {
+            service: destination.service.clone(),
+            endpoint: destination.endpoint.clone(),
+            region: destination.region.clone(),
+            bucket: destination.bucket.clone(),
+            prefix: destination.prefix.clone(),
+            access_key_id: destination.access_key_id.clone(),
+            path_style: destination.path_style,
+            secret_access_key: None,
         }
     }
 }
@@ -225,10 +103,6 @@ impl Client {
         expected_revision: i64,
         destination: BackupDestinationInput,
     ) -> Result<String, ClientError> {
-        #[derive(Deserialize)]
-        struct Tested {
-            message: String,
-        }
         let this = self.clone();
         self.run(async move {
             let request = this
@@ -243,7 +117,7 @@ impl Client {
     }
 
     pub async fn run_backup(self: Arc<Self>) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(Method::POST, "/v1/settings/backups/run".into(), None)
+        self.call::<BackupAccepted>(Method::POST, "/v1/settings/backups/run".into(), None)
             .await
             .map(|_| ())
     }
@@ -252,6 +126,8 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use else_wire::backups::LocalBackupStatus;
+    use else_wire::maintenance::PauseReason;
     use serde_json::json;
 
     #[test]

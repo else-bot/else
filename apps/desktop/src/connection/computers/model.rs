@@ -1,10 +1,10 @@
-use crate::api::{Computer, ComputerStatus, ComputerUpgrade, Computers};
+use else_wire::computers::{Computer, ComputerUpgrade, Computers, RuntimeState};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Action<'a> {
     Upgrade,
     Retry,
-    Queued(u32),
+    Queued(usize),
     Waiting(&'a str),
     Running,
     Current,
@@ -16,6 +16,7 @@ pub(super) fn action(computer: &Computer) -> Action<'_> {
         Some(ComputerUpgrade::Waiting { reason }) => Action::Waiting(reason),
         Some(ComputerUpgrade::Running) => Action::Running,
         Some(ComputerUpgrade::Failed { .. }) => Action::Retry,
+        Some(ComputerUpgrade::Unknown) => Action::Current,
         _ if computer.outdated() => Action::Upgrade,
         _ => Action::Current,
     }
@@ -52,7 +53,7 @@ pub(super) fn summary(report: &Computers) -> String {
     let running = report
         .computers
         .iter()
-        .filter(|c| c.state == ComputerStatus::Running)
+        .filter(|c| c.state == RuntimeState::Running)
         .count();
     let outdated = report.computers.iter().filter(|c| c.outdated()).count();
     let disk: u64 = report
@@ -94,7 +95,7 @@ pub(super) fn queue_line(
             }
             Some(ComputerUpgrade::Waiting { .. }) => waiting.push(name(computer.bot_id)),
             Some(ComputerUpgrade::Failed { .. }) => failed.push(name(computer.bot_id)),
-            Some(ComputerUpgrade::Completed { .. }) => continue,
+            Some(ComputerUpgrade::Completed { .. } | ComputerUpgrade::Unknown) => continue,
         }
         total += 1;
     }
@@ -122,7 +123,7 @@ pub(super) fn image_label(image: &str) -> String {
     }
 }
 
-pub(super) fn ordinal(position: u32) -> String {
+pub(super) fn ordinal(position: usize) -> String {
     let suffix = match (position % 100, position % 10) {
         (11..=13, _) => "th",
         (_, 1) => "st",

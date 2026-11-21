@@ -162,7 +162,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
     assert_eq!(query["code_challenge"], challenge);
     assert_eq!(exchange["redirect_uri"], query["redirect_uri"]);
     assert_eq!(exchange["resource"], discovery.resource);
-    assert_eq!(session.status().status, "connected");
+    assert_eq!(session.status().status.as_str(), "connected");
     drop(session);
     let mut reopened = Session::open(store, Some(registration)).await.unwrap();
     reopened.refresh(true).await.unwrap();
@@ -181,7 +181,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
         reopened.refresh(true).await,
         Err(Error::AuthRequired(_))
     ));
-    assert_eq!(reopened.status().status, "reauth_required");
+    assert_eq!(reopened.status().status.as_str(), "reauth_required");
     assert!(!dir.path().join(format!("oauth-{bot}.json")).exists());
     server.abort();
 }

@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
+use else_wire::maintenance::{RemoteOperation, RemoteState, Status};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -42,30 +43,6 @@ impl Version {
 pub(crate) struct Request {
     pub request_id: Uuid,
     pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct Snapshot {
-    version: &'static str,
-    unavailable: Option<String>,
-    operation: Option<Operation>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Operation {
-    request_id: Uuid,
-    version: String,
-    state: State,
-    output: String,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum State {
-    Running,
-    Succeeded,
-    Failed,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,12 +97,12 @@ impl Installation {
         identify().map_or_else(Self::default, |home| Self { home: Ok(home) })
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Snapshot, ApiError> {
+    pub(crate) fn snapshot(&self) -> Result<Status, ApiError> {
         let home = match &self.home {
             Ok(home) => home,
             Err(why) => {
-                return Ok(Snapshot {
-                    version: crate::VERSION,
+                return Ok(Status {
+                    version: crate::VERSION.into(),
                     unavailable: Some(why.clone()),
                     operation: None,
                 });
@@ -140,8 +117,8 @@ impl Installation {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(storage_error()),
         };
-        Ok(Snapshot {
-            version: crate::VERSION,
+        Ok(Status {
+            version: crate::VERSION.into(),
             unavailable: None,
             operation,
         })
@@ -151,7 +128,7 @@ impl Installation {
         &mut self,
         request: Request,
         state: &crate::http::AppState,
-    ) -> Result<Snapshot, ApiError> {
+    ) -> Result<Status, ApiError> {
         let home = self.home.as_ref().map_err(|why| {
             ApiError::new(StatusCode::CONFLICT, "update_unavailable", why.clone())
         })?;
@@ -169,8 +146,8 @@ impl Installation {
                     "This request already names a different version.",
                 ));
             }
-            return Ok(Snapshot {
-                version: crate::VERSION,
+            return Ok(Status {
+                version: crate::VERSION.into(),
                 unavailable: None,
                 operation: Some(operation),
             });
@@ -178,7 +155,7 @@ impl Installation {
         if self
             .snapshot()?
             .operation
-            .is_some_and(|operation| operation.state == State::Running)
+            .is_some_and(|operation| operation.state == RemoteState::Running)
         {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
@@ -247,7 +224,7 @@ impl Installation {
     }
 }
 
-fn read_operation(home: &Path, id: Uuid) -> Result<Operation, ApiError> {
+fn read_operation(home: &Path, id: Uuid) -> Result<RemoteOperation, ApiError> {
     let job = home.join("run/server-updates").join(id.to_string());
     let record: Record = serde_json::from_slice(
         &std::fs::read(job.join("request.json")).map_err(|_| storage_error())?,
@@ -263,19 +240,19 @@ fn read_operation(home: &Path, id: Uuid) -> Result<Operation, ApiError> {
         .and_then(rustix::process::Pid::from_raw)
         .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
     let (state, error) = match result.as_deref().map(str::trim) {
-        Some("0") => (State::Succeeded, None),
-        Some(_) => (State::Failed, Some("The installer failed. Review its output and try again.".into())),
+        Some("0") => (RemoteState::Succeeded, None),
+        Some(_) => (RemoteState::Failed, Some("The installer failed. Review its output and try again.".into())),
         None if elapsed > RUN_LIMIT => (
-            State::Failed,
+            RemoteState::Failed,
             Some("The updater has not reported a result for two hours. Check the server before trying again.".into()),
         ),
         None if !alive && elapsed > START_GRACE => (
-            State::Failed,
+            RemoteState::Failed,
             Some("The background updater stopped before reporting its result. Check the server before trying again.".into()),
         ),
-        None => (State::Running, None),
+        None => (RemoteState::Running, None),
     };
-    Ok(Operation {
+    Ok(RemoteOperation {
         request_id: record.request_id,
         version: record.version,
         state,

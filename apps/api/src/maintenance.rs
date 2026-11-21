@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use else_wire::maintenance::{PausePhase, PauseReason, ServerPause};
 use tokio::sync::watch;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
@@ -94,29 +94,33 @@ impl Pause {
             step: None,
         }
     }
+}
 
-    pub fn json(&self) -> Value {
-        let (phase, done, total) = match self.step {
+impl From<&Pause> for ServerPause {
+    fn from(pause: &Pause) -> Self {
+        let (phase, done, total) = match pause.step {
             None => (None, None, None),
-            Some(Step::WaitingForTasks) => (Some("waiting_for_tasks"), None, None),
-            Some(Step::Computers { done, total }) => (Some("computers"), Some(done), Some(total)),
-            Some(Step::Files) => (Some("files"), None, None),
-            Some(Step::Projects) => (Some("projects"), None, None),
-            Some(Step::Database) => (Some("database"), None, None),
+            Some(Step::WaitingForTasks) => (Some(PausePhase::WaitingForTasks), None, None),
+            Some(Step::Computers { done, total }) => {
+                (Some(PausePhase::Computers), Some(done), Some(total))
+            }
+            Some(Step::Files) => (Some(PausePhase::Files), None, None),
+            Some(Step::Projects) => (Some(PausePhase::Projects), None, None),
+            Some(Step::Database) => (Some(PausePhase::Database), None, None),
         };
-        json!({
-            "reason": match self.reason {
-                Reason::Backup => "backup",
-                Reason::Update => "update",
+        Self {
+            reason: match pause.reason {
+                Reason::Backup => PauseReason::Backup,
+                Reason::Update => PauseReason::Update,
             },
-            "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            "expected_secs": self.expected.map(|d| d.as_secs()),
+            started_at: Some(pause.started_at),
+            expected_secs: pause.expected.map(|d| d.as_secs()),
             // Measured here so clients count down without trusting their clock.
-            "elapsed_secs": (Utc::now() - self.started_at).num_seconds().max(0),
-            "phase": phase,
-            "done": done,
-            "total": total,
-        })
+            elapsed_secs: (Utc::now() - pause.started_at).num_seconds().max(0) as u64,
+            phase,
+            done,
+            total,
+        }
     }
 }
 
@@ -478,7 +482,10 @@ mod tests {
         let closed = gate
             .close(
                 Duration::from_millis(50),
-                Pause::backup(Some(Duration::from_secs(300))),
+                Pause {
+                    started_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+                    ..Pause::backup(Some(Duration::from_secs(300)))
+                },
             )
             .await
             .unwrap()
@@ -486,12 +493,25 @@ mod tests {
         watch.changed().await.unwrap();
         let pause = watch.borrow_and_update().clone().unwrap();
         assert_eq!(pause.step, Some(Step::WaitingForTasks));
-        assert_eq!(pause.json()["expected_secs"], 300);
+        assert_eq!(
+            serde_json::json!(ServerPause::from(&pause)),
+            serde_json::json!({
+                "reason": "backup",
+                "started_at": "2099-01-01T00:00:00.000Z",
+                "expected_secs": 300,
+                "elapsed_secs": 0,
+                "phase": "waiting_for_tasks",
+                "done": null,
+                "total": null,
+            })
+        );
         closed.step(Step::Computers { done: 6, total: 11 });
         watch.changed().await.unwrap();
         let pause = watch.borrow_and_update().clone().unwrap();
-        assert_eq!(pause.json()["phase"], "computers");
-        assert_eq!(pause.json()["done"], 6);
+        let payload = serde_json::json!(ServerPause::from(&pause));
+        assert_eq!(payload["phase"], "computers");
+        assert_eq!(payload["done"], 6);
+        assert_eq!(payload["total"], 11);
         assert!(
             gate.close(Duration::from_millis(1), Pause::update())
                 .await

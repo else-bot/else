@@ -1,6 +1,6 @@
 use super::*;
-use crate::api::InstalledMcp;
 use crate::controls::{Control as _, Scale, Tier, text_field};
+use else_wire::mcp::InstalledMcp;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;

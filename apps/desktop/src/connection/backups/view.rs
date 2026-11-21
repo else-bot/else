@@ -1,9 +1,8 @@
 use super::*;
-use crate::api::LocalBackupStatus;
 use crate::connection::settings::settings_column;
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::{DateTime, Local, Utc};
-use else_wire::backups::RemoteBackupStatus;
+use else_wire::backups::{BackupSnapshot, LocalBackupStatus, RemoteBackupStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -314,7 +313,7 @@ impl View {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .child(destination.service.label()),
+                                            .child(destination.service.label().to_owned()),
                                     )
                                     .child(
                                         div().text_xs().text_color(theme.muted_foreground).child(

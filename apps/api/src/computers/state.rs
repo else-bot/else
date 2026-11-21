@@ -41,6 +41,24 @@ pub enum Observed {
     Error,
 }
 
+impl From<Observed> for else_wire::computers::RuntimeState {
+    fn from(value: Observed) -> Self {
+        match value {
+            Observed::Absent => Self::Absent,
+            Observed::Creating => Self::Creating,
+            Observed::Starting => Self::Starting,
+            Observed::Running => Self::Running,
+            Observed::Pausing => Self::Pausing,
+            Observed::Paused => Self::Paused,
+            Observed::Resuming => Self::Resuming,
+            Observed::Stopping => Self::Stopping,
+            Observed::Stopped => Self::Stopped,
+            Observed::Missing => Self::Missing,
+            Observed::Error => Self::Error,
+        }
+    }
+}
+
 impl Observed {
     /// A runtime call is (or was, before a restart) moving the computer.
     pub fn is_transient(self) -> bool {
@@ -84,6 +102,15 @@ pub enum Desired {
     Auto,
     /// The owner stopped it; nothing wakes it until they resume it.
     Stopped,
+}
+
+impl From<Desired> for else_wire::computers::DesiredState {
+    fn from(value: Desired) -> Self {
+        match value {
+            Desired::Auto => Self::Auto,
+            Desired::Stopped => Self::Stopped,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

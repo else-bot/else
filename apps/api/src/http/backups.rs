@@ -4,12 +4,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use else_wire::backups::{BackupAccepted, BackupSnapshot, Tested};
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 use super::error::{ApiError, ApiJson};
 use super::{AppState, Routes};
-use crate::backup::service::{Backups, Snapshot};
+use crate::backup::service::Backups;
 use crate::backup::settings::{DestinationInput, Error, LocalUpdate, Update};
 
 pub fn routes() -> Routes {
@@ -47,21 +47,21 @@ fn error(error: Error) -> ApiError {
     }
 }
 
-async fn show(State(state): State<Arc<AppState>>) -> Result<Json<Snapshot>, ApiError> {
+async fn show(State(state): State<Arc<AppState>>) -> Result<Json<BackupSnapshot>, ApiError> {
     Ok(Json(service(&state)?.snapshot().await.map_err(error)?))
 }
 
 async fn save(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<Update>,
-) -> Result<Json<Snapshot>, ApiError> {
+) -> Result<Json<BackupSnapshot>, ApiError> {
     Ok(Json(service(&state)?.save(body).await.map_err(error)?))
 }
 
 async fn save_local(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<LocalUpdate>,
-) -> Result<Json<Snapshot>, ApiError> {
+) -> Result<Json<BackupSnapshot>, ApiError> {
     Ok(Json(
         service(&state)?.save_local(body).await.map_err(error)?,
     ))
@@ -77,17 +77,24 @@ struct Test {
 async fn test(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<Test>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Tested>, ApiError> {
     service(&state)?
         .test(body.expected_revision, body.destination)
         .await
         .map_err(error)?;
-    Ok(Json(
-        json!({ "message": "Connection verified. Bucket list, read, write, and delete permissions are available." }),
-    ))
+    Ok(Json(Tested {
+        message:
+            "Connection verified. Bucket list, read, write, and delete permissions are available."
+                .into(),
+    }))
 }
 
-async fn run(State(state): State<Arc<AppState>>) -> Result<(StatusCode, Json<Value>), ApiError> {
+async fn run(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<BackupAccepted>), ApiError> {
     service(&state)?.run_now().await.map_err(error)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BackupAccepted { accepted: true }),
+    ))
 }

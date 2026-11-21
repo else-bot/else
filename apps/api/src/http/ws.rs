@@ -421,7 +421,10 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
 async fn server_channel(state: Arc<AppState>, sub: Sub) {
     let mut pause = state.gate.watch_pause();
     loop {
-        let current = pause.borrow_and_update().as_ref().map(|p| p.json());
+        let current = pause
+            .borrow_and_update()
+            .as_ref()
+            .map(else_wire::maintenance::ServerPause::from);
         let body =
             json!({ "channel": "server", "event": "server.pause", "data": { "pause": current } });
         if !sub.send(body).await {

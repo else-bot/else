@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use else_wire::backups::{BackupDestination, BackupService};
+use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 use zeroize::Zeroizing;
 
@@ -24,19 +25,6 @@ pub enum Error {
     Db(#[from] sqlx::Error),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DestinationView {
-    pub service: String,
-    pub endpoint: String,
-    pub region: String,
-    pub bucket: String,
-    pub prefix: String,
-    pub access_key_id: String,
-    pub path_style: bool,
-    pub has_secret: bool,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationInput {
@@ -52,7 +40,7 @@ pub struct DestinationInput {
 
 #[derive(Clone)]
 pub struct Destination {
-    pub view: DestinationView,
+    pub view: BackupDestination,
     secret: Zeroizing<String>,
 }
 
@@ -91,7 +79,8 @@ impl Destination {
                 "The endpoint must be an HTTP or HTTPS origin without a path or credentials.",
             ));
         }
-        if !matches!(input.service.as_str(), "r2" | "s3" | "compatible") {
+        let service = BackupService::from(input.service);
+        if matches!(service, BackupService::Other(_)) {
             return Err(Error::Invalid("Choose R2, S3, or S3 compatible storage."));
         }
         let region = input.region.trim().to_owned();
@@ -123,8 +112,8 @@ impl Destination {
             prefix.push('/');
         }
         Ok(Self {
-            view: DestinationView {
-                service: input.service,
+            view: BackupDestination {
+                service,
                 endpoint,
                 region,
                 bucket,

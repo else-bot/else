@@ -1,6 +1,6 @@
-use super::{Client, ServerPause};
+use super::{BotList, Client};
 use crate::model::Frame;
-use else_wire::bots::BotList;
+use else_wire::maintenance::ServerPause;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
 use reqwest::header::AUTHORIZATION;
@@ -341,7 +341,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::PauseReason;
+    use else_wire::maintenance::PauseReason;
 
     #[test]
     fn backup_server_pause_routes_start_progress_update_and_end() {

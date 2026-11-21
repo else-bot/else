@@ -24,6 +24,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
+use else_wire::maintenance::{Report, Status};
 use serde_json::{Value, json};
 
 use super::error::ApiError;
@@ -45,9 +46,7 @@ pub fn routes() -> Routes {
     )
 }
 
-async fn installation(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<crate::server_updates::Snapshot>, ApiError> {
+async fn installation(State(state): State<Arc<AppState>>) -> Result<Json<Status>, ApiError> {
     state
         .server_updates
         .call(|updates| updates.snapshot().map(Json))
@@ -57,7 +56,7 @@ async fn installation(
 async fn install(
     State(state): State<Arc<AppState>>,
     request: Result<Json<crate::server_updates::Request>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<crate::server_updates::Snapshot>, ApiError> {
+) -> Result<Json<Status>, ApiError> {
     let Json(request) = request?;
     let owner = state.clone();
     state
@@ -79,15 +78,15 @@ pub(crate) async fn ensure_idle(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Report>, ApiError> {
     let work = work(&state).await?;
-    Ok(Json(json!({
-        "version": crate::VERSION,
-        "active_turns": work.turns,
-        "running_commands": work.commands,
-        "queued_turns": work.queued,
-        "background_jobs": work.jobs,
-    })))
+    Ok(Json(Report {
+        version: Some(crate::VERSION.into()),
+        active_turns: work.turns,
+        running_commands: work.commands,
+        queued_turns: Some(work.queued),
+        background_jobs: Some(work.jobs),
+    }))
 }
 
 async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
@@ -151,10 +150,10 @@ async fn reopen(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 struct Work {
-    turns: i64,
-    commands: i64,
-    queued: i64,
-    jobs: i64,
+    turns: u64,
+    commands: u64,
+    queued: u64,
+    jobs: u64,
 }
 
 async fn work(state: &AppState) -> Result<Work, ApiError> {
@@ -174,14 +173,14 @@ async fn work(state: &AppState) -> Result<Work, ApiError> {
         state.scheduler.running_count(),
     );
     let (turns, queued): (i64, i64) = turns.map_err(|_| unavailable())?;
-    let commands = commands.map_err(|_| unavailable())?;
-    let jobs = jobs.map_err(|_| unavailable())?;
-    let turns = turns.max(running as i64);
+    let commands: i64 = commands.map_err(|_| unavailable())?;
+    let jobs: i64 = jobs.map_err(|_| unavailable())?;
+    let turns = turns.max(running as i64) as u64;
     Ok(Work {
         turns,
-        commands,
-        queued,
-        jobs,
+        commands: commands as u64,
+        queued: queued as u64,
+        jobs: jobs as u64,
     })
 }
 

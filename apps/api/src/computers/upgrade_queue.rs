@@ -34,6 +34,17 @@ pub enum UpgradeStatus {
     Failed(String),
 }
 
+impl From<UpgradeStatus> for else_wire::computers::ComputerUpgrade {
+    fn from(status: UpgradeStatus) -> Self {
+        match status {
+            UpgradeStatus::Queued { position } => Self::Queued { position },
+            UpgradeStatus::Waiting(reason) => Self::Waiting { reason },
+            UpgradeStatus::Running => Self::Running,
+            UpgradeStatus::Failed(error) => Self::Failed { error },
+        }
+    }
+}
+
 /// The upgrade of a bot that is not in the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Started {

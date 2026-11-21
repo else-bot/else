@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use super::{APP_CONTEXT, ElseApp, TakeOverComputer};
 use crate::api::HandoffAction;
-use crate::model::{ComputerHandoff, HandoffStatus};
 use else_wire::bots::Bot;
+use else_wire::computers::ComputerHandoff;
+use else_wire::computers::HandoffStatus;
 
 impl ElseApp {
     fn open_handoff(&self) -> Option<(Uuid, ComputerHandoff)> {
@@ -270,6 +271,7 @@ impl ElseApp {
             HandoffStatus::HandedBack => "Handed back",
             HandoffStatus::Dismissed => "Declined",
             HandoffStatus::Skipped | HandoffStatus::Cancelled => "Withdrawn",
+            HandoffStatus::Unknown => "Unknown",
         };
         let at = handoff
             .created_at

@@ -140,7 +140,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "delegations": turn.delegations.iter().map(Delegation::from).collect::<Vec<_>>(),
         "mcp_waits": turn.mcp_waits.iter().map(McpWait::from).collect::<Vec<_>>(),
         "computer_job_waits": turn.computer_job_waits.iter().map(ComputerJobWait::from).collect::<Vec<_>>(),
-        "computer_handoffs": turn.computer_handoffs,
+        "computer_handoffs": turn.computer_handoffs.iter().map(else_wire::computers::ComputerHandoff::from).collect::<Vec<_>>(),
         "owner_notices": turn.owner_notices.iter().map(OwnerNotice::from).collect::<Vec<_>>(),
     })
 }

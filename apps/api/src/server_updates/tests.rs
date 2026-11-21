@@ -40,13 +40,13 @@ impl Fixture {
         }
     }
 
-    async fn wait(&self, id: Uuid) -> Operation {
+    async fn wait(&self, id: Uuid) -> RemoteOperation {
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut poll = tokio::time::interval(Duration::from_millis(10));
             loop {
                 poll.tick().await;
                 let operation = read_operation(self.directory.path(), id).unwrap();
-                if operation.state != State::Running {
+                if operation.state != RemoteState::Running {
                     return operation;
                 }
             }
@@ -81,7 +81,7 @@ chmod +x "$ELSE_HOME/server-current/bin/else-api"
         .start(request.clone(), &fixture.state)
         .await
         .unwrap();
-    assert_eq!(started.operation.unwrap().state, State::Running);
+    assert_eq!(started.operation.unwrap().state, RemoteState::Running);
     let repeated = updater
         .start(request.clone(), &fixture.state)
         .await
@@ -105,14 +105,19 @@ chmod +x "$ELSE_HOME/server-current/bin/else-api"
     assert_eq!(conflict.code, "request_conflict");
     std::fs::write(fixture.directory.path().join("finish"), "").unwrap();
     let operation = fixture.wait(request.request_id).await;
-    assert_eq!(operation.state, State::Succeeded, "{}", operation.output);
+    assert_eq!(
+        operation.state,
+        RemoteState::Succeeded,
+        "{}",
+        operation.output
+    );
     assert!(
         operation
             .output
             .contains("--yes --server-only --version 999.0.0")
     );
     let recovered = fixture.updater().snapshot().unwrap().operation.unwrap();
-    assert_eq!(recovered.state, State::Succeeded);
+    assert_eq!(recovered.state, RemoteState::Succeeded);
     assert_eq!(recovered.request_id, request.request_id);
     assert_eq!(
         std::fs::read_to_string(fixture.directory.path().join("invocations"))
@@ -126,7 +131,7 @@ chmod +x "$ELSE_HOME/server-current/bin/else-api"
         .start(request, &fixture.state)
         .await
         .unwrap();
-    assert_eq!(repeated.operation.unwrap().state, State::Succeeded);
+    assert_eq!(repeated.operation.unwrap().state, RemoteState::Succeeded);
 }
 
 #[tokio::test]
@@ -139,7 +144,7 @@ async fn installer_failure_and_interruption_remain_visible_after_restart() {
         .await
         .unwrap();
     let failed = fixture.wait(request.request_id).await;
-    assert_eq!(failed.state, State::Failed);
+    assert_eq!(failed.state, RemoteState::Failed);
     assert!(failed.output.contains("fixture failure"));
     assert_eq!(
         fixture
@@ -149,7 +154,7 @@ async fn installer_failure_and_interruption_remain_visible_after_restart() {
             .operation
             .unwrap()
             .state,
-        State::Failed
+        RemoteState::Failed
     );
     let job = fixture
         .directory
@@ -169,7 +174,7 @@ async fn installer_failure_and_interruption_remain_visible_after_restart() {
     )
     .unwrap();
     let interrupted = fixture.updater().snapshot().unwrap().operation.unwrap();
-    assert_eq!(interrupted.state, State::Failed);
+    assert_eq!(interrupted.state, RemoteState::Failed);
     assert!(interrupted.error.unwrap().contains("stopped"));
 }
 

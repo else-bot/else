@@ -19,8 +19,16 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     app.wait_turn(&turn, &["running"]).await;
     let busy = app.owner("GET", "/v1/maintenance/update", None).await;
     assert_eq!(busy.status, StatusCode::OK, "{}", busy.body);
-    assert_eq!(busy.body["active_turns"], 1);
-    assert_eq!(busy.body["running_commands"], 0);
+    assert_eq!(
+        busy.body,
+        serde_json::json!({
+            "version": else_api::VERSION,
+            "active_turns": 1,
+            "running_commands": 0,
+            "queued_turns": 0,
+            "background_jobs": 0,
+        })
+    );
     let refused = app.owner("POST", "/v1/maintenance/update", None).await;
     assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
     assert_eq!(refused.body["error"]["code"], "busy");

@@ -1,10 +1,9 @@
 use crate::controls::{Control as _, Scale, Tier, hugging_segment, segment_track};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use else_wire::computers::DesiredState;
-
-use else_wire::computers::RuntimeState;
-
+use else_wire::computers::{
+    ComputerState, ComputerUpgrade, DesiredState, DesktopMode, RuntimeState,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -14,8 +13,7 @@ use uuid::Uuid;
 use xkeysym::Keysym;
 
 use crate::api::{
-    Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
-    DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES,
+    Client, ClientError, DesktopCommand, DesktopCommands, DesktopEvent, MAX_CLIPBOARD_BYTES,
 };
 
 #[cfg(target_os = "macos")]
@@ -181,9 +179,9 @@ impl ComputerView {
                     match client.clone().computer(bot).await {
                         Ok(state) => {
                             let upgrading = state.upgrade == Some(ComputerUpgrade::Running);
-                            let available = state.desktop_available;
-                            let running = state.state == RuntimeState::Running
-                                && state.desired_state != DesiredState::Stopped;
+                            let available = state.status.desktop_available;
+                            let running = state.status.state == RuntimeState::Running
+                                && state.status.desired_state != DesiredState::Stopped;
                             let _ = this.update(cx, |view, cx| {
                                 view.computer = Some(state);
                                 if upgrading {
@@ -386,6 +384,7 @@ impl ComputerView {
         let computer = self.computer.as_ref()?;
         let theme = cx.theme();
         let (message, failed) = match (&computer.upgrade, &self.upgrade_refused) {
+            (Some(ComputerUpgrade::Unknown), _) => return None,
             (Some(ComputerUpgrade::Queued { position }), _) => {
                 return Some(
                     div()

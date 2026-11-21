@@ -2,12 +2,19 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::api::{Client, ClientError, McpConnectionStatus, McpState};
+use crate::api::{Client, ClientError};
+
+use else_wire::mcp::McpConnectionStatus;
+
 use crate::email::oauth;
 use crate::model::{APPROVE, DENY};
 use else_wire::email::EmailProvider;
 use else_wire::email::preset_config;
-use else_wire::questions::{EmailConsent, McpConsent, Question, QuestionAnswer};
+use else_wire::mcp::McpState;
+use else_wire::questions::EmailConsent;
+use else_wire::questions::McpConsent;
+use else_wire::questions::Question;
+use else_wire::questions::QuestionAnswer;
 
 #[derive(Clone)]
 pub(super) struct Flow {

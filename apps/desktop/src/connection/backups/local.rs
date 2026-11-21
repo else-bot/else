@@ -1,6 +1,7 @@
 use super::*;
-use crate::api::{LocalBackupSettings, LocalBackupStatus, PauseReason};
 use chrono::{DateTime, FixedOffset, Offset as _, Utc};
+use else_wire::backups::{LocalBackupSettings, LocalBackupStatus};
+use else_wire::maintenance::PauseReason;
 use gpui_kit::component::{Theme, h_flex};
 use view::{message, metric, metrics};
 

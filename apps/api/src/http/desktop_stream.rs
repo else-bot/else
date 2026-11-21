@@ -48,8 +48,9 @@ use axum::extract::rejection::QueryRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
+use else_wire::computers::{DesktopMode, ServerEvent};
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, mpsc};
@@ -107,13 +108,6 @@ impl Streams {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Mode {
-    Watch,
-    Control,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CursorMode {
@@ -124,7 +118,7 @@ enum CursorMode {
 
 #[derive(Deserialize)]
 pub(super) struct Params {
-    mode: Mode,
+    mode: DesktopMode,
     #[serde(default)]
     wake: bool,
     #[serde(default)]
@@ -134,7 +128,7 @@ pub(super) struct Params {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum ClientMessage {
-    Mode { mode: Mode },
+    Mode { mode: DesktopMode },
     Pointer { x: u16, y: u16, buttons: u8 },
     Key { key: u32, down: bool },
     Release,
@@ -172,12 +166,15 @@ fn end(code: &'static str, message: impl Into<String>) -> Option<End> {
     })
 }
 
+fn event_message(event: ServerEvent) -> Message {
+    Message::Text(json!(event).to_string().into())
+}
+
 fn error_message(code: &str, message: &str) -> Message {
-    Message::Text(
-        json!({ "type": "error", "code": code, "message": message })
-            .to_string()
-            .into(),
-    )
+    event_message(ServerEvent::Error {
+        code: code.to_owned(),
+        message: message.to_owned(),
+    })
 }
 
 async fn session(
@@ -379,7 +376,7 @@ struct Session {
     cursor_shapes: bool,
     cursor_style: Option<&'static str>,
     cursor_unsent: bool,
-    mode: Mode,
+    mode: DesktopMode,
     control_lease: Option<Uuid>,
     watch_server: Option<bool>,
     view: Option<View>,
@@ -421,7 +418,7 @@ impl Session {
             cursor_shapes: false,
             cursor_style: None,
             cursor_unsent: false,
-            mode: Mode::Watch,
+            mode: DesktopMode::Watch,
             control_lease: None,
             watch_server: None,
             view: None,
@@ -472,28 +469,24 @@ impl Session {
     }
 
     async fn send_mode(&self) -> Option<End> {
-        self.send(Message::Text(
-            json!({ "type": "mode", "mode": self.mode })
-                .to_string()
-                .into(),
-        ))
-        .await
+        self.send(event_message(ServerEvent::Mode { mode: self.mode }))
+            .await
     }
 
     async fn run(
         &mut self,
-        mode: Mode,
+        mode: DesktopMode,
         incoming: &mut futures_util::stream::SplitStream<WebSocket>,
     ) -> Option<End> {
         if let Some(end) = self.sync_view().await {
             return Some(end);
         }
-        if mode == Mode::Control
+        if mode == DesktopMode::Control
             && let Some(end) = self.enter_control().await
         {
             return Some(end);
         }
-        if self.mode == Mode::Watch && self.watch_server == Some(false) {
+        if self.mode == DesktopMode::Watch && self.watch_server == Some(false) {
             return unsupported();
         }
         if let Some(end) = self.send_mode().await {
@@ -630,17 +623,19 @@ impl Session {
         };
         match message {
             ClientMessage::Mode {
-                mode: Mode::Control,
+                mode: DesktopMode::Control,
             } => {
-                if self.mode == Mode::Watch
+                if self.mode == DesktopMode::Watch
                     && let Some(end) = self.enter_control().await
                 {
                     return Some(end);
                 }
                 self.send_mode().await
             }
-            ClientMessage::Mode { mode: Mode::Watch } => {
-                if self.mode == Mode::Control {
+            ClientMessage::Mode {
+                mode: DesktopMode::Watch,
+            } => {
+                if self.mode == DesktopMode::Control {
                     self.leave_control().await;
                     if let Some(end) = self.sync_view().await {
                         return Some(end);
@@ -780,7 +775,7 @@ impl Session {
                     connected: Instant::now(),
                     clipboard_utf8: false,
                 });
-                self.mode = Mode::Control;
+                self.mode = DesktopMode::Control;
                 if let Some(end) = self.sync_view().await {
                     return Some(end);
                 }
@@ -806,7 +801,7 @@ impl Session {
         }
         self.held_keys.clear();
         self.buttons = 0;
-        self.mode = Mode::Watch;
+        self.mode = DesktopMode::Watch;
         self.end_control_lease().await;
         self.computers.end_control(self.bot, self.stream_id).await;
     }
@@ -840,8 +835,8 @@ impl Session {
 
     async fn sync_view(&mut self) -> Option<End> {
         let wanted = match (self.watch_server, self.mode) {
-            (Some(false), Mode::Watch) => None,
-            (Some(false), Mode::Control) => Some(Target::Control),
+            (Some(false), DesktopMode::Watch) => None,
+            (Some(false), DesktopMode::Control) => Some(Target::Control),
             _ => Some(Target::Watch),
         };
         if self.view.as_ref().map(|v| v.target) == wanted {
@@ -903,7 +898,7 @@ impl Session {
     /// Asks the view for cursor shapes exactly while a native-cursor owner
     /// controls; otherwise the server paints the cursor into the frames.
     async fn sync_cursor(&mut self) -> Option<End> {
-        let wanted = self.cursor == CursorMode::Native && self.mode == Mode::Control;
+        let wanted = self.cursor == CursorMode::Native && self.mode == DesktopMode::Control;
         let Some(view) = &mut self.view else {
             return None;
         };
@@ -938,9 +933,11 @@ impl Session {
         let Some(style) = self.cursor_style.filter(|_| self.cursor_unsent) else {
             return;
         };
-        let message = json!({ "type": "cursor", "style": style }).to_string();
+        let message = event_message(ServerEvent::Cursor {
+            style: style.to_owned(),
+        });
         if !matches!(
-            self.out.try_send(Message::Text(message.into())),
+            self.out.try_send(message),
             Err(mpsc::error::TrySendError::Full(_))
         ) {
             self.cursor_unsent = false;
@@ -953,11 +950,10 @@ impl Session {
             return None;
         }
         self.sent_size = Some(size);
-        self.send(Message::Text(
-            json!({ "type": "size", "width": size.0, "height": size.1 })
-                .to_string()
-                .into(),
-        ))
+        self.send(event_message(ServerEvent::Size {
+            width: size.0,
+            height: size.1,
+        }))
         .await
     }
 

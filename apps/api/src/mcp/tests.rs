@@ -270,7 +270,12 @@ for line in sys.stdin:
     }
     library.disconnect(&id).await.unwrap();
     assert_eq!(
-        library.connection_status(&id).await.unwrap().status,
+        library
+            .connection_status(&id)
+            .await
+            .unwrap()
+            .status
+            .as_str(),
         "disconnected"
     );
     let response = library
@@ -387,7 +392,7 @@ async fn owner_listings_name_the_http_origin_without_credentials() {
     let listings = library.listings().await.unwrap();
     let websites: Vec<_> = listings
         .iter()
-        .map(|listing| (listing.manifest.id.0.as_str(), listing.website.as_deref()))
+        .map(|listing| (listing.id.as_str(), listing.website.as_deref()))
         .collect();
     assert_eq!(
         websites,
