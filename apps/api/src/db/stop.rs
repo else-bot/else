@@ -126,7 +126,6 @@ pub async fn halt_accepted(
         }
     };
     let active = lifecycle::request_cancel(conn, bot_id, boundary, halt.unwind()).await?;
-    crate::db::steers::settle(&mut *conn).await?;
     if active.is_some() {
         return Ok(active);
     }

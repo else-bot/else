@@ -3,9 +3,11 @@
 //! Each transition is a named function whose `WHERE` clause checks the
 //! states it leaves. The `turns_*` triggers in the migrations are part of
 //! these transitions. A turn that ends runs [`ended`], so every end has the
-//! same follow-up; a caller that changed an active turn then settles the
-//! bot's pending stop ([`crate::db::stop::settle`]) and joined messages
-//! ([`crate::db::steers::settle`]) once, at the end of its transaction.
+//! same follow-up, and the transition that ended it then settles the
+//! messages joined to it ([`crate::db::steers::settle`]) and, when it left
+//! the bot with nothing active, the bot's pending stop
+//! ([`crate::db::stop::settle`]). A halt settles its stop once, after all of
+//! its steps ([`crate::db::stop::halt_accepted`]).
 
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -19,7 +21,7 @@ mod settle;
 #[cfg(test)]
 mod tests;
 
-pub use recovery::{end_restored_mail, end_restored_social, recover_after_restart, settle_orphans};
+pub use recovery::{Restored, end_restored, recover_after_restart, settle_orphans};
 use settle::{Disposition, End, Facts, Holds, Reason, limit_cut, settle};
 
 /// The error code of a turn the owner's Stop moved to `cancelling`. The
@@ -76,6 +78,15 @@ async fn ended(conn: &mut SqliteConnection, bot: Uuid, turn: Uuid) -> Result<(),
     crate::db::memory::log_turn_end(conn, turn).await?;
     Box::pin(crate::db::delegations::cancel_for_root(conn, turn)).await?;
     crate::db::handoffs::settle_ended(conn, Some(turn)).await
+}
+
+/// What follows a transition that ended a turn of `bot` or took one out of
+/// its active statuses: messages joined to an ended turn run on their own
+/// or end with it, and the bot's pending stop completes once nothing is
+/// active.
+async fn settled(conn: &mut SqliteConnection, bot: Uuid) -> Result<(), sqlx::Error> {
+    crate::db::stop::settle(conn, bot).await?;
+    crate::db::steers::settle(conn).await
 }
 
 /// Claim queued `turn` of `bot` for a new attempt: it moves to `preparing`
@@ -173,6 +184,7 @@ pub async fn fail_unstarted(
     .rows_affected();
     if updated == 1 {
         ended(conn, bot, turn).await?;
+        settled(conn, bot).await?;
     }
     Ok(())
 }
@@ -251,7 +263,7 @@ pub async fn interrupt_accepted(
     for turn in ended_turns {
         ended(conn, bot, turn).await?;
     }
-    Ok(())
+    crate::db::steers::settle(conn).await
 }
 
 /// Move `bot`'s active turn up to `boundary` to `cancelling`, unwinding as
@@ -336,7 +348,12 @@ pub async fn cancel_task(
     .fetch_optional(&mut *conn)
     .await?;
     match status {
-        Some(TurnStatus::Interrupted) => ended(conn, target, turn).await?,
+        // An idle turn leaves no active turn behind, so the target's stop
+        // stays as it was; only the messages joined to it settle.
+        Some(TurnStatus::Interrupted) => {
+            ended(conn, target, turn).await?;
+            crate::db::steers::settle(conn).await?;
+        }
         // An owner's Stop of its attempt alone becomes a full cancel.
         Some(_) => cancelled(conn, target, turn).await?,
         None if end_all(conn, turn, code, message).await? => cancelled(conn, target, turn).await?,
@@ -464,8 +481,7 @@ pub async fn finish_attempt(
             crate::db::memory::log_turn_end(conn, turn).await?;
         }
     }
-    crate::db::stop::settle(conn, bot).await?;
-    crate::db::steers::settle(conn).await
+    settled(conn, bot).await
 }
 
 /// How a joined owner message ends with the reply it joined.

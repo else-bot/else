@@ -376,7 +376,9 @@ async fn a_restore_ends_every_unfinished_social_turn() {
         .await
         .unwrap();
     }
-    super::end_restored_social(&mut conn).await.unwrap();
+    super::end_restored(&mut conn, super::Restored::Social)
+        .await
+        .unwrap();
     for turn in [queued, preparing] {
         assert_eq!(
             row(&mut conn, turn).await,
