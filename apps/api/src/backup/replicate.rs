@@ -122,9 +122,9 @@ impl Replicator {
     }
 
     /// Record how replicating `set_id` ended, here and on its local run,
-    /// in one transaction. A retired set stays retired: its remote objects
-    /// are gone.
-    async fn record(&self, set_id: &str, recorded: Recorded<'_>) -> Result<(), BackupError> {
+    /// in one transaction. A retired set stays retired, since its remote
+    /// objects are gone: false when the record was refused for that.
+    async fn record(&self, set_id: &str, recorded: Recorded<'_>) -> Result<bool, BackupError> {
         let (state, outcome, error, whole_assistant, uploaded_bytes) = match recorded {
             Recorded::Completed { whole, uploaded } => (
                 RemoteState::Completed,
@@ -165,11 +165,11 @@ impl Replicator {
         .rows_affected();
         if moved == 0 {
             tracing::warn!(set = %set_id, "a retired remote set was not recorded again");
-            return Ok(());
+            return Ok(false);
         }
         runs::remote(&mut tx, set_id, outcome).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn verified(&self) -> Result<Vec<(String, bool)>, BackupError> {
@@ -244,9 +244,12 @@ impl Replicator {
             match self.replicate_set(&dir.join(&set_id), key, &mut run).await {
                 Ok(whole) => {
                     let uploaded = run.stats.uploaded_bytes - before;
-                    self.record(&set_id, Recorded::Completed { whole, uploaded })
-                        .await?;
-                    run.stats.completed.push(set_id);
+                    if self
+                        .record(&set_id, Recorded::Completed { whole, uploaded })
+                        .await?
+                    {
+                        run.stats.completed.push(set_id);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(set = %set_id, error = %err, "replication failed");
@@ -1022,7 +1025,17 @@ mod tests {
             .execute(&r.pool)
             .await
             .unwrap();
-        r.record(set, Recorded::Failed(&failure)).await.unwrap();
+        assert!(
+            !r.record(
+                set,
+                Recorded::Completed {
+                    whole: true,
+                    uploaded: 1
+                }
+            )
+            .await
+            .unwrap()
+        );
         assert_eq!(
             states(&r, set).await,
             ("retired".into(), Some("completed".into())),

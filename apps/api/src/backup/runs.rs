@@ -146,26 +146,39 @@ pub async fn remote(
 
 /// On a restored database: the run that captured it was still running in
 /// its own snapshot, and the restore proves it completed. A set made
-/// without a run row has nothing to move.
+/// without a run row has nothing to move; a row in any state but running
+/// or completed means the set does not match its own history.
 pub async fn restored(conn: &mut SqliteConnection, set_id: &str) -> Result<(), BackupError> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE backup_runs SET local_status = ?2, finished_at = coalesce(finished_at, {NOW}), error = NULL
-         WHERE set_id = ?1 AND local_status = ?3"
-    )))
-    .bind(set_id)
-    .bind(LocalStatus::Completed)
-    .bind(LocalStatus::Running)
-    .execute(conn)
-    .await?;
-    Ok(())
+    let status: Option<LocalStatus> =
+        sqlx::query_scalar("SELECT local_status FROM backup_runs WHERE set_id = ?1")
+            .bind(set_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    match status {
+        None | Some(LocalStatus::Completed) => Ok(()),
+        Some(LocalStatus::Failed) => Err(BackupError::Invalid(
+            "the set's own run is recorded as failed".into(),
+        )),
+        Some(LocalStatus::Running) => {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE backup_runs SET local_status = ?2, finished_at = coalesce(finished_at, {NOW}), error = NULL
+                 WHERE set_id = ?1 AND local_status = ?3"
+            )))
+            .bind(set_id)
+            .bind(LocalStatus::Completed)
+            .bind(LocalStatus::Running)
+            .execute(conn)
+            .await?;
+            Ok(())
+        }
+    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn only_a_running_capture_completes_or_fails() {
+    async fn only_a_running_capture_completes_fails_or_is_restored() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -201,5 +214,21 @@ mod tests {
         let failed = start(&pool, "b").await.unwrap();
         fail(&pool, failed, "disk full").await.unwrap();
         assert_eq!(status("b").await, "failed");
+        let mut conn = pool.acquire().await.unwrap();
+        restored(&mut conn, "missing").await.unwrap();
+        assert!(matches!(
+            restored(&mut conn, "b").await,
+            Err(BackupError::Invalid(_))
+        ));
+        drop(conn);
+        start(&pool, "c").await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        restored(&mut conn, "c").await.unwrap();
+        drop(conn);
+        assert_eq!(
+            status("c").await,
+            "completed",
+            "a restore completes its own run"
+        );
     }
 }

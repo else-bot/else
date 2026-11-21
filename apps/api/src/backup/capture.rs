@@ -126,8 +126,17 @@ fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), Bac
     super::sync_dir(set_dir)
 }
 
-/// A staging directory this attempt created and marked as its own.
+/// A staging directory this attempt created and marked as its own. Dropping
+/// it removes the directory, so a failed or aborted capture (a shutdown
+/// that outlives its grace) leaves no plaintext behind; after
+/// [`Self::move_into`] nothing is left at the staging path.
 struct StagedSet(PathBuf);
+
+impl Drop for StagedSet {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// A set directory this attempt renamed into place, not yet complete.
 struct OwnedFinalSet(PathBuf);
@@ -137,23 +146,14 @@ impl StagedSet {
         let staging = super::staging_path(dir, set_id);
         super::private_dir(&staging)?;
         let staged = Self(staging);
-        match super::mark_owned(&staged.0) {
-            Ok(()) => Ok(staged),
-            Err(err) => Err(staged.discard(err)),
-        }
-    }
-
-    fn discard(self, err: BackupError) -> BackupError {
-        let _ = std::fs::remove_dir_all(&self.0);
-        err
+        super::mark_owned(&staged.0)?;
+        Ok(staged)
     }
 
     /// A failed rename never touches the destination: another set may own it.
     fn move_into(self, dir: &Path, set_id: &str) -> Result<OwnedFinalSet, BackupError> {
         let final_dir = dir.join(set_id);
-        if let Err(err) = super::rename_noreplace(&self.0, &final_dir) {
-            return Err(self.discard(err));
-        }
+        super::rename_noreplace(&self.0, &final_dir)?;
         let owned = OwnedFinalSet(final_dir);
         match super::sync_dir(dir) {
             Ok(()) => Ok(owned),
@@ -208,10 +208,7 @@ pub async fn create_set(
         capture_set(&capture, super::encryption_for(key, &salt)).await
     }
     .await;
-    let (manifest, completion) = match captured {
-        Ok(captured) => captured,
-        Err(err) => return Err(staged.discard(err)),
-    };
+    let (manifest, completion) = captured?;
     let path = staged
         .move_into(&config.dir, set_id)?
         .publish(&completion)?;

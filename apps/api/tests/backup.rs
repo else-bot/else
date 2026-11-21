@@ -658,8 +658,8 @@ async fn a_restore_ends_every_lease_claim_and_native_session() {
             vec!["[1024]"],
         ),
         (
-            "SELECT native_session_id FROM provider_sessions WHERE status = 'active'",
-            vec![],
+            "SELECT status FROM provider_sessions WHERE native_session_id = 'native'",
+            vec![r#"["retired"]"#],
         ),
         (
             "SELECT observed_state FROM bot_computers",
