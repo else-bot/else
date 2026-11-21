@@ -1,9 +1,7 @@
 mod form;
 pub(crate) mod oauth;
 
-use else_wire::email::AccountState;
-
-use else_wire::email::AccountHealth;
+use else_wire::email::{AccountHealth, AccountState, EmailAccount, EmailPreset};
 
 use crate::controls::{Control as _, Scale, Tier};
 use std::sync::Arc;
@@ -17,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{Client, EmailAccount, EmailPreset};
+use crate::api::Client;
 use form::Form;
 
 struct Introduction {

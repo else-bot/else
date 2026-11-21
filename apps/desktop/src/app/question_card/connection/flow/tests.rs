@@ -203,7 +203,7 @@ async fn a_removed_package_leaves_the_card_cancellable() {
 
 fn inbox(address: &str) -> Consent {
     Consent::Email(EmailConsent {
-        provider: else_wire::questions::EmailProvider::Gmail,
+        provider: else_wire::email::EmailProvider::Gmail,
         address: address.into(),
         replaces: None,
     })
@@ -295,7 +295,7 @@ async fn mail_server(
         bot: Uuid::new_v4(),
         question: Uuid::new_v4(),
         consent: Consent::Email(EmailConsent {
-            provider: else_wire::questions::EmailProvider::Icloud,
+            provider: else_wire::email::EmailProvider::Icloud,
             address: "owner@icloud.com".into(),
             replaces: None,
         }),

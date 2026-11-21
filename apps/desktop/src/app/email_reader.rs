@@ -6,10 +6,10 @@
 //! or mail client, and show where they go on hover.
 
 use super::ElseApp;
-use crate::api::{Client, EmailMessage, EmailPerson};
+use crate::api::Client;
 use crate::attachments::byte_size;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{MailLocation, TurnMail};
+use else_wire::email::{EmailMessage, EmailPerson, MailLocation, MessageRef, TurnMail};
 use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared};
 use gpui_kit::assets::IconName;
@@ -71,7 +71,7 @@ type Fetch = Shared<Task<Result<Arc<EmailMessage>, FetchError>>>;
 struct MailKey {
     client: usize,
     account_id: uuid::Uuid,
-    message: crate::api::MessageRef,
+    message: MessageRef,
 }
 
 impl MailKey {
@@ -924,14 +924,18 @@ pub(super) fn mail_banner(
             id.and_then(|id| bots.iter().find(|bot| bot.id == id))
                 .map(|bot| bot.name.as_str())
         };
-        let stamp = |at| super::message_row::short_stamp(at);
+        let stamp = |at: &str| {
+            at.parse()
+                .map(super::message_row::short_stamp)
+                .unwrap_or_else(|_| at.to_owned())
+        };
         let verb = match &first.location {
-            MailLocation::Arrived => "New email".to_owned(),
+            MailLocation::Arrived | MailLocation::Unknown => "New email".to_owned(),
             MailLocation::Archived(m) | MailLocation::Trashed(m) | MailLocation::Moved(m) => {
-                place_label(&first.location, name(m.by_bot_id), &stamp(m.at))
+                place_label(&first.location, name(m.by_bot_id), &stamp(&m.at))
             }
             MailLocation::Deleted(d) => {
-                place_label(&first.location, name(d.by_bot_id), &stamp(d.at))
+                place_label(&first.location, name(d.by_bot_id), &stamp(&d.at))
             }
         };
         let object = first.subject.clone().or_else(|| first.sender.clone());
@@ -984,7 +988,7 @@ pub(super) fn mail_banner(
 fn place_label(location: &MailLocation, by: Option<&str>, stamp: &str) -> String {
     let by = by.map(|name| format!(" by {name}")).unwrap_or_default();
     match location {
-        MailLocation::Arrived => "New email".to_owned(),
+        MailLocation::Arrived | MailLocation::Unknown => "New email".to_owned(),
         MailLocation::Archived(_) => format!("Archived{by} · {stamp}"),
         MailLocation::Trashed(_) if by.is_empty() => format!("In Trash · {stamp}"),
         MailLocation::Trashed(_) => format!("In Trash · moved{by} · {stamp}"),
@@ -1025,7 +1029,7 @@ pub(super) fn mail_outcome(turn: &crate::model::Turn) -> Option<String> {
         .collect();
     if let [only] = mine.as_slice() {
         return Some(match only {
-            MailLocation::Arrived => return None,
+            MailLocation::Arrived | MailLocation::Unknown => return None,
             MailLocation::Archived(_) => "Archived the email.".to_owned(),
             MailLocation::Trashed(_) => "Moved the email to Trash.".to_owned(),
             MailLocation::Moved(m) => format!("Moved the email to {}.", m.folder),
@@ -1065,8 +1069,8 @@ pub(super) fn mail_outcome(turn: &crate::model::Turn) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{Body, Html, Key, Page, Shown, area, body, place_label, places_summary};
-    use crate::model::{MailDeletion, MailLocation, MailMove, TurnMail};
     use else_visual::email::Rect;
+    use else_wire::email::{MailDeletion, MailLocation, MailMove, MessageRef, TurnMail};
     use gpui_kit::{Bounds, point, px, size};
     use gpui_kit::{RenderImage, Task};
     use std::sync::Arc;
@@ -1151,7 +1155,7 @@ mod tests {
     fn mail(location: MailLocation) -> TurnMail {
         TurnMail {
             account_id: uuid::Uuid::nil(),
-            message: crate::api::MessageRef {
+            message: MessageRef {
                 folder: "INBOX".into(),
                 uid_validity: 1,
                 uid: 9,
@@ -1167,7 +1171,7 @@ mod tests {
             folder: folder.into(),
             by_bot_id: None,
             by_turn_id: turn,
-            at: chrono::Utc::now(),
+            at: "2026-11-01T07:00:00Z".into(),
         }
     }
 
@@ -1200,7 +1204,7 @@ mod tests {
             mail(MailLocation::Deleted(MailDeletion {
                 by_bot_id: None,
                 by_turn_id: None,
-                at: chrono::Utc::now(),
+                at: "2026-11-01T07:00:00Z".into(),
             })),
         ];
         assert_eq!(

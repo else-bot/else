@@ -3,13 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use else_wire::email::EmailAuthorization;
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet,
     EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError,
     Scope, TokenResponse, TokenUrl,
     basic::{BasicClient, BasicErrorResponse, BasicTokenResponse},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -33,13 +34,6 @@ pub struct Complete {
     pub request_id: Uuid,
     pub state: String,
     pub code: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Started {
-    pub request_id: Uuid,
-    pub authorization_url: String,
-    pub expires_in: u64,
 }
 
 struct Pending {
@@ -152,7 +146,7 @@ impl OAuth {
             .await;
     }
 
-    pub async fn start(&self, request: Start) -> Result<Started, MailError> {
+    pub async fn start(&self, request: Start) -> Result<EmailAuthorization, MailError> {
         if !matches!(request.provider, Provider::Gmail | Provider::Microsoft) {
             return Err(MailError::new(MailErrorCode::OauthWizardUnavailable));
         }
@@ -216,7 +210,7 @@ impl OAuth {
                 Ok(())
             })
             .await?;
-        Ok(Started {
+        Ok(EmailAuthorization {
             request_id,
             authorization_url: url.into(),
             expires_in: 600,

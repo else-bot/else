@@ -5,10 +5,13 @@ use else_api::db::turns::ItemKind;
 use async_trait::async_trait;
 use else_api::socials::{
     Manager,
-    pairing::{Pairing, Progress, Purpose, View},
+    pairing::{Progress, Purpose},
     providers::{Session, Transport, whatsapp::Vault},
     store,
     types::*,
+};
+use else_wire::socials::{
+    Connection as WireConnection, Pairing, PairingView, Provider as WireProvider,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -118,7 +121,7 @@ fn manager(db: &TestDb, phone: &Arc<Phone>) -> Arc<Manager> {
 }
 
 /// Wait for the pairing to reach a state `done` accepts.
-async fn until(m: &Manager, purpose: Purpose, done: impl Fn(&Pairing) -> bool) -> View {
+async fn until(m: &Manager, purpose: Purpose, done: impl Fn(&Pairing) -> bool) -> PairingView {
     let mut after = 0;
     tokio::time::timeout(common::SETTLE, async {
         loop {
@@ -149,7 +152,7 @@ async fn whatsapp_setup(db: &TestDb) -> (Uuid, store::Setup) {
     (turn, setup)
 }
 
-async fn paired(db: &TestDb, m: &Arc<Manager>, phone: &Phone) -> (store::Setup, Connection) {
+async fn paired(db: &TestDb, m: &Arc<Manager>, phone: &Phone) -> (store::Setup, WireConnection) {
     let (_, setup) = whatsapp_setup(db).await;
     let purpose = Purpose::Setup(setup.id);
     m.start_pairing(purpose).await.unwrap();
@@ -174,7 +177,7 @@ async fn a_scanned_code_links_an_encrypted_device_and_returns_the_owners_words()
     let (setup, c) = paired(&db, &m, &phone).await;
     assert_eq!(
         (c.provider, c.remote_id.as_str(), c.username.as_deref()),
-        (Provider::WhatsApp, "33612345678", Some("+33612345678"))
+        (WireProvider::WhatsApp, "33612345678", Some("+33612345678"))
     );
     assert_eq!(stores(&db).await.len(), 1);
     assert_eq!(
@@ -193,7 +196,8 @@ async fn a_scanned_code_links_an_encrypted_device_and_returns_the_owners_words()
             .all(|v| !v.windows(DEVICE_SECRET.len()).any(|w| w == DEVICE_SECRET)),
         "device keys are sealed at rest"
     );
-    match store::credential(&db.pool, &key(), &c).await.unwrap() {
+    let record = store::connection(&db.pool, c.id).await.unwrap();
+    match store::credential(&db.pool, &key(), &record).await.unwrap() {
         Credential::Device(_) => {}
         Credential::Token(_) => panic!("a paired device holds a device key, not a token"),
     }
@@ -667,6 +671,8 @@ async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each(
     )
     .await;
     assert_eq!(done["pairing"]["state"], "paired", "{done}");
+    assert_eq!(done["pairing"]["connection"]["provider"], "whatsapp");
+    assert_eq!(done["pairing"]["connection"]["message_content"], false);
     let connection = done["pairing"]["connection"]["id"]
         .as_str()
         .unwrap()

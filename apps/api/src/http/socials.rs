@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     routing::{get, patch, post, put},
 };
+use else_wire::socials as wire;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -80,16 +81,19 @@ pub(super) fn error(e: Error) -> ApiError {
     }
 }
 async fn list(State(s): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
-        json!({"connections":store::connections(&s.db).await.map_err(error)?}),
-    ))
+    let connections = store::connections(&s.db).await.map_err(error)?;
+    Ok(Json(json!(wire::Connections {
+        connections: connections.iter().map(Into::into).collect(),
+    })))
 }
 async fn detail(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let connection = store::connection(&s.db, id).await.map_err(error)?;
-    Ok(Json(json!({ "connection": connection })))
+    Ok(Json(json!(wire::ConnectionEnvelope {
+        connection: (&connection).into(),
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +127,9 @@ async fn connect(
     .await
     .map_err(error)?;
     m.changed(c.id).await;
-    Ok(Json(json!({"connection":c})))
+    Ok(Json(json!(wire::ConnectionEnvelope {
+        connection: (&c).into(),
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,7 +154,9 @@ async fn active(
         }
         store::StateChange::Unchanged(c) => c,
     };
-    Ok(Json(json!({"connection":c})))
+    Ok(Json(json!(wire::ConnectionEnvelope {
+        connection: (&c).into(),
+    })))
 }
 /// Tell the connection's worker about a committed change from a task of its
 /// own, so a dropped request cannot lose the signal that stops in-flight work.
@@ -219,7 +227,9 @@ async fn toggle_trigger(
         .await
         .map_err(error)?;
     super::social_tools::reconnect(&s, &change).await;
-    Ok(Json(json!({ "trigger": change.value })))
+    Ok(Json(json!(wire::TriggerEnvelope {
+        trigger: (&change.value).into(),
+    })))
 }
 async fn delete_trigger(
     State(s): State<Arc<AppState>>,
@@ -249,7 +259,9 @@ async fn complete(
         .map_err(error)?;
     m.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
-    Ok(Json(json!({"setup":setup})))
+    Ok(Json(json!(wire::SetupEnvelope {
+        setup: (&setup).into(),
+    })))
 }
 async fn cancel(
     State(s): State<Arc<AppState>>,
@@ -260,7 +272,9 @@ async fn cancel(
         .map_err(error)?;
     s.socials.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
-    Ok(Json(json!({"setup":setup})))
+    Ok(Json(json!(wire::SetupEnvelope {
+        setup: (&setup).into(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -277,7 +291,7 @@ async fn start_pairing(
     purpose: fn(Uuid) -> Purpose,
 ) -> Result<Json<Value>, ApiError> {
     let view = s.socials.start_pairing(purpose(id)).await.map_err(error)?;
-    Ok(Json(json!({ "pairing": view })))
+    Ok(Json(json!(wire::PairingEnvelope { pairing: view })))
 }
 async fn pairing(
     State(s): State<Arc<AppState>>,
@@ -290,7 +304,7 @@ async fn pairing(
         .pairing(purpose(id), after.after)
         .await
         .map_err(error)?;
-    Ok(Json(json!({ "pairing": view })))
+    Ok(Json(json!(wire::PairingEnvelope { pairing: view })))
 }
 async fn stop_repair_pairing(
     State(s): State<Arc<AppState>>,

@@ -131,7 +131,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "steered_into": turn.steered_into,
         "steer_status": turn.steer_status,
         "secret_requests": turn.secret_requests.iter().map(else_wire::secrets::SecretRequest::from).collect::<Vec<_>>(),
-        "social_setups": turn.social_setups,
+        "social_setups": turn.social_setups.iter().map(else_wire::socials::SocialSetup::from).collect::<Vec<_>>(),
         "skill_installs": turn.skill_installs.iter().map(else_wire::skills::SkillInstall::from).collect::<Vec<_>>(),
         "questions": turn.questions.iter().map(else_wire::questions::Question::from).collect::<Vec<_>>(),
         "routine": turn.routine,

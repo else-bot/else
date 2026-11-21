@@ -11,7 +11,8 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::Client;
-use crate::api::socials::{Connection, Pairing, PairingTarget, PairingView, Provider};
+use crate::api::socials::PairingTarget;
+use else_wire::socials::{Connection, Pairing, PairingView, Provider};
 
 enum Receipt {
     Loading {
@@ -380,7 +381,7 @@ impl SocialsView {
             card.qr = qr_image(code).map(|image| (code.clone(), image));
         }
         let paired = match &view.pairing {
-            Pairing::Paired { connection } => Some(connection.clone()),
+            Pairing::Paired { connection } => Some(connection.as_ref().clone()),
             _ => None,
         };
         card.view = Some(view);
@@ -418,7 +419,7 @@ impl SocialsView {
         let Some(Pairing::Paired { connection }) = card.view.as_ref().map(|v| &v.pairing) else {
             return;
         };
-        let connection = connection.clone();
+        let connection = connection.as_ref().clone();
         let note = card.note(cx);
         self.complete(connection, note, window, cx);
     }

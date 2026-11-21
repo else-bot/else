@@ -5,7 +5,9 @@ use uuid::Uuid;
 use crate::api::{Client, ClientError, McpConnectionStatus, McpState};
 use crate::email::oauth;
 use crate::model::{APPROVE, DENY};
-use else_wire::questions::{EmailConsent, EmailProvider, McpConsent, Question, QuestionAnswer};
+use else_wire::email::EmailProvider;
+use else_wire::email::preset_config;
+use else_wire::questions::{EmailConsent, McpConsent, Question, QuestionAnswer};
 
 #[derive(Clone)]
 pub(super) struct Flow {
@@ -182,8 +184,8 @@ impl Flow {
             return client.replace_email_password(account.id, password).await;
         }
         let presets = client.clone().email_presets().await?;
-        let config = crate::api::preset_config(&presets, consent.provider, &consent.address)
-            .ok_or_else(|| {
+        let config =
+            preset_config(&presets, consent.provider, &consent.address).ok_or_else(|| {
                 ClientError::Protocol(format!(
                     "This server has no preset for {}.",
                     consent.provider.label()

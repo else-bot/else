@@ -75,7 +75,8 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
             bot_id,
             "bot.updated",
             json!({ "bot_id": bot_id, "bot": else_wire::bots::Bot::from(&bot), "routines": routines,
-                    "social_triggers": social_triggers, "mail_triggers": mail_triggers,
+                    "social_triggers": social_triggers.iter().map(else_wire::socials::Trigger::from).collect::<Vec<_>>(),
+                    "mail_triggers": mail_triggers.iter().map(else_wire::email::MailTrigger::from).collect::<Vec<_>>(),
                     "webhooks": webhooks, "watchers": watchers, "draft_grants": draft_grants,
                     "rules_version": rules_version }),
         )

@@ -373,7 +373,7 @@ fn provider_icon(provider: Provider) -> gpui_kit::component::Icon {
     match provider {
         Provider::Telegram => gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Send),
         Provider::Discord => gpui_kit::component::Icon::empty().path(crate::DISCORD_ICON),
-        Provider::WhatsApp => {
+        Provider::WhatsApp | Provider::Unknown => {
             gpui_kit::component::Icon::new(gpui_kit::assets::IconName::MessageSquare)
         }
     }

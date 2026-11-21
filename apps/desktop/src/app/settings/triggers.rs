@@ -1,11 +1,11 @@
 use super::{BotSettings, automation_section};
-use crate::api::socials::Provider;
 use crate::app::panel::{alert, item_name, meta, meta_line};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::controls::toggle;
 use crate::model::Conversation;
 use chrono::{DateTime, Utc};
+use else_wire::socials::Provider;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
@@ -315,7 +315,10 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
                 .unwrap_or_else(|| "Wakes the bot when new mail arrives.".to_owned()),
             pills,
             enabled: trigger.wake,
-            last_woke: trigger.last_woke_at,
+            last_woke: trigger
+                .last_woke_at
+                .as_deref()
+                .and_then(|at| at.parse().ok()),
         }
     });
     let social = conversation.social_triggers().iter().map(|trigger| {
@@ -329,7 +332,9 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
             icon: match trigger.provider {
                 Provider::Telegram => Icon::new(gpui_kit::assets::IconName::Send),
                 Provider::Discord => Icon::empty().path(crate::DISCORD_ICON),
-                Provider::WhatsApp => Icon::new(gpui_kit::assets::IconName::MessageSquare),
+                Provider::WhatsApp | Provider::Unknown => {
+                    Icon::new(gpui_kit::assets::IconName::MessageSquare)
+                }
             },
             title: trigger.title().to_owned(),
             delete_name: match trigger.destination {
@@ -343,7 +348,10 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
                 trigger.wake.label().to_owned(),
             ],
             enabled: trigger.enabled,
-            last_woke: trigger.last_woke_at,
+            last_woke: trigger
+                .last_woke_at
+                .as_deref()
+                .and_then(|at| at.parse().ok()),
         }
     });
     let webhooks = conversation.webhooks().iter().map(|webhook| TriggerCard {
@@ -382,8 +390,8 @@ fn still_pending(save: &Request<TriggerChange>, current: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Request, TriggerChange, pace, still_pending, trigger_cards};
-    use crate::api::socials::Trigger;
     use crate::model::{Conversation, Snapshot};
+    use else_wire::socials::Trigger;
     use serde_json::json;
     use uuid::Uuid;
 

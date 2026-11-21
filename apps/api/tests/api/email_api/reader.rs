@@ -207,8 +207,11 @@ async fn the_owner_reads_the_email_behind_a_mail_turn_and_its_bot_cannot() {
         .owner("GET", &messages_path(account.id, 9), None)
         .await;
     assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["message"], message);
     assert_eq!(read.body["subject"], "Verify your email");
     assert_eq!(read.body["html"], "<p>Hi</p>");
+    assert_eq!(read.body["html_omitted"], Value::Null);
+    assert_eq!(read.body["reply_to"], json!([]));
     assert_eq!(fetches(&mailbox), 1);
     let again = h
         .app

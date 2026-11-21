@@ -1,75 +1,13 @@
-use else_wire::socials::{ConnectionState, Health, SetupStatus};
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
+use else_wire::socials::{
+    Connection, ConnectionEnvelope, Connections, PairingEnvelope, PairingView, Provider, Trigger,
+    TriggerEnvelope,
+};
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{Client, ClientError};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Telegram,
-    Discord,
-    #[serde(rename = "whatsapp")]
-    WhatsApp,
-}
-
-impl Provider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Telegram => "Telegram",
-            Self::Discord => "Discord",
-            Self::WhatsApp => "WhatsApp",
-        }
-    }
-
-    pub fn portal(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::Telegram => Some(("Open BotFather", "https://t.me/BotFather")),
-            Self::Discord => Some((
-                "Open Discord Developer Portal",
-                "https://discord.com/developers/applications",
-            )),
-            Self::WhatsApp => None,
-        }
-    }
-
-    /// Whether the owner links this provider by scanning a code instead of
-    /// pasting a bot token.
-    pub fn pairs(self) -> bool {
-        match self {
-            Self::Telegram | Self::Discord => false,
-            Self::WhatsApp => true,
-        }
-    }
-
-    pub fn token_help(self) -> &'static str {
-        match self {
-            Self::Telegram => {
-                "Create a bot with @BotFather using /newbot. This token lets the API act as that bot in chats it joins. It does not connect your personal Telegram inbox."
-            }
-            Self::Discord => {
-                "Create an application in the Discord Developer Portal and copy its bot token. This token lets the API act as that bot, within its server and channel permissions. It does not connect your personal account."
-            }
-            Self::WhatsApp => {
-                "This links your personal WhatsApp account as a device, like WhatsApp Web. Bots read your chats and groups, and anything they send goes out as you, only after you approve it. WhatsApp does not allow unofficial clients and may ban accounts that act like bots."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SocialSetup {
-    pub id: Uuid,
-    pub provider: Provider,
-    pub reason: String,
-    pub status: SetupStatus,
-    pub connection_id: Option<Uuid>,
-}
 
 /// Where a device pairing links: a bot's setup card, or a connection the
 /// account signed out.
@@ -88,131 +26,9 @@ impl PairingTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Pairing {
-    Starting,
-    Code { code: String, expires_in: u64 },
-    Paired { connection: Connection },
-    Expired,
-    Failed { message: String },
-    Cancelled,
-}
-
-impl Pairing {
-    pub fn finished(&self) -> bool {
-        !matches!(self, Self::Starting | Self::Code { .. })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct PairingView {
-    pub revision: u64,
-    #[serde(flatten)]
-    pub pairing: Pairing,
-}
-
-#[derive(Deserialize)]
-struct PairingEnvelope {
-    pairing: PairingView,
-}
-
-impl SocialSetup {
-    pub fn is_pending(&self) -> bool {
-        self.status == SetupStatus::Pending
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Connection {
-    pub id: Uuid,
-    pub provider: Provider,
-    pub remote_id: String,
-    pub display_name: String,
-    pub username: Option<String>,
-    pub state: ConnectionState,
-    pub health: Health,
-    pub generation: i64,
-    pub instructions: String,
-}
-
-impl Connection {
-    /// Another webhook, app, or server takes this bot's messages, so none
-    /// reach the connection.
-    pub fn receiver_conflict(&self) -> bool {
-        self.health == Health::ReceiverConflict
-    }
-
-    pub fn health_label(&self) -> &str {
-        if self.receiver_conflict() {
-            "messages go elsewhere"
-        } else {
-            self.health.as_str()
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WakePolicy {
-    Mentions,
-    All,
-}
-
-impl WakePolicy {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Mentions => "on mention",
-            Self::All => "every message",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Trigger {
-    pub id: Uuid,
-    pub connection_id: Uuid,
-    pub bot_id: Uuid,
-    pub provider: Provider,
-    pub connection_name: String,
-    pub username: Option<String>,
-    pub destination: Option<String>,
-    pub destination_name: Option<String>,
-    pub wake: WakePolicy,
-    pub instructions: String,
-    pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    #[serde(default)]
-    pub last_woke_at: Option<DateTime<Utc>>,
-}
-
-impl Trigger {
-    pub fn title(&self) -> &str {
-        self.destination_name
-            .as_deref()
-            .or(self.destination.as_deref())
-            .unwrap_or("Any chat")
-    }
-}
-
-#[derive(Deserialize)]
-pub struct ConnectionDetail {
-    pub connection: Connection,
-}
-
-#[derive(Deserialize)]
-struct ConnectionEnvelope {
-    connection: Connection,
-}
-
 impl Client {
     pub async fn social_connections(self: Arc<Self>) -> Result<Vec<Connection>, ClientError> {
-        #[derive(Deserialize)]
-        struct Response {
-            connections: Vec<Connection>,
-        }
-        self.call::<Response>(
+        self.call::<Connections>(
             Method::GET,
             "/v1/connectors/socials/connections".into(),
             None,
@@ -224,7 +40,7 @@ impl Client {
     pub async fn social_connection(
         self: Arc<Self>,
         id: Uuid,
-    ) -> Result<ConnectionDetail, ClientError> {
+    ) -> Result<ConnectionEnvelope, ClientError> {
         self.call(
             Method::GET,
             format!("/v1/connectors/socials/connections/{id}"),
@@ -254,11 +70,7 @@ impl Client {
         id: Uuid,
         enabled: bool,
     ) -> Result<Trigger, ClientError> {
-        #[derive(Deserialize)]
-        struct Response {
-            trigger: Trigger,
-        }
-        self.call::<Response>(
+        self.call::<TriggerEnvelope>(
             Method::PATCH,
             format!("/v1/bots/{bot}/social-triggers/{id}"),
             Some(json!({"enabled": enabled})),

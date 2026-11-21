@@ -1,4 +1,5 @@
 use axum::http::StatusCode;
+use else_wire::email;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -11,6 +12,18 @@ pub enum Provider {
     Yahoo,
     Icloud,
     Imap,
+}
+
+impl From<Provider> for email::EmailProvider {
+    fn from(provider: Provider) -> Self {
+        match provider {
+            Provider::Gmail => Self::Gmail,
+            Provider::Microsoft => Self::Microsoft,
+            Provider::Yahoo => Self::Yahoo,
+            Provider::Icloud => Self::Icloud,
+            Provider::Imap => Self::Imap,
+        }
+    }
 }
 
 /// How an inbox card in chat signs the owner in to a provider.
@@ -35,6 +48,16 @@ pub struct Endpoint {
     pub start_tls: bool,
 }
 
+impl From<&Endpoint> for email::EmailEndpoint {
+    fn from(endpoint: &Endpoint) -> Self {
+        Self {
+            host: endpoint.host.clone(),
+            port: endpoint.port,
+            start_tls: endpoint.start_tls,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailConfig {
@@ -47,6 +70,22 @@ pub struct MailConfig {
     pub trash_folder: String,
     pub drafts_folder: String,
     pub sent_folder: String,
+}
+
+impl From<&MailConfig> for email::EmailConfig {
+    fn from(config: &MailConfig) -> Self {
+        Self {
+            provider: config.provider.into(),
+            address: config.address.clone(),
+            username: config.username.clone(),
+            imap: (&config.imap).into(),
+            smtp: (&config.smtp).into(),
+            archive_folder: config.archive_folder.clone(),
+            trash_folder: config.trash_folder.clone(),
+            drafts_folder: config.drafts_folder.clone(),
+            sent_folder: config.sent_folder.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -102,13 +141,35 @@ pub enum AccountState {
     Removed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl From<AccountState> for email::AccountState {
+    fn from(state: AccountState) -> Self {
+        match state {
+            AccountState::Active => Self::Active,
+            AccountState::Paused => Self::Paused,
+            AccountState::Removed => Self::Removed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Account {
     pub id: Uuid,
     pub config: MailConfig,
     pub generation: i64,
     pub state: AccountState,
     pub health: Health,
+}
+
+impl From<&Account> for email::EmailAccount {
+    fn from(account: &Account) -> Self {
+        Self {
+            id: account.id,
+            config: (&account.config).into(),
+            generation: account.generation,
+            state: account.state.into(),
+            health: (&account.health).into(),
+        }
+    }
 }
 
 /// What the runtime last saw of an account's mail server. It is stored and
@@ -149,6 +210,18 @@ impl Health {
     }
 }
 
+impl From<&Health> for email::AccountHealth {
+    fn from(health: &Health) -> Self {
+        match health {
+            Health::Unknown => Self::Unchecked,
+            Health::Connected => Self::Connected,
+            Health::CredentialRejected | Health::ReauthenticationRequired | Health::Failing(_) => {
+                Self::Failing(health.code().to_owned())
+            }
+        }
+    }
+}
+
 impl From<String> for Health {
     fn from(code: String) -> Self {
         match code.as_str() {
@@ -184,9 +257,20 @@ pub struct Permissions {
     pub wake: bool,
 }
 
+impl From<&Permissions> for email::Permissions {
+    fn from(permissions: &Permissions) -> Self {
+        Self {
+            read: permissions.read,
+            write: permissions.write,
+            send: permissions.send,
+            wake: permissions.wake,
+        }
+    }
+}
+
 /// A bot's trigger on an inbox it can read: whether new mail wakes it, and
 /// what to do then.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MailTrigger {
     pub account_id: Uuid,
     pub address: String,
@@ -197,12 +281,36 @@ pub struct MailTrigger {
     pub last_woke_at: Option<String>,
 }
 
+impl From<&MailTrigger> for email::MailTrigger {
+    fn from(trigger: &MailTrigger) -> Self {
+        Self {
+            account_id: trigger.account_id,
+            address: trigger.address.clone(),
+            state: trigger.state.into(),
+            health: Some(trigger.health.clone().into()),
+            wake: trigger.wake,
+            instructions: Some(trigger.instructions.clone()),
+            last_woke_at: trigger.last_woke_at.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct MessageRef {
     pub folder: String,
     pub uid_validity: u32,
     pub uid: u32,
+}
+
+impl From<&MessageRef> for email::MessageRef {
+    fn from(message: &MessageRef) -> Self {
+        Self {
+            folder: message.folder.clone(),
+            uid_validity: message.uid_validity,
+            uid: message.uid,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

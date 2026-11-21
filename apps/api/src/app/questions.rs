@@ -1054,11 +1054,11 @@ impl From<&Action> for wire::QuestionAction {
                 Self::EmailConnection {
                     email_connection: wire::EmailConsent {
                         provider: match email_connection.provider {
-                            Provider::Gmail => wire::EmailProvider::Gmail,
-                            Provider::Microsoft => wire::EmailProvider::Microsoft,
-                            Provider::Yahoo => wire::EmailProvider::Yahoo,
-                            Provider::Icloud => wire::EmailProvider::Icloud,
-                            Provider::Imap => wire::EmailProvider::Imap,
+                            Provider::Gmail => else_wire::email::EmailProvider::Gmail,
+                            Provider::Microsoft => else_wire::email::EmailProvider::Microsoft,
+                            Provider::Yahoo => else_wire::email::EmailProvider::Yahoo,
+                            Provider::Icloud => else_wire::email::EmailProvider::Icloud,
+                            Provider::Imap => else_wire::email::EmailProvider::Imap,
                         },
                         address: email_connection.address.clone(),
                         replaces: email_connection.replaces,

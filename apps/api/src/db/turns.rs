@@ -150,7 +150,7 @@ pub struct TurnRecord {
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
     pub routine: Option<Json<else_wire::routines::RoutineRun>>,
     /// The emails whose arrival started this turn, oldest first.
-    pub mail: Json<Vec<TurnMail>>,
+    pub mail: Json<Vec<else_wire::email::TurnMail>>,
     /// The outgoing draft revisions shown under this turn.
     #[sqlx(skip)]
     pub outgoing_drafts: Vec<crate::db::outgoing_drafts::OutgoingDraft>,
@@ -199,44 +199,6 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
                   (SELECT lower(hex(l.bot_id)) FROM turns l WHERE l.id = e.located_turn_id) AS by_bot_id
            FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
            WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
-
-/// An email that started a turn, which the owner can open in the reader.
-/// `message` is where it arrived, which the reader follows to where it is.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnMail {
-    pub account_id: Uuid,
-    pub message: crate::connectors::types::MessageRef,
-    pub subject: Option<String>,
-    pub sender: Option<String>,
-    pub location: MailLocation,
-}
-
-/// Where a turn's email is now ([`crate::connectors::types::Place`]), and
-/// which bot's turn put it there when one did.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum MailLocation {
-    Arrived,
-    Archived(MailMove),
-    Trashed(MailMove),
-    Moved(MailMove),
-    Deleted(MailDeletion),
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MailMove {
-    pub folder: String,
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MailDeletion {
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: String,
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BotTask {

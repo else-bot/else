@@ -2600,6 +2600,7 @@ dependencies = [
 name = "else-visual"
 version = "0.0.30"
 dependencies = [
+ "else-wire",
  "futures-channel",
  "futures-executor",
  "html5ever",

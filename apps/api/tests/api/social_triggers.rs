@@ -69,6 +69,9 @@ async fn a_bot_watches_a_chat_and_the_owner_pauses_and_deletes_it_from_its_sideb
         )
         .await;
     assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
+    assert_eq!(paused.body["trigger"]["id"], id);
+    assert_eq!(paused.body["trigger"]["wake"], "mentions");
+    assert_eq!(paused.body["trigger"]["last_woke_at"], Value::Null);
     assert_eq!(shown(app, &main).await[0]["enabled"], false);
 
     let deleted = app

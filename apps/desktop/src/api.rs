@@ -35,7 +35,6 @@ pub use vault::*;
 mod mcp;
 pub use mcp::*;
 mod email;
-pub use email::*;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;

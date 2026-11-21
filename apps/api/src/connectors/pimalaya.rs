@@ -971,7 +971,10 @@ pub fn read(fetched: &Fetched, message: &MessageRef) -> Result<Value, MailError>
 }
 
 /// A message as the owner's reader shows it.
-pub fn view(fetched: &Fetched, message: &MessageRef) -> Result<Value, MailError> {
+pub fn view(
+    fetched: &Fetched,
+    message: &MessageRef,
+) -> Result<else_wire::email::EmailMessage, MailError> {
     let parsed = parse(fetched)?;
     Ok(mime::view(&parsed, message, fetched.received_at.clone()))
 }

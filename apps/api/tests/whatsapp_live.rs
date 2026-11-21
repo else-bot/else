@@ -7,11 +7,12 @@
 mod common;
 
 use else_api::socials::{
-    pairing::{Pairing, Progress},
+    pairing::Progress,
     providers::{Native, Transport, whatsapp::Vault},
     store,
     types::*,
 };
+use else_wire::socials::Pairing;
 
 use tokio_util::sync::CancellationToken;
 

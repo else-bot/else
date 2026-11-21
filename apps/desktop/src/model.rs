@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use else_wire::delegations::Delegation;
+use else_wire::email::{MailTrigger, TurnMail};
 use else_wire::items::ItemKind;
 use else_wire::notices::{ExchangeAsk, OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftKind, DraftStatus, OutgoingDraft};
@@ -20,14 +21,13 @@ use else_wire::secrets::SecretRequest;
 #[cfg(test)]
 use else_wire::secrets::SecretRequestStatus;
 use else_wire::skills::{SkillInstall, SkillInstallStatus};
+use else_wire::socials::{SocialSetup, Trigger};
 use else_wire::turns::TurnError;
 use else_wire::turns::TurnStatus;
 use else_wire::waits::{ComputerJobWait, McpWait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::MailTrigger;
-use crate::api::socials::Trigger;
 use else_wire::bots::Activity;
 use else_wire::bots::Bot;
 
@@ -282,7 +282,7 @@ pub struct Turn {
     #[serde(default)]
     pub outgoing_drafts: Vec<OutgoingDraft>,
     #[serde(default)]
-    pub social_setups: Vec<crate::api::socials::SocialSetup>,
+    pub social_setups: Vec<SocialSetup>,
     /// Tasks this turn handed to other bots. Absent from older servers.
     #[serde(default)]
     pub delegations: Vec<Delegation>,
@@ -297,60 +297,6 @@ pub struct Turn {
     pub computer_handoffs: Vec<ComputerHandoff>,
     #[serde(default)]
     pub owner_notices: Vec<OwnerNotice>,
-}
-
-/// An email that started a turn, which the owner can open in the reader.
-/// `message` is where it arrived; the server follows it from there.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct TurnMail {
-    pub account_id: Uuid,
-    pub message: crate::api::MessageRef,
-    /// Absent from older servers, and for mail that arrived before them.
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub sender: Option<String>,
-    #[serde(default)]
-    pub location: MailLocation,
-}
-
-/// Where a turn's email is now, and which bot's turn put it there.
-/// Older servers send none, which reads as where it arrived.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum MailLocation {
-    #[default]
-    Arrived,
-    Archived(MailMove),
-    Trashed(MailMove),
-    Moved(MailMove),
-    Deleted(MailDeletion),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct MailMove {
-    pub folder: String,
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct MailDeletion {
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: DateTime<Utc>,
-}
-
-impl MailLocation {
-    /// The turn that moved or deleted the email, when a bot did.
-    pub fn by_turn(&self) -> Option<Uuid> {
-        match self {
-            Self::Arrived => None,
-            Self::Archived(m) | Self::Trashed(m) | Self::Moved(m) => m.by_turn_id,
-            Self::Deleted(d) => d.by_turn_id,
-        }
-    }
 }
 
 /// One thing a bot waits on, as the owner sees it above the composer.
@@ -978,7 +924,7 @@ impl Conversation {
         waits
     }
 
-    pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {
+    pub fn social_setup(&self, id: Uuid) -> Option<&SocialSetup> {
         self.turns
             .values()
             .flat_map(|t| &t.social_setups)

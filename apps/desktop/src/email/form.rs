@@ -1,8 +1,11 @@
 use super::*;
-use crate::api::{ClientError, EmailConfig, EmailEndpoint};
+use crate::api::ClientError;
 use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track, text_field};
 use else_wire::bots::Bot;
-use else_wire::questions::EmailProvider;
+use else_wire::email::EmailConfig;
+use else_wire::email::EmailEndpoint;
+use else_wire::email::EmailProvider;
+use else_wire::email::preset_config;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
@@ -221,7 +224,7 @@ impl Form {
                 sent_folder: "Sent".into(),
             }
         } else {
-            crate::api::preset_config(presets, self.provider, &address)
+            preset_config(presets, self.provider, &address)
                 .ok_or("This server has no preset for that provider.")?
         };
         Ok(Request::Password(Box::new(config), password))

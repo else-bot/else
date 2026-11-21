@@ -18,6 +18,7 @@ use else_api::{
         types::*,
     },
 };
+use else_wire::socials::Connection as WireConnection;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -122,7 +123,7 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
             .unwrap();
     assert!(!String::from_utf8_lossy(&cipher).contains(token().0.as_str()));
     assert!(
-        !serde_json::to_string(&c)
+        !serde_json::to_string(&WireConnection::from(&c))
             .unwrap()
             .contains(token().0.as_str())
     );
@@ -1573,6 +1574,11 @@ async fn completing_another_bots_setup_keeps_an_approved_send_running() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["setup"]["status"], "connected");
+    assert_eq!(body["setup"]["connection_id"], json!(c.id));
+    assert_eq!(body["setup"]["bot_id"], json!(setup.bot_id));
+    assert_eq!(body["setup"]["turn_id"], json!(setup.turn_id));
+    assert_eq!(body["setup"]["note"], Value::Null);
     fake.release.notify_one();
     let sent = common::until("the other bot's send", send).await.unwrap();
     assert!(sent.is_ok(), "the other bot's send survives: {sent:?}");
@@ -1626,8 +1632,8 @@ async fn resuming_reports_the_stored_connection() {
     };
     let stored = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(
-        serde_json::to_value(&returned).unwrap(),
-        serde_json::to_value(&stored).unwrap()
+        WireConnection::from(&returned),
+        WireConnection::from(&stored)
     );
 }
 

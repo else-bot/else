@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::email::EmailProvider;
+
 wire_state! {
     /// A question's kind; a newer server's kind keeps its text so an
     /// approval card can still name it.
@@ -189,30 +191,6 @@ pub struct EmailConsent {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<i64>,
-}
-
-wire_state! {
-    pub enum EmailProvider {
-        Gmail = "gmail",
-        Microsoft = "microsoft",
-        Yahoo = "yahoo",
-        Icloud = "icloud",
-        Imap = "imap",
-    }
-    _ => Unknown
-}
-
-impl EmailProvider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Gmail => "Gmail",
-            Self::Microsoft => "Microsoft 365",
-            Self::Yahoo => "Yahoo",
-            Self::Icloud => "iCloud",
-            Self::Imap => "Other email",
-            Self::Unknown => "Unknown email provider",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

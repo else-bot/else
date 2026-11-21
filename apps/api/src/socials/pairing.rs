@@ -5,7 +5,7 @@
 //! transaction.
 
 use super::{Manager, providers::whatsapp::Vault, store, types::*};
-use serde::Serialize;
+use else_wire::socials::{Pairing, PairingView};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -21,49 +21,12 @@ pub enum Purpose {
     Repair(Uuid),
 }
 
-/// What the pairing card shows.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Pairing {
-    /// Waiting for a code, or linking the phone that scanned one.
-    Starting,
-    /// Scan `code` with WhatsApp → Linked devices before `expires_in` seconds.
-    Code {
-        code: String,
-        expires_in: u64,
-    },
-    /// Linked; the connection now holds the device.
-    Paired {
-        connection: Box<Connection>,
-    },
-    /// No code was scanned in time. Start again for a new one.
-    Expired,
-    Failed {
-        message: String,
-    },
-    Cancelled,
-}
-impl Pairing {
-    pub fn finished(&self) -> bool {
-        !matches!(self, Self::Starting | Self::Code { .. })
-    }
-}
-
-/// A pairing as the card sees it. `revision` advances on every change, so
-/// a card can wait for the next one.
-#[derive(Debug, Clone, Serialize)]
-pub struct View {
-    pub revision: u64,
-    #[serde(flatten)]
-    pub pairing: Pairing,
-}
-
 /// How a provider reports a pairing's progress: the codes it shows and the
 /// moment a phone scanned one. The pairing itself decides how it ends.
-pub struct Progress(watch::Sender<View>);
+pub struct Progress(watch::Sender<PairingView>);
 impl Progress {
-    pub fn new() -> (Self, watch::Receiver<View>) {
-        let (view, watched) = watch::channel(View {
+    pub fn new() -> (Self, watch::Receiver<PairingView>) {
+        let (view, watched) = watch::channel(PairingView {
             revision: 1,
             pairing: Pairing::Starting,
         });
@@ -84,7 +47,7 @@ impl Progress {
 }
 
 pub(super) struct Live {
-    pub(super) view: watch::Receiver<View>,
+    pub(super) view: watch::Receiver<PairingView>,
     pub(super) stop: CancellationToken,
 }
 
@@ -99,7 +62,7 @@ impl Manager {
     /// Start pairing for `purpose`, or return the one already running, or a
     /// setup's that already linked. Any other finished pairing is replaced,
     /// which is how the owner gets a new code.
-    pub async fn start_pairing(self: &Arc<Self>, purpose: Purpose) -> Result<View, Error> {
+    pub async fn start_pairing(self: &Arc<Self>, purpose: Purpose) -> Result<PairingView, Error> {
         let provider = match purpose {
             Purpose::Setup(id) => {
                 let setup = store::setup(&self.db, id).await?;
@@ -155,7 +118,7 @@ impl Manager {
 
     /// The pairing's view once its revision passes `after`, or the current
     /// one when [`POLL`] runs out.
-    pub async fn pairing(&self, purpose: Purpose, after: u64) -> Result<View, Error> {
+    pub async fn pairing(&self, purpose: Purpose, after: u64) -> Result<PairingView, Error> {
         if let Purpose::Setup(id) = purpose
             && store::setup(&self.db, id).await?.status != store::SetupStatus::Pending
         {
@@ -200,7 +163,7 @@ impl Manager {
     ) {
         let last = match self.link(purpose, provider, &progress, stop.clone()).await {
             Ok(connection) => Pairing::Paired {
-                connection: Box::new(connection),
+                connection: Box::new((&connection).into()),
             },
             Err(_) if stop.is_cancelled() => Pairing::Cancelled,
             Err(Error::Expired) => Pairing::Expired,
