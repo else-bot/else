@@ -9,6 +9,68 @@ pub const SECRET_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 /// hang: a passing wait returns as soon as the state appears, and several
 /// suites sharing one machine can slow a step tenfold.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// [`SETTLE`] for a live test, whose turns run a real model.
+pub const LIVE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Run `probe` until it returns a value, sleeping 25 ms after each miss. It
+/// has no deadline: bound it with [`until`]. Use [`never_polled`] for negative checks.
+pub async fn poll<T, F: std::future::Future<Output = Option<T>>>(
+    mut probe: impl FnMut() -> F,
+) -> T {
+    loop {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Wait for `event`, which the test expects to happen. The deadline is
+/// [`SETTLE`] and only bounds a hang.
+pub async fn until<T>(what: &str, event: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(SETTLE, event)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+/// Assert that `event` does not happen within `window`. Keep the window
+/// short: every passing run waits all of it.
+pub async fn never<T: std::fmt::Debug>(
+    what: &str,
+    window: std::time::Duration,
+    event: impl std::future::Future<Output = T>,
+) {
+    // Check the window first, so an event that became ready after it ended
+    // is not reported as inside it.
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep(window) => {}
+        value = event => panic!("{what} within {window:?}: {value:?}"),
+    }
+}
+
+/// Assert that `probe` returns `None` throughout `window`, including one
+/// last run that starts after the window ends. Keep the window short:
+/// every passing run waits all of it.
+pub async fn never_polled<T: std::fmt::Debug, F: std::future::Future<Output = Option<T>>>(
+    what: &str,
+    window: std::time::Duration,
+    mut probe: impl FnMut() -> F,
+) {
+    let end = tokio::time::Instant::now() + window;
+    loop {
+        let last = tokio::time::Instant::now() >= end;
+        if let Some(value) = probe().await {
+            panic!("{what} within {window:?}: {value:?}");
+        }
+        if last {
+            return;
+        }
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        tokio::time::sleep(left.min(std::time::Duration::from_millis(25))).await;
+    }
+}
+
 /// A chunked local backup set rebuilt whole in a new directory, as a remote
 /// download leaves it, for tests that read or damage its files.
 pub fn rebuilt_set(
@@ -340,27 +402,36 @@ impl TestApp {
         config
     }
 
-    pub async fn wait_turn(&self, turn_id: &str, statuses: &[&str]) -> String {
-        self.wait_turn_for(turn_id, statuses, SETTLE).await
+    pub async fn wait_turn(&self, turn_id: impl std::fmt::Display, statuses: &[&str]) -> String {
+        self.wait_turn_within(turn_id, statuses, SETTLE).await
     }
 
-    pub async fn wait_turn_for(
+    /// [`Self::wait_turn`] for a turn a real provider runs.
+    pub async fn wait_live_turn(
         &self,
-        turn_id: &str,
+        turn_id: impl std::fmt::Display,
         statuses: &[&str],
-        timeout: std::time::Duration,
     ) -> String {
-        let id: uuid::Uuid = turn_id.parse().unwrap();
-        for _ in 0..(timeout.as_millis() / 25) {
+        self.wait_turn_within(turn_id, statuses, LIVE).await
+    }
+
+    async fn wait_turn_within(
+        &self,
+        turn_id: impl std::fmt::Display,
+        statuses: &[&str],
+        deadline: std::time::Duration,
+    ) -> String {
+        let id: uuid::Uuid = turn_id.to_string().parse().unwrap();
+        let status = poll(|| async {
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
                 .bind(id)
                 .fetch_one(&self.db.pool)
                 .await
                 .unwrap();
-            if statuses.contains(&status.as_str()) {
-                return status;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            statuses.contains(&status.as_str()).then_some(status)
+        });
+        if let Ok(status) = tokio::time::timeout(deadline, status).await {
+            return status;
         }
         let all: Vec<(i64, String, Option<String>)> =
             sqlx::query_as("SELECT turn_no, status, error_code FROM turns ORDER BY created_at")

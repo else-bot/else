@@ -93,8 +93,7 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
-        else {
+        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
@@ -186,32 +185,37 @@ impl Drop for Cleanup {
 
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
-    loop {
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+    let mut last_status = String::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, error): (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+                    .bind(turn)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
+                let text: String = sqlx::query_scalar(
+                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
+                )
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
-        if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-            let text: String = sqlx::query_scalar(
-                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-            )
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-            note(&format!(
-                "  -> {status} {error:?} after {:?}: {}",
-                started.elapsed(),
-                text.chars().take(600).collect::<String>()
-            ));
-            return (status, text);
+                note(&format!(
+                    "  -> {status} {error:?} after {:?}: {}",
+                    started.elapsed(),
+                    text.chars().take(600).collect::<String>()
+                ));
+                return (status, text);
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(started.elapsed() < timeout, "turn {turn} still {status}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
 }
 
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
@@ -522,14 +526,15 @@ async fn both_providers_read_pixels_from_their_desktop() {
             "Take three screenshots, one at a time, and describe each in detail.",
         )
         .await;
-    let started_turn = Instant::now();
-    while turn_activity(&pool, &bot, turn).await.is_empty() {
-        assert!(
-            started_turn.elapsed() < Duration::from_secs(120),
-            "no screenshot was taken"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    const SCREENSHOT_WAIT: Duration = Duration::from_secs(120);
+    tokio::time::timeout(
+        SCREENSHOT_WAIT,
+        common::poll(|| async {
+            (!turn_activity(&pool, &bot, turn).await.is_empty()).then_some(())
+        }),
+    )
+    .await
+    .expect("the bot took a screenshot");
     let (status, body) = api
         .call(
             reqwest::Method::POST,
@@ -548,27 +553,30 @@ async fn both_providers_read_pixels_from_their_desktop() {
         turn_activity(&pool, &bot, turn).await.len() < 3,
         "stopped before finishing"
     );
-    let turn = loop {
-        let (status, body) = api
-            .call(
-                reqwest::Method::POST,
-                &format!("/v1/bots/{bot}/turns"),
-                Some(
-                    json!({ "request_id": Uuid::new_v4(), "provider_id": "claude",
+    let turn = common::until("the API to accept the turn after cancellation", async {
+        loop {
+            let (status, body) = api
+                .call(
+                    reqwest::Method::POST,
+                    &format!("/v1/bots/{bot}/turns"),
+                    Some(
+                        json!({ "request_id": Uuid::new_v4(), "provider_id": "claude",
                                "text": "Reply with the single word READY." }),
-                ),
-            )
-            .await;
-        if status < 300 {
-            break body["turn"]["id"]
-                .as_str()
-                .unwrap()
-                .parse::<Uuid>()
-                .unwrap();
+                    ),
+                )
+                .await;
+            if status < 300 {
+                break body["turn"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
+                    .unwrap();
+            }
+            assert_eq!(status, 409, "{body}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        assert_eq!(status, 409, "{body}");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
+    })
+    .await;
     let (status, reply) = finish(&pool, turn, long).await;
     assert_eq!(status, "completed", "{reply}");
     note("== 6. the API dies during a screenshot turn (the provider loses its tools)");
@@ -580,19 +588,18 @@ async fn both_providers_read_pixels_from_their_desktop() {
             "Take a screenshot with computer_screenshot, then describe the desktop.",
         )
         .await;
-    let started_turn = Instant::now();
-    loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if status == "running" {
-            break;
-        }
-        assert!(started_turn.elapsed() < Duration::from_secs(60));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        &format!("turn {turn} to start running"),
+        common::poll(|| async {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            (status == "running").then_some(())
+        }),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     api.kill();
     let api = install.serve().await;

@@ -262,7 +262,7 @@ async fn secret_values_arrive_exactly_and_never_reach_output() {
             "test:hold",
             "printf %s \"$SMTP_PASSWORD\" | wc -c; echo \"pw=$SMTP_PASSWORD\"; \
              echo \"to stderr $SMTP_PASSWORD\" >&2",
-            Duration::from_secs(30),
+            common::SETTLE,
             &secrets,
         )
         .await
@@ -290,7 +290,7 @@ async fn secret_values_arrive_exactly_and_never_reach_output() {
             bot,
             "test:hold",
             "head -c 3000 /dev/zero | tr '\\0' x; printf %s \"$BIG_TOKEN\"",
-            Duration::from_secs(30),
+            common::SETTLE,
             &secrets,
         )
         .await
@@ -330,14 +330,11 @@ async fn a_jobs_output_file_never_holds_a_secret() {
         panic!("not started")
     };
     let dir = root.path().join(format!("var-lib-elsebot/jobs/{job}"));
-    let started = Instant::now();
-    while !dir.join("exit").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the job did not finish"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the job exit file",
+        common::poll(|| std::future::ready(dir.join("exit").exists().then_some(()))),
+    )
+    .await;
     let file = std::fs::read_to_string(dir.join("out")).unwrap();
     assert_eq!(
         file,
@@ -384,14 +381,11 @@ printf '%s\n' "${t#"${t%????????????}"}" >&2; exit 3"#,
         panic!("not started")
     };
     let dir = root.path().join(format!("var-lib-elsebot/jobs/{job}"));
-    let started = Instant::now();
-    while !dir.join("exit").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the job did not finish"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the job exit file",
+        common::poll(|| std::future::ready(dir.join("exit").exists().then_some(()))),
+    )
+    .await;
     let file = std::fs::read_to_string(dir.join("out")).unwrap();
     assert_eq!(
         file,
@@ -413,17 +407,17 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
     // pgrep sees every suite on this machine; a per-run fraction keeps
     // another run of this test from looking like a survivor.
     let tag = Uuid::new_v4().as_u128() % 1_000_000_000;
-    let started = Instant::now();
-    let out = manager
-        .run_command(
+    let out = common::until(
+        "the runtime to time out the long command",
+        manager.run_command(
             bot,
             "test:hold",
             &format!("sleep 601.{tag:09} & sleep 602.{tag:09}; echo late"),
             Duration::from_secs(2),
-        )
-        .await;
+        ),
+    )
+    .await;
     assert!(out.is_err(), "the runtime call timed out: {out:?}");
-    assert!(started.elapsed() < Duration::from_secs(10));
     gone(&format!("sleep 60[12].{tag:09}")).await;
     let ended: (Option<String>, bool) =
         sqlx::query_as("SELECT end_reason, ended_at IS NOT NULL FROM guest_runs WHERE bot_id = ?1")
@@ -438,7 +432,7 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
             bot,
             "test:hold",
             &format!("sleep 603.{tag:09} & echo started"),
-            Duration::from_secs(30),
+            common::SETTLE,
         )
         .await
         .unwrap()

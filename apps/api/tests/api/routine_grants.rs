@@ -1,7 +1,5 @@
 use crate::common;
 
-use std::time::Duration;
-
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
@@ -49,20 +47,21 @@ pub(super) async fn create(
 }
 
 pub(super) async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
-    for _ in 0..400 {
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+    common::until(
+        "terminal routine runs to be reviewed",
+        common::poll(|| async {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                             WHERE NOT rr.reviewed
                               AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
-        )
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if !pending {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+            )
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (!pending).then_some(())
+        }),
+    )
+    .await;
     routines::admit_due(&app.db.pool, &app.state.registry, None, now, 8)
         .await
         .unwrap();
@@ -86,11 +85,6 @@ pub(super) async fn next_run(app: &TestApp, routine: Uuid) -> DateTime<Utc> {
         .fetch_one(&app.db.pool)
         .await
         .unwrap()
-}
-
-pub(super) async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
 }
 
 pub(super) async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
@@ -209,7 +203,7 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
             .is_empty()
     );
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
 
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
@@ -220,7 +214,7 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
         "the destructive grant does not cover external actions"
     );
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
 
     let (manual, token) = h
         .running(&main, &format!("{GATE} delete a branch for me"))
@@ -231,13 +225,13 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
         "routine approval does not cover owner requests"
     );
     h.release(manual).await;
-    wait(app, manual, "waiting").await;
+    app.wait_turn(manual, &["waiting"]).await;
     answer(app, &main, question, "deny").await;
-    wait(app, manual, "completed").await;
+    app.wait_turn(manual, &["completed"]).await;
     // An owner message leaves the waiting run alone; it must end before the
     // next occurrence, which would otherwise be skipped as overlapping.
     answer(app, &main, send_question, "deny").await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     set_prompt(app, &main, prune, &format!("{GATE} Delete all branches.")).await;
     assert!(
@@ -284,7 +278,7 @@ async fn chat_bot_approval_is_idempotent_and_a_retry_cannot_restore_it_after_rev
     assert_eq!(retry.result["question_id"], first.result["question_id"]);
     asks(app, &token, delete_args("feature-b")).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -329,9 +323,9 @@ async fn chat_approval_requires_the_current_owner_message_and_current_owned_rout
     let refused = tool(app, &other_token, "confirm_permission", args.clone()).await;
     assert_eq!(refused.code(), "ROUTINE_CHANGED", "{}", refused.body);
     h.release(other_turn).await;
-    wait(app, other_turn, "completed").await;
+    app.wait_turn(other_turn, &["completed"]).await;
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
 
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
@@ -344,7 +338,7 @@ async fn chat_approval_requires_the_current_owner_message_and_current_owned_rout
     .await;
     assert_eq!(refused.code(), "NOT_AUTHORIZED", "{}", refused.body);
     h.release(run).await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     let (later, token) = h.running(&main, &format!("{GATE} continue")).await;
     let refused = tool(app, &token, "confirm_permission", args).await;
@@ -354,7 +348,7 @@ async fn chat_approval_requires_the_current_owner_message_and_current_owned_rout
         "old owner messages grant nothing"
     );
     h.release(later).await;
-    wait(app, later, "completed").await;
+    app.wait_turn(later, &["completed"]).await;
     assert!(routine_grants(app).await.is_empty());
 }
 
@@ -426,7 +420,7 @@ async fn a_chat_authorization_cannot_be_reused_after_the_routine_task_changes() 
         )
     ));
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -454,7 +448,7 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
     )
     .await;
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
 
     let (manual, token) = h.running(&main, &format!("{GATE} tidy up")).await;
     let (question, choices) = asks(app, &token, delete_args("old")).await;
@@ -463,9 +457,9 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
         "an owner request offers the bot grant"
     );
     h.release(manual).await;
-    wait(app, manual, "waiting").await;
+    app.wait_turn(manual, &["waiting"]).await;
     answer(app, &main, question, "approve_forever").await;
-    wait(app, manual, "completed").await;
+    app.wait_turn(manual, &["completed"]).await;
 
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
@@ -475,23 +469,23 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
         "the bot grant does not cover a routine run, which offers only its own grant"
     );
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, question, "approve_routine").await;
     assert_eq!(routine_grants(app).await, [(prune, 1)]);
 
     let token = h.continued(run, &token).await;
     runs_without_asking(app, &token, delete_args("feature-b")).await;
     h.release(run).await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     let other_run = run_of(&fire(app, other_due).await, other);
     let (_, token) = h.started(other_run).await;
     let (question, choices) = asks(app, &token, delete_args("feature-c")).await;
     assert_eq!(choices, APPROVE_ROUTINE, "another routine has no grant");
     h.release(other_run).await;
-    wait(app, other_run, "waiting").await;
+    app.wait_turn(other_run, &["waiting"]).await;
     answer(app, &main, question, "deny").await;
-    wait(app, other_run, "completed").await;
+    app.wait_turn(other_run, &["completed"]).await;
 
     let (manual, token) = h.running(&main, &format!("{GATE} tidy up more")).await;
     let called = tool(
@@ -503,7 +497,7 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
     .await;
     assert_eq!(called.result["scope"], "bot", "{}", called.body);
     h.release(manual).await;
-    wait(app, manual, "completed").await;
+    app.wait_turn(manual, &["completed"]).await;
 
     let run = run_of(&fire(app, next_run(app, prune).await).await, prune);
     let (_, token) = h.started(run).await;
@@ -568,14 +562,14 @@ async fn a_destructive_routine_grant_does_not_cover_an_external_action() {
     )
     .await;
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
     let (question, _) = asks(app, &token, delete_args("feature-a")).await;
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, question, "approve_routine").await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     let run = run_of(&fire(app, next_run(app, prune).await).await, prune);
     let (_, token) = h.started(run).await;
@@ -595,13 +589,13 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
     let (setup, token) = h.running(&main, &format!("{GATE} set up")).await;
     let (prune, due) = create(app, &token, "Prune branches", &first, YEARLY).await;
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
 
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
     let (question, _) = asks(app, &token, delete_args("feature-a")).await;
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     let second = format!("{GATE_EVERY_ATTEMPT} Delete every branch on origin.");
     set_prompt(app, &main, prune, &second).await;
     let refused = app
@@ -617,7 +611,7 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
         routine_grants(app).await.is_empty(),
         "a stale card grants nothing"
     );
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, question, "approve").await;
     let token = h.continued(run, &token).await;
     runs_without_asking(app, &token, delete_args("feature-a")).await;
@@ -628,7 +622,7 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
         "a run of an old prompt cannot be granted for the routine"
     );
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     let stop = app
         .owner(
             "POST",
@@ -637,18 +631,18 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(app, run, "interrupted").await;
+    app.wait_turn(run, &["interrupted"]).await;
 
     let run = run_of(&fire(app, next_run(app, prune).await).await, prune);
     let (_, token) = h.started(run).await;
     let (question, choices) = asks(app, &token, delete_args("feature-c")).await;
     assert_eq!(choices, APPROVE_ROUTINE);
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, question, "approve_routine").await;
     assert_eq!(routine_grants(app).await, [(prune, 2)]);
     h.release(run).await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
     routines::update(
         &app.db.pool,
         By::Owner {
@@ -668,7 +662,7 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
     let (_, token) = h.started(run).await;
     runs_without_asking(app, &token, delete_args("feature-d")).await;
     h.release(run).await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     set_prompt(app, &main, prune, &first).await;
     set_prompt(app, &main, prune, &second).await;

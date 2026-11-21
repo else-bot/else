@@ -223,13 +223,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
         .unwrap();
     assert!(replay.iter().all(|a| !a.created));
     h.release(root).await;
-    h.app
-        .wait_turn_for(
-            &root.to_string(),
-            &["completed"],
-            std::time::Duration::from_secs(20),
-        )
-        .await;
+    h.app.wait_turn(root, &["completed"]).await;
     let inputs = h.inputs(root).await;
     assert_eq!(inputs.len(), 2);
     let outcomes = &inputs[1].delegation.outcomes;
@@ -303,7 +297,7 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
             .fetch_one(&h.app.db.pool)
             .await
             .unwrap();
-    h.app.wait_turn(&child.to_string(), &["running"]).await;
+    h.app.wait_turn(child, &["running"]).await;
     assert!(matches!(
         else_api::db::delegations::council(
             &h.app.db.pool,
@@ -324,9 +318,9 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    h.app.wait_turn(root, &["waiting"]).await;
     assert_eq!(
-        h.app.wait_turn(&child.to_string(), &["running"]).await,
+        h.app.wait_turn(child, &["running"]).await,
         "running",
         "Stop leaves the council's tasks running"
     );
@@ -376,10 +370,10 @@ async fn a_cancelled_member_is_included_with_the_other_council_reports() {
     h.app
         .wait_turn(&children[0].0.to_string(), &["interrupted"])
         .await;
-    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    h.app.wait_turn(root, &["waiting"]).await;
     h.release(children[1].0).await;
     h.release(children[2].0).await;
-    h.app.wait_turn(&root.to_string(), &["completed"]).await;
+    h.app.wait_turn(root, &["completed"]).await;
     let inputs = h.inputs(root).await;
     assert_eq!(inputs.len(), 2);
     let outcomes = &inputs[1].delegation.outcomes;

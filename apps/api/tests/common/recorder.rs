@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use super::{Builder, SETTLE, TestApp};
+use super::{Builder, TestApp, until};
 
 pub const GATE: &str = "[gate]";
 /// Like [`GATE`], but the reply's opening chunks ("Synthetic reply ✓ fro")
@@ -252,19 +252,18 @@ pub async fn harness(mut builder: Builder) -> Harness {
 impl Harness {
     async fn grant(&self, turn: Uuid, old: Option<&str>) -> String {
         let mut updates = self.recorder.ask(|r| Message::Grant(turn, r)).await;
-        let token = tokio::time::timeout(
-            SETTLE,
+        let token = until(
+            &format!("turn {turn} to supply a new grant"),
             updates.wait_for(|token| token.as_deref().is_some_and(|token| Some(token) != old)),
         )
         .await
-        .unwrap_or_else(|_| panic!("turn {turn} never supplied a new grant"))
         .unwrap();
         token.as_ref().unwrap().clone()
     }
 
     pub async fn continued(&self, turn: Uuid, old: &str) -> String {
         let token = self.grant(turn, Some(old)).await;
-        self.app.wait_turn(&turn.to_string(), &["running"]).await;
+        self.app.wait_turn(turn, &["running"]).await;
         token
     }
 
@@ -288,7 +287,7 @@ impl Harness {
     }
 
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
-        self.app.wait_turn(&turn.to_string(), &["running"]).await;
+        self.app.wait_turn(turn, &["running"]).await;
         (turn, self.grant(turn, None).await)
     }
 

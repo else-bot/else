@@ -323,16 +323,14 @@ async fn guest_tools_desktop_and_isolation() {
         Some(RuntimeState::Running),
         "the job keeps the computer"
     );
-    let mut done = None;
-    for _ in 0..30 {
-        let state = manager.job(bot, job).await.unwrap().unwrap();
-        if state.status != JobStatus::Running {
-            done = Some(state);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let done = done.expect("the job finished");
+    let done = common::until(
+        "the background job to finish",
+        common::poll(|| async {
+            let state = manager.job(bot, job).await.unwrap().unwrap();
+            (state.status != JobStatus::Running).then_some(state)
+        }),
+    )
+    .await;
     assert_eq!(
         (done.status, done.exit_code),
         (JobStatus::Completed, Some(0))
@@ -712,21 +710,26 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
 
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(a_id, "test:r").await.unwrap() });
-    gated.entered.notified().await;
+    common::until(
+        "the gated guest runtime to enter start",
+        gated.entered.notified(),
+    )
+    .await;
     let m = manager.clone();
     let stopping = tokio::spawn(async move { m.owner_stop(a_id).await.unwrap() });
-    loop {
-        let desired: String =
-            sqlx::query_scalar("SELECT desired_state FROM bot_computers WHERE bot_id = ?1")
-                .bind(a_id)
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap();
-        if desired == "stopped" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    common::until(
+        "the computer's desired state to become stopped",
+        common::poll(|| async {
+            let desired: String =
+                sqlx::query_scalar("SELECT desired_state FROM bot_computers WHERE bot_id = ?1")
+                    .bind(a_id)
+                    .fetch_one(&app.db.pool)
+                    .await
+                    .unwrap();
+            (desired == "stopped").then_some(())
+        }),
+    )
+    .await;
     gated.open.add_permits(1);
     assert_eq!(acquiring.await.unwrap(), Acquire::OwnerStopped);
     assert_eq!(held(a_id).await, 0, "the late start granted nothing");
@@ -739,7 +742,11 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
 
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(b_id, "test:d").await.unwrap() });
-    gated.entered.notified().await;
+    common::until(
+        "the gated guest runtime to enter start",
+        gated.entered.notified(),
+    )
+    .await;
     let deleted = app.owner("DELETE", &format!("/v1/bots/{b}"), None).await;
     assert!(deleted.status.is_success());
     gated.open.add_permits(1);
@@ -1195,7 +1202,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let up = common::ready_url(&new_dir, &child, Duration::from_secs(10))
+        let up = common::ready_url(&new_dir, &child, common::SETTLE)
             .await
             .is_some();
         tokio::time::sleep(Duration::from_secs(2)).await;

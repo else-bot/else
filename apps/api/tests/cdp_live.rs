@@ -286,12 +286,27 @@ async fn count(manager: &ComputerManager, bot: Uuid) -> u32 {
         .unwrap()
 }
 
+async fn no_more_orders(
+    what: &str,
+    manager: &ComputerManager,
+    bot: Uuid,
+    expected: u32,
+    window: Duration,
+) {
+    common::never_polled(what, window, || async {
+        let observed = count(manager, bot).await;
+        (observed != expected).then_some(observed)
+    })
+    .await;
+}
+
 async fn wait_file(manager: &ComputerManager, bot: Uuid, file: &str) {
-    let started = Instant::now();
-    while ok(manager, bot, &format!("cat {file} 2>/dev/null || true"), 30).await != "ready" {
-        assert!(started.elapsed() < Duration::from_secs(60), "{file}");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
+    common::until(&format!("{file} to be ready"), async {
+        while ok(manager, bot, &format!("cat {file} 2>/dev/null || true"), 30).await != "ready" {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    })
+    .await;
 }
 
 async fn wait_job(
@@ -299,19 +314,20 @@ async fn wait_job(
     bot: Uuid,
     job: Uuid,
 ) -> else_api::computers::jobs::JobState {
-    let started = Instant::now();
-    loop {
-        let state = manager.job(bot, job).await.unwrap().unwrap();
-        if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
-            return state;
+    const JOB_WAIT: Duration = Duration::from_secs(180);
+    let mut last_output = String::new();
+    tokio::time::timeout(JOB_WAIT, async {
+        loop {
+            let state = manager.job(bot, job).await.unwrap().unwrap();
+            if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
+                return state;
+            }
+            last_output = state.output_tail;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(180),
-            "{}",
-            state.output_tail
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("job {job} did not finish: {last_output}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -600,14 +616,12 @@ async fn scripts_drive_the_visible_browser_safely() {
             panic!("not started")
         };
         wait_file(&manager, bot, "restart-ready").await;
-        let started = Instant::now();
-        while count(&manager, bot).await < expected {
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "the order never arrived"
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        common::until("the order to arrive", async {
+            while count(&manager, bot).await < expected {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await;
         if expected == 1 {
             let held = manager
                 .capture_disk(bot, &dir.path().join("disk.msb"), &Default::default())
@@ -638,12 +652,14 @@ async fn scripts_drive_the_visible_browser_safely() {
             "never rebinds another tab"
         );
         assert_eq!(restart["after"], "Results for after-restart");
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(
-            count(&manager, bot).await,
+        no_more_orders(
+            "a repeated order: exactly one order per run",
+            &manager,
+            bot,
             expected,
-            "exactly one order per run, never repeated"
-        );
+            Duration::from_secs(3),
+        )
+        .await;
     }
 
     let before = count(&manager, bot).await;
@@ -670,12 +686,14 @@ async fn scripts_drive_the_visible_browser_safely() {
         !tabs_after.contains("/order"),
         "the stopped script's tab was closed: {tabs_after}"
     );
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    assert_eq!(
-        count(&manager, bot).await,
+    no_more_orders(
+        "the delayed order ran",
+        &manager,
+        bot,
         before,
-        "the delayed order never ran"
-    );
+        Duration::from_secs(10),
+    )
+    .await;
     let keep = ok(
         &manager,
         bot,
@@ -698,7 +716,9 @@ async fn scripts_drive_the_visible_browser_safely() {
     // The page's own browser-side limit ends the stopped script's loop
     // (a busy page cannot be attached to for an earlier halt).
     let stopped_at = Instant::now();
-    let responsive = loop {
+    let mut last_title = String::new();
+    let responsive = tokio::time::timeout(common::SETTLE, async {
+        loop {
         let (_, title, _) = run(
             &manager,
             bot,
@@ -706,11 +726,15 @@ async fn scripts_drive_the_visible_browser_safely() {
             60,
         )
         .await;
-        if title == "Results for keep" || stopped_at.elapsed() > Duration::from_secs(40) {
-            break title;
+            if title == "Results for keep" {
+                break title;
+            }
+            last_title = title;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    };
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the attached tab last answered with {last_title:?}"));
     eprintln!(
         "the attached tab answered {:?} after the stop",
         stopped_at.elapsed()

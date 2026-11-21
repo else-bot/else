@@ -2,7 +2,6 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{TestApp, TestDb};
 use else_api::app::providers::Provider;
@@ -42,11 +41,7 @@ async fn ask(app: &TestApp, bot: &str, text: &str) -> (Uuid, String) {
     assert!(reply.status.is_success(), "{}", reply.body);
     let turn = reply.body["turn"]["id"].as_str().unwrap();
     let status = app
-        .wait_turn_for(
-            turn,
-            &["completed", "failed", "interrupted", "uncertain"],
-            Duration::from_secs(240),
-        )
+        .wait_live_turn(turn, &["completed", "failed", "interrupted", "uncertain"])
         .await;
     let (answer, error): (String, Option<String>) = sqlx::query_as(
         "SELECT coalesce((SELECT group_concat(text, '') FROM items WHERE turn_id=t.id AND kind='assistant'), ''), t.error_message FROM turns t WHERE t.id=?1"
@@ -191,11 +186,12 @@ async fn cursor_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() 
         )
         .await;
     let interrupted = sent.body["turn"]["id"].as_str().unwrap();
-    tokio::time::timeout(Duration::from_secs(120), async {
-        while !project.join("cursor-sleep-started").exists() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    tokio::time::timeout(
+        common::LIVE,
+        common::poll(|| {
+            std::future::ready(project.join("cursor-sleep-started").exists().then_some(()))
+        }),
+    )
     .await
     .expect("Cursor started the shell command");
     let stopped = app
@@ -207,10 +203,9 @@ async fn cursor_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() 
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
     let status = app
-        .wait_turn_for(
+        .wait_live_turn(
             interrupted,
             &["completed", "interrupted", "failed", "uncertain"],
-            Duration::from_secs(45),
         )
         .await;
     assert_eq!(status, "interrupted");

@@ -1,7 +1,6 @@
 use crate::common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::guest::Guest;
@@ -50,11 +49,6 @@ async fn turn_status(app: &TestApp, turn: Uuid) -> String {
         .unwrap()
 }
 
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_parks_the_turn_until_the_owner_hands_the_computer_back() {
     let h = with_computer().await;
@@ -79,7 +73,7 @@ async fn a_handoff_parks_the_turn_until_the_owner_hands_the_computer_back() {
         "a parked attempt runs no more tools"
     );
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let taken = settle(app, &bot, &asked["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
@@ -112,7 +106,7 @@ async fn a_handoff_parks_the_turn_until_the_owner_hands_the_computer_back() {
     let back = settle(app, &bot, &asked["handoff_id"], "hand-back").await;
     assert_eq!(back.status, StatusCode::OK, "{}", back.body);
     assert_eq!(back.body["handoff"]["status"], "handed_back");
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("[else.bot take-over results]"), "{packet}");
     assert!(
@@ -148,7 +142,7 @@ async fn declining_a_handoff_continues_the_turn_and_it_cannot_be_handed_back() {
     .await
     .result;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let early = settle(app, &bot, &asked["handoff_id"], "hand-back").await;
     assert_eq!(
@@ -160,7 +154,7 @@ async fn declining_a_handoff_continues_the_turn_and_it_cannot_be_handed_back() {
     let declined = settle(app, &bot, &asked["handoff_id"], "dismiss").await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
     assert_eq!(declined.body["handoff"]["status"], "dismissed");
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("result=\"declined:"), "{packet}");
     let late = settle(app, &bot, &asked["handoff_id"], "take").await;
@@ -183,7 +177,7 @@ async fn an_owner_message_withdraws_a_pending_handoff() {
     .result;
     assert_eq!(handoff["status"], "pending", "{handoff}");
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let sent = app
         .send(&bot, Uuid::new_v4(), "Skip X for today.", Some("synthetic"))
@@ -209,7 +203,7 @@ async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
     .await
     .result;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let taken = settle(app, &bot, &asked["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
 
@@ -236,7 +230,7 @@ async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
         "{refused}"
     );
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         status(app, &asked["handoff_id"]).await,
         "taken",
@@ -252,8 +246,8 @@ async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
     assert_eq!(back.status, StatusCode::OK, "{}", back.body);
     h.continued(turn, &token).await;
     h.release(turn).await;
-    wait(app, turn, "completed").await;
-    wait(app, next, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -293,7 +287,7 @@ async fn a_taken_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page() 
     .await
     .result;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let taken = settle(app, &bot, &handoff["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
     let request: Uuid = sqlx::query_scalar("SELECT request_id FROM turns WHERE id = ?1")
@@ -309,7 +303,7 @@ async fn a_taken_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page() 
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(status(app, &handoff["handoff_id"]).await, "taken");
 
     let first: i64 = sqlx::query_scalar("SELECT min(seq) FROM items WHERE turn_id = ?1")
@@ -348,7 +342,7 @@ async fn stopping_the_turn_withdraws_a_handoff_the_owner_has_not_taken() {
     .await
     .result;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let request: Uuid = sqlx::query_scalar("SELECT request_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -362,7 +356,7 @@ async fn stopping_the_turn_withdraws_a_handoff_the_owner_has_not_taken() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(status(app, &handoff["handoff_id"]).await, "cancelled");
     let late = settle(app, &bot, &handoff["handoff_id"], "take").await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
@@ -424,7 +418,7 @@ async fn a_taken_handoff_shows_the_owner_has_the_computer_until_hand_back() {
     .await
     .result;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let taken = settle(app, &bot, &handoff["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
 

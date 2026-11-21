@@ -76,12 +76,12 @@ async fn subscribe_bot(socket: &mut Socket, bot: &str, cursor: &str) {
     .await;
 }
 
-async fn next(socket: &mut Socket, wait: Duration) -> Option<Value> {
+async fn next_text(socket: &mut Socket) -> Option<Value> {
     loop {
-        match tokio::time::timeout(wait, socket.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => return Some(serde_json::from_str(&text).unwrap()),
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => return None,
-            Ok(Some(Ok(_))) => continue,
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => return Some(serde_json::from_str(&text).unwrap()),
+            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+            Some(Ok(_)) => continue,
         }
     }
 }
@@ -193,20 +193,18 @@ fn latest_seq(snapshot: &Value) -> i64 {
 }
 
 async fn read_until(socket: &mut Socket, model: &mut Model, done: impl Fn(&Model) -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !done(model) {
-        assert!(tokio::time::Instant::now() < deadline, "timed out");
-        if let Some(message) = next(socket, Duration::from_secs(10)).await {
+    common::until("the bot channel to catch up", async {
+        while !done(model) {
+            let message = next_text(socket).await.expect("socket closed");
             if message["channel"]
                 .as_str()
                 .is_some_and(|c| c.starts_with("bot:"))
             {
                 model.apply(&message);
             }
-        } else {
-            panic!("socket closed");
         }
-    }
+    })
+    .await;
 }
 
 async fn wait_completed(server: &Server<'_>, reply: &common::Reply) {
@@ -228,7 +226,7 @@ async fn snapshot_then_subscribe_replays_everything_in_between() {
         .await;
     common::steer::wait_for_text(&h.app, turn, 0).await;
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     subscribe_bot(&mut socket, &bot, &model.cursor()).await;
     let latest = server.snapshot(&bot).await;
@@ -257,10 +255,7 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
     .await;
     drop(socket);
     h.release(turn).await;
-    server
-        .app
-        .wait_turn(&turn.to_string(), &["completed"])
-        .await;
+    server.app.wait_turn(turn, &["completed"]).await;
     let latest = server.snapshot(&bot).await;
     let target = latest_seq(&latest);
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
@@ -307,15 +302,22 @@ async fn one_socket_carries_several_channels_and_unsubscribe_stops_one() {
         .await;
     wait_completed(&server, &sa).await;
     wait_completed(&server, &sb).await;
-    let mut channels = Vec::new();
-    while let Some(message) = next(&mut socket, Duration::from_millis(1500)).await {
-        channels.push(message["channel"].as_str().unwrap().to_owned());
+    let a_channel = format!("bot:{a}");
+    let b_channel = format!("bot:{b}");
+    let check = |message: Value| {
+        let channel = message["channel"].as_str().unwrap();
+        assert_ne!(channel, a_channel, "unsubscribed channel is silent");
+        channel == b_channel
+    };
+    common::until("an event from the subscribed bot", async {
+        while !check(next_text(&mut socket).await.expect("socket closed")) {}
+    })
+    .await;
+    // Drain pending messages until the socket has been quiet for this window.
+    const QUIET: Duration = Duration::from_millis(1500);
+    while let Ok(Some(message)) = tokio::time::timeout(QUIET, next_text(&mut socket)).await {
+        check(message);
     }
-    assert!(channels.iter().any(|c| *c == format!("bot:{b}")));
-    assert!(
-        channels.iter().all(|c| *c != format!("bot:{a}")),
-        "unsubscribed channel is silent"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -324,7 +326,9 @@ async fn bots_channel_pushes_list_changes() {
     let server = Server::start(&app).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
-    let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let first = common::until("the initial bots snapshot", next_text(&mut socket))
+        .await
+        .unwrap();
     assert_eq!(
         (first["channel"].clone(), first["event"].clone()),
         (json!("bots"), json!("bots.snapshot"))
@@ -333,9 +337,13 @@ async fn bots_channel_pushes_list_changes() {
     let main = first["data"]["default_bot_id"].as_str().unwrap().to_owned();
     let created = server.app.create_bot("Pushed").await;
     let started = std::time::Instant::now();
-    let update = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let update = common::until("the newly created bot to appear", next_text(&mut socket))
+        .await
+        .unwrap();
+    // A push must arrive before the 1 s polling fallback.
+    const PUSH_BEFORE_POLL: Duration = Duration::from_millis(900);
     assert!(
-        started.elapsed() < Duration::from_millis(900),
+        started.elapsed() < PUSH_BEFORE_POLL,
         "pushed promptly, not polled"
     );
     let ids: Vec<_> = update["data"]["bots"]
@@ -354,44 +362,40 @@ async fn bots_channel_pushes_list_changes() {
             Some("synthetic"),
         )
         .await;
-    let mut saw_working = false;
-    for _ in 0..10 {
-        let Some(update) = next(&mut socket, Duration::from_secs(3)).await else {
-            break;
-        };
-        if update["data"]["bots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b["activity"]["phase"] == "working")
-        {
-            saw_working = true;
-            break;
+    common::until("the sidebar to show a working bot", async {
+        loop {
+            let update = next_text(&mut socket).await.expect("socket closed");
+            if update["data"]["bots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["activity"]["phase"] == "working")
+            {
+                break;
+            }
         }
-    }
-    assert!(saw_working);
+    })
+    .await;
     let _ = sent;
     server
         .app
         .owner("DELETE", &format!("/v1/bots/{created}"), None)
         .await;
-    let mut removed = false;
-    for _ in 0..10 {
-        let Some(update) = next(&mut socket, Duration::from_secs(3)).await else {
-            break;
-        };
-        if !update["data"]["bots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b["id"] == json!(created))
-        {
-            assert_eq!(update["data"]["default_bot_id"], json!(main));
-            removed = true;
-            break;
+    common::until("the bot deletion to reach subscribers", async {
+        loop {
+            let update = next_text(&mut socket).await.expect("socket closed");
+            if !update["data"]["bots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["id"] == json!(created))
+            {
+                assert_eq!(update["data"]["default_bot_id"], json!(main));
+                break;
+            }
         }
-    }
-    assert!(removed, "deleting a bot reaches subscribers");
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -410,7 +414,9 @@ async fn bots_channel_carries_background_replies_and_reads() {
             .unwrap()["read_state"]
             .clone()
     };
-    let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let first = common::until("the initial bots snapshot", next_text(&mut socket))
+        .await
+        .unwrap();
     assert_eq!(state(&first)["unread"], false);
     let sent = server
         .app
@@ -418,9 +424,17 @@ async fn bots_channel_carries_background_replies_and_reads() {
         .await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     server.app.wait_turn(&turn, &["completed"]).await;
+    let item = server.snapshot(&background).await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|i| i["kind"] == "assistant")
+        .cloned()
+        .unwrap();
+    let text_bytes = json!(item["text"].as_str().unwrap().len());
     let mut latest = Value::Null;
     let mut previous: Option<Value> = None;
-    while let Some(update) = next(&mut socket, Duration::from_secs(1)).await {
+    let mut apply = |update: Value| {
         assert_ne!(
             previous.as_ref(),
             Some(&update["data"]),
@@ -432,21 +446,23 @@ async fn bots_channel_carries_background_replies_and_reads() {
             latest = read["latest"].clone();
         }
         previous = Some(update["data"].clone());
+        latest["position"]["text_bytes"] == text_bytes
+    };
+    common::until("the whole background reply to reach the sidebar", async {
+        while !apply(next_text(&mut socket).await.expect("socket closed")) {}
+    })
+    .await;
+    // Drain pending messages until the socket has been quiet for this window.
+    const QUIET: Duration = Duration::from_secs(1);
+    while let Ok(Some(update)) = tokio::time::timeout(QUIET, next_text(&mut socket)).await {
+        apply(update);
     }
     assert!(
         latest.is_object(),
         "the background reply reached the sidebar"
     );
-    let item = server.snapshot(&background).await["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rfind(|i| i["kind"] == "assistant")
-        .cloned()
-        .unwrap();
     assert_eq!(
-        latest["position"]["text_bytes"],
-        json!(item["text"].as_str().unwrap().len()),
+        latest["position"]["text_bytes"], text_bytes,
         "the last push carries the whole reply"
     );
 
@@ -458,7 +474,12 @@ async fn bots_channel_carries_background_replies_and_reads() {
             Some(json!({ "action": "through", "position": latest["position"] })),
         )
         .await;
-    let update = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let update = common::until(
+        "the sidebar to show the reply as read",
+        next_text(&mut socket),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         state(&update)["unread"],
         false,
@@ -511,11 +532,15 @@ async fn cursor_errors_are_reported_per_channel() {
     ];
     for (message, code) in cases {
         op(&mut socket, message.clone()).await;
-        let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+        let reply = common::until("the subscription error", next_text(&mut socket))
+            .await
+            .unwrap();
         assert_eq!(reply["error"]["code"], code, "{message}");
     }
     op(&mut socket, json!({ "op": "bogus" })).await;
-    let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let reply = common::until("the invalid operation error", next_text(&mut socket))
+        .await
+        .unwrap();
     assert_eq!(reply["error"]["code"], "invalid_message");
 }
 
@@ -531,12 +556,20 @@ async fn ended_channels_do_not_use_up_the_subscription_limit() {
         )
         .await;
     }
-    for _ in 0..40 {
-        let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
-        assert_eq!(reply["error"]["code"], "cursor_required", "{reply}");
-    }
+    common::until("all 40 subscription errors", async {
+        for _ in 0..40 {
+            let reply = next_text(&mut socket).await.expect("socket closed");
+            assert_eq!(reply["error"]["code"], "cursor_required", "{reply}");
+        }
+    })
+    .await;
     op(&mut socket, json!({"op": "subscribe", "channel": "bots"})).await;
-    let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let reply = common::until(
+        "the bots snapshot after the rejected subscriptions",
+        next_text(&mut socket),
+    )
+    .await
+    .unwrap();
     assert_eq!(reply["event"], "bots.snapshot", "{reply}");
 }
 
@@ -568,16 +601,25 @@ async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
         .owner("DELETE", &format!("/v1/bots/{bot}"), None)
         .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let mut ended = false;
-    while let Some(message) = next(&mut socket, Duration::from_millis(1500)).await {
-        assert!(!ended, "no message after bot_deleted: {message}");
-        if message["error"]["code"] == "bot_deleted" {
-            ended = true;
+    common::until("the bot_deleted event for the stalled reader", async {
+        loop {
+            let message = next_text(&mut socket).await.expect("socket closed");
+            if message["error"]["code"] == "bot_deleted" {
+                break;
+            }
         }
-    }
-    assert!(ended);
+    })
+    .await;
+    common::never(
+        "the socket to close or send another message after bot_deleted",
+        Duration::from_millis(1500),
+        next_text(&mut socket),
+    )
+    .await;
     subscribe_bot(&mut socket, &bot, &cursor).await;
-    let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    let reply = common::until("the deleted bot subscription error", next_text(&mut socket))
+        .await
+        .unwrap();
     assert_eq!(reply["error"]["code"], "bot_deleted");
 }
 
@@ -613,7 +655,9 @@ async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
         .send(&bot, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
     wait_completed(&server, &sent).await;
-    while let Some(message) = next(&mut socket, Duration::from_millis(800)).await {
+    // Inspect queued messages until the socket has been quiet for this window.
+    const QUIET: Duration = Duration::from_millis(800);
+    while let Ok(Some(message)) = tokio::time::timeout(QUIET, next_text(&mut socket)).await {
         let text = message.to_string();
         for secret in [TOKEN, "request_hash", "\"profile\"", "gpt-6.1-sol"] {
             assert!(!text.contains(secret), "{secret} leaked");
@@ -629,22 +673,24 @@ async fn bots_channel_carries_categories_to_every_client() {
     for _ in 0..2 {
         let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
         op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
-        let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+        let first = common::until("the initial categories snapshot", next_text(&mut socket))
+            .await
+            .unwrap();
         assert_eq!(first["data"]["categories"], json!([]));
         clients.push(socket);
     }
     async fn each(clients: &mut [Socket], check: impl Fn(&Value) -> bool) -> Value {
         let mut last = Value::Null;
         for socket in clients.iter_mut() {
-            loop {
-                let message = next(socket, Duration::from_secs(5))
-                    .await
-                    .expect("a snapshot arrived");
-                if check(&message["data"]) {
-                    last = message["data"].clone();
-                    break;
+            last = common::until("the changed categories snapshot", async {
+                loop {
+                    let message = next_text(socket).await.expect("socket closed");
+                    if check(&message["data"]) {
+                        break message["data"].clone();
+                    }
                 }
-            }
+            })
+            .await;
         }
         last
     }
@@ -757,6 +803,8 @@ async fn bots_channel_carries_categories_to_every_client() {
     let after = each(&mut clients, |d| d["categories"] == json!([])).await;
     let mut again = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut again, json!({ "op": "subscribe", "channel": "bots" })).await;
-    let fresh = next(&mut again, Duration::from_secs(5)).await.unwrap();
+    let fresh = common::until("the new client's snapshot", next_text(&mut again))
+        .await
+        .unwrap();
     assert_eq!(fresh["data"], after);
 }

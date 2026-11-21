@@ -53,7 +53,7 @@ async fn with_routine(h: &Harness, bot: &str) {
     .await;
     assert!(!created.error, "{}", created.body);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -91,7 +91,7 @@ async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
     assert_eq!(status(&h.app, &growth).await, "active");
 
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     answer(&h.app, &main, &question, "approve").await;
     let token = h.continued(turn, &token).await;
     let deleted = tool(&h.app, &token, "delete_bot", args.clone()).await;
@@ -139,7 +139,7 @@ async fn refused_targets_and_a_denial_leave_the_bot_active() {
         assert_eq!(called.code(), code, "{args}");
     }
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions")
         .fetch_one(&h.app.db.pool)
         .await
@@ -157,7 +157,7 @@ async fn refused_targets_and_a_denial_leave_the_bot_active() {
             .contains("Nothing scheduled or in progress stops.")
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     answer(&h.app, &main, &question, "deny").await;
     let token = h.continued(turn, &token).await;
     let denied = tool(&h.app, &token, "delete_bot", args).await;
@@ -229,7 +229,7 @@ async fn a_retry_reports_shutdown_pending_until_the_bot_is_deleted() {
     let pending = tool(&h.app, &token, "delete_bot", args.clone()).await;
     let question = pending.result["question_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     answer(&h.app, &main, &question, "approve").await;
     let token = h.continued(turn, &token).await;
     let deleted = tool(&h.app, &token, "delete_bot", args.clone()).await;
@@ -238,9 +238,7 @@ async fn a_retry_reports_shutdown_pending_until_the_bot_is_deleted() {
     assert_eq!(retry.result["status"], "deleting", "{}", retry.body);
 
     h.release(busy).await;
-    h.app
-        .wait_turn(&busy.to_string(), &["interrupted", "completed"])
-        .await;
+    h.app.wait_turn(busy, &["interrupted", "completed"]).await;
     tokio::time::timeout(common::SETTLE, async {
         while status(&h.app, &growth).await != "deleted" {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

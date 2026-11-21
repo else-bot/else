@@ -254,7 +254,7 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
     );
 
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let answered = app
         .owner(
             "POST",

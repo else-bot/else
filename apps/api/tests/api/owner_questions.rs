@@ -44,11 +44,6 @@ async fn status(app: &TestApp, turn: Uuid) -> String {
         .unwrap()
 }
 
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
-}
-
 async fn question_row(app: &TestApp, question: Uuid) -> (String, Option<String>, Option<i32>) {
     sqlx::query_as("SELECT status, answer, consumed_attempt FROM owner_questions WHERE id = ?1")
         .bind(question)
@@ -150,7 +145,7 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(more.body["error"]["code"], "attempt_parked");
 
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let shown = shown_turn(app, &main, turn).await;
     let card = &shown["questions"][0];
     assert_eq!(card["id"], question.to_string());
@@ -174,7 +169,7 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(chosen.body["question"]["status"], "answered");
     assert_eq!(chosen.body["question"]["answer"], "b");
     assert_eq!(chosen.body["requeued"], true);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(sidebar_status(app, &main).await, Value::Null);
     let shown = shown_turn(app, &main, turn).await;
     assert_eq!(shown["questions"][0]["status"], "answered");
@@ -229,7 +224,7 @@ async fn a_reply_turns_unread_when_its_turn_parks_on_a_question() {
     let asked = tool(app, &token, "ask_owner", choice_args()).await;
     assert_eq!(asked.result["parked"], true, "{}", asked.body);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let parked = read_state().await;
     assert_eq!(parked["latest"]["turn_id"], turn.to_string(), "{parked}");
     assert_eq!(parked["unread"], true);
@@ -255,7 +250,7 @@ async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
         let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
         assert_eq!(pending["multiple"], false);
         h.release(turn).await;
-        wait(app, turn, "waiting").await;
+        app.wait_turn(turn, &["waiting"]).await;
         let shown = shown_turn(app, &main, turn).await;
         let card = &shown["questions"][0];
         assert_eq!(card["multiple"], false);
@@ -279,7 +274,7 @@ async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
         assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
         assert_eq!(chosen.body["question"]["answer"], "d");
         assert_eq!(chosen.body["requeued"], true);
-        wait(app, turn, "completed").await;
+        app.wait_turn(turn, &["completed"]).await;
         let shown = shown_turn(app, &main, turn).await;
         assert_eq!(shown["questions"][0]["status"], "answered");
         assert_eq!(shown["questions"][0]["answer"], "d");
@@ -327,7 +322,7 @@ async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
     assert_eq!(pending["multiple"], true);
     assert_eq!(pending["choices"].as_array().unwrap().len(), 5);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let shown = shown_turn(app, &main, turn).await;
     assert_eq!(shown["questions"][0]["multiple"], true);
     assert_eq!(shown["questions"][0]["answer"], Value::Null);
@@ -351,7 +346,7 @@ async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
     assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
     assert_eq!(chosen.body["question"]["answer"], json!(["c", "e"]));
     assert_eq!(chosen.body["requeued"], true);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let card = &shown_turn(app, &main, turn).await["questions"][0];
     assert_eq!(card["status"], "answered");
     assert_eq!(card["answer"], json!(["c", "e"]));
@@ -389,7 +384,7 @@ async fn chat_closes_a_multiple_choice_card_without_selecting_actions() {
     let pending = tool(app, &token, "ask_owner", multiple_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let sent = app
         .send(
             &main,
@@ -471,7 +466,7 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
     assert_eq!(pending["status"], "pending", "{pending}");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let follow_up = "Actually, keep the old site for now and just archive it.";
     let sent = app
@@ -494,7 +489,7 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
         "This question was already skipped."
     );
     assert_eq!(question_row(app, question).await.0, "skipped");
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
     assert_eq!(attempts(app, turn).await, 2, "the reply continued with it");
@@ -532,7 +527,7 @@ async fn a_follow_up_while_the_asking_attempt_still_runs_skips_the_card_too() {
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
     assert_eq!(question_row(app, question).await.0, "skipped");
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
     assert_eq!(attempts(app, turn).await, 2, "the reply continued with it");
@@ -666,7 +661,7 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
     );
 
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["kind"], "external");
     assert_eq!(card["title"], "Send the newsletter to 120 subscribers");
@@ -744,7 +739,7 @@ async fn approved_mcp_call(h: &Harness, bot: &str, call: Value) -> (Uuid, Uuid, 
     let pending = tool(app, &token, "mcp_request", call.clone()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         answer(app, bot, question, "approve").await.status,
         StatusCode::OK
@@ -754,7 +749,7 @@ async fn approved_mcp_call(h: &Harness, bot: &str, call: Value) -> (Uuid, Uuid, 
     assert_eq!(card["used"], Value::Null, "approved but not yet run");
     let ran = tool(app, &token, "mcp_request", call).await;
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     (turn, question, ran)
 }
 
@@ -830,7 +825,7 @@ async fn an_approved_call_records_what_its_tool_returned_once() {
         .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let approved = answer(app, &main, question, "approve_forever").await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
     let token = h.continued(turn, &token).await;
@@ -870,7 +865,7 @@ async fn a_denied_action_stays_denied_for_the_request() {
     let pending = tool(app, &token, "computer_run", send_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let denied = answer(app, &main, question, "deny").await;
     assert_eq!(denied.status, StatusCode::OK, "{}", denied.body);
     let token = h.continued(turn, &token).await;
@@ -907,7 +902,7 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
     assert_eq!(pending["kind"], "destructive");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["choices"][2]["id"], "approve_forever");
     assert_eq!(card["title"], "Run a command in the bot's computer");
@@ -919,7 +914,7 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
         .owner("GET", &format!("/v1/bots/{main}/permissions"), None)
         .await;
     assert_eq!(listed.body["permissions"][0]["scope"], "destructive");
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (turn, token) = h.running(&main, GATE).await;
     let other_delete = json!({ "command": "rm -rf ~/work/cache", "effect": "destructive" });
@@ -944,7 +939,7 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
     let external = tool(app, &token, "computer_run", send_args()).await.result;
     assert_eq!(external["status"], "pending", "{external}");
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let revoked = app
         .owner(
@@ -963,12 +958,12 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
         )
         .await;
     assert!(stop.status.is_success());
-    wait(app, turn, "interrupted").await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let (turn, token) = h.running(&main, GATE).await;
     let asks = tool(app, &token, "computer_run", other_delete).await.result;
     assert_eq!(asks["status"], "pending", "revoked: asks again");
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 }
 
 fn unfollow_args(accounts: &str, target: &str, effect: &str) -> Value {
@@ -1019,7 +1014,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
     assert_eq!(pending["status"], "pending", "{pending}");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(choice_ids(&card), ["approve", "deny", "approve_task"]);
     assert_eq!(card["action"]["tool"], "computer_run");
@@ -1037,7 +1032,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         "{}",
         listed.body
     );
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Task scope: {\"task\":\"Unfollow X accounts that never replied\""),
@@ -1080,7 +1075,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
             .result;
         assert_eq!(asks["status"], "pending", "{other}: {asks}");
         h.release(turn).await;
-        wait(app, turn, "waiting").await;
+        app.wait_turn(turn, &["waiting"]).await;
         let card = shown_turn(app, &main, turn).await["questions"]
             .as_array()
             .unwrap()
@@ -1090,7 +1085,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         assert_eq!(choice_ids(&card), choices, "{other}");
         turn_token = (turn, follow(&h, &main, turn, &token).await);
     }
-    app.wait_turn(&turn_token.0.to_string(), &["running"]).await;
+    app.wait_turn(turn_token.0, &["running"]).await;
 }
 
 /// Send a follow-up while `turn` waits on a card: it joins the reply,
@@ -1140,12 +1135,12 @@ async fn approval_records_never_store_typed_text() {
             .unwrap();
         assert!(!stored.contains(canary), "{stored}");
         h.release(turn).await;
-        wait(app, turn, "waiting").await;
+        app.wait_turn(turn, &["waiting"]).await;
         assert_eq!(
             answer(app, &main, question, "approve").await.status,
             StatusCode::OK
         );
-        wait(app, turn, "completed").await;
+        app.wait_turn(turn, &["completed"]).await;
         let packet = h.packets().await.last().unwrap().clone();
         assert!(packet.contains("[else.bot owner answers]"));
         assert!(!packet.contains(canary), "{packet}");
@@ -1165,7 +1160,7 @@ async fn a_turn_continues_only_after_all_owner_requests_settle() {
         SELECT ?1, bot_id, id, attempt, 'login', 'Authenticate', '[\"LOGIN_TOKEN\"]' FROM turns WHERE id = ?2")
         .bind(secret).bind(turn).execute(&app.db.pool).await.unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let declined = app
         .owner(
             "POST",
@@ -1180,7 +1175,7 @@ async fn a_turn_continues_only_after_all_owner_requests_settle() {
         answer(app, &main, question, "a").await.status,
         StatusCode::OK
     );
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1198,7 +1193,7 @@ async fn a_host_permission_waits_and_the_answer_names_the_action() {
     assert_eq!(pending["parked"], true);
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["title"], "Email the invoice to the client");
     assert_eq!(
@@ -1344,7 +1339,7 @@ async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_a_
         .parse()
         .unwrap();
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     let shown = shown_turn(app, &leaf, child).await;
     let choices: Vec<&str> = shown["questions"][0]["choices"]
         .as_array()
@@ -1388,7 +1383,7 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
     let pending = tool(app, &token, "ask_owner", choice_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let stop = app
         .owner(
             "POST",
@@ -1397,7 +1392,7 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(app, turn, "interrupted").await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(question_row(app, question).await.0, "cancelled");
     assert_eq!(
         answer(app, &main, question, "a").await.status,
@@ -1410,13 +1405,10 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
         .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let h = harness(TestApp::builder().db(h.app.stop().await)).await;
     let app = &h.app;
-    assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
-        "waiting"
-    );
+    assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
     assert_eq!(question_row(app, question).await.0, "pending");
     assert_eq!(
         shown_turn(app, &main, turn).await["questions"][0]["status"],
@@ -1425,7 +1417,7 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
     );
     let approved = answer(app, &main, question, "approve").await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let attempts: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -1470,8 +1462,8 @@ async fn stopping_the_delegated_task_closes_its_card() {
         .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(child).await;
-    wait(app, child, "waiting").await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let stop = app
         .owner(
             "POST",
@@ -1480,7 +1472,7 @@ async fn stopping_the_delegated_task_closes_its_card() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         question_row(app, question).await.0,
         "pending",
@@ -1494,7 +1486,7 @@ async fn stopping_the_delegated_task_closes_its_card() {
         )
         .await;
     assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
-    wait(app, child, "interrupted").await;
+    app.wait_turn(child, &["interrupted"]).await;
     assert_eq!(question_row(app, question).await.0, "cancelled");
     assert_eq!(
         answer(app, &leaf, question, "approve").await.status,
@@ -1540,7 +1532,7 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
 
     let reply = app
         .send(
@@ -1571,7 +1563,7 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    wait(app, child, "completed").await;
+    app.wait_turn(child, &["completed"]).await;
     app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
     assert_eq!(attempts(app, child).await, 2, "the task continued with it");
@@ -1609,9 +1601,9 @@ async fn delegated_card(h: &Harness, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid, Str
         .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     h.release(root).await;
-    wait(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     (root, task, child, question, child_token)
 }
 
@@ -1632,9 +1624,9 @@ async fn an_owner_reply_in_chat_joins_a_delegated_card_and_the_task_reports_back
     assert_eq!(question_row(app, question).await.0, "skipped");
     let reply = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     h.release(child).await;
-    wait(app, child, "completed").await;
+    app.wait_turn(child, &["completed"]).await;
     app.wait_turn(&reply, &["completed"]).await;
-    wait(app, root, "completed").await;
+    app.wait_turn(root, &["completed"]).await;
     assert!(
         h.packets().await.iter().any(|p| p.contains(follow_up)),
         "the task continued with the owner's message"
@@ -1682,8 +1674,8 @@ async fn stopping_a_task_ends_the_message_that_joined_it() {
         )
         .await;
     assert_eq!(stop.status, StatusCode::OK, "{}", stop.body);
-    wait(app, child, "interrupted").await;
-    wait(app, reply, "interrupted").await;
+    app.wait_turn(child, &["interrupted"]).await;
+    app.wait_turn(reply, &["interrupted"]).await;
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1717,8 +1709,8 @@ async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
     h.release(child).await;
     app.wait_turn(second.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    wait(app, first, "completed").await;
-    wait(app, root, "completed").await;
+    app.wait_turn(first, &["completed"]).await;
+    app.wait_turn(root, &["completed"]).await;
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1764,9 +1756,9 @@ async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_tas
     assert_eq!(follow.body["turn"]["steered_into"], root.to_string());
     let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     h.release(child).await;
-    wait(app, approval, "completed").await;
-    wait(app, root, "completed").await;
-    wait(app, follow, "completed").await;
+    app.wait_turn(approval, &["completed"]).await;
+    app.wait_turn(root, &["completed"]).await;
+    app.wait_turn(follow, &["completed"]).await;
 
     let (state, carrier, delivered): (String, Uuid, Option<i64>) = sqlx::query_as(
         "SELECT status, root_turn_id, delivered_attempt FROM delegations WHERE id = ?1",

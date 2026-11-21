@@ -340,20 +340,16 @@ async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
     }
     let local = backup::completed_sets(&dir.path().join("backups")).unwrap();
     assert_eq!(local, [first.set_id.clone(), second.set_id.clone()]);
-    let mut done = false;
-    for _ in 0..30 {
-        match w.replicate_now().await {
-            Ok(_) => {
-                done = true;
-                break;
+    common::until("replication after the emulator returned", async {
+        loop {
+            match w.replicate_now().await {
+                Ok(_) => break,
+                Err(err) => eprintln!("retrying: {err}"),
             }
-            Err(err) => {
-                eprintln!("retrying: {err}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    }
-    assert!(done, "replicated once the emulator returned");
+    })
+    .await;
     for summary in [&first, &second] {
         assert_eq!(
             remote_state(&app, &summary.set_id).await.unwrap().0,
@@ -566,7 +562,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         .with_coordinator(Coordinator {
             scheduler: Some(app.scheduler.clone()),
             computers: Some(manager.clone()),
-            drain: Duration::from_secs(5),
+            drain: common::SETTLE,
             exclusive: false,
 
             projects_dir: Some(dir.path().join("bots")),
@@ -591,39 +587,36 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     drop(fake);
     compose(&["restart", "seaweedfs"]);
     compose(&["up", "-d", "--wait", "seaweedfs"]);
-    let mut listed = None;
-    for _ in 0..30 {
-        match r.completed_remote().await {
-            Ok(sets) => {
-                listed = Some(sets);
-                break;
+    let listed = common::until("the remote backup list after restart", async {
+        loop {
+            if let Ok(sets) = r.completed_remote().await {
+                break sets;
             }
-            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    }
-    assert_eq!(listed.unwrap(), std::slice::from_ref(&summary.set_id));
-    let mut downloaded = None;
-    for attempt in 0..10 {
-        match else_api::backup::replicate::download_set(
-            &r.s3,
-            &summary.set_id,
-            &dir.path().join(format!("download-{attempt}")),
-            &key(),
-            1 << 30,
-        )
-        .await
-        {
-            Ok(set) => {
-                downloaded = Some(set);
-                break;
+    })
+    .await;
+    assert_eq!(listed, std::slice::from_ref(&summary.set_id));
+    let downloaded = common::until("the set to download after restart", async {
+        let mut attempt = 0;
+        loop {
+            match else_api::backup::replicate::download_set(
+                &r.s3,
+                &summary.set_id,
+                &dir.path().join(format!("download-{attempt}")),
+                &key(),
+                1 << 30,
+            )
+            .await
+            {
+                Ok(set) => break set,
+                Err(err) => eprintln!("download attempt {attempt}: {err}"),
             }
-            Err(err) => {
-                eprintln!("download attempt {attempt}: {err}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            attempt += 1;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    }
-    let downloaded = downloaded.expect("the set downloads once the emulator is back");
+    })
+    .await;
     let fresh = Arc::new(Fake::default());
     let new_dir = dir.path().join("installation");
     std::fs::create_dir(&new_dir).unwrap();
@@ -1015,7 +1008,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
         .with_coordinator(Coordinator {
             scheduler: Some(app.scheduler.clone()),
             computers: Some(manager.clone()),
-            drain: Duration::from_secs(5),
+            drain: common::SETTLE,
             exclusive: false,
 
             projects_dir: Some(dir.path().join("bots")),

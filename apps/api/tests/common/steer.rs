@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use super::TestApp;
+use super::{TestApp, poll};
 
 const ENDED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
 
@@ -20,20 +20,22 @@ pub struct Joined {
 
 /// Wait until `turn` has streamed more than `chars` characters.
 pub async fn wait_for_text(app: &TestApp, turn: Uuid, chars: i64) {
-    for _ in 0..1200 {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
-        )
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if n > chars {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("turn {turn} streamed no text");
+    const TEXT_WAIT: Duration = Duration::from_secs(120);
+    tokio::time::timeout(
+        TEXT_WAIT,
+        poll(|| async {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
+            )
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (n > chars).then_some(())
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} streamed no text beyond {chars} characters"));
 }
 
 /// Send `first` to `provider`, then `second` once `ready` returns for the
@@ -53,8 +55,7 @@ where
     let sent = app.send(bot, Uuid::new_v4(), first, Some(provider)).await;
     assert!(sent.status.is_success(), "{}", sent.body);
     let one: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn_for(&one.to_string(), &["running"], Duration::from_secs(120))
-        .await;
+    app.wait_live_turn(one, &["running"]).await;
     ready(one).await;
     let sent = app.send(bot, Uuid::new_v4(), second, Some(provider)).await;
     assert!(sent.status.is_success(), "{}", sent.body);
@@ -66,9 +67,11 @@ where
     );
     let two: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     let mut live = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-    let reply = loop {
-        let (status, attempt, steer): (String, i64, Option<String>) = sqlx::query_as(
+    const JOIN_WAIT: Duration = Duration::from_secs(300);
+    let mut last_status = String::new();
+    let reply = tokio::time::timeout(JOIN_WAIT, async {
+        loop {
+            let (status, attempt, steer): (String, i64, Option<String>) = sqlx::query_as(
             "SELECT t.status, t.attempt, (SELECT s.status FROM turn_steers s WHERE s.turn_id = ?2)
              FROM turns t WHERE t.id = ?1",
         )
@@ -77,16 +80,17 @@ where
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-        live |= status == "running" && attempt == 1 && steer.as_deref() == Some("delivered");
-        if ENDED.contains(&status.as_str()) {
-            break status;
+            live |= status == "running" && attempt == 1 && steer.as_deref() == Some("delivered");
+            if ENDED.contains(&status.as_str()) {
+                break status;
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(tokio::time::Instant::now() < deadline, "{status}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let message = app
-        .wait_turn_for(&two.to_string(), ENDED, Duration::from_secs(30))
-        .await;
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {one} still {last_status}"));
+    let message = app.wait_live_turn(two, ENDED).await;
     let text: String = sqlx::query_scalar(
         "SELECT coalesce(group_concat(text, char(10)), '') FROM (
              SELECT i.text FROM items i JOIN turns t ON t.id = i.turn_id

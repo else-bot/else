@@ -64,17 +64,14 @@ impl Harness {
         response.body
     }
     async fn wait_idle(&self) -> Value {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
+        common::until(
+            "the backup to finish",
+            common::poll(|| async {
                 let snapshot = self.snapshot().await;
-                if snapshot["running"] == false {
-                    return snapshot;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
+                (snapshot["running"] == false).then_some(snapshot)
+            }),
+        )
         .await
-        .unwrap()
     }
     /// The first reply other than `backup_running`, which a scheduled
     /// capture causes while it runs.
@@ -438,9 +435,7 @@ async fn manual_backup_is_nonblocking_verified_destination_scoped_and_retained()
         let duplicate = h.app.owner("POST", "/v1/settings/backups/run", None).await;
         assert_eq!(duplicate.status, StatusCode::CONFLICT, "{}", duplicate.body);
         assert_eq!(duplicate.body["error"]["code"], "backup_running");
-        let current = tokio::time::timeout(Duration::from_secs(1), h.snapshot())
-            .await
-            .unwrap();
+        let current = common::until("backup settings while an upload is held", h.snapshot()).await;
         assert_eq!(current["running"], true);
         let saving = h
             .app

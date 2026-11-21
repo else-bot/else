@@ -144,24 +144,39 @@ impl Frame {
     }
 }
 
-async fn next(socket: &mut Socket, limit: Duration) -> Option<Message> {
-    match tokio::time::timeout(limit, socket.next()).await {
-        Ok(Some(Ok(message))) => Some(message),
-        Ok(other) => panic!("stream ended: {other:?}"),
-        Err(_) => None,
+async fn read_message(socket: &mut Socket) -> Message {
+    match socket.next().await {
+        Some(Ok(message)) => message,
+        other => panic!("stream ended: {other:?}"),
     }
 }
 
-async fn latest_frame(socket: &mut Socket, settle: Duration) -> Option<Frame> {
+fn decode_frame(message: Message) -> Option<Frame> {
+    match message {
+        Message::Binary(png) => Some(Frame::decode(&png)),
+        Message::Text(text) => {
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            None
+        }
+        _ => None,
+    }
+}
+
+async fn next_frame(socket: &mut Socket) -> Frame {
+    loop {
+        if let Some(frame) = decode_frame(read_message(socket).await) {
+            return frame;
+        }
+    }
+}
+
+async fn latest_frame(socket: &mut Socket, quiet_window: Duration) -> Option<Frame> {
     let mut latest = None;
-    while let Some(message) = next(socket, settle).await {
-        match message {
-            Message::Binary(png) => latest = Some(Frame::decode(&png)),
-            Message::Text(text) => {
-                let event: Value = serde_json::from_str(&text).unwrap();
-                assert_ne!(event["type"], "error", "{event}");
-            }
-            _ => {}
+    // Drain until no message arrives for a full quiet window.
+    while let Ok(message) = tokio::time::timeout(quiet_window, read_message(socket)).await {
+        if let Some(frame) = decode_frame(message) {
+            latest = Some(frame);
         }
     }
     latest
@@ -263,9 +278,10 @@ async fn pointer_moves_reach_the_viewer_quickly() {
         return;
     };
     let socket = &mut live.socket;
+    let first = common::until("the first desktop frame", next_frame(socket)).await;
     let mut frame = latest_frame(socket, Duration::from_secs(2))
         .await
-        .expect("a first frame");
+        .unwrap_or(first);
 
     let spots = [(300u16, 300u16), (900, 500)];
     let mut latencies = Vec::new();
@@ -280,31 +296,24 @@ async fn pointer_moves_reach_the_viewer_quickly() {
         let before = frame.patch(target.0, target.1);
         let moved = Instant::now();
         pointer(socket, x, y).await;
-        let mut arrived = None;
-        while moved.elapsed() < Duration::from_secs(2) {
-            match next(socket, Duration::from_secs(2)).await {
-                Some(Message::Binary(png)) => {
-                    let next = Frame::decode(&png);
-                    let changed = next.patch(target.0, target.1) != before;
-                    frame = next;
-                    if changed {
-                        arrived = Some(moved.elapsed());
-                        break;
-                    }
+        let arrived = common::until("the pointer to show up in a frame", async {
+            loop {
+                frame = next_frame(socket).await;
+                if frame.patch(target.0, target.1) != before {
+                    return moved.elapsed();
                 }
-                Some(_) => {}
-                None => break,
             }
-        }
-        let arrived = arrived.expect("the pointer shows up in a frame");
+        })
+        .await;
         latencies.push(arrived.as_secs_f64() * 1000.);
     }
 
+    const MOTION_SAMPLE: Duration = Duration::from_secs(3);
     let started = Instant::now();
     let mut frames = 0;
     let mut sweep = tokio::time::interval(Duration::from_millis(8));
     let mut step = 0u16;
-    while started.elapsed() < Duration::from_secs(3) {
+    while started.elapsed() < MOTION_SAMPLE {
         tokio::select! {
             _ = sweep.tick() => {
                 step = (step + 7) % 800;
@@ -319,13 +328,14 @@ async fn pointer_moves_reach_the_viewer_quickly() {
     }
     let fps = f64::from(frames) / started.elapsed().as_secs_f64();
     latest_frame(socket, Duration::from_millis(500)).await;
-    let mut idle_frames = 0;
+    const IDLE_SAMPLE: Duration = Duration::from_secs(10);
     let idle = Instant::now();
-    while let Some(remaining) = Duration::from_secs(10).checked_sub(idle.elapsed()) {
-        match next(socket, remaining).await {
-            Some(Message::Binary(_)) => idle_frames += 1,
-            Some(_) => {}
-            None => break,
+    let mut idle_frames = 0;
+    while let Some(remaining) = IDLE_SAMPLE.checked_sub(idle.elapsed()) {
+        match tokio::time::timeout(remaining, read_message(socket)).await {
+            Ok(Message::Binary(_)) => idle_frames += 1,
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
 
@@ -426,11 +436,12 @@ async fn every_native_cursor_name_matches_its_guest_shape() {
     let mut table: Vec<(u64, &str)> = Vec::new();
     let mut mismatches = Vec::new();
     for name in cursors::STYLES {
-        assert_eq!(shown.next_line().await.unwrap().as_deref(), Some(*name));
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let shown = common::until("the helper to show a cursor", shown.next_line()).await;
+        assert_eq!(shown.unwrap().as_deref(), Some(*name));
+        let deadline = tokio::time::Instant::now() + common::SETTLE;
         let mut shape = None;
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            match tokio::time::timeout(remaining, events.recv()).await {
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
                 Ok(Some(viewer::Event::Cursor {
                     hotspot_x,
                     hotspot_y,
@@ -473,21 +484,20 @@ async fn every_native_cursor_name_matches_its_guest_shape() {
 }
 
 /// Waits for a `{"type":"cursor"}` message, counting frames meanwhile.
-async fn next_cursor(socket: &mut Socket, frames: &mut u32) -> Option<String> {
-    while let Some(message) = next(socket, Duration::from_secs(3)).await {
-        match message {
+async fn next_cursor(socket: &mut Socket, frames: &mut u32) -> String {
+    loop {
+        match read_message(socket).await {
             Message::Binary(_) => *frames += 1,
             Message::Text(text) => {
                 let event: Value = serde_json::from_str(&text).unwrap();
                 assert_ne!(event["type"], "error", "{event}");
                 if event["type"] == "cursor" {
-                    return Some(event["style"].as_str().unwrap().to_owned());
+                    return event["style"].as_str().unwrap().to_owned();
                 }
             }
             _ => {}
         }
     }
-    None
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -502,33 +512,33 @@ async fn a_native_cursor_moves_without_frames_and_follows_the_guest_shape() {
     let socket = &mut live.socket;
     let mut frames = 0;
     assert_eq!(
-        next_cursor(socket, &mut frames).await.as_deref(),
-        Some("default")
+        common::until("the first cursor style", next_cursor(socket, &mut frames)).await,
+        "default"
     );
     latest_frame(socket, Duration::from_millis(500)).await;
 
     let mut sweep = tokio::time::interval(Duration::from_millis(8));
-    let started = Instant::now();
-    let mut moving_frames = 0;
     let mut step = 0u16;
-    while started.elapsed() < Duration::from_secs(3) {
-        tokio::select! {
-            _ = sweep.tick() => {
-                step = (step + 7) % 800;
-                pointer(socket, 200 + step, 200 + step / 2).await;
-            }
-            message = socket.next() => {
-                if matches!(message, Some(Ok(Message::Binary(_)))) {
-                    moving_frames += 1;
+    common::never(
+        "a frame arrived while the native cursor moved over a still screen",
+        Duration::from_secs(3),
+        async {
+            loop {
+                tokio::select! {
+                    _ = sweep.tick() => {
+                        step = (step + 7) % 800;
+                        pointer(socket, 200 + step, 200 + step / 2).await;
+                    }
+                    message = read_message(socket) => {
+                        if matches!(message, Message::Binary(_)) {
+                            return;
+                        }
+                    }
                 }
             }
-        }
-    }
-    println!("frames while the native cursor moved for 3 s: {moving_frames}");
-    assert_eq!(
-        moving_frames, 0,
-        "pointer moves over a still screen need no frames"
-    );
+        },
+    )
+    .await;
 
     let mut helper = tokio::process::Command::new("docker")
         .args([
@@ -547,32 +557,35 @@ async fn a_native_cursor_moves_without_frames_and_follows_the_guest_shape() {
         .spawn()
         .unwrap();
     assert_eq!(
-        next_cursor(socket, &mut frames).await.as_deref(),
-        Some("text")
+        common::until(
+            "the cursor style after opening the helper",
+            next_cursor(socket, &mut frames)
+        )
+        .await,
+        "text"
     );
     helper.kill().await.unwrap();
-    assert!(
-        latest_frame(socket, Duration::from_secs(1)).await.is_some(),
-        "the helper window closed"
-    );
-    assert!(
-        latest_frame(socket, Duration::from_millis(500))
-            .await
-            .is_none(),
-        "the screen is still before watching"
-    );
+    common::until("a frame after the helper window closes", next_frame(socket)).await;
+    latest_frame(socket, Duration::from_secs(1)).await;
+    common::never(
+        "a frame arrived while the screen was still",
+        Duration::from_millis(500),
+        async {
+            next_frame(socket).await;
+        },
+    )
+    .await;
 
     let body = json!({ "type": "mode", "mode": "watch" });
     socket
         .send(Message::Text(body.to_string().into()))
         .await
         .unwrap();
-    assert!(
-        latest_frame(socket, Duration::from_millis(500))
-            .await
-            .is_some(),
-        "watching paints the cursor into the frames again"
-    );
+    common::until(
+        "a frame with the cursor painted after switching to watch mode",
+        next_frame(socket),
+    )
+    .await;
 }
 
 /// A focused X window that, on each Ctrl+V, asks for CLIPBOARD as UTF-8 the
@@ -636,29 +649,33 @@ async fn pasted_text_reaches_a_guest_app_as_utf8() {
         .spawn()
         .unwrap();
     let mut lines = tokio::io::BufReader::new(helper.stdout.take().unwrap()).lines();
-    assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("ready"));
+    let ready = common::until("the paste target to be ready", lines.next_line()).await;
+    assert_eq!(ready.unwrap().as_deref(), Some("ready"));
 
     let text = "héllo ‘quoted’ 漢字 🙂\nsecond line";
     // x11vnc takes the selection 8 to 45 seconds after it starts, so a guest
     // that just booted needs a few tries.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let pasted = loop {
-        assert!(Instant::now() < deadline, "the paste never arrived");
-        for body in [
-            json!({ "type": "clipboard", "text": text }),
-            json!({ "type": "key", "key": 0xffe3, "down": true }),
-            json!({ "type": "key", "key": 0x76, "down": true }),
-            json!({ "type": "key", "key": 0x76, "down": false }),
-            json!({ "type": "key", "key": 0xffe3, "down": false }),
-        ] {
-            socket
-                .send(Message::Text(body.to_string().into()))
-                .await
-                .unwrap();
+    const PASTE_RETRY: Duration = Duration::from_secs(1);
+    let pasted = common::until("the paste to arrive", async {
+        loop {
+            for body in [
+                json!({ "type": "clipboard", "text": text }),
+                json!({ "type": "key", "key": 0xffe3, "down": true }),
+                json!({ "type": "key", "key": 0x76, "down": true }),
+                json!({ "type": "key", "key": 0x76, "down": false }),
+                json!({ "type": "key", "key": 0xffe3, "down": false }),
+            ] {
+                socket
+                    .send(Message::Text(body.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            // Retry after a quiet window with no paste output.
+            if let Ok(line) = tokio::time::timeout(PASTE_RETRY, lines.next_line()).await {
+                break line.unwrap().expect("the helper printed the paste");
+            }
         }
-        if let Ok(line) = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await {
-            break line.unwrap().expect("the helper printed the paste");
-        }
-    };
+    })
+    .await;
     assert_eq!(serde_json::from_str::<String>(&pasted).unwrap(), text);
 }

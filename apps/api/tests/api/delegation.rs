@@ -26,11 +26,6 @@ async fn bot_count(app: &TestApp) -> i64 {
         .unwrap()
 }
 
-async fn wait_status(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], common::SETTLE)
-        .await;
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_bot_acknowledges_delegated_work_in_its_conversation() {
     let h = harness(TestApp::builder().max_active(1)).await;
@@ -78,8 +73,7 @@ async fn a_new_bot_acknowledges_delegated_work_in_its_conversation() {
     );
 
     h.release(root).await;
-    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
-        .await;
+    app.wait_turn(root, &["completed"]).await;
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{target}/conversation"), None)
         .await
@@ -215,8 +209,7 @@ async fn a_delegated_reply_streams_into_the_receiving_chat_in_order() {
     )
     .await;
     h.release(root).await;
-    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
-        .await;
+    app.wait_turn(root, &["completed"]).await;
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -467,7 +460,7 @@ async fn a_running_delegated_task_keeps_its_scope_and_its_stop_is_shown() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait_status(app, child, "interrupted").await;
+    app.wait_turn(child, &["interrupted"]).await;
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{work}/conversation"), None)
         .await
@@ -514,8 +507,7 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     assert_eq!(again.status, StatusCode::CONFLICT, "the attempt is parked");
 
     h.release(root).await;
-    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
-        .await;
+    app.wait_turn(root, &["completed"]).await;
     let (status, result, delivered, child): (String, Option<String>, Option<i32>, Uuid) =
         sqlx::query_as(
             "SELECT status, result, delivered_attempt, child_turn_id FROM delegations WHERE id = ?1",
@@ -671,10 +663,9 @@ async fn delegation_limits_fail_in_code() {
     .result;
     assert_eq!(first["status"], "pending");
     h.release(root).await;
-    app.wait_turn_for(
-        &root.to_string(),
+    app.wait_turn(
+        root,
         &["waiting", "queued", "preparing", "running", "completed"],
-        Duration::from_secs(20),
     )
     .await;
     let second = else_api::db::delegations::create(
@@ -721,7 +712,7 @@ async fn delegation_limits_fail_in_code() {
         "{loop_back:?}"
     );
     h.release(child).await;
-    wait_status(app, root, "completed").await;
+    app.wait_turn(root, &["completed"]).await;
     let children: i64 =
         sqlx::query_scalar("SELECT count(*) FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -788,7 +779,7 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
     .await;
     let task_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     let view = app.owner("GET", "/v1/bots", None).await.body;
     let main_view = view["bots"]
         .as_array()
@@ -806,7 +797,6 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let task_status = || async {
         sqlx::query_as::<_, (String, Option<String>, Option<i32>)>(
             "SELECT status, error, delivered_attempt FROM delegations WHERE id = ?1",
@@ -816,14 +806,16 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
         .await
         .unwrap()
     };
-    assert_eq!(
-        (
-            app.wait_turn(&root.to_string(), &["waiting"]).await,
-            task_status().await.0
-        ),
-        ("waiting".into(), "running".into()),
-        "Stop leaves the task running"
-    );
+    common::never_polled(
+        "Stop ends the delegated task",
+        Duration::from_secs(1),
+        || async {
+            let status = task_status().await.0;
+            (status != "running").then_some(status)
+        },
+    )
+    .await;
+    app.wait_turn(root, &["waiting"]).await;
 
     let cancel = app
         .owner(
@@ -839,13 +831,8 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.wait_turn_for(
-        &child.to_string(),
-        &["interrupted"],
-        Duration::from_secs(20),
-    )
-    .await;
-    wait_status(app, root, "completed").await;
+    app.wait_turn(child, &["interrupted"]).await;
+    app.wait_turn(root, &["completed"]).await;
     let (status, _, delivered) = task_status().await;
     assert_eq!((status.as_str(), delivered), ("cancelled", Some(2)));
     let again = app
@@ -868,9 +855,9 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
     .await;
     let task_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     app.owner("DELETE", &format!("/v1/bots/{work}"), None).await;
-    wait_status(app, root, "completed").await;
+    app.wait_turn(root, &["completed"]).await;
     let (status, error, delivered): (String, Option<String>, Option<i32>) =
         sqlx::query_as("SELECT status, error, delivered_attempt FROM delegations WHERE id = ?1")
             .bind(task_id)
@@ -900,7 +887,7 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_its_reply_receives_e
     .await;
     let audit_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     let audit_child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
             .bind(audit_id)
@@ -932,18 +919,17 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_its_reply_receives_e
     let links_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
 
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     h.release(audit_child).await;
     let links_child = child_of(app, links_id).await;
     let token = h.continued(root, &token).await;
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     h.release(links_child).await;
     h.continued(root, &token).await;
     h.release(root).await;
-    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(60))
-        .await;
-    wait_status(app, follow, "completed").await;
+    app.wait_turn(root, &["completed"]).await;
+    app.wait_turn(follow, &["completed"]).await;
     let tasks: Vec<(Uuid, Uuid, String, Option<i64>)> = sqlx::query_as(
         "SELECT id, root_turn_id, status, delivered_attempt FROM delegations
          WHERE id IN (?1, ?2) ORDER BY created_at",
@@ -973,7 +959,7 @@ async fn an_owner_aside_waits_for_a_running_delegated_task() {
     let task_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
     let child = child_of(app, task_id).await;
-    wait_status(app, child, "running").await;
+    app.wait_turn(child, &["running"]).await;
 
     let aside = "Release a patch.";
     let sent = app
@@ -993,12 +979,12 @@ async fn an_owner_aside_waits_for_a_running_delegated_task() {
     h.release(child).await;
     let (_, result, _) = wait_task(app, task_id, "completed").await;
     assert_eq!(child_of(app, task_id).await, child);
-    wait_status(app, child, "completed").await;
+    app.wait_turn(child, &["completed"]).await;
     assert!(
         result.as_deref().is_some_and(|r| !r.contains(aside)),
         "the delegating bot gets the task's own reply: {result:?}"
     );
-    wait_status(app, aside_turn, "completed").await;
+    app.wait_turn(aside_turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1032,7 +1018,7 @@ async fn an_owner_aside_runs_after_the_running_task_before_other_queued_tasks() 
     let [first, second] = children[..] else {
         panic!("two tasks: {children:?}");
     };
-    wait_status(app, first, "running").await;
+    app.wait_turn(first, &["running"]).await;
 
     let sent = app
         .send(&work, Uuid::new_v4(), "Release a patch.", Some("synthetic"))
@@ -1040,8 +1026,8 @@ async fn an_owner_aside_runs_after_the_running_task_before_other_queued_tasks() 
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     let aside: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     h.release(first).await;
-    wait_status(app, first, "completed").await;
-    wait_status(app, aside, "completed").await;
+    app.wait_turn(first, &["completed"]).await;
+    app.wait_turn(aside, &["completed"]).await;
     let second_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
         .bind(second)
         .fetch_one(&app.db.pool)
@@ -1681,25 +1667,28 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
         .await
         .unwrap();
     let pool = db.pool.clone();
-    let child_end = tokio::spawn(async move {
+    let mut child_end = tokio::spawn(async move {
         sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
             .bind(child)
             .execute(&pool)
             .await
             .unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !child_end.is_finished(),
-        "settlement waits for the parent's decision"
-    );
+    common::never(
+        "the child settles before the parent decides",
+        Duration::from_millis(300),
+        &mut child_end,
+    )
+    .await;
     sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
         .bind(root)
         .execute(&mut *parent)
         .await
         .unwrap();
     parent.commit().await.unwrap();
-    child_end.await.unwrap();
+    common::until("the child to settle after the parent's decision", child_end)
+        .await
+        .unwrap();
     let (root_status, delegation_status): (String, String) = sqlx::query_as(
         "SELECT t.status, d.status FROM turns t JOIN delegations d ON d.root_turn_id = t.id
          WHERE d.id = ?1",
@@ -2201,7 +2190,7 @@ async fn the_main_bot_creates_specialists_it_can_delegate_to_at_once() {
     );
     assert_eq!(bot_count(app).await, before + 1);
     h.release(root).await;
-    wait_status(app, root, "completed").await;
+    app.wait_turn(root, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2286,7 +2275,7 @@ async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     assert_eq!(
         tool(app, &token, "create_bot", args).await.status,
         StatusCode::UNAUTHORIZED
@@ -2334,7 +2323,7 @@ async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
         .await;
         assert_eq!(pending.result["status"], "pending", "{}", pending.body);
         h.release(root).await;
-        wait_status(&h.app, root, "completed").await;
+        h.app.wait_turn(root, &["completed"]).await;
         let (parent, to, status, delivered, result) = delegation_of(&h.app, root).await;
         assert_eq!(
             (parent.to_string(), to.to_string()),
@@ -2367,7 +2356,7 @@ async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
     .await;
     assert_eq!(asked.result["status"], "pending", "{}", asked.body);
     h.release(root_a).await;
-    wait_status(&h.app, root_a, "waiting").await;
+    h.app.wait_turn(root_a, &["waiting"]).await;
 
     let (_, token) = h.started(root_b).await;
     let asked = tool(
@@ -2381,8 +2370,8 @@ async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
     h.release(root_b).await;
 
     tokio::join!(
-        wait_status(&h.app, root_a, "completed"),
-        wait_status(&h.app, root_b, "completed"),
+        h.app.wait_turn(root_a, &["completed"]),
+        h.app.wait_turn(root_b, &["completed"]),
     );
     let outcomes = tokio::join!(delegation_of(&h.app, root_a), delegation_of(&h.app, root_b));
     for (_, _, status, delivered, _) in [outcomes.0, outcomes.1] {
@@ -2411,7 +2400,7 @@ async fn stopping_a_peer_leaves_its_task_until_the_owner_stops_the_task() {
             .await
             .unwrap();
     h.release(root).await;
-    wait_status(&h.app, root, "waiting").await;
+    h.app.wait_turn(root, &["waiting"]).await;
     h.started(child).await;
     let stop = h
         .app
@@ -2422,7 +2411,7 @@ async fn stopping_a_peer_leaves_its_task_until_the_owner_stops_the_task() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait_status(&h.app, root, "waiting").await;
+    h.app.wait_turn(root, &["waiting"]).await;
     let (_, _, status, _, _) = delegation_of(&h.app, root).await;
     assert_eq!(status, "running", "Stop leaves the task running");
 
@@ -2440,7 +2429,7 @@ async fn stopping_a_peer_leaves_its_task_until_the_owner_stops_the_task() {
         )
         .await;
     assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
-    wait_status(&h.app, child, "interrupted").await;
+    h.app.wait_turn(child, &["interrupted"]).await;
     let (_, _, status, _, _) = delegation_of(&h.app, root).await;
     assert_eq!(status, "cancelled");
 }
@@ -2471,8 +2460,7 @@ async fn the_parent_chat_shows_the_childs_reply_once_before_its_continuation() {
     .await;
     let task_id = reply.result["task_id"].as_str().unwrap().to_owned();
     h.release(root).await;
-    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
-        .await;
+    app.wait_turn(root, &["completed"]).await;
     let result: String = sqlx::query_scalar("SELECT result FROM delegations WHERE id = ?1")
         .bind(task_id.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
@@ -3126,7 +3114,7 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
     .await;
     let audit_id: Uuid = audit.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
 
     let follow = app
         .send(
@@ -3149,12 +3137,12 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
     let links_id: Uuid = links.result["task_id"].as_str().unwrap().parse().unwrap();
 
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     h.release(child_of(app, links_id).await).await;
     h.continued(root, &token).await;
     h.release(root).await;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + common::SETTLE;
     loop {
         let (delivered, attempt, status): (Option<i64>, i64, String) = sqlx::query_as(
             "SELECT d.delivered_attempt, t.attempt, t.status FROM delegations d, turns t
@@ -3390,7 +3378,7 @@ async fn a_task_hands_work_on_once_and_the_last_hop_routes_follow_ups_back() {
     let _ = task_token;
     h.continued(root, &token).await;
     h.release(root).await;
-    wait_status(&h.app, root, "completed").await;
+    h.app.wait_turn(root, &["completed"]).await;
 
     let hops: Vec<(Uuid, Uuid, String, Option<i32>)> = sqlx::query_as(
         "SELECT parent_bot_id, target_bot_id, status, delivered_attempt FROM delegations
@@ -3534,7 +3522,7 @@ async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_ta
         .unwrap_or_else(|| panic!("{}", asked.body))
         .to_owned();
     h.release(child).await;
-    wait_status(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     let taken = app
         .owner(
             "POST",
@@ -3559,7 +3547,7 @@ async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_ta
         state, "completed",
         "a question is not a hand back; the task keeps waiting"
     );
-    wait_status(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
 
     let back = app
         .owner(
@@ -3569,8 +3557,8 @@ async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_ta
         )
         .await;
     assert_eq!(back.status, StatusCode::OK, "{}", back.body);
-    wait_status(app, child, "completed").await;
-    wait_status(app, root, "completed").await;
+    app.wait_turn(child, &["completed"]).await;
+    app.wait_turn(root, &["completed"]).await;
 }
 
 /// A task to `target` from the main bot's running turn, whose waiting
@@ -3594,7 +3582,7 @@ async fn task_carried_to_a_follow_up(
     .await;
     let task_id: Uuid = reply.result["task_id"].as_str().unwrap().parse().unwrap();
     h.release(root).await;
-    wait_status(app, root, "waiting").await;
+    app.wait_turn(root, &["waiting"]).await;
     let child = child_of(app, task_id).await;
     h.started(child).await;
     let follow = app
@@ -3669,7 +3657,7 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         matches!(updated["status"].as_str(), Some("queued" | "running")),
         "{updated}"
     );
-    wait_status(app, first, "interrupted").await;
+    app.wait_turn(first, &["interrupted"]).await;
     let stopped: (Option<String>, Option<String>) =
         sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
             .bind(first)
@@ -3747,21 +3735,20 @@ async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
     let work = leaf(app, "Work").await;
     let original = format!("{GATE_AFTER_OPENING} List the school forms.");
     let (task, first, token) = task_carried_to_a_follow_up(&h, &work, &original).await;
-    let deadline = tokio::time::Instant::now() + common::SETTLE;
-    let partial = loop {
-        let text: Option<String> = sqlx::query_scalar(
+    let partial = common::until(
+        "the first attempt's partial reply",
+        common::poll(|| async {
+            let text: Option<String> = sqlx::query_scalar(
             "SELECT group_concat(text, '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
         )
         .bind(first)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-        if let Some(text) = text.filter(|t| t.len() >= 14) {
-            break text;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "no partial reply");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+            text.filter(|t| t.len() >= 14)
+        }),
+    )
+    .await;
     let native: Vec<String> = sqlx::query_scalar(
         "SELECT s.native_session_id FROM provider_sessions s JOIN turns t
          ON t.conversation_id = s.conversation_id WHERE t.id = ?1",
@@ -3871,9 +3858,9 @@ async fn an_owner_aside_leaves_a_queued_update_to_run() {
     )
     .await;
     assert!(!updated.error, "{}", updated.body);
-    wait_status(app, first, "cancelling").await;
+    app.wait_turn(first, &["cancelling"]).await;
     let replacement = child_of(app, task).await;
-    wait_status(app, replacement, "queued").await;
+    app.wait_turn(replacement, &["queued"]).await;
 
     let aside = "Release a patch.";
     let sent = app
@@ -3882,7 +3869,7 @@ async fn an_owner_aside_leaves_a_queued_update_to_run() {
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     let aside_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     synthetic.hold_hangs(false).await;
-    wait_status(app, replacement, "completed").await;
+    app.wait_turn(replacement, &["completed"]).await;
     let (_, result, _) = wait_task(app, task, "completed").await;
     assert!(
         result
@@ -3890,7 +3877,7 @@ async fn an_owner_aside_leaves_a_queued_update_to_run() {
             .is_some_and(|r| r.contains("permission slip") && !r.contains(aside)),
         "the update answers the task: {result:?}"
     );
-    wait_status(app, aside_turn, "completed").await;
+    app.wait_turn(aside_turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3905,7 +3892,7 @@ async fn a_delegating_bot_cancels_a_running_task() {
     assert!(!stopping.error, "{}", stopping.body);
     let stopping = stopping.result;
     assert_eq!(stopping["status"], "stopping", "{stopping}");
-    wait_status(app, child, "interrupted").await;
+    app.wait_turn(child, &["interrupted"]).await;
     let (_, _, error) = wait_task(app, task, "cancelled").await;
     assert!(
         error

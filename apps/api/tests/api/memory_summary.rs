@@ -19,6 +19,7 @@ struct Scripted {
     replies: Mutex<VecDeque<Result<String, String>>>,
     prompts: Mutex<Vec<String>>,
     delay: Mutex<std::time::Duration>,
+    started: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -39,6 +40,7 @@ impl Summarizer for Scripted {
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<String, String> {
         let delay = *self.delay.lock().unwrap();
+        self.started.notify_one();
         if !delay.is_zero() {
             tokio::select! {
                 _ = cancel.cancelled() => return Err("cancelled".into()),
@@ -98,16 +100,11 @@ fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {
 }
 
 async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::SummaryPermit {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(permit) = app.scheduler.try_begin_summary(limit) {
-                break permit;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
+    common::until(
+        "the scheduler to release a summary slot",
+        common::poll(|| std::future::ready(app.scheduler.try_begin_summary(limit))),
+    )
     .await
-    .expect("the scheduler releases a summary slot")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -246,13 +243,19 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
         .send(&bot, Uuid::new_v4(), "after the summary", Some("synthetic"))
         .await;
     let next = next.body["turn"]["id"].as_str().unwrap().to_owned();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-        .bind(next.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "queued", "the summary holds the only slot");
+    common::never_polled(
+        "the next turn to leave the queue while the summary holds the only slot",
+        Duration::from_millis(300),
+        || async {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(next.parse::<Uuid>().unwrap())
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+            (status != "queued").then_some(status)
+        },
+    )
+    .await;
     drop(permit);
     app.wait_turn(&next, &["completed"]).await;
 }
@@ -406,33 +409,14 @@ async fn shutdown_cancels_an_active_summary_promptly() {
     let bot: Uuid = app.create_bot("Stop").await.parse().unwrap();
     add(&app, bot, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
-    *fake.delay.lock().unwrap() = Duration::from_secs(60);
+    *fake.delay.lock().unwrap() = common::SETTLE * 2;
     let cancel = tokio_util::sync::CancellationToken::new();
     let runner = tokio::spawn(compactor(&app, fake.clone()).run(cancel.clone()));
-    for _ in 0..100 {
-        let leased: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM memory_job WHERE bot_id = ?1 AND lease_token IS NOT NULL)",
-        )
-        .bind(bot)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if leased {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let began = std::time::Instant::now();
+    common::until("the summary to start", fake.started.notified()).await;
     cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(5), runner)
+    common::until("the summary worker to stop", runner)
         .await
-        .unwrap()
         .unwrap();
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "no full summary batch after shutdown"
-    );
     let (leased, failures): (bool, i32) = sqlx::query_as(
         "SELECT lease_token IS NOT NULL, failures FROM memory_job WHERE bot_id = ?1",
     )

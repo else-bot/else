@@ -169,13 +169,11 @@ async fn transcript(app: &TestApp, bot: &str) -> Vec<(String, String)> {
 /// Until the running reply has written its first text, so the chat order
 /// is fixed before the next message.
 async fn wait_for_reply_text(app: &TestApp, bot: &str) {
-    for _ in 0..400 {
-        if transcript(app, bot).await.len() == 2 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the reply wrote no text");
+    common::until(
+        "the first reply text",
+        common::poll(|| async { (transcript(app, bot).await.len() == 2).then_some(()) }),
+    )
+    .await;
 }
 
 const ENDED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
@@ -321,17 +319,18 @@ async fn stop_ends_the_reply_and_every_message_steered_into_it() {
     let first = send(&app, &bot, "Patch the sender script. [steer:hold]").await;
     app.wait_turn(&first, &["running"]).await;
     let second = send(&app, &bot, "If they agreed, send the deal.").await;
-    for _ in 0..200 {
-        let delivered: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM turn_steers WHERE status = 'delivered'")
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap();
-        if delivered == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    common::until(
+        "the steer to be delivered",
+        common::poll(|| async {
+            let delivered: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM turn_steers WHERE status = 'delivered'")
+                    .fetch_one(&app.db.pool)
+                    .await
+                    .unwrap();
+            (delivered == 1).then_some(())
+        }),
+    )
+    .await;
     assert_eq!(
         status(&app.db.pool, second.parse().unwrap()).await.0,
         "queued",

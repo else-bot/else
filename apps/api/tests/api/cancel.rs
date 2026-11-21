@@ -27,14 +27,14 @@ async fn status_of(pool: &sqlx::SqlitePool, turn: &str) -> (String, Option<Strin
 }
 
 async fn wait_receipt(app: &TestApp, bot: &str, request: Uuid) -> common::Reply {
-    for _ in 0..200 {
-        let reply = stop(app, bot, request).await;
-        if reply.body["state"] == "done" {
-            return reply;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("cancellation did not complete");
+    common::until(
+        "cancellation to complete",
+        common::poll(|| async {
+            let reply = stop(app, bot, request).await;
+            (reply.body["state"] == "done").then_some(reply)
+        }),
+    )
+    .await
 }
 
 fn turn_id(reply: &common::Reply) -> String {
@@ -97,8 +97,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
     assert_eq!(retry.body["state"], "done");
     h.release(after).await;
     assert_eq!(
-        app.wait_turn(&after.to_string(), &["completed", "interrupted"])
-            .await,
+        app.wait_turn(after, &["completed", "interrupted"]).await,
         "completed"
     );
     let other = app.create_bot("Other").await;
@@ -155,8 +154,15 @@ async fn a_provider_that_ignores_interruption_ends_uncertain() {
     app.wait_turn(&turn_id(&stuck), &["running"]).await;
     let request = Uuid::new_v4();
     assert_eq!(stop(&app, &bot, request).await.status, StatusCode::ACCEPTED);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(stop(&app, &bot, request).await.body["state"], "pending");
+    common::never_polled(
+        "the retried stop to stop reporting pending during the interruption grace period",
+        Duration::from_millis(300),
+        || async {
+            let reply = stop(&app, &bot, request).await;
+            (reply.body["state"] != "pending").then_some(reply.body)
+        },
+    )
+    .await;
     wait_receipt(&app, &bot, request).await;
     let (status, code, uncertain) = status_of(&app.db.pool, &turn_id(&stuck)).await;
     assert_eq!(
@@ -219,15 +225,14 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
         StatusCode::GONE
     );
 
-    for _ in 0..200 {
-        let receipt = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
-        if receipt.body["bot"]["cleanup"]["state"] == "done" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let receipt = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
-    assert_eq!(receipt.body["bot"]["cleanup"]["state"], "done");
+    common::until(
+        "the deleted bot's cleanup to finish",
+        common::poll(|| async {
+            let receipt = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+            (receipt.body["bot"]["cleanup"]["state"] == "done").then_some(())
+        }),
+    )
+    .await;
     assert_eq!(
         status_of(&app.db.pool, &turn_id(&queued)).await.0,
         "interrupted"
@@ -275,7 +280,7 @@ async fn late_output_after_deletion_is_fenced() {
     };
     let at_delete = count().await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(
         count().await,
         at_delete,
@@ -289,18 +294,14 @@ async fn late_output_after_deletion_is_fenced() {
     assert_eq!(status, "deleted");
 }
 
-async fn wait_status(api: &ApiProcess, pool: &sqlx::SqlitePool, turn: &str, want: &str) {
-    let _ = api;
-    for _ in 0..200 {
-        if status_of(pool, turn).await.0 == want {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+async fn wait_status(pool: &sqlx::SqlitePool, turn: &str, want: &str) {
+    let reached = common::poll(|| async { (status_of(pool, turn).await.0 == want).then_some(()) });
+    if tokio::time::timeout(common::SETTLE, reached).await.is_err() {
+        panic!(
+            "turn {turn} never reached {want}: {:?}",
+            status_of(pool, turn).await
+        );
     }
-    panic!(
-        "turn {turn} never reached {want}: {:?}",
-        status_of(pool, turn).await
-    );
 }
 
 async fn send(api: &ApiProcess, bot: &str, text: &str) -> String {
@@ -340,12 +341,19 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
     let third = created["bot"]["id"].as_str().unwrap().to_owned();
 
     let sending = send(&api, &main, "[synthetic:stall-send]").await;
-    wait_status(&api, &db.pool, &sending, "sending").await;
+    wait_status(&db.pool, &sending, "sending").await;
     let running = send(&api, &second, "[synthetic:hang]").await;
-    wait_status(&api, &db.pool, &running, "running").await;
+    wait_status(&db.pool, &running, "running").await;
     let queued = send(&api, &third, "queued during crash").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(status_of(&db.pool, &queued).await.0, "queued");
+    common::never_polled(
+        "the third turn to leave the queue before the API restarts",
+        Duration::from_millis(200),
+        || async {
+            let status = status_of(&db.pool, &queued).await.0;
+            (status != "queued").then_some(status)
+        },
+    )
+    .await;
     let owner_items = || async {
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM items WHERE kind = 'user'")
             .fetch_one(&db.pool)
@@ -361,7 +369,7 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         .unwrap();
     for _ in 0..2 {
         let api = ApiProcess::start(&db, dir.path()).await;
-        wait_status(&api, &db.pool, &queued, "completed").await;
+        wait_status(&db.pool, &queued, "completed").await;
         let (status, code, uncertain) = status_of(&db.pool, &sending).await;
         assert_eq!(
             (status.as_str(), code.as_deref(), uncertain),
@@ -405,7 +413,7 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     let (_, bots) = api.call(Method::GET, "/v1/bots", None).await;
     let main = bots["default_bot_id"].as_str().unwrap().to_owned();
     let hanging = send(&api, &main, "[synthetic:hang]").await;
-    wait_status(&api, &db.pool, &hanging, "running").await;
+    wait_status(&db.pool, &hanging, "running").await;
 
     let output = common::api_command(&db, dir.path(), 0)
         .arg("serve")
@@ -443,7 +451,7 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
         )
         .await;
     assert!(status == 202 || status == 200, "{body}");
-    wait_status(&api, &db.pool, &hanging, "interrupted").await;
+    wait_status(&db.pool, &hanging, "interrupted").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -497,7 +505,12 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    assert_eq!(stop_task.await.unwrap(), StatusCode::OK);
+    assert_eq!(
+        common::until("the stop to finish after the send commits", stop_task)
+            .await
+            .unwrap(),
+        StatusCode::OK
+    );
     let (status, code, _) = status_of(&app.db.pool, &turn_id.to_string()).await;
     assert_eq!(
         (status.as_str(), code.as_deref()),

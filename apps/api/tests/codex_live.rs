@@ -161,7 +161,8 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
     let mut threads_started = 0;
     let mut reply = String::new();
     let mut status = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    const TURN_WAIT: Duration = Duration::from_secs(180);
+    let deadline = tokio::time::Instant::now() + TURN_WAIT;
     while let Ok(Some(message)) = tokio::time::timeout_at(deadline, server.next()).await {
         match message {
             Incoming::Refused { method } => server_requests.push(method),
@@ -267,28 +268,28 @@ async fn send_codex(app: &TestApp, bot: &str, text: &str) -> String {
 
 async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
     let turn = send_codex(app, bot, text).await;
-    let status = app
-        .wait_turn_for(&turn, FINISHED, Duration::from_secs(150))
-        .await;
+    let status = app.wait_live_turn(&turn, FINISHED).await;
     reply_text(app, bot, turn, status).await
 }
 
 async fn ask_answering_the_owner(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
     let turn = send_codex(app, bot, text).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let mut answered = 0;
     let mut statuses = FINISHED.to_vec();
     statuses.push("waiting");
-    let status = loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let status = app.wait_turn_for(&turn, &statuses, remaining).await;
-        if status != "waiting" {
-            break status;
+    let status = tokio::time::timeout(common::LIVE, async {
+        loop {
+            let status = app.wait_live_turn(&turn, &statuses).await;
+            if status != "waiting" {
+                return status;
+            }
+            answered += answer_pending_questions(app).await;
+            assert!(answered <= 4, "the bots kept asking the owner");
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        answered += answer_pending_questions(app).await;
-        assert!(answered <= 4, "the bots kept asking the owner");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    };
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} stayed waiting after its questions were answered"));
     reply_text(app, bot, turn, status).await
 }
 
@@ -497,19 +498,21 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         )
         .await;
     let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
-    for _ in 0..600 {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
-        )
-        .bind(turn.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if n > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    tokio::time::timeout(
+        common::LIVE,
+        common::poll(|| async {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
+            )
+            .bind(turn.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (n > 0).then_some(())
+        }),
+    )
+    .await
+    .expect("Codex streamed an assistant item before cancellation");
     app.owner(
         "POST",
         &format!("/v1/bots/{a}/cancel"),
@@ -517,11 +520,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     )
     .await;
     let status = app
-        .wait_turn_for(
-            &turn,
-            &["interrupted", "completed", "uncertain"],
-            Duration::from_secs(60),
-        )
+        .wait_live_turn(&turn, &["interrupted", "completed", "uncertain"])
         .await;
     eprintln!("interrupt -> {status}");
     assert_eq!(status, "interrupted");
@@ -1100,11 +1099,7 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
         .unwrap();
     eprintln!("first attempt status {status} {error:?}: {text}");
     let final_status = app
-        .wait_turn_for(
-            &turn,
-            &["completed", "failed", "interrupted", "uncertain"],
-            Duration::from_secs(400),
-        )
+        .wait_live_turn(&turn, &["completed", "failed", "interrupted", "uncertain"])
         .await;
     let delegations: Vec<(Uuid, String, Option<String>, Option<i32>)> = sqlx::query_as(
         "SELECT target_bot_id, status, result, delivered_attempt FROM delegations WHERE root_turn_id = ?1",

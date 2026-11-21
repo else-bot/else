@@ -430,7 +430,7 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
         .await
         .unwrap();
     let pool = app.db.pool.clone();
-    let append = tokio::spawn(async move {
+    let mut append = tokio::spawn(async move {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         let result = memory::append(&mut tx, bot, &entry("racer", "late")).await;
         if result.is_ok() {
@@ -438,8 +438,12 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
         }
         result.map(|_| ())
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(!append.is_finished(), "the append waits for the deletion");
+    common::never(
+        "the append finishes before deletion commits",
+        std::time::Duration::from_millis(300),
+        &mut append,
+    )
+    .await;
     sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(bot)
         .execute(&mut *deletion)
@@ -689,7 +693,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         Some(json!({ "request_id": Uuid::new_v4() })),
     )
     .await;
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let after = tool(app, &token, "memory_bots", json!({})).await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
 }

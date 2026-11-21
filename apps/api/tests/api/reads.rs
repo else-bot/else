@@ -43,15 +43,16 @@ async fn assistant_items(app: &TestApp, bot: &str) -> Vec<Value> {
 
 /// The first reply of a running turn, once it has some text.
 async fn streaming_reply(app: &TestApp, bot: &str, turn: &str) -> Value {
-    let deadline = tokio::time::Instant::now() + common::SETTLE;
-    loop {
-        let items = assistant_items(app, bot).await;
-        if let Some(item) = items.into_iter().find(|item| item["turn_id"] == turn) {
-            return item;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the reply started");
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    common::until(
+        "the reply to start",
+        common::poll(|| async {
+            assistant_items(app, bot)
+                .await
+                .into_iter()
+                .find(|item| item["turn_id"] == turn)
+        }),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,7 +133,7 @@ async fn sidebar_failure_clears_when_the_next_turn_starts_and_returns_to_the_rep
     let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
     assert!(
@@ -235,7 +236,7 @@ async fn text_appended_after_a_partial_read_is_unread_again() {
     .await;
     assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let state = read_state(app, &bot).await;
     assert_eq!(state["latest"]["position"]["item_seq"], partial["item_seq"]);

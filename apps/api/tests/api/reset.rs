@@ -496,8 +496,8 @@ fn remove_refuses_external_storage_and_keeps_the_software_for_retry() {
     assert!(!installation.home.join("run/install.lock").exists());
 }
 
-#[test]
-fn remove_stops_its_running_server_before_deleting_the_installation() {
+#[tokio::test]
+async fn remove_stops_its_running_server_before_deleting_the_installation() {
     let installation = Installation::new();
     let binary = installation.home.join("current/bin/else-api");
     fs::remove_file(&binary).unwrap();
@@ -512,11 +512,20 @@ fn remove_stops_its_running_server_before_deleting_the_installation() {
     let pid = child.id();
     let reaper = std::thread::spawn(move || child.wait().unwrap());
     fs::write(installation.home.join("run/else-api.pid"), pid.to_string()).unwrap();
-    for _ in 0..100 {
-        if installation.home.join("data/api.json").exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    let manifest = installation.home.join("data/api.json");
+    let started = tokio::time::timeout(
+        crate::common::SETTLE,
+        crate::common::poll(|| std::future::ready(manifest.exists().then_some(()))),
+    )
+    .await;
+    if started.is_err() {
+        // SAFETY: signalling the server this test spawned.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        reaper.join().unwrap();
+        panic!(
+            "timed out waiting for the server manifest in {}",
+            manifest.display()
+        );
     }
     let result = installation.cli(&["remove", "--yes"]);
     if !result.status.success() {

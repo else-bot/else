@@ -64,7 +64,7 @@ async fn start_run(h: &Harness, bot: &str, quiet: bool, task: &str) -> (Value, U
     let saved = created.result["routine"].clone();
     assert_eq!(saved["quiet"], quiet);
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let latest = shown_bot(&h.app, bot).await["read_state"]["latest"]["position"].clone();
     let read = h
         .app
@@ -116,7 +116,7 @@ async fn a_quiet_run_with_no_news_alerts_no_one() {
         "repeating changes nothing"
     );
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
 
     let after = shown_bot(&h.app, &main).await;
     assert_eq!(after["read_state"]["unread"], false, "{after}");
@@ -150,7 +150,7 @@ async fn a_quiet_run_that_asks_the_owner_still_reports() {
     assert_eq!(asked.result["status"], "pending", "{}", asked.body);
     let question = asked.result["question_id"].as_str().unwrap().to_owned();
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["waiting"]).await;
+    h.app.wait_turn(run, &["waiting"]).await;
     assert_eq!(
         shown_bot(&h.app, &main).await["sidebar_status"]["kind"],
         "waiting_for_answer"
@@ -165,7 +165,7 @@ async fn a_quiet_run_that_asks_the_owner_still_reports() {
         )
         .await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
 
     let after = shown_bot(&h.app, &main).await;
     assert_eq!(after["read_state"]["unread"], true, "{after}");
@@ -208,7 +208,7 @@ async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
     assert_eq!(marked.body["routine"]["quiet"], true);
     assert!(!no_news(&h.app, &token).await.error);
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     assert_eq!(
         routine(&h.app, &main).await["last_run"]["status"],
         "no_news"
@@ -235,7 +235,7 @@ async fn a_quiet_run_that_fails_still_reports() {
     let (_, run, token) = start_run(&h, &main, true, &task).await;
     assert!(!no_news(&h.app, &token).await.error);
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["failed"]).await;
+    h.app.wait_turn(run, &["failed"]).await;
 
     let after = shown_bot(&h.app, &main).await;
     assert_eq!(after["read_state"]["unread"], true, "{after}");
@@ -260,7 +260,7 @@ async fn a_run_that_ran_an_allowed_action_cannot_end_with_no_news() {
     assert_eq!(asked.result["status"], "pending", "{}", asked.body);
     let question = asked.result["question_id"].as_str().unwrap().to_owned();
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["waiting"]).await;
+    h.app.wait_turn(run, &["waiting"]).await;
     let answered = h
         .app
         .owner(
@@ -289,7 +289,7 @@ async fn a_run_that_ran_an_allowed_action_cannot_end_with_no_news() {
         refused.body
     );
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     assert_eq!(
         routine(&h.app, &main).await["last_run"]["status"],
         "completed"

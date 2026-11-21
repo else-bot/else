@@ -1,6 +1,5 @@
 use crate::common;
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,24 +58,13 @@ async fn setup(check: &str) -> Setup {
         .parse()
         .unwrap();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     Setup {
         h,
         guest,
         manager,
         bot,
         routine,
-    }
-}
-
-async fn until<T, F: Future<Output = Option<T>>>(what: &str, mut probe: impl FnMut() -> F) -> T {
-    let deadline = tokio::time::Instant::now() + common::SETTLE;
-    loop {
-        if let Some(value) = probe().await {
-            return value;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "never {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -113,20 +101,24 @@ async fn make_due(app: &TestApp, routine: Uuid) {
 
 async fn checking(s: &Setup) -> (Uuid, Uuid) {
     make_due(&s.h.app, s.routine).await;
-    let run = until("admitted the run", || async {
-        runs(&s.h.app, s.routine).await.into_iter().last()
-    })
+    let run = common::until(
+        "admitted the run",
+        common::poll(|| async { runs(&s.h.app, s.routine).await.into_iter().last() }),
+    )
     .await;
     assert_eq!((run.turn_id, run.skip_reason.as_deref()), (None, None));
     let job = run.check_job_id.expect("the run has its check job");
-    until("launched the check", || async {
-        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
-            .bind(job)
-            .fetch_one(&s.h.app.db.pool)
-            .await
-            .unwrap();
-        (status == "running").then_some(())
-    })
+    common::until(
+        "launched the check",
+        common::poll(|| async {
+            let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
+                .bind(job)
+                .fetch_one(&s.h.app.db.pool)
+                .await
+                .unwrap();
+            (status == "running").then_some(())
+        }),
+    )
     .await;
     assert_eq!(last_run(&s.h.app, &s.bot).await["status"], "checking");
     (run.id, job)
@@ -139,16 +131,19 @@ async fn check_ends(s: &Setup, job: Uuid, probe: &str) {
 }
 
 async fn settled(app: &TestApp, run: Uuid) -> Run {
-    until("settled the run", || async {
-        let row: Run = sqlx::query_as(
-            "SELECT id, turn_id, skip_reason, check_job_id FROM routine_runs WHERE id = ?1",
-        )
-        .bind(run)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        (row.turn_id.is_some() || row.skip_reason.is_some()).then_some(row)
-    })
+    common::until(
+        "settled the run",
+        common::poll(|| async {
+            let row: Run = sqlx::query_as(
+                "SELECT id, turn_id, skip_reason, check_job_id FROM routine_runs WHERE id = ?1",
+            )
+            .bind(run)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (row.turn_id.is_some() || row.skip_reason.is_some()).then_some(row)
+        }),
+    )
     .await
 }
 
@@ -243,10 +238,13 @@ async fn a_cancelled_check_wakes_the_run_and_a_due_occurrence_meanwhile_overlaps
     let (run, job) = checking(&s).await;
 
     make_due(&s.h.app, s.routine).await;
-    let overlap = until("skipped the next occurrence", || async {
-        let all = runs(&s.h.app, s.routine).await;
-        (all.len() == 2).then(|| all[1].clone())
-    })
+    let overlap = common::until(
+        "skipped the next occurrence",
+        common::poll(|| async {
+            let all = runs(&s.h.app, s.routine).await;
+            (all.len() == 2).then(|| all[1].clone())
+        }),
+    )
     .await;
     assert_eq!(
         (overlap.skip_reason.as_deref(), overlap.check_job_id),
@@ -349,13 +347,16 @@ async fn stop_work_settles_a_checking_run_before_its_check_can_report() {
     );
 
     check_ends(&s, job, "done 0\n2 new leads\n").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let row = runs(&s.h.app, s.routine).await.remove(0);
-    assert_eq!(
-        (row.skip_reason.as_deref(), row.turn_id),
-        (Some("check_cancelled"), None),
-        "a check that reports after Stop never queues its turn"
-    );
+    common::never_polled(
+        "a check that reports after Stop changes the skipped run",
+        Duration::from_secs(2),
+        || async {
+            let row = runs(&s.h.app, s.routine).await.remove(0);
+            (row.skip_reason.as_deref() != Some("check_cancelled") || row.turn_id.is_some())
+                .then_some(row)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -387,10 +388,13 @@ async fn deleting_a_routine_settles_its_checking_run_and_stops_the_check() {
 
     let turns = bot_turns(&s.h.app, &s.bot).await;
     check_ends(&s, job, "done 0\n2 new leads\n").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(
-        bot_turns(&s.h.app, &s.bot).await,
-        turns,
-        "a deleted routine's check never queues a turn"
-    );
+    common::never_polled(
+        "a deleted routine's check queues a turn",
+        Duration::from_secs(2),
+        || async {
+            let count = bot_turns(&s.h.app, &s.bot).await;
+            (count != turns).then_some(count)
+        },
+    )
+    .await;
 }

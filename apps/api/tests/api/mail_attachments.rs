@@ -255,7 +255,7 @@ async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() 
     );
 
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     let answered = h
         .app
         .owner(
@@ -354,7 +354,7 @@ async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() 
         raw.body
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -371,7 +371,7 @@ async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_c
         "Open minutes.html"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     h.app
         .owner(
             "POST",
@@ -397,7 +397,7 @@ async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_c
         unsupported.body
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let other = h.app.create_bot("Other").await;
     let path = format!("/v1/connectors/email/accounts/{account}/bots/{other}");
@@ -416,7 +416,7 @@ async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_c
         "a bot that cannot read the inbox fetches nothing"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -430,7 +430,7 @@ async fn pdfs_are_read_in_a_worker_that_a_hostile_file_cannot_take_down() {
     let parked = tool(&h.app, &token, "mail_action", open(account, &[3, 4])).await;
     let question = parked.result["question_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     h.app
         .owner(
             "POST",
@@ -471,5 +471,5 @@ async fn pdfs_are_read_in_a_worker_that_a_hostile_file_cannot_take_down() {
         elsewhere.body
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }

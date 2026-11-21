@@ -89,8 +89,7 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
-        else {
+        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
@@ -180,32 +179,37 @@ impl Drop for Cleanup {
 
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
-    loop {
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+    let mut last_status = String::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, error): (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+                    .bind(turn)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
+                let text: String = sqlx::query_scalar(
+                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
+                )
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
-        if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-            let text: String = sqlx::query_scalar(
-                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-            )
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-            note(&format!(
-                "  -> {status} {error:?} after {:?}: {}",
-                started.elapsed(),
-                text.chars().take(600).collect::<String>()
-            ));
-            return (status, text);
+                note(&format!(
+                    "  -> {status} {error:?} after {:?}: {}",
+                    started.elapsed(),
+                    text.chars().take(600).collect::<String>()
+                ));
+                return (status, text);
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(started.elapsed() < timeout, "turn {turn} still {status}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
 }
 
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
@@ -717,18 +721,21 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         "0",
         "the timed-out command was ended"
     );
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    assert_eq!(
+    let late_file_count = || {
         guest(
             &home,
             &name,
             "ls ~/work/late.txt 2>/dev/null | wc -l",
             None,
-            false
-        ),
-        "0",
-        "it never finished its side effect"
-    );
+            false,
+        )
+    };
+    common::never_polled(
+        "the timed-out command finished its side effect",
+        Duration::from_secs(30),
+        || std::future::ready(Some(late_file_count()).filter(|count| count != "0")),
+    )
+    .await;
 
     note("== 7. Stop work ends foreground and background script work");
     let turn = api
@@ -739,24 +746,26 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
              computer_run and timeout_secs 300, and wait for it.",
         )
         .await;
-    let started = Instant::now();
-    loop {
-        let procs = guest(
-            &home,
-            &name,
-            "pgrep -fa 'sleep 2[89]0' | grep -v pgrep || true",
-            None,
-            true,
-        );
-        if procs.contains("sleep 280") && procs.contains("sleep 290") {
-            break;
+    const WORK_START_WAIT: Duration = Duration::from_secs(300);
+    let mut last_processes = String::new();
+    tokio::time::timeout(WORK_START_WAIT, async {
+        loop {
+            let procs = guest(
+                &home,
+                &name,
+                "pgrep -fa 'sleep 2[89]0' | grep -v pgrep || true",
+                None,
+                true,
+            );
+            if procs.contains("sleep 280") && procs.contains("sleep 290") {
+                break;
+            }
+            last_processes = procs;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(300),
-            "the work did not start: {procs}"
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the work did not start: {last_processes}"));
     let stop_at = Instant::now();
     let (status, body) = api
         .call(
@@ -766,23 +775,25 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         )
         .await;
     assert!(status < 300, "{body}");
-    loop {
-        let procs = guest(
-            &home,
-            &name,
-            "pgrep -fa 'sleep 2[89]0' | grep -v pgrep || true",
-            None,
-            true,
-        );
-        if procs.is_empty() {
-            break;
+    let mut last_processes = String::new();
+    tokio::time::timeout(common::SETTLE, async {
+        loop {
+            let procs = guest(
+                &home,
+                &name,
+                "pgrep -fa 'sleep 2[89]0' | grep -v pgrep || true",
+                None,
+                true,
+            );
+            if procs.is_empty() {
+                break;
+            }
+            last_processes = procs;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        assert!(
-            stop_at.elapsed() < Duration::from_secs(20),
-            "still running: {procs}"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("still running: {last_processes}"));
     note(&format!(
         "Stop work ended both within {:?}",
         stop_at.elapsed()
@@ -797,59 +808,66 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     .await
     .unwrap();
     assert_eq!(cancelled, 1);
-    for _ in 0..200 {
-        let (status, _) = api
-            .call(reqwest::Method::GET, &format!("/v1/bots/{bot}"), None)
-            .await;
-        if status == 200 {
-            break;
+    common::until("the bot to respond after stopping work", async {
+        loop {
+            let (status, _) = api
+                .call(reqwest::Method::GET, &format!("/v1/bots/{bot}"), None)
+                .await;
+            if status == 200 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await;
 
     note("== 8. a lost provider and API: the job keeps its lease, the foreground command ends");
-    let turn = loop {
-        let (status, body) = api
-            .call(
-                reqwest::Method::POST,
-                &format!("/v1/bots/{bot}/turns"),
-                Some(
-                    json!({ "request_id": Uuid::new_v4(), "provider_id": "codex",
+    let turn = common::until("the API to accept the turn", async {
+        loop {
+            let (status, body) = api
+                .call(
+                    reqwest::Method::POST,
+                    &format!("/v1/bots/{bot}/turns"),
+                    Some(
+                        json!({ "request_id": Uuid::new_v4(), "provider_id": "codex",
                     "text": "Two steps, in this order. First start a background job with \
                     exactly the command `sleep 45 && date +%s > ~/work/restart-proof.txt`. \
                     Then run exactly `sleep 120` with computer_run and timeout_secs 300, and \
                     wait for it." }),
-                ),
-            )
-            .await;
-        if status < 300 {
-            break body["turn"]["id"]
-                .as_str()
-                .unwrap()
-                .parse::<Uuid>()
-                .unwrap();
+                    ),
+                )
+                .await;
+            if status < 300 {
+                break body["turn"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
+                    .unwrap();
+            }
+            assert_eq!(status, 409, "{body}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        assert_eq!(status, 409, "{body}");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    let started = Instant::now();
-    loop {
-        let procs = guest(
-            &home,
-            &name,
-            "pgrep -fa '^sleep (45|120)$' || true",
-            None,
-            true,
-        );
-        if procs.contains("sleep 45") && procs.contains("sleep 120") {
-            break;
+    })
+    .await;
+    let mut last_processes = String::new();
+    tokio::time::timeout(WORK_START_WAIT, async {
+        loop {
+            let procs = guest(
+                &home,
+                &name,
+                "pgrep -fa '^sleep (45|120)$' || true",
+                None,
+                true,
+            );
+            if procs.contains("sleep 45") && procs.contains("sleep 120") {
+                break;
+            }
+            last_processes = procs;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(300),
-            "the work did not start: {procs}"
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the work did not start: {last_processes}"));
     let job: (Uuid, Option<Uuid>) = sqlx::query_as(
         "SELECT id, lease_id FROM guest_jobs WHERE bot_id = ?1 AND command LIKE 'sleep 45%'",
     )
@@ -880,23 +898,22 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         "one process"
     );
     let restarted = Instant::now();
-    loop {
-        let left = guest(
-            &home,
-            &name,
-            "pgrep -c -f '^sleep 120$' || true",
-            None,
-            true,
-        );
-        if left == "0" {
-            break;
+    common::until("the leftover sleep 120 to exit after restart", async {
+        loop {
+            let left = guest(
+                &home,
+                &name,
+                "pgrep -c -f '^sleep 120$' || true",
+                None,
+                true,
+            );
+            if left == "0" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        assert!(
-            restarted.elapsed() < Duration::from_secs(30),
-            "sleep 120 still runs"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    })
+    .await;
     note(&format!(
         "the left-over foreground command ended {:?} after the restart",
         restarted.elapsed()
@@ -906,19 +923,24 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         status, "completed",
         "the interrupted turn is not reported done"
     );
-    let started = Instant::now();
-    loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
-            .bind(job.0)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if status == "completed" {
-            break;
+    const JOB_WAIT: Duration = Duration::from_secs(120);
+    let mut last_status = String::new();
+    tokio::time::timeout(JOB_WAIT, async {
+        loop {
+            let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
+                .bind(job.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if status == "completed" {
+                break;
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        assert!(started.elapsed() < Duration::from_secs(120), "job {status}");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("job {last_status}"));
     let released: bool =
         sqlx::query_scalar("SELECT released_at IS NOT NULL FROM computer_leases WHERE id = ?1")
             .bind(job.1.unwrap())

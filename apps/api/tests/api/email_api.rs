@@ -380,7 +380,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
         "the card shows the exact instructions: {card}"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     let answered = h
         .app
         .owner(
@@ -398,7 +398,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
     assert_eq!(listed[0]["account_id"], json!(account.id));
     assert_eq!(listed[0]["instructions"], "Flag invoices from new vendors.");
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let wake = format!(
         "/v1/connectors/email/accounts/{}/bots/{bot}/wake",
@@ -464,7 +464,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
         refused.body
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -519,7 +519,7 @@ async fn a_delegated_task_cannot_change_mail_triggers() {
     .await
     .unwrap();
     h.release(root).await;
-    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    h.app.wait_turn(root, &["waiting"]).await;
     let (_, child_token) = h.started(child).await;
     for (name, args) in [
         (
@@ -623,7 +623,7 @@ async fn introduction_leaves_busy_work_running_and_can_be_retried_when_idle() {
             .contains("[else.bot email setup]")
     );
     h.release(running).await;
-    h.app.wait_turn(&running.to_string(), &["completed"]).await;
+    h.app.wait_turn(running, &["completed"]).await;
     let accepted = h.app.owner("POST", &path, Some(body.clone())).await;
     assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
     assert_eq!(
@@ -646,7 +646,7 @@ async fn introduction_is_private_idempotent_and_reaches_the_model_and_history() 
     assert_eq!(again.status, StatusCode::OK, "{}", again.body);
     assert_eq!(first.body, again.body);
     let turn: Uuid = first.body["turn_id"].as_str().unwrap().parse().unwrap();
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let inputs = h.inputs(turn).await;
     assert_eq!(inputs.len(), 1);
     assert!(inputs[0].text.contains(&account.id.to_string()));
@@ -814,12 +814,7 @@ async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
         .unwrap();
     let manager = h.app.state.connectors.clone();
     manager.changed(account.id).await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        transport.ready.notified(),
-    )
-    .await
-    .unwrap();
+    common::until("the mail watcher to be ready", transport.ready.notified()).await;
     for _ in 0..3 {
         manager
             .execute(account.id, bot, turn, None, MailCommand::Folders)
@@ -1106,7 +1101,7 @@ async fn store_refusals_reach_the_bot_under_their_own_codes() {
         .await
         .unwrap();
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     assert_eq!(
         code(turn, None, MailCommand::Folders).await,
         "mail_not_running"
@@ -1300,7 +1295,7 @@ async fn mail_event_origin_removes_computer_authority() {
     assert!(!visible);
     drop(conn);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 /// An inbox bot passes a notice on as its trigger says (issue #518). The
@@ -1387,7 +1382,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
             .await
             .unwrap();
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     let (_, child_token) = h.started(child).await;
     let grant = h.app.state.grants.resolve(&child_token).await.unwrap();
     assert!(grant.allows(Tool::ReadHistory));
@@ -1420,7 +1415,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
         onward.body
     );
     h.release(child).await;
-    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+    h.app.wait_turn(child, &["completed"]).await;
     h.continued(turn, &token).await;
     let inputs = h.inputs(turn).await;
     let outcomes = &inputs.last().unwrap().delegation.outcomes;
@@ -1431,7 +1426,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
         "{outcomes:?}"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test]
@@ -1502,13 +1497,7 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
         .unwrap()
         .to_owned();
     h.release(turn).await;
-    h.app
-        .wait_turn_for(
-            &turn.to_string(),
-            &["waiting"],
-            std::time::Duration::from_secs(20),
-        )
-        .await;
+    h.app.wait_turn(turn, &["waiting"]).await;
 
     let snapshot = h
         .app
@@ -1557,7 +1546,7 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
     assert_eq!(sent.result["status"], "sent", "{}", sent.body);
     assert_eq!(transport.sends.load(Ordering::SeqCst), 1);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test]
@@ -1576,10 +1565,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         let _closed = app
             .state
             .gate
-            .close(
-                Duration::from_secs(2),
-                else_api::maintenance::Pause::backup(None),
-            )
+            .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
             .await
             .unwrap()
             .unwrap();
@@ -1810,12 +1796,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     );
 
     h.release(turn).await;
-    app.wait_turn_for(
-        &turn.to_string(),
-        &["waiting"],
-        std::time::Duration::from_secs(30),
-    )
-    .await;
+    app.wait_turn(turn, &["waiting"]).await;
     let answer_path = format!("/v1/bots/{bot}/questions/{question}/answer");
     let approve = || app.owner("POST", &answer_path, Some(json!({"choice":"approve"})));
     let early = approve().await;
@@ -1934,13 +1915,7 @@ async fn inbox_card(h: &recorder::Harness) -> (String, String) {
     .await;
     let question = parked.result["question_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    h.app
-        .wait_turn_for(
-            &turn.to_string(),
-            &["waiting"],
-            std::time::Duration::from_secs(30),
-        )
-        .await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     let path = format!("/v1/bots/{bot}/questions/{question}/answer");
     (bot, path)
 }

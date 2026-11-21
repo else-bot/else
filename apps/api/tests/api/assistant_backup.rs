@@ -357,7 +357,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let starts = s.fake.starts.load(SeqCst);
     let checkpoints_before = s.fake.execs.lock().unwrap().len();
 
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let manifest = &summary.manifest;
     assert!(manifest.coverage.whole_assistant, "{:?}", manifest.coverage);
     assert_eq!(manifest.coverage.vm, Covered::Included);
@@ -532,7 +532,7 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
     else {
         panic!()
     };
-    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    let result = worker(&s, common::SETTLE).run_once().await;
     assert!(
         matches!(result, Err(BackupError::Deferred(ref m)) if m.contains("in use")),
         "{result:?}"
@@ -540,7 +540,7 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
     s.manager.release(lease_id).await.unwrap();
 
     s.fake.fail_export.store(true, SeqCst);
-    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    let result = worker(&s, common::SETTLE).run_once().await;
     assert!(
         matches!(result, Err(BackupError::Producer(ref m)) if m.contains("disk full")),
         "{result:?}"
@@ -552,7 +552,7 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
         .count();
     assert_eq!(leftovers, 0);
     s.fake.fail_export.store(false, SeqCst);
-    let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    let set = worker(&s, common::SETTLE).run_once().await.unwrap();
     assert!(set.manifest.coverage.whole_assistant);
 }
 
@@ -659,22 +659,24 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
     let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
     h.release(first).await;
     assert_eq!(
-        app.wait_turn_for(
-            &first.to_string(),
-            &["completed", "cancelling", "interrupted"],
-            Duration::from_secs(30)
-        )
-        .await,
+        app.wait_turn(first, &["completed", "cancelling", "interrupted"])
+            .await,
         "completed",
         "the running turn finishes instead of being cancelled"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-        .bind(second.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "queued", "nothing starts while the gate is closed");
+    common::never_polled(
+        "the follow-up leaves the queue while the gate is closed",
+        Duration::from_millis(300),
+        || async {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(second.parse::<Uuid>().unwrap())
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+            (status != "queued").then_some(status)
+        },
+    )
+    .await;
     drop(closed);
     app.scheduler.wake();
     assert_eq!(app.wait_turn(&second, &["completed"]).await, "completed");
@@ -693,7 +695,7 @@ async fn a_set_with_computers_needs_a_new_installation_to_restore() {
         panic!()
     };
     s.manager.release(lease_id).await.unwrap();
-    let summary = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let target = Target::new(&s.app);
     let result = restore(RestoreRequest {
         set_dir: &summary.path,
@@ -721,7 +723,7 @@ async fn retention_keeps_every_artifact_a_kept_set_needs() {
         panic!()
     };
     s.manager.release(lease_id).await.unwrap();
-    let mut w = worker(&s, Duration::from_secs(2));
+    let mut w = worker(&s, common::SETTLE);
     w.config.keep = 1;
     let first = w.run_once().await.unwrap();
     let second = w.run_once().await.unwrap();
@@ -769,7 +771,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
     let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     let name = used(&s, a).await;
     s.fake.checkpoint_fails.store(true, SeqCst);
-    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    let result = worker(&s, common::SETTLE).run_once().await;
     assert!(
         matches!(result, Err(BackupError::Deferred(ref m)) if m.contains("checkpoint")),
         "{result:?}"
@@ -786,7 +788,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
         .await
         .unwrap();
     let before = s.fake.execs.lock().unwrap().len();
-    let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    let set = worker(&s, common::SETTLE).run_once().await.unwrap();
     assert!(
         s.fake.execs.lock().unwrap()[before..]
             .iter()
@@ -804,7 +806,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
     );
     assert!(set.manifest.coverage.whole_assistant);
     std::fs::remove_file(s.manager.desktop_password_file(a)).unwrap();
-    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    let result = worker(&s, common::SETTLE).run_once().await;
     assert!(
         matches!(result, Err(BackupError::Producer(ref m)) if m.contains("password")),
         "{result:?}"
@@ -830,7 +832,7 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
     .execute(&s.app.db.pool)
     .await
     .unwrap();
-    let mut w = worker(&s, Duration::from_secs(2));
+    let mut w = worker(&s, common::SETTLE);
     w.config.keep = 1;
     let whole = w.run_once().await.unwrap();
     assert!(whole.manifest.coverage.whole_assistant);
@@ -878,7 +880,7 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
     let s = setup().await;
     let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     let name = used(&s, a).await;
-    let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    let set = worker(&s, common::SETTLE).run_once().await.unwrap();
     for stop_fails in [false, true] {
         let fresh = Arc::new(Fake::default());
         fresh.restore_fails_running.store(true, SeqCst);
@@ -955,7 +957,7 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     std::fs::create_dir_all(&pb).unwrap();
     std::fs::write(pb.join("sheet.csv"), "item,qty\n").unwrap();
 
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let manifest = &summary.manifest;
     assert!(manifest.coverage.whole_assistant, "{:?}", manifest.coverage);
     assert_eq!(manifest.coverage.projects, Covered::Included);
@@ -1056,7 +1058,7 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
         let locked = pb.join("locked.csv");
         std::fs::write(&locked, "secret").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let partial = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+        let partial = worker(&s, common::SETTLE).run_once().await.unwrap();
         let manifest = &partial.manifest;
         assert_eq!(manifest.coverage.projects, Covered::Partial);
         assert!(!manifest.coverage.whole_assistant);
@@ -1091,7 +1093,7 @@ async fn shared_mcp_packages_survive_backup_restore_and_removal() {
     }
     std::fs::create_dir(library.join(".pending-install")).unwrap();
     std::fs::write(library.join(".pending-install/README.md"), "unfinished").unwrap();
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     assert_eq!(summary.manifest.coverage.mcp, Covered::Included);
     assert!(summary.manifest.coverage.whole_assistant);
     let artifact = summary
@@ -1113,7 +1115,7 @@ async fn shared_mcp_packages_survive_backup_restore_and_removal() {
         );
     }
     std::fs::rename(&package, library.join(".removed-t3-code")).unwrap();
-    let after_removal = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let after_removal = worker(&s, common::SETTLE).run_once().await.unwrap();
     for (set, populated) in [(&summary, true), (&after_removal, false)] {
         let target = Target::new(&s.app);
         let new_dir = s.dir.path().join(format!("restored-{}", target.name));
@@ -1154,7 +1156,7 @@ async fn an_incomplete_shared_mcp_package_does_not_produce_a_complete_backup() {
     let library = s.dir.path().join("mcp/t3-code");
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(library.join("SKILL.md"), "only one file").unwrap();
-    let result = worker(&s, Duration::from_secs(5)).run_once().await;
+    let result = worker(&s, common::SETTLE).run_once().await;
     assert!(matches!(result, Err(BackupError::Invalid(_))), "{result:?}");
     assert!(
         backup::completed_sets(&s.dir.path().join("backups"))
@@ -1168,7 +1170,7 @@ async fn an_incomplete_shared_mcp_package_does_not_produce_a_complete_backup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn backups_from_before_shared_mcp_support_still_restore() {
     let s = setup().await;
-    let summary = worker(&s, Duration::from_secs(5))
+    let summary = worker(&s, common::SETTLE)
         .with_coordinator(Coordinator::default())
         .run_once()
         .await
@@ -1284,7 +1286,7 @@ async fn restore_fresh(s: &Setup, set: &Path, name: &str) -> (Arc<Fake>, std::pa
 async fn schema_2_sets_with_plain_project_tars_still_restore() {
     let s = setup_with(true).await;
     let (a, b) = computers_with_projects(&s).await;
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let (_whole, whole) = common::rebuilt_set(&summary.path, &key());
     rewrite_manifest(&whole, |manifest, identity| {
         manifest["schema_version"] = json!(2);
@@ -1336,7 +1338,7 @@ async fn schema_2_sets_with_plain_project_tars_still_restore() {
 async fn a_computer_archive_without_its_image_must_follow_one_that_has_it() {
     let s = setup_with(true).await;
     computers_with_projects(&s).await;
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let (_whole, whole) = common::rebuilt_set(&summary.path, &key());
     rewrite_manifest(&whole, |manifest, _| {
         for bot in manifest["bots"].as_array_mut().unwrap() {
@@ -1355,7 +1357,7 @@ async fn a_computer_archive_without_its_image_must_follow_one_that_has_it() {
 async fn computers_from_a_tag_keep_their_own_image() {
     let s = setup_image(true, "python:3.12-slim").await;
     let (a, b) = computers_with_projects(&s).await;
-    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let summary = worker(&s, common::SETTLE).run_once().await.unwrap();
     let carried: Vec<bool> = summary
         .manifest
         .bots

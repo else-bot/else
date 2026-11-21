@@ -300,25 +300,26 @@ async fn toolchain_projects_persist_and_restore() {
     let build = "cd rs-app && /usr/bin/time -v cargo build --release > build.log 2>&1; c=$?; \
                  grep -E 'Maximum resident|Elapsed|Percent of CPU' build.log; \
                  du -sh target ~/.cargo | tr '\\t' ' '; exit $c";
+    const BUILD_WAIT: Duration = Duration::from_secs(1800);
     let Started::Job(job) = manager
-        .start_job(bot, None, build, Duration::from_secs(1800))
+        .start_job(bot, None, build, BUILD_WAIT)
         .await
         .unwrap()
     else {
         panic!("the build job did not start")
     };
     let started = Instant::now();
-    let done = loop {
-        let state = manager.job(bot, job).await.unwrap().unwrap();
-        if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
-            break state;
+    let done = tokio::time::timeout(BUILD_WAIT, async {
+        loop {
+            let state = manager.job(bot, job).await.unwrap().unwrap();
+            if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(1800),
-            "build timed out"
-        );
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    };
+    })
+    .await
+    .expect("the guest build finished");
     eprintln!(
         "cargo build (serde + serde_json with derive, 1 vCPU, 2 GiB) in {:?}:\n{}",
         started.elapsed(),

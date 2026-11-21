@@ -666,8 +666,29 @@ async fn health_after_listening(refused: bool) -> Health {
         fake,
     ));
     manager.changed(c.id).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    store::connection(&db.pool, c.id).await.unwrap().health
+    let health = |db: &TestDb| {
+        let pool = db.pool.clone();
+        async move { store::connection(&pool, c.id).await.unwrap().health }
+    };
+    let settled = common::until(
+        "the listener's health",
+        common::poll(|| async {
+            let health = health(&db).await;
+            matches!(health, Health::Connected | Health::ReceiverConflict).then_some(health)
+        }),
+    )
+    .await;
+    // Outlast the 3 s listen settle, after which a listener is marked Connected.
+    common::never_polled(
+        "the listener's health to change",
+        Duration::from_secs(4),
+        || async {
+            let health = health(&db).await;
+            (health != settled).then_some(health)
+        },
+    )
+    .await;
+    settled
 }
 
 #[tokio::test]
@@ -712,23 +733,24 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
-        .await
-        .unwrap();
+    common::until("the send to start", fake.started.notified()).await;
     store::set_state(&db.pool, c.id, ConnectionState::Paused)
         .await
         .unwrap();
     manager.changed(c.id).await;
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), task)
+        common::until("the cancelled send", task)
             .await
-            .unwrap()
             .unwrap()
             .is_err()
     );
     fake.release.notify_one();
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+    common::never_polled(
+        "the cancelled send to reach the transport",
+        Duration::from_millis(20),
+        || std::future::ready((fake.sends.load(Ordering::SeqCst) != 0).then_some(())),
+    )
+    .await;
     let status: String = sqlx::query_scalar("SELECT status FROM social_actions WHERE action_id=?1")
         .bind(id)
         .fetch_one(&db.pool)
@@ -960,7 +982,7 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1055,7 +1077,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
         "the owner approves the chat the username named when drafted: {proposed}"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1079,7 +1101,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{stopped}");
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let woken = insert_turn(db, bot, "connector", "queued", GATE).await;
     app.scheduler.wake();
     h.started(woken).await;
@@ -1376,9 +1398,7 @@ async fn completing_another_bots_setup_keeps_an_approved_send_running() {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
-        .await
-        .unwrap();
+    common::until("the send to start", fake.started.notified()).await;
     let (status, body) = http(
         &router,
         "POST",
@@ -1389,10 +1409,7 @@ async fn completing_another_bots_setup_keeps_an_approved_send_running() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     fake.release.notify_one();
-    let sent = tokio::time::timeout(Duration::from_secs(2), send)
-        .await
-        .unwrap()
-        .unwrap();
+    let sent = common::until("the other bot's send", send).await.unwrap();
     assert!(sent.is_ok(), "the other bot's send survives: {sent:?}");
     assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
 }
@@ -1544,7 +1561,7 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         "a connected draft is never sent by the bot's own tools"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",

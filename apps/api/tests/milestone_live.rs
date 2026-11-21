@@ -173,8 +173,7 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
-        else {
+        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
@@ -236,7 +235,7 @@ impl Api {
                 if let Some(status) = child.try_wait().unwrap() {
                     break status;
                 }
-                if started.elapsed() > Duration::from_secs(60) {
+                if started.elapsed() > common::SETTLE {
                     let _ = child.kill();
                     let _ = child.wait();
                     panic!("the API did not stop within 60 s of SIGTERM; killed");
@@ -379,32 +378,37 @@ impl Drop for Cleanup {
 
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
-    loop {
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+    let mut last_status = String::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, error): (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+                    .bind(turn)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
+                let text: String = sqlx::query_scalar(
+                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
+                )
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
-        if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-            let text: String = sqlx::query_scalar(
-                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-            )
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-            note(&format!(
-                "  -> {status} {error:?} after {:?}: {}",
-                started.elapsed(),
-                text.chars().take(600).collect::<String>()
-            ));
-            return (status, text);
+                note(&format!(
+                    "  -> {status} {error:?} after {:?}: {}",
+                    started.elapsed(),
+                    text.chars().take(600).collect::<String>()
+                ));
+                return (status, text);
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(started.elapsed() < timeout, "turn {turn} still {status}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
 }
 
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
@@ -483,7 +487,7 @@ async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<Stri
 fn version(program: &str) -> String {
     let mut command = std::process::Command::new(program);
     command.arg("--version");
-    bounded(command, Duration::from_secs(30))
+    bounded(command, common::SETTLE)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_default()
 }
@@ -1068,20 +1072,23 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     assert_eq!(status, "completed", "{reply}");
 
     note("== 9. browser state, then a coordinated backup (job finished, API stopped)");
-    let started = Instant::now();
-    loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
-            .bind(job.0)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if status != "running" {
-            assert_eq!(status, "completed");
-            break;
+    const JOB_WAIT: Duration = Duration::from_secs(180);
+    let status = tokio::time::timeout(JOB_WAIT, async {
+        loop {
+            let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
+                .bind(job.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if status != "running" {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        assert!(started.elapsed() < Duration::from_secs(180));
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+    })
+    .await
+    .expect("the job finished before backup");
+    assert_eq!(status, "completed");
     let marker = format!("kept-{}", &Uuid::new_v4().simple().to_string()[..8]);
     guest(
         &home,

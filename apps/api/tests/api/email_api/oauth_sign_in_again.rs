@@ -73,8 +73,7 @@ async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
         "{context}"
     );
     h.release(turn).await;
-    app.wait_turn_for(&turn.to_string(), &["waiting"], common::SETTLE)
-        .await;
+    app.wait_turn(turn, &["waiting"]).await;
     let path = format!("/v1/bots/{bot}/questions/{question}/answer");
     let approve = || app.owner("POST", &path, Some(json!({"choice":"approve"})));
     assert_eq!(

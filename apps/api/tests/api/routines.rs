@@ -152,7 +152,7 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
         "later renames preserve history"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let (next, _) = h.running(&bot, GATE).await;
     let inputs = h.inputs(next).await;
     let history = &inputs[0].history;
@@ -569,7 +569,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     let (setup, token) = h.running(&main, GATE).await;
     let old = create(&h.app, &token, args.clone()).await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     let (root, token) = h
         .running(
@@ -592,7 +592,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     assert_eq!(pending.result["status"], "pending", "{}", pending.body);
     let child = child_of(&h.app, root).await;
     h.release(root).await;
-    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    h.app.wait_turn(root, &["waiting"]).await;
 
     let (_, child_token) = h.started(child).await;
     let saved = create(&h.app, &child_token, args.clone()).await;
@@ -711,7 +711,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     assert!(!retired.error, "{}", retired.body);
     assert_eq!(retired.result["routine"]["enabled"], false);
     h.release(root).await;
-    h.app.wait_turn(&root.to_string(), &["completed"]).await;
+    h.app.wait_turn(root, &["completed"]).await;
     assert_eq!(owner_routines(&h.app, &main).await[0]["enabled"], false);
     let (status, delivered, result): (String, Option<i32>, Option<String>) = sqlx::query_as(
         "SELECT status, delivered_attempt, result FROM delegations WHERE child_turn_id = ?1",
@@ -730,7 +730,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     let run = runs(&h.app, saved["id"].as_str().unwrap()).await[0]
         .0
         .unwrap();
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let (run_bot, run_conversation): (Uuid, Uuid) =
         sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
             .bind(run)
@@ -767,7 +767,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     )
     .await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     assert_eq!(fire(&h.app, at(&routine["next_run_at"])).await, 1);
     let run = runs(&h.app, routine["id"].as_str().unwrap()).await[0]
         .0
@@ -839,7 +839,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     .await;
     assert_eq!(called.code(), "NOT_ALLOWED", "{}", called.body);
     h.release(child).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     assert!(owner_routines(&h.app, &leaf).await.is_empty());
 }
 
@@ -858,7 +858,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
     .await;
     let foreign = asked.result["question_id"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["waiting"]).await;
+    h.app.wait_turn(setup, &["waiting"]).await;
     let chosen = h
         .app
         .owner(
@@ -876,7 +876,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
     )
     .await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let (setup, token) = h.running(&manager, GATE).await;
     let audit = create(
         &h.app,
@@ -885,7 +885,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
     )
     .await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     assert_eq!(fire(&h.app, at(&audit["next_run_at"])).await, 1);
     let run = runs(&h.app, audit["id"].as_str().unwrap()).await[0]
         .0
@@ -901,7 +901,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
     .await;
     let question = asked.result["question_id"].as_str().unwrap().to_owned();
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["waiting"]).await;
+    h.app.wait_turn(run, &["waiting"]).await;
     let chosen = h
         .app
         .owner(
@@ -975,7 +975,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
         );
     }
     h.release(child).await;
-    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+    h.app.wait_turn(child, &["completed"]).await;
     assert_eq!(
         owner_routines(&h.app, &scout).await[0]["prompt"],
         "Find leads; DM at most 20 per day."
@@ -1028,7 +1028,7 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     let run = all[0].0.unwrap();
 
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let (_, run_token) = h.started(run).await;
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(packet.contains(TASK), "{packet}");
@@ -1041,25 +1041,26 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     .await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
 
     let listed = owner_routines(&h.app, &main).await;
     assert_eq!(listed[0]["last_run"]["status"], "completed");
     assert_eq!(listed[0]["last_run"]["turn_id"], run.to_string().as_str());
     assert_eq!(listed[0]["next_run_at"], next_run_at);
     assert_eq!(listed[0]["enabled"], true);
-    for _ in 0..200 {
-        let reviewed: bool =
-            sqlx::query_scalar("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
-                .bind(run)
-                .fetch_one(&h.app.db.pool)
-                .await
-                .unwrap();
-        if reviewed {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    common::until(
+        "the completed routine run to be reviewed",
+        common::poll(|| async {
+            let reviewed: bool =
+                sqlx::query_scalar("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
+                    .bind(run)
+                    .fetch_one(&h.app.db.pool)
+                    .await
+                    .unwrap();
+            reviewed.then_some(())
+        }),
+    )
+    .await;
 
     assert_eq!(
         set_enabled(&h.app, &main, &id, false).await.status,
@@ -1081,9 +1082,7 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     let paused_run = all[1].0.unwrap();
     h.started(paused_run).await;
     h.release(paused_run).await;
-    h.app
-        .wait_turn(&paused_run.to_string(), &["completed"])
-        .await;
+    h.app.wait_turn(paused_run, &["completed"]).await;
     let listed = owner_routines(&h.app, &main).await;
     assert_eq!(listed[0]["last_run"]["status"], "completed");
     assert_eq!(
@@ -1102,7 +1101,7 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     let routine = create(&h.app, &token, digest(TASK)).await;
     let id = routine["id"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let selected: Option<String> =
         sqlx::query_scalar("SELECT selected_provider_id FROM bots WHERE id = ?1")
             .bind(main.parse::<Uuid>().unwrap())
@@ -1122,7 +1121,7 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     let run = runs(&h.app, &id).await;
     assert_eq!(run.len(), 1);
     let turn = run[0].0.unwrap();
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(
@@ -1265,12 +1264,12 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
     let (setup, token) = h.running(&main, GATE).await;
     let routine = create(&h.app, &token, digest("Water the plants reminder.")).await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     fire(&h.app, at(&routine["next_run_at"])).await;
     let run = runs(&h.app, routine["id"].as_str().unwrap()).await[0]
         .0
         .unwrap();
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let sessions: Vec<String> =
         sqlx::query_scalar("SELECT native_session_id FROM provider_sessions")
             .fetch_all(&h.app.db.pool)
@@ -1293,17 +1292,17 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
 }
 
 async fn wait_routine(app: &TestApp, bot: &str, done: impl Fn(&Value) -> bool) -> Value {
-    for _ in 0..400 {
+    let settled = common::poll(|| async {
         let listed = owner_routines(app, bot).await;
-        if done(&listed[0]) {
-            return listed[0].clone();
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        done(&listed[0]).then(|| listed[0].clone())
+    });
+    match tokio::time::timeout(common::SETTLE, settled).await {
+        Ok(routine) => routine,
+        Err(_) => panic!(
+            "routine never reached the state: {}",
+            owner_routines(app, bot).await[0]
+        ),
     }
-    panic!(
-        "routine never reached the state: {}",
-        owner_routines(app, bot).await[0]
-    );
 }
 
 async fn replies(app: &TestApp, turn: Uuid) -> Vec<String> {
@@ -1332,7 +1331,7 @@ async fn failing_routine(h: &Harness, bot: &str, prompt: &str) -> (String, DateT
     )
     .await;
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     (
         routine["id"].as_str().unwrap().to_owned(),
         at(&routine["next_run_at"]),
@@ -1688,7 +1687,7 @@ async fn a_scheduled_run_skipped_during_an_owner_retry_keeps_it_retrying() {
     let queued = retry(&h.app, &main, &id, Uuid::new_v4()).await;
     assert_eq!(queued.status, StatusCode::OK, "{}", queued.body);
     let run = runs(&h.app, &id).await[2].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     fire(&h.app, due + chrono::Duration::hours(1)).await;
     let routine = wait_routine(&h.app, &main, |r| r["last_run"]["status"] == "skipped").await;
     assert_eq!(routine["last_run"]["skip_reason"], "overlap");
@@ -1710,7 +1709,7 @@ async fn a_second_retry_waits_for_the_first_and_a_stopped_retry_stays_paused() {
     assert_eq!(runs(&h.app, &id).await.len(), 2, "one retry run");
 
     let run = runs(&h.app, &id).await[1].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     let stop = h
         .app
         .owner(
@@ -1827,7 +1826,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let due = at(&json!("2030-01-01T00:00:00Z"));
     sqlx::query("UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1")
         .bind(id.parse::<Uuid>().unwrap())
@@ -1836,7 +1835,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         .unwrap();
     fire(&h.app, due).await;
     let first = runs(&h.app, &id).await[0].0.unwrap();
-    h.app.wait_turn(&first.to_string(), &["running"]).await;
+    h.app.wait_turn(first, &["running"]).await;
 
     assert_eq!(fire(&h.app, due + chrono::Duration::hours(1)).await, 0);
     let all = runs(&h.app, &id).await;
@@ -1846,7 +1845,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     assert_eq!(listed[0]["last_run"]["status"], "skipped");
     assert_eq!(listed[0]["last_run"]["skip_reason"], "overlap");
     h.release(first).await;
-    h.app.wait_turn(&first.to_string(), &["completed"]).await;
+    h.app.wait_turn(first, &["completed"]).await;
 
     h.running(&main, GATE).await;
     for _ in 0..else_api::app::messages::MAX_QUEUED_TURNS {
@@ -1864,7 +1863,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         )
         .await;
     assert!(stop.status.is_success());
-    for _ in 0..200 {
+    common::until("turns, cancellation, and routine review to settle", common::poll(|| async {
         let busy: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
              OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)
@@ -1873,11 +1872,8 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         .fetch_one(&h.app.db.pool)
         .await
         .unwrap();
-        if !busy {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+        (!busy).then_some(())
+    })).await;
 
     let late = due + chrono::Duration::days(10) + chrono::Duration::minutes(7);
     assert_eq!(fire(&h.app, late).await, 1);
@@ -1906,7 +1902,7 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
         )
         .await;
         h.release(setup).await;
-        h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+        h.app.wait_turn(setup, &["completed"]).await;
         sqlx::query(
             "UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1",
         )
@@ -1916,29 +1912,23 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
         .unwrap();
     }
     assert_eq!(fire(&h.app, due).await, 2);
-    let first = loop {
-        let running: Option<Uuid> = sqlx::query_scalar(
+    let first: Uuid = common::until("a routine turn to run", common::poll(|| async {
+        sqlx::query_scalar(
             "SELECT id FROM turns WHERE status = 'running' AND id IN (SELECT turn_id FROM routine_runs)",
         )
         .fetch_optional(&h.app.db.pool)
         .await
-        .unwrap();
-        if let Some(turn) = running {
-            break turn;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+        .unwrap()
+    }))
+    .await;
 
     let owner = h.send(&main, "[synthetic] are you there?").await;
     assert_eq!(
-        h.app.wait_turn(&owner.to_string(), &["completed"]).await,
+        h.app.wait_turn(owner, &["completed"]).await,
         "completed",
         "the owner message ran while routines held the other slot"
     );
-    assert_eq!(
-        h.app.wait_turn(&first.to_string(), &["running"]).await,
-        "running"
-    );
+    assert_eq!(h.app.wait_turn(first, &["running"]).await, "running");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1955,17 +1945,17 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     let id = routine["id"].as_str().unwrap().to_owned();
     let original_next = routine["next_run_at"].clone();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     fire(&h.app, at(&original_next)).await;
     let run = runs(&h.app, &id).await[0].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     let paused = set_enabled(&h.app, &main, &id, false).await;
     assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
     assert_eq!(paused.body["routine"]["enabled"], false);
     assert_eq!(paused.body["routine"]["next_run_at"], Value::Null);
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let far = Utc::now() + chrono::Duration::days(3650);
     assert_eq!(fire(&h.app, far).await, 0, "paused routines never run");
 
@@ -2049,10 +2039,10 @@ async fn the_owner_deletes_a_routine_and_its_admitted_run_finishes() {
     assert_eq!(owner_routines(&h.app, &main).await.len(), 1);
 
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     fire(&h.app, at(&routine["next_run_at"])).await;
     let run = runs(&h.app, &id).await[0].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     let before = events(&h.app, &main).await.len();
     let listed = owner_routines(&h.app, &main).await;
     assert_eq!(listed[0]["last_run"]["status"], "running");
@@ -2076,7 +2066,7 @@ async fn the_owner_deletes_a_routine_and_its_admitted_run_finishes() {
     assert_eq!(toggled.status, StatusCode::NOT_FOUND);
 
     h.release(run).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let far = Utc::now() + chrono::Duration::days(3650);
     assert_eq!(fire(&h.app, far).await, 0, "deleted routines never run");
     assert_eq!(runs(&h.app, &id).await.len(), 1);
@@ -2100,11 +2090,11 @@ async fn stop_deletion_and_maintenance_hold_runs() {
     let routine = create(&h.app, &token, args).await;
     let id = routine["id"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     fire(&h.app, at(&routine["next_run_at"])).await;
     let run = runs(&h.app, &id).await[0].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     let stop = h
         .app
         .owner(
@@ -2114,7 +2104,7 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    h.app.wait_turn(&run.to_string(), &["interrupted"]).await;
+    h.app.wait_turn(run, &["interrupted"]).await;
     let listed = owner_routines(&h.app, &main).await;
     assert_eq!(listed[0]["last_run"]["status"], "interrupted");
     assert_eq!(listed[0]["enabled"], true);
@@ -2123,10 +2113,7 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .app
         .state
         .gate
-        .close(
-            Duration::from_secs(10),
-            else_api::maintenance::Pause::backup(None),
-        )
+        .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
         .await
         .unwrap()
         .unwrap();
@@ -2136,19 +2123,21 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .await
         .unwrap();
     h.app.scheduler.wake();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(
-        runs(&h.app, &id).await.len(),
-        1,
-        "nothing admitted during maintenance"
-    );
+    common::never_polled(
+        "the scheduler admits a run during maintenance",
+        Duration::from_millis(1500),
+        || async {
+            let count = runs(&h.app, &id).await.len();
+            (count != 1).then_some(count)
+        },
+    )
+    .await;
     drop(closed);
-    for _ in 0..200 {
-        if runs(&h.app, &id).await.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    common::until(
+        "the second run after maintenance",
+        common::poll(|| async { (runs(&h.app, &id).await.len() == 2).then_some(()) }),
+    )
+    .await;
     let after = runs(&h.app, &id).await;
     assert_eq!(after.len(), 2, "admitted once the gate opened");
     let second = after
@@ -2156,15 +2145,13 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .find_map(|r| r.0.filter(|t| *t != run))
         .unwrap();
     h.release(second).await;
-    h.app.wait_turn(&second.to_string(), &["completed"]).await;
+    h.app.wait_turn(second, &["completed"]).await;
 
     let other = h.app.create_bot("Work").await;
     let (other_setup, other_token) = h.running(&other, GATE).await;
     let theirs = create(&h.app, &other_token, digest("Weekly report.")).await;
     h.release(other_setup).await;
-    h.app
-        .wait_turn(&other_setup.to_string(), &["completed"])
-        .await;
+    h.app.wait_turn(other_setup, &["completed"]).await;
     let gone = h
         .app
         .owner("DELETE", &format!("/v1/bots/{other}"), None)
@@ -2196,15 +2183,15 @@ async fn a_restart_never_repeats_an_admitted_run() {
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let due = at(&routine["next_run_at"]);
     fire(&h.app, due).await;
     let run = runs(&h.app, &id).await[0].0.unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    h.app.wait_turn(run, &["running"]).await;
     let Harness { app, recorder } = h;
     let app = app.restart().await;
     let status = app
-        .wait_turn(&run.to_string(), &["uncertain", "completed", "interrupted"])
+        .wait_turn(run, &["uncertain", "completed", "interrupted"])
         .await;
     assert_ne!(status, "queued");
     assert_eq!(
@@ -2575,7 +2562,7 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
     .await;
     assert!(moved.error, "a reminder's time is fixed: {}", moved.body);
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     assert_eq!(
         set_enabled(&h.app, &main, &id, false).await.status,
@@ -2592,29 +2579,32 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
     assert_eq!(run.len(), 1);
     let turn = run[0].0.unwrap().to_string();
     h.app.wait_turn(&turn, &["completed"]).await;
-    for _ in 0..400 {
-        let listed = owner_routines(&h.app, &main).await;
-        if listed.iter().all(|r| r["id"] != id.as_str()) {
-            assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
-            let snapshot = h
-                .app
-                .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
-                .await
-                .body;
-            let ran = snapshot["turns"]
-                .as_array()
-                .unwrap()
+    let listed = common::until(
+        "the completed reminder to disappear from the list",
+        common::poll(|| async {
+            let listed = owner_routines(&h.app, &main).await;
+            listed
                 .iter()
-                .find(|t| t["id"] == turn.as_str())
-                .unwrap();
-            assert_eq!(ran["routine"]["name"], "Scout check");
-            assert_eq!(
-                ran["routine"]["reminder"], true,
-                "its run still shows as a reminder's"
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the reminder stayed listed after its run completed");
+                .all(|r| r["id"] != id.as_str())
+                .then_some(listed)
+        }),
+    )
+    .await;
+    assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    let ran = snapshot["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.as_str())
+        .unwrap();
+    assert_eq!(ran["routine"]["name"], "Scout check");
+    assert_eq!(
+        ran["routine"]["reminder"], true,
+        "its run still shows as a reminder's"
+    );
 }
