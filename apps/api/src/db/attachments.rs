@@ -104,8 +104,8 @@ pub(super) async fn store_in(
 }
 
 /// A bot's file with its bytes.
-pub async fn read(
-    pool: &SqlitePool,
+pub async fn read<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     bot_id: Uuid,
     id: Uuid,
 ) -> Result<Option<(Attachment, Vec<u8>)>, sqlx::Error> {
@@ -114,7 +114,7 @@ pub async fn read(
     )
     .bind(id)
     .bind(bot_id)
-    .fetch_optional(pool)
+    .fetch_optional(db)
     .await?;
     Ok(row
         .map(|(id, name, media_type, size, data)| (attachment((id, name, media_type, size)), data)))

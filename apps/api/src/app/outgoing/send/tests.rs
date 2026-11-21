@@ -295,3 +295,17 @@ async fn a_file_changed_after_the_claim_leaves_the_send_unknown() {
     assert_eq!(approval.status().await, Status::Sending);
     assert_eq!(via.sends().len(), 1);
 }
+
+#[tokio::test]
+async fn fail_unsent_refuses_a_connected_send() {
+    let file = Uuid::new_v4();
+    let approval = approved_message(Some((file, b"approved bytes"))).await;
+    let via = Recorded::default();
+    approval.send(&via).await.unwrap();
+    approval.replace_file(file, b"altered bytes!").await;
+    let refused = outgoing_drafts::fail_unsent(&approval.db, approval.draft, "changed")
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, DraftError::Connected), "{refused:?}");
+    assert_eq!(approval.status().await, Status::Sending);
+}

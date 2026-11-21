@@ -5,7 +5,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use common::TestApp;
 use common::recorder::{GATE, GATE_EVERY_ATTEMPT, Harness, harness, tool};
+use else_api::app::outgoing::{Content, Delivery, send};
 use else_api::connectors::{store, types::*};
+use else_api::db::outgoing_drafts::{self, Claim, DraftError, MailSend, Payload};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -3005,20 +3007,25 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
         .unwrap()
         .parse()
         .unwrap();
-    let stale = else_api::db::outgoing_drafts::record_sent_check(
+    let stale = outgoing_drafts::record_sent_check(
         &app.db.pool,
         id,
         Uuid::new_v4(),
         &[earlier],
-        Ok(else_api::db::outgoing_drafts::SentCheck::Found),
+        Ok(outgoing_drafts::SentCheck::Found),
     )
     .await
-    .unwrap();
-    assert_eq!(
-        stale.status.as_str(),
-        "uncertain",
-        "a search for another claim changes nothing"
+    .unwrap_err();
+    assert!(
+        matches!(stale, DraftError::Settled(_)),
+        "a search for another claim is refused: {stale:?}"
     );
+    let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "uncertain", "and changes nothing");
     assert_eq!(action_statuses(app, account).await, ["uncertain"]);
     assert_eq!(mail.sends().len(), 1);
     assert_eq!(mail.searches().len(), 1);
@@ -3140,45 +3147,268 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
-    use else_api::db::outgoing_drafts;
+async fn a_changed_file_on_a_retry_keeps_an_earlier_send_uncertain() {
+    let root = tempfile::tempdir().unwrap();
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
+    let h = harness(TestApp::builder().mail(mail.clone()).projects(root.path())).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    project(root.path(), &main, &[("report.pdf", PDF)]);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let mut args = connected_reply(account);
+    args["attachments"] = json!([{ "path": "report.pdf" }]);
+    let id = draft(app, &token, args).await;
+    h.release(first).await;
+    app.wait_turn(first, &["waiting"]).await;
+    let file_id = files_of(&shown(app, &main, first).await[0])[0]["id"].clone();
+    let seen = json!({ "id": id, "version": 1, "attachments": [file_id] });
+    let mut approval = seen.clone();
+    approval.as_object_mut().unwrap().remove("id");
+    owner_action(app, &main, id, "approve", approval).await;
+    let token = h.continued(first, &token).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    let earlier = lost["sends"][0]["action_id"].clone();
+    h.release(first).await;
+    app.wait_turn(first, &["completed"]).await;
+
+    let again = send_with_draft(app, &main, &format!("{GATE} Send it again."), seen).await;
+    assert_eq!(again.status, StatusCode::ACCEPTED, "{}", again.body);
+    let (_, token) = h
+        .started(again.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
+    let confirmed = tool(
+        app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    sqlx::query("UPDATE attachments SET data = zeroblob(size) WHERE id = ?1")
+        .bind(file_id.as_str().unwrap().parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let commands = mail.commands.lock().unwrap().len();
+    let retried = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(retried.result["status"], "uncertain", "{}", retried.body);
+    assert_eq!(
+        retried.result["detail"],
+        "the attachment report.pdf changed or is missing since the owner approved it; nothing \
+         was sent An earlier send of it may have gone out."
+    );
+    assert_eq!(
+        mail.commands.lock().unwrap().len(),
+        commands,
+        "nothing was sent"
+    );
+    let delivery: String = sqlx::query_scalar("SELECT delivery FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&delivery).unwrap()["action_id"],
+        earlier,
+        "the draft names the send that may have gone out"
+    );
+}
+
+/// A mail connector too busy to queue the send.
+struct Busy;
+
+#[async_trait::async_trait]
+impl send::Connected for Busy {
+    async fn send_mail(&self, _: Uuid, _: Uuid, _: MailCommand) -> Result<(), MailError> {
+        Err(MailError::new(MailErrorCode::MailAccountBusy))
+    }
+
+    async fn find_sent(&self, _: Uuid, _: String) -> Result<bool, MailError> {
+        unreachable!("no earlier send to search for")
+    }
+
+    async fn send_social(
+        &self,
+        _: Uuid,
+        _: Uuid,
+        _: else_api::app::outgoing::Platform,
+        _: else_api::socials::types::SendMessage,
+    ) -> Result<(), else_api::socials::types::Error> {
+        unreachable!("these drafts are emails")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_mail_send_fails_and_a_queued_copy_never_goes_out() {
+    let mail = Arc::new(FakeMail::default());
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let bot: Uuid = main.parse().unwrap();
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, turn, _) = approved_connected_reply(&h, &main, account).await;
+
+    let refused = send::send_connected(&app.db.pool, turn, id, MAIL, &Busy)
+        .await
+        .unwrap();
+    assert_eq!(refused.status.as_str(), "failed");
+    let Some(Delivery::Mail { action_id, .. }) = refused.delivery.as_deref().cloned() else {
+        panic!("a connected email: {refused:?}");
+    };
+    let Content::Email(email) = &refused.content.0 else {
+        panic!("an email: {refused:?}");
+    };
+    let queued = app
+        .state
+        .connectors
+        .execute(
+            account,
+            bot,
+            turn,
+            Some(action_id),
+            email.send_command(Vec::new(), Some(email.message_id(id))),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(queued.code, MailErrorCode::MailActionConflict, "{queued:?}");
+    assert!(mail.sends().is_empty(), "the queued copy never went out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_its_stopped_request_failed_is_never_admitted_after_the_request_resumes() {
+    let mail = Arc::new(FakeMail::default());
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let bot: Uuid = main.parse().unwrap();
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, turn, _) = approved_connected_reply(&h, &main, account).await;
+    let Claim::Fresh(claimed) = outgoing_drafts::claim_connected(&app.db.pool, turn, id, MAIL)
+        .await
+        .unwrap()
+    else {
+        panic!("the first call claims the email");
+    };
+    for status in ["cancelling", "running"] {
+        sqlx::query("UPDATE turns SET status = ?2 WHERE id = ?1")
+            .bind(turn)
+            .bind(status)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed", "the stop failed the unsent email");
+    let Payload::Mail(email) = claimed.payload else {
+        panic!("an email");
+    };
+    let queued = app
+        .state
+        .connectors
+        .execute(
+            account,
+            bot,
+            turn,
+            Some(claimed.action_id),
+            email.send_command(Vec::new(), Some(email.message_id(id))),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(queued.code, MailErrorCode::MailActionConflict, "{queued:?}");
+    assert!(mail.sends().is_empty(), "the queued copy never went out");
+}
+
+/// The request's first call claims the email, and a second call resumes the
+/// claim and stops before reading the outcome.
+async fn stalled_retry(app: &TestApp, turn: Uuid, id: Uuid) -> Uuid {
+    let first = outgoing_drafts::claim_connected(&app.db.pool, turn, id, MAIL)
+        .await
+        .unwrap();
+    assert!(matches!(first, Claim::Fresh(_)), "{first:?}");
+    match outgoing_drafts::claim_connected(&app.db.pool, turn, id, MAIL)
+        .await
+        .unwrap()
+    {
+        Claim::Resumed(claimed) => claimed.action_id,
+        other => panic!("the retry resumes the claim: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_mail_retry_returns_the_receipt_its_claim_settled() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Envelope));
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, turn, token) = approved_connected_reply(&h, &main, account).await;
+    let claim = stalled_retry(app, turn, id).await;
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
+    assert_eq!(sent["status"], "failed", "{sent}");
+
+    let next = outgoing_drafts::next_mail_send(&app.db.pool, id, claim, "draft@owner.example")
+        .await
+        .unwrap();
+    let MailSend::Settled(draft) = next else {
+        panic!("the claim's receipt: {next:?}");
+    };
+    assert_eq!(draft.status.as_str(), "failed");
+    assert_eq!(
+        json!(draft.delivery.unwrap().0)["action_id"],
+        sent["sends"][0]["action_id"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_retry_never_reads_or_changes_a_later_claim() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Envelope));
     let h = harness(TestApp::builder().mail(mail.clone())).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let account = connect(app, &main, "main@owner.example", true).await;
     let (id, first, token) = approved_connected_reply(&h, &main, account).await;
-    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+    let claim = stalled_retry(app, first, id).await;
+    let failed = tool(app, &token, "send_draft", json!({ "draft_id": id }))
         .await
         .result;
-    let earlier = lost["sends"][0]["action_id"].clone();
+    assert_eq!(failed["status"], "failed", "{failed}");
     h.release(first).await;
     app.wait_turn(first, &["completed"]).await;
+    mail.fail_at(None);
+    let (_, token) = approve_again(&h, &main, id).await;
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
+    assert_eq!(sent["status"], "sent", "{sent}");
 
-    let (second, _) = approve_again(&h, &main, id).await;
-    outgoing_drafts::claim_connected(&app.db.pool, second, id, MAIL)
+    let next = outgoing_drafts::next_mail_send(&app.db.pool, id, claim, "draft@owner.example")
+        .await
+        .unwrap_err();
+    assert!(matches!(next, DraftError::Settled(_)), "{next:?}");
+    let after =
+        outgoing_drafts::after_mail_send(&app.db.pool, id, claim, Some("MAIL_ACCOUNT_BUSY"))
+            .await
+            .unwrap_err();
+    assert!(matches!(after, DraftError::Settled(_)), "{after:?}");
+    let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let failed = outgoing_drafts::fail_unsent(
-        &app.db.pool,
-        id,
-        "An approved file changed. Nothing was sent.",
-    )
-    .await
-    .unwrap();
-    assert_eq!(failed.status.as_str(), "uncertain");
-    assert_eq!(
-        failed.result_detail.as_deref(),
-        Some(
-            "An approved file changed. Nothing was sent. An earlier send of it may have gone out."
-        )
-    );
-    assert_eq!(
-        json!(failed.delivery.unwrap().0)["action_id"],
-        earlier,
-        "the draft names the send that may have gone out"
-    );
+    assert_eq!(status, "sent");
 }
 
 #[tokio::test(flavor = "multi_thread")]
