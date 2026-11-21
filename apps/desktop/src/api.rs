@@ -829,13 +829,8 @@ impl Client {
         bot: Uuid,
         routine: Uuid,
     ) -> Result<Routine, ClientError> {
-        self.call::<RoutineEnvelope>(
-            Method::PATCH,
-            format!("/v1/bots/{bot}/routines/{routine}"),
-            Some(json!({ "dismiss_failures": true })),
-        )
-        .await
-        .map(|v| v.routine)
+        self.patch_routine(bot, routine, json!({ "dismiss_failures": true }))
+            .await
     }
 
     /// Run a paused routine now; a success switches it back on. Repeating
@@ -861,13 +856,8 @@ impl Client {
         routine: Uuid,
         model: Option<ProfileChoice>,
     ) -> Result<Routine, ClientError> {
-        self.call::<RoutineEnvelope>(
-            Method::PATCH,
-            format!("/v1/bots/{bot}/routines/{routine}"),
-            Some(json!({ "model": model })),
-        )
-        .await
-        .map(|v| v.routine)
+        self.patch_routine(bot, routine, json!({ "model": model }))
+            .await
     }
 
     /// Delete a routine: it never runs again and a run already admitted
