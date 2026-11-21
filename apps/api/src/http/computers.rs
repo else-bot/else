@@ -31,6 +31,7 @@ pub fn routes() -> Routes {
             .route("/computers", get(list))
             .route("/bots/{bot_id}/computer", get(show))
             .route("/bots/{bot_id}/computer/stop", post(stop))
+            // The stream enters the gate itself, and only while it wakes.
             .route(
                 "/bots/{bot_id}/desktop/stream",
                 get(super::desktop_stream::stream),

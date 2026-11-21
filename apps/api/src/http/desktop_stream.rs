@@ -17,7 +17,8 @@
 //!
 //! Authenticated like every `/v1` route. Without `wake` the stream attaches
 //! only to a running computer; with it, connecting is a use that may start
-//! the computer, but never one the owner stopped. Each stream holds its own
+//! the computer, but never one the owner stopped, and is refused with
+//! `maintenance` while a backup or update holds the gate. Each stream holds its own
 //! lease, renewed while connected and released on close; an owner stop,
 //! delete, or reboot ends the stream. Leases are checked every second. Frames come from the
 //! guest's view-only VNC server, which the bot's input guard ignores, so
@@ -148,10 +149,10 @@ pub(super) async fn stream(
     let Some(admission) = state.desktop_streams.admit() else {
         return Err(ApiError::unavailable("server_stopping", STOPPING));
     };
-    let db = state.db.clone();
+    let (db, gate) = (state.db.clone(), state.gate.clone());
     Ok(ws
         .max_message_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| session(computers, db, bot_id, params, socket, admission)))
+        .on_upgrade(move |socket| session(computers, db, gate, bot_id, params, socket, admission)))
 }
 
 struct End {
@@ -206,6 +207,7 @@ fn error_message(code: &str, message: &str) -> Message {
 async fn session(
     computers: Arc<ComputerManager>,
     db: sqlx::SqlitePool,
+    gate: Arc<crate::maintenance::Gate>,
     bot: Uuid,
     params: Params,
     socket: WebSocket,
@@ -218,17 +220,34 @@ async fn session(
     let writer = tokio::spawn(write(sink, out_rx, frame_slot.clone()));
     let stream_id = Uuid::new_v4();
     let holder = format!("desktop-stream:{stream_id}");
-    let viewer = tokio::select! {
-        biased;
-        _ = stop.cancelled() => None,
-        viewer = computers.viewer(bot, &holder, params.wake) => Some(viewer),
+    // Waking may boot a computer that a backup is capturing, so it enters
+    // the maintenance gate like a write. It enters here, after the upgrade,
+    // so a stalled handshake cannot hold the gate, and leaves once the
+    // viewer returns.
+    let wake = if params.wake {
+        gate.enter().map(Some).ok_or(())
+    } else {
+        Ok(None)
+    };
+    let viewer = match wake {
+        Err(()) => Err(()),
+        Ok(wake) => {
+            let viewer = tokio::select! {
+                biased;
+                _ = stop.cancelled() => None,
+                viewer = computers.viewer(bot, &holder, wake.is_some()) => Some(viewer),
+            };
+            drop(wake);
+            Ok(viewer)
+        }
     };
     let ended = match viewer {
-        None => {
+        Err(()) => Some(end("maintenance", super::MAINTENANCE)),
+        Ok(None) => {
             release_abandoned(&computers, &db, &holder).await;
             Some(stopping())
         }
-        Some(Ok(Ok(target))) => {
+        Ok(Some(Ok(Ok(target)))) => {
             let lease = target.lease_id;
             let mut session = Session::new(
                 computers.clone(),
@@ -249,9 +268,10 @@ async fn session(
             }
             ended
         }
-        Some(Ok(Err(refusal))) => Some(refused(refusal)),
-        Some(Err(err)) => {
+        Ok(Some(Ok(Err(refusal)))) => Some(refused(refusal)),
+        Ok(Some(Err(err))) => {
             tracing::warn!(bot = %bot, error = %err, "desktop viewer");
+            release_abandoned(&computers, &db, &holder).await;
             Some(unavailable())
         }
     };
