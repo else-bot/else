@@ -1131,7 +1131,7 @@ fn reader(raw: &str) -> Value {
         uid_validity: 1,
         uid: 9,
     };
-    mime::view(&parsed, &message, None)
+    serde_json::to_value(mime::view(&parsed, &message, None)).unwrap()
 }
 
 #[test]

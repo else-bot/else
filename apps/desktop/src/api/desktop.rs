@@ -1,10 +1,11 @@
 use super::{Client, ClientError};
+use else_wire::computers::{ComputerState, DesktopMode, ServerEvent};
 use futures_util::{SinkExt as _, StreamExt as _};
 use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Method, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::Cursor;
 use std::sync::{
     Arc,
@@ -25,82 +26,6 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_TEXT_CHARS: usize = 4096;
 /// The most clipboard text the desktop takes at once, in UTF-8 bytes.
 pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ComputerState {
-    pub state: RuntimeState,
-    pub desired_state: DesiredState,
-    #[serde(default)]
-    pub desktop_available: bool,
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub latest_image: Option<String>,
-    #[serde(default)]
-    pub upgrade: Option<ComputerUpgrade>,
-    #[serde(default)]
-    pub memory_mib: Option<u32>,
-    #[serde(default)]
-    pub default_memory_mib: Option<u32>,
-}
-
-crate::model::wire_state! {
-    /// What the runtime last observed of a bot's computer.
-    pub enum RuntimeState {
-        Absent = "absent",
-        Creating = "creating",
-        Starting = "starting",
-        Running = "running",
-        Pausing = "pausing",
-        Paused = "paused",
-        Resuming = "resuming",
-        Stopping = "stopping",
-        Stopped = "stopped",
-        Missing = "missing",
-        Error = "error",
-    }
-    _ => Unknown
-}
-
-crate::model::wire_state! {
-    /// Whether the owner let the computer start on demand or stopped it.
-    pub enum DesiredState {
-        Auto = "auto",
-        Stopped = "stopped",
-    }
-    _ => Unknown
-}
-
-impl ComputerState {
-    /// The memory the owner approved above the configured size, and that size.
-    pub fn raised_memory(&self) -> Option<(u32, u32)> {
-        match (self.memory_mib, self.default_memory_mib) {
-            (Some(memory), Some(default)) if memory > default => Some((memory, default)),
-            _ => None,
-        }
-    }
-
-    pub fn outdated(&self) -> bool {
-        matches!((&self.image, &self.latest_image), (Some(image), Some(latest)) if image != latest)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum ComputerUpgrade {
-    Queued { position: u32 },
-    Waiting { reason: String },
-    Running,
-    Failed { error: String },
-    Completed { unrestored_packages: Vec<String> },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesktopMode {
-    Watch,
-    Control,
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -176,26 +101,6 @@ impl DesktopCommands {
 pub struct DesktopStream {
     pub commands: DesktopCommands,
     pub events: mpsc::Receiver<DesktopEvent>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerEvent {
-    Size {
-        width: u16,
-        height: u16,
-    },
-    Mode {
-        mode: DesktopMode,
-    },
-    Cursor {
-        style: String,
-    },
-    Error {
-        #[serde(default)]
-        code: String,
-        message: String,
-    },
 }
 
 /// The X11 keysym that types `ch`, or `None` for control characters the
@@ -612,6 +517,7 @@ impl Client {
 mod tests {
     use super::*;
     use crate::config::{Origin, OwnerToken};
+    use else_wire::computers::ComputerUpgrade;
 
     #[test]
     fn typed_text_maps_to_keysyms_and_skips_control_characters() {

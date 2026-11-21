@@ -60,6 +60,29 @@ pub struct Watcher {
     pub created_at: DateTime<Utc>,
 }
 
+impl From<&Watcher> for else_wire::routines::Watcher {
+    fn from(watcher: &Watcher) -> Self {
+        Self {
+            id: watcher.id,
+            purpose: watcher.purpose.clone(),
+            check: watcher.check_command.clone(),
+            secrets: watcher.secrets.0.clone(),
+            every_minutes: watcher.every_minutes,
+            until: watcher.watch_until,
+            status: watcher.status.into(),
+            outcome: watcher.outcome.map(Into::into),
+            last_status: watcher.last_status.clone(),
+            last_checked_at: watcher.last_checked_at,
+            next_check_at: watcher.next_check_at,
+            last_output: watcher.last_output.clone(),
+            checks: watcher.checks,
+            failures: watcher.failures,
+            created_at: watcher.created_at,
+            created_turn_id: Some(watcher.created_turn_id),
+        }
+    }
+}
+
 const COLUMNS: &str = "id, bot_id, created_turn_id, purpose, check_command, prompt, secrets,
     every_minutes,
     watch_until, status, outcome, next_check_at, checks, failures, last_status, last_output,

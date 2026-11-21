@@ -4,11 +4,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
+use else_wire::settings::Onboarded;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::error::{ApiError, ApiJson};
-use super::settings::{ProfileChoice, choice_json, validate_choice};
+use super::settings::{ProfileRequest, validate_choice};
 use super::{AppState, Routes};
 use crate::app::bots::BotName;
 
@@ -20,7 +21,7 @@ pub fn routes() -> Routes {
 #[serde(deny_unknown_fields)]
 struct Onboarding {
     name: String,
-    profile: ProfileChoice,
+    profile: ProfileRequest,
 }
 
 /// Whether the welcome screen is still to be shown.
@@ -78,9 +79,9 @@ async fn complete(
         crate::db::events::bot_updated(&mut tx, main).await?;
     }
     tx.commit().await?;
-    Ok(Json(json!({
-        "main_bot_id": main,
-        "name": name.as_str(),
-        "profile": choice_json(provider_id, &profile),
+    Ok(Json(json!(Onboarded {
+        main_bot_id: main,
+        name: Some(name.as_str().to_owned()),
+        profile: Some(profile.choice(provider_id)),
     })))
 }

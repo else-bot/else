@@ -206,7 +206,7 @@ mod tests {
         assert!(!warm.contains(Uuid::from_u128(8)));
     }
 
-    fn page(applied: i64) -> crate::model::Snapshot {
+    fn page(applied: i64) -> else_wire::conversation::Snapshot {
         serde_json::from_value(serde_json::json!({
             "event_cursor": format!("server:bot:{applied}"),
             "items": [], "turns": [],

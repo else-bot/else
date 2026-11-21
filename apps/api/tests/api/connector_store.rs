@@ -259,7 +259,9 @@ async fn credentials_are_encrypted_and_bound_to_their_account() {
     .await
     .unwrap();
     assert!(
-        !serde_json::to_string(&first).unwrap().contains(PASSWORD),
+        !serde_json::to_string(&else_wire::email::EmailAccount::from(&first))
+            .unwrap()
+            .contains(PASSWORD),
         "an account never carries its credential"
     );
     let opened = store::credential(&db.pool, &key(), first.id).await.unwrap();

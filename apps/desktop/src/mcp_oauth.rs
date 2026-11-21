@@ -4,8 +4,11 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::api::{Client, ClientError, McpAuthorization, McpConsent};
+use crate::api::{Client, ClientError};
+
 use crate::oauth_callback::{self, Callback, WaitError};
+use else_wire::mcp::McpAuthorization;
+use else_wire::questions::McpConsent;
 
 pub struct SignIn {
     pub authorization: McpAuthorization,

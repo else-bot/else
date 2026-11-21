@@ -1,7 +1,7 @@
 use super::*;
-use crate::api::Bot;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
+use else_wire::bots::Bot;
 use gpui_kit::component::checkbox::Checkbox;
 
 fn category_name<'a>(bot: &Bot, categories: &'a [Category]) -> Option<&'a str> {

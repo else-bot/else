@@ -5,7 +5,9 @@ pub(super) use view::{chip, draft_chip};
 
 use super::{Draft, ElseApp};
 use crate::api::ClientError;
-use crate::attachments::{Attachment, IncomingName, MAX_FILE_BYTES, MAX_FILES, MessagePart};
+use crate::attachments::{IncomingName, MAX_FILE_BYTES, MAX_FILES};
+use else_wire::items::Attachment;
+use else_wire::items::MessagePart;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::InputContent;
 use gpui_kit::component::{WindowExt as _, h_flex};
@@ -485,7 +487,7 @@ impl ElseApp {
                 size: 0,
             };
             let inserted = self.composer.update(cx, |state, cx| {
-                state.replace_with_token(file.token(), window, cx)
+                state.replace_with_token(crate::attachments::token(&file), window, cx)
             });
             if let Err(error) = inserted {
                 self.notice = Some(format!("Could not paste file: {error}"));
@@ -660,9 +662,9 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{DraftFile, PasteSource, UploadState, append, parts};
-    use crate::attachments::{
-        Attachment, IncomingName, MAX_FILE_BYTES, MessagePart, input_content,
-    };
+    use crate::attachments::{IncomingName, MAX_FILE_BYTES, input_content};
+    use else_wire::items::Attachment;
+    use else_wire::items::MessagePart;
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
 

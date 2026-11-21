@@ -1,7 +1,8 @@
 use super::*;
 use crate::app::transcript::CardKey;
-use crate::model::ItemKind;
-use crate::model::{Frame, Snapshot};
+use crate::model::Frame;
+use else_wire::conversation::Snapshot;
+use else_wire::items::ItemKind;
 use serde_json::{Value, json};
 
 fn id(value: u128) -> Uuid {
@@ -69,11 +70,10 @@ fn a_chat_reply_settles_to_the_same_bubble_after_streaming_or_reload() {
     let items = vec![item(1, 10, "user"), item(2, 10, "assistant")];
     let mut live = conversation(items.clone(), vec![turn(10, "running")]);
     assert_eq!(task_replies(&live)[&id(10)].state, ReplyState::Working);
-    live.apply(&Frame {
-        id: Some("test:1".into()),
-        event: "turn.updated".into(),
-        data: json!({"turn": turn(10, "completed")}).to_string(),
-    })
+    live.apply(&Frame::decode(
+        Some("test:1".into()),
+        &json!({ "event": "turn.updated", "data": json!({"turn": turn(10, "completed")}) }),
+    ))
     .unwrap();
     let reloaded = conversation(items, vec![turn(10, "completed")]);
     assert!(task_replies(&live).is_empty());
@@ -238,11 +238,10 @@ fn a_routine_edit_does_not_move_the_task_capsule_from_its_receipt() {
     let before = task_replies(&c);
     let mut notice = item(2, 10, "status");
     notice["routine_update"] = json!({ "routine_id": id(20), "name": "Daily digest" });
-    c.apply(&Frame {
-        id: Some("test:1".into()),
-        event: "item.upsert".into(),
-        data: json!({ "item": notice.clone() }).to_string(),
-    })
+    c.apply(&Frame::decode(
+        Some("test:1".into()),
+        &json!({ "event": "item.upsert", "data": json!({ "item": notice.clone() }) }),
+    ))
     .unwrap();
     assert_eq!(task_replies(&c), before);
     assert_eq!(before[&id(10)].anchor, Some(id(1)));
@@ -264,11 +263,10 @@ fn streaming_and_reconnect_choose_the_same_capsule_and_reply() {
         (2, "item.upsert", json!({"item": item(3, 10, "assistant")})),
         (3, "turn.updated", json!({"turn": turn(10, "completed")})),
     ] {
-        c.apply(&Frame {
-            id: Some(format!("test:{seq}")),
-            event: event.into(),
-            data: data.to_string(),
-        })
+        c.apply(&Frame::decode(
+            Some(format!("test:{seq}")),
+            &json!({ "event": event, "data": data }),
+        ))
         .unwrap();
     }
     let reloaded = conversation(
@@ -467,11 +465,10 @@ fn reacting_to_a_file_changes_the_task_layout_even_when_already_kept() {
     assert!(before[&id(10)].latest_kept);
     let mut feedback = item(3, 11, "user");
     feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
-    c.apply(&Frame {
-        id: Some("test:1".into()),
-        event: "item.upsert".into(),
-        data: json!({"item": feedback}).to_string(),
-    })
+    c.apply(&Frame::decode(
+        Some("test:1".into()),
+        &json!({ "event": "item.upsert", "data": json!({"item": feedback}) }),
+    ))
     .unwrap();
     assert_ne!(task_replies(&c)[&id(10)], before[&id(10)]);
 }
@@ -1459,19 +1456,17 @@ fn a_joined_turns_new_updates_count_from_the_message_live_and_reloaded() {
     let (items, turns) = parked_then_joined("waiting", 2, &[]);
     let mut live = conversation(items, turns);
     let (_, mut turns) = parked_then_joined("running", 3, &[]);
-    live.apply(&Frame {
-        id: Some("test:1".into()),
-        event: "turn.updated".into(),
-        data: json!({"turn": turns.remove(0)}).to_string(),
-    })
+    live.apply(&Frame::decode(
+        Some("test:1".into()),
+        &json!({ "event": "turn.updated", "data": json!({"turn": turns.remove(0)}) }),
+    ))
     .unwrap();
     let (items, _) = parked_then_joined("running", 3, &[(7, 3), (8, 3)]);
     for (seq, new) in [(2, &items[6]), (3, &items[7])] {
-        live.apply(&Frame {
-            id: Some(format!("test:{seq}")),
-            event: "item.upsert".into(),
-            data: json!({"item": new}).to_string(),
-        })
+        live.apply(&Frame::decode(
+            Some(format!("test:{seq}")),
+            &json!({ "event": "item.upsert", "data": json!({"item": new}) }),
+        ))
         .unwrap();
     }
     let (items, turns) = parked_then_joined("running", 3, &[(7, 3), (8, 3)]);
@@ -1561,11 +1556,10 @@ fn a_message_waits_below_a_queued_status_until_the_reply_takes_it() {
         ],
     );
     turns[1]["steer_status"] = json!("delivered");
-    c.apply(&Frame {
-        id: Some("test:1".into()),
-        event: "turn.updated".into(),
-        data: json!({"turn": turns[1]}).to_string(),
-    })
+    c.apply(&Frame::decode(
+        Some("test:1".into()),
+        &json!({ "event": "turn.updated", "data": json!({"turn": turns[1]}) }),
+    ))
     .unwrap();
     assert_eq!(
         rows(&c),

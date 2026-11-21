@@ -8,8 +8,13 @@ use gpui_kit::*;
 
 use std::collections::HashSet;
 
-use crate::api::{Capabilities, ModelInfo, ProfileChoice, ProviderInfo};
+use else_wire::settings::Capabilities;
+
+use else_wire::settings::ModelInfo;
+
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
+use else_wire::settings::ProfileChoice;
+use else_wire::settings::ProviderInfo;
 
 const FAST: &str = "priority";
 
@@ -38,18 +43,18 @@ impl ProfilePicker {
             .cloned()
             .collect();
         let choice = initial
-            .and_then(|c| providers.iter().find(|p| p.id == c.provider_id))
+            .and_then(|c| providers.iter().find(|p| p.state.id == c.provider_id))
             .and_then(|p| catalog_choice(p, initial))
             .or_else(|| {
                 providers
                     .iter()
-                    .filter(|p| p.cli_available)
+                    .filter(|p| p.state.cli_available)
                     .find_map(|p| catalog_choice(p, None))
             });
         let browsing = choice
             .as_ref()
             .map(|c| c.provider_id.clone())
-            .or_else(|| providers.first().map(|p| p.id.clone()));
+            .or_else(|| providers.first().map(|p| p.state.id.clone()));
         Self {
             providers,
             choice,
@@ -87,31 +92,33 @@ impl ProfilePicker {
     }
 
     pub fn any_available(&self) -> bool {
-        self.providers.iter().any(|p| p.cli_available)
+        self.providers.iter().any(|p| p.state.cli_available)
     }
 
     fn current(&self) -> Option<&ProviderInfo> {
         let choice = self.choice.as_ref()?;
-        self.providers.iter().find(|p| p.id == choice.provider_id)
+        self.providers
+            .iter()
+            .find(|p| p.state.id == choice.provider_id)
     }
 
     fn browsed(&self) -> Option<&ProviderInfo> {
         let id = self.browsing.as_ref()?;
-        self.providers.iter().find(|p| p.id == *id)
+        self.providers.iter().find(|p| p.state.id == *id)
     }
 
     fn choose_model(&mut self, provider: &str, model: String, cx: &mut Context<Self>) {
-        let Some(info) = self.providers.iter().find(|p| p.id == provider) else {
+        let Some(info) = self.providers.iter().find(|p| p.state.id == provider) else {
             return;
         };
         let previous = match self.choice.clone() {
             Some(choice) => ProfileChoice {
-                provider_id: info.id.clone(),
+                provider_id: info.state.id.clone(),
                 model,
                 ..choice
             },
             None => ProfileChoice {
-                provider_id: info.id.clone(),
+                provider_id: info.state.id.clone(),
                 model,
                 reasoning_effort: "medium".to_owned(),
                 service_tier: "default".to_owned(),
@@ -124,12 +131,12 @@ impl ProfilePicker {
     fn render_providers(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let items = self.providers.iter().map(|provider| {
-            let browsing = self.browsing.as_deref() == Some(provider.id.as_str());
+            let browsing = self.browsing.as_deref() == Some(provider.state.id.as_str());
             let holds_choice = self
                 .choice
                 .as_ref()
-                .is_some_and(|choice| choice.provider_id == provider.id);
-            let status = if provider.cli_available {
+                .is_some_and(|choice| choice.provider_id == provider.state.id);
+            let status = if provider.state.cli_available {
                 match provider.catalog.models.len() {
                     1 => "1 model".to_owned(),
                     n => format!("{n} models"),
@@ -137,27 +144,27 @@ impl ProfilePicker {
             } else {
                 "Needs setup".to_owned()
             };
-            let health = if provider.cli_available {
+            let health = if provider.state.cli_available {
                 theme.success
             } else {
                 theme.danger
             };
             let dot = || div().flex_none().size_1p5().rounded_full().bg(health);
-            let id = provider.id.clone();
+            let id = provider.state.id.clone();
             let select = cx.listener(move |picker, _, _, cx| {
                 picker.browsing = Some(id.clone());
                 cx.notify();
             });
-            let button_id = SharedString::from(format!("provider-{}", provider.id));
+            let button_id = SharedString::from(format!("provider-{}", provider.state.id));
             if self.tabs {
                 return segment(
                     button_id,
-                    provider.label.clone(),
+                    provider.state.label.clone(),
                     browsing,
                     self.disabled,
                     cx,
                 )
-                .accessibility_label(format!("{} · {status}", provider.label))
+                .accessibility_label(format!("{} · {status}", provider.state.label))
                 .on_click(select);
             }
             Button::new(button_id)
@@ -170,7 +177,7 @@ impl ProfilePicker {
                 .h_auto()
                 .px_2()
                 .py_1p5()
-                .accessibility_label(format!("{} · {status}", provider.label))
+                .accessibility_label(format!("{} · {status}", provider.state.label))
                 .child(
                     h_flex()
                         .w_full()
@@ -189,7 +196,7 @@ impl ProfilePicker {
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
                                             .truncate()
-                                            .child(provider.label.clone()),
+                                            .child(provider.state.label.clone()),
                                     ),
                                 )
                                 .child(
@@ -257,26 +264,29 @@ impl ProfilePicker {
         let Some(provider) = self.browsed() else {
             return pane.into_any_element();
         };
-        if !provider.cli_available {
+        if !provider.state.cli_available {
             return pane
                 .child(self.render_setup(provider, cx))
                 .into_any_element();
         }
         let (featured, older) = split_models(provider);
         let selected = |model: &str| {
-            self.choice
-                .as_ref()
-                .is_some_and(|choice| choice.provider_id == provider.id && choice.model == model)
+            self.choice.as_ref().is_some_and(|choice| {
+                choice.provider_id == provider.state.id && choice.model == model
+            })
         };
-        let is_new = |model: &str| self.new.contains(&(provider.id.clone(), model.to_owned()));
+        let is_new = |model: &str| {
+            self.new
+                .contains(&(provider.state.id.clone(), model.to_owned()))
+        };
         let cards = featured.into_iter().map(|model| {
             let on = selected(&model.id);
-            let provider_id = provider.id.clone();
+            let provider_id = provider.state.id.clone();
             let model_id = model.id.clone();
             div().w(relative(0.5)).p_1().child(
                 Button::new(SharedString::from(format!(
                     "model-{}-{}",
-                    provider.id, model.id
+                    provider.state.id, model.id
                 )))
                 .focus_ring(false)
                 .ghost()
@@ -308,11 +318,11 @@ impl ProfilePicker {
         let older_count = older.len();
         let older_rows = older.into_iter().enumerate().map(|(index, model)| {
             let on = selected(&model.id);
-            let provider_id = provider.id.clone();
+            let provider_id = provider.state.id.clone();
             let model_id = model.id.clone();
             Button::new(SharedString::from(format!(
                 "model-{}-{}",
-                provider.id, model.id
+                provider.state.id, model.id
             )))
             .focus_ring(false)
             .ghost()
@@ -348,7 +358,10 @@ impl ProfilePicker {
             } else {
                 "Showing the built-in list."
             };
-            let line = format!("Couldn't refresh {}'s models. {shown}", provider.label);
+            let line = format!(
+                "Couldn't refresh {}'s models. {shown}",
+                provider.state.label
+            );
             h_flex()
                 .px_1()
                 .gap_1p5()
@@ -363,18 +376,21 @@ impl ProfilePicker {
                 .child(div().min_w_0().truncate().child(line))
         });
         let toggle = (older_count > 0).then(|| {
-            Button::new(SharedString::from(format!("more-models-{}", provider.id)))
-                .control(Tier::Ghost, Scale::Compact, older_selected, cx)
-                .label(format!("More models ({older_count})"))
-                .icon(if more {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .on_click(cx.listener(|picker, _, _, cx| {
-                    picker.more = !picker.more;
-                    cx.notify();
-                }))
+            Button::new(SharedString::from(format!(
+                "more-models-{}",
+                provider.state.id
+            )))
+            .control(Tier::Ghost, Scale::Compact, older_selected, cx)
+            .label(format!("More models ({older_count})"))
+            .icon(if more {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
+            })
+            .on_click(cx.listener(|picker, _, _, cx| {
+                picker.more = !picker.more;
+                cx.notify();
+            }))
         });
         pane.children(refresh_note)
             .child(h_flex().w_full().flex_wrap().children(cards))
@@ -400,13 +416,19 @@ impl ProfilePicker {
     fn render_setup(&self, provider: &ProviderInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let reason = provider
+            .state
             .cli_unavailable_reason
             .clone()
-            .unwrap_or_else(|| format!("{} is not available on this computer.", provider.label));
+            .unwrap_or_else(|| {
+                format!(
+                    "{} is not available on this computer.",
+                    provider.state.label
+                )
+            });
         let command = setup_command(&reason).map(str::to_owned);
-        let copied = self.copied.as_deref() == Some(provider.id.as_str());
-        let explained = self.explained.as_deref() == Some(provider.id.as_str());
-        let explain_id = provider.id.clone();
+        let copied = self.copied.as_deref() == Some(provider.state.id.as_str());
+        let explained = self.explained.as_deref() == Some(provider.state.id.as_str());
+        let explain_id = provider.state.id.clone();
         // Under the Provider tabs the warning row is the whole notice; the
         // side-by-side catalog keeps a heading over it.
         v_flex()
@@ -417,7 +439,7 @@ impl ProfilePicker {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(format!("Connect {}", provider.label)),
+                        .child(format!("Connect {}", provider.state.label)),
                 )
             })
             // Why the provider can't run: one short warning line, with the
@@ -439,31 +461,36 @@ impl ProfilePicker {
                             .min_w_0()
                             .truncate()
                             .text_color(theme.warning)
-                            .child(format!("{} isn't available yet.", provider.label)),
+                            .child(format!("{} isn't available yet.", provider.state.label)),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("setup-details-{}", provider.id)))
-                            .control(Tier::Ghost, Scale::Compact, false, cx)
-                            // 13 px, like the warning it explains.
-                            .child(div().text_size(px(13.)).child(if explained {
-                                "Hide details"
-                            } else {
-                                "Details"
-                            }))
-                            .accessibility_label(if explained { "Hide details" } else { "Details" })
-                            .icon(if explained {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .on_click(cx.listener(move |picker, _, _, cx| {
+                        Button::new(SharedString::from(format!(
+                            "setup-details-{}",
+                            provider.state.id
+                        )))
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        // 13 px, like the warning it explains.
+                        .child(div().text_size(px(13.)).child(if explained {
+                            "Hide details"
+                        } else {
+                            "Details"
+                        }))
+                        .accessibility_label(if explained { "Hide details" } else { "Details" })
+                        .icon(if explained {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .on_click(cx.listener(
+                            move |picker, _, _, cx| {
                                 picker.explained = if explained {
                                     None
                                 } else {
                                     Some(explain_id.clone())
                                 };
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     ),
             )
             .when(explained, |setup| {
@@ -476,7 +503,7 @@ impl ProfilePicker {
                 )
             })
             .children(command.map(|command| {
-                let provider_id = provider.id.clone();
+                let provider_id = provider.state.id.clone();
                 let text = command.clone();
                 h_flex()
                     .gap_2()
@@ -495,20 +522,25 @@ impl ProfilePicker {
                             .child(format!("$ {command}")),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("copy-setup-{}", provider.id)))
-                            .control(Tier::Ghost, Scale::Compact, self.disabled, cx)
-                            .icon(if copied {
-                                IconName::Check
-                            } else {
-                                IconName::Copy
-                            })
-                            .label(if copied { "Copied" } else { "Copy" })
-                            .accessibility_label(format!("Copy {command}"))
-                            .on_click(cx.listener(move |picker, _, _, cx| {
+                        Button::new(SharedString::from(format!(
+                            "copy-setup-{}",
+                            provider.state.id
+                        )))
+                        .control(Tier::Ghost, Scale::Compact, self.disabled, cx)
+                        .icon(if copied {
+                            IconName::Check
+                        } else {
+                            IconName::Copy
+                        })
+                        .label(if copied { "Copied" } else { "Copy" })
+                        .accessibility_label(format!("Copy {command}"))
+                        .on_click(cx.listener(
+                            move |picker, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                                 picker.copied = Some(provider_id.clone());
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     )
             }))
             .into_any_element()
@@ -655,7 +687,7 @@ fn model_name(model: &ModelInfo, new: bool, cx: &App) -> impl IntoElement {
 
 fn model_accessibility(model: &ModelInfo, provider: &ProviderInfo, new: bool) -> String {
     let new = if new { " · New" } else { "" };
-    format!("{} · {}{new}", model.label, provider.label)
+    format!("{} · {}{new}", model.label, provider.state.label)
 }
 
 /// The first `code span` of an unavailable reason, such as `claude login`.
@@ -683,7 +715,7 @@ pub(crate) fn catalog_choice(
     provider: &ProviderInfo,
     previous: Option<&ProfileChoice>,
 ) -> Option<ProfileChoice> {
-    let previous = previous.filter(|choice| choice.provider_id == provider.id);
+    let previous = previous.filter(|choice| choice.provider_id == provider.state.id);
     let model = previous
         .and_then(|choice| provider.catalog.model(&choice.model))
         .or(provider.catalog.models.first())?;
@@ -696,36 +728,11 @@ pub(crate) fn catalog_choice(
     let fast = previous.is_some_and(|choice| choice.service_tier == FAST)
         && model.tiers.iter().any(|tier| tier == FAST);
     Some(ProfileChoice {
-        provider_id: provider.id.clone(),
+        provider_id: provider.state.id.clone(),
         model: model.id.clone(),
         reasoning_effort: effort.clone(),
         service_tier: if fast { FAST } else { "default" }.to_owned(),
     })
-}
-
-/// "gpt-6.1-sol" -> "GPT 6.1 Sol", "claude-opus-5-5" -> "Claude Opus 5.5".
-pub fn model_label(id: &str) -> String {
-    let mut words: Vec<String> = Vec::new();
-    for part in id.split('-') {
-        match words.last_mut() {
-            Some(last)
-                if part.chars().all(|c| c.is_ascii_digit())
-                    && last.chars().all(|c| c.is_ascii_digit() || c == '.') =>
-            {
-                last.push('.');
-                last.push_str(part);
-            }
-            _ if part == "gpt" => words.push("GPT".to_owned()),
-            _ => {
-                let mut chars = part.chars();
-                words.push(match chars.next() {
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                    None => String::new(),
-                });
-            }
-        }
-    }
-    words.join(" ")
 }
 
 pub fn effort_label(id: &str) -> &str {
@@ -810,8 +817,8 @@ impl Render for ProfilePicker {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, catalog_choice, model_label, setup_command, split_models};
-    use crate::api::{Catalog, ModelInfo, ProviderInfo};
+    use super::{FAST, catalog_choice, setup_command, split_models};
+    use else_wire::settings::{Catalog, ModelInfo, ProviderInfo, ProviderState, model_label};
 
     fn model(id: &str, featured: bool, fast: bool) -> ModelInfo {
         ModelInfo {
@@ -830,10 +837,16 @@ mod tests {
 
     fn provider(id: &str, fast: bool) -> ProviderInfo {
         ProviderInfo {
-            id: id.into(),
-            label: id.into(),
-            cli_available: true,
-            cli_unavailable_reason: None,
+            state: ProviderState {
+                id: id.into(),
+                label: id.into(),
+                available: true,
+                cli_available: true,
+                cli_unavailable_reason: None,
+                requires_profile: true,
+                profile_configured: Some(true),
+                unavailable_reason: None,
+            },
             catalog: Catalog {
                 models: vec![model("first", true, fast), model("second", false, fast)],
                 ..Catalog::default()

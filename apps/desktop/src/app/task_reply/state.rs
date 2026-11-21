@@ -1,7 +1,9 @@
 use crate::app::RowKey;
 use crate::app::transcript::CardKey;
-use crate::model::{Conversation, ItemKind, TurnStatus};
+use crate::model::Conversation;
 use chrono::{DateTime, Utc};
+use else_wire::items::ItemKind;
+use else_wire::turns::TurnStatus;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -69,7 +71,7 @@ pub(in crate::app) struct TaskReply {
     /// Cards that follow an earlier item of the turn, such as a settled draft
     /// or question; [`TaskReply::earlier`] places each after the item it followed.
     pub cards: Vec<TaskCard>,
-    pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
+    pub reactions: Vec<(Uuid, else_wire::items::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub attempt: Option<i64>,
@@ -170,7 +172,7 @@ impl TaskReply {
             return false;
         };
         let delivers = item.parts.iter().any(|part| {
-            matches!(part, crate::attachments::MessagePart::File { file }
+            matches!(part, else_wire::items::MessagePart::File { file }
                 if !self.repeated_files.contains(&file.id))
         });
         item.attempt.is_some_and(|earlier| earlier < latest) && !delivers
@@ -285,7 +287,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             let has_file = item
                 .parts
                 .iter()
-                .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }));
+                .any(|part| matches!(part, else_wire::items::MessagePart::File { .. }));
             if has_file {
                 task_turns.insert(item.turn_id);
             }
@@ -457,7 +459,7 @@ pub(in crate::app) fn place_cards(
 /// before them.
 fn split_answers(
     conversation: &Conversation,
-    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reactions: &HashMap<Uuid, else_wire::items::ReactionKind>,
     reply: &mut TaskReply,
     joined: &[Uuid],
 ) {
@@ -468,7 +470,7 @@ fn split_answers(
             || conversation.item(id).is_some_and(|item| {
                 item.parts
                     .iter()
-                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+                    .any(|part| matches!(part, else_wire::items::MessagePart::File { .. }))
             })
     };
     let replies: Vec<_> = reply.history.iter().copied().chain(reply.latest).collect();
@@ -478,8 +480,8 @@ fn split_answers(
             .into_iter()
             .flat_map(|item| &item.parts)
             .filter_map(|part| match part {
-                crate::attachments::MessagePart::File { file } => Some(file),
-                crate::attachments::MessagePart::Text { .. } => None,
+                else_wire::items::MessagePart::File { file } => Some(file),
+                else_wire::items::MessagePart::Text { .. } => None,
             })
     };
     // A reacted reply before a message stays in view, and so does one with a
@@ -550,7 +552,7 @@ fn split_answers(
 /// Whether `b` delivers file `a` again: a bot that re-uploads a file after a
 /// park sometimes renames an image, so an image of the same type and byte
 /// size counts as the same file.
-fn same_file(a: &crate::attachments::Attachment, b: &crate::attachments::Attachment) -> bool {
+fn same_file(a: &else_wire::items::Attachment, b: &else_wire::items::Attachment) -> bool {
     a.media_type == b.media_type
         && a.size == b.size
         && (a.name == b.name || a.media_type.starts_with("image/"))
@@ -567,7 +569,7 @@ fn same_file(a: &crate::attachments::Attachment, b: &crate::attachments::Attachm
 /// same way.
 fn keep_earlier_replies(
     conversation: &Conversation,
-    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reactions: &HashMap<Uuid, else_wire::items::ReactionKind>,
     reply: &mut TaskReply,
 ) {
     let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
@@ -577,8 +579,8 @@ fn keep_earlier_replies(
             .into_iter()
             .flat_map(|item| &item.parts)
             .filter_map(|part| match part {
-                crate::attachments::MessagePart::File { file } => Some(file),
-                crate::attachments::MessagePart::Text { .. } => None,
+                else_wire::items::MessagePart::File { file } => Some(file),
+                else_wire::items::MessagePart::Text { .. } => None,
             })
             .collect::<Vec<_>>()
     };
@@ -606,7 +608,7 @@ fn keep_earlier_replies(
     let mut repeated = HashSet::new();
     for &id in replies.iter().rev().filter(|&&id| reply.latest != Some(id)) {
         let files = files(id);
-        let (again, new): (Vec<&&crate::attachments::Attachment>, Vec<_>) = files
+        let (again, new): (Vec<&&else_wire::items::Attachment>, Vec<_>) = files
             .iter()
             .partition(|file| delivered_later.iter().any(|later| same_file(file, later)));
         let answer = reply.answers.contains(&id);

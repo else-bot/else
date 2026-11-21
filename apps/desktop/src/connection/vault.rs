@@ -2,11 +2,11 @@
 //! on hide, navigation, server switching, and connection loss.
 use super::*;
 use crate::api::{
-    PatchSecret, SaveSecret, VaultEntry, valid_secret_name, validate_secret_metadata,
-    vault_last_used,
+    PatchSecret, SaveSecret, valid_secret_name, validate_secret_metadata, vault_last_used,
 };
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, Form};
+use else_wire::secrets::VaultEntry;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -661,7 +661,7 @@ impl View {
                         entry
                             .last_used
                             .as_ref()
-                            .map(|last| format!(" · Used in {}", last.r#use.label()))
+                            .map(|last| format!(" · Used in {}", last.r#use.as_str()))
                             .unwrap_or_default()
                     )),
             );

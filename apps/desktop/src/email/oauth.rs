@@ -1,9 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
+use else_wire::email::EmailProvider;
 use url::Url;
 
-use crate::api::{Client, ClientError, EmailAccount, EmailAuthorization, EmailProvider};
+use crate::api::{Client, ClientError};
+
+use else_wire::email::EmailAccount;
+
 use crate::oauth_callback::{self, Outcome, WaitError};
+use else_wire::email::EmailAuthorization;
 
 const GOOGLE_REGISTRATION: Option<(&str, &str)> =
     include!(concat!(env!("OUT_DIR"), "/google_oauth.rs"));

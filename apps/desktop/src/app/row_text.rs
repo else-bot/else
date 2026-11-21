@@ -3,8 +3,10 @@ use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::reply::{Author, Passage, QuotedReply};
 use super::{ElseApp, RowKey};
-use crate::attachments::{Attachment, MessagePart, byte_size, file_id, input_content};
-use crate::model::ItemKind;
+use crate::attachments::{byte_size, file_id, input_content};
+use else_wire::items::Attachment;
+use else_wire::items::ItemKind;
+use else_wire::items::MessagePart;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{
@@ -53,7 +55,7 @@ impl RowFormat {
         }
     }
 
-    pub(super) fn for_item(item: &crate::model::Item) -> Self {
+    pub(super) fn for_item(item: &else_wire::items::Item) -> Self {
         if item.kind == ItemKind::Assistant || item.bot_reply.is_some() {
             Self::Markdown
         } else if item.kind == ItemKind::User && item.bot_task.is_none() {
@@ -1188,11 +1190,13 @@ mod tests {
         CellRun, RowFormat, RowSource, file_links, file_map, linked_file, list_blocks,
         plain_content, shows_its_destination, table_columns,
     };
-    use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
     use crate::app::reply::{Author, Draft, MessageReference, Quote};
-    use crate::attachments::{Attachment, MessagePart, file_id};
+    use crate::attachments::file_id;
+    use else_wire::bots::Bot;
+    use else_wire::items::Attachment;
+    use else_wire::items::MessagePart;
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
 

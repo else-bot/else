@@ -4,7 +4,7 @@
 //! earlier version. Every save appends a version.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use else_wire::rules::{DiffLine, RulesUpdate, RulesVersion};
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -12,9 +12,7 @@ use uuid::Uuid;
 use super::events;
 use super::turns::ConversationKind;
 use crate::app::providers::Origin;
-use crate::app::rules::{
-    Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules, RulesUpdate,
-};
+use crate::app::rules::{Applied, ChangeKind, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules};
 use crate::db::bots::{self, BotStatus};
 
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +38,7 @@ pub enum RulesError {
     Db(#[from] sqlx::Error),
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Version {
     pub version: i64,
     pub markdown: String,
@@ -54,6 +52,22 @@ pub struct Version {
     /// When the owner restored the version before this one while it was
     /// current, which undoes it.
     pub undone_at: Option<DateTime<Utc>>,
+}
+
+impl From<&Version> for RulesVersion {
+    fn from(version: &Version) -> Self {
+        Self {
+            version: version.version,
+            section: version.section.clone(),
+            change: version.change.clone().into(),
+            owner_words: version.owner_words.clone(),
+            author: version.author.clone().into(),
+            restored_from: version.restored_from,
+            diff: version.diff.0.clone(),
+            created_at: version.created_at,
+            undone_at: version.undone_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +262,7 @@ pub async fn update_for_turn(
     let update = RulesUpdate {
         version,
         section,
-        change,
+        change: change.into(),
         owner_words,
         diff,
         undone_at: None,

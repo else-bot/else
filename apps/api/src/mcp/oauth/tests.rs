@@ -79,8 +79,7 @@ async fn github_signin_identifies_the_missing_server_registration() {
             "http://127.0.0.1:49177/mcp/callback".into(),
         )
         .await
-        .err()
-        .expect("GitHub needs a registered app");
+        .expect_err("GitHub needs a registered app");
     assert!(
         error.to_string().contains("ELSE_GITHUB_CLIENT_ID"),
         "{error}"
@@ -89,7 +88,7 @@ async fn github_signin_identifies_the_missing_server_registration() {
         error.to_string().contains("ELSE_GITHUB_CLIENT_SECRET"),
         "{error}"
     );
-    assert_eq!(session.status().status, "disconnected");
+    assert_eq!(session.status().status.as_str(), "disconnected");
 }
 
 #[tokio::test]
@@ -99,22 +98,22 @@ async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_
     let id = pending.id;
     let mut session = session(store(dir.path().into()), State::Authorizing(pending));
     assert!(session.complete(callback(id, "wrong-state")).await.is_err());
-    assert_eq!(session.status().status, "authorizing");
+    assert_eq!(session.status().status.as_str(), "authorizing");
     let mut wrong_issuer = callback(id, &state);
     wrong_issuer.error = None;
     wrong_issuer.code = Some("authorization-code".into());
     wrong_issuer.iss = Some("https://imposter.example.com".into());
     let error = session.complete(wrong_issuer).await.unwrap_err();
     assert!(error.to_string().contains("issuer"), "{error}");
-    assert_eq!(session.status().status, "authorizing");
+    assert_eq!(session.status().status.as_str(), "authorizing");
     for iss in [Some("https://imposter.example.com"), None] {
         let mut forged_denial = callback(id, &state);
         forged_denial.iss = iss.map(Into::into);
         assert!(session.complete(forged_denial).await.is_err());
-        assert_eq!(session.status().status, "authorizing");
+        assert_eq!(session.status().status.as_str(), "authorizing");
     }
     assert!(session.complete(callback(id, &state)).await.is_err());
-    assert_eq!(session.status().status, "disconnected");
+    assert_eq!(session.status().status.as_str(), "disconnected");
     assert!(session.complete(callback(id, &state)).await.is_err());
 }
 
@@ -125,20 +124,20 @@ async fn cancellation_and_expiration_restore_an_existing_account_without_exposin
     let dir = tempfile::tempdir().unwrap();
     let mut session = session(store(dir.path().into()), State::Authorizing(flow));
     session.cancel(Uuid::new_v4());
-    assert_eq!(session.status().status, "authorizing");
+    assert_eq!(session.status().status.as_str(), "authorizing");
     session.cancel(id);
-    assert_eq!(session.status().status, "connected");
+    assert_eq!(session.status().status.as_str(), "connected");
     let safe = serde_json::to_string(&session.status()).unwrap();
     assert!(!safe.contains("private-access-token"));
     assert!(!safe.contains("private-refresh-token"));
     session.state = State::Authorizing(pending(Some(credential()), discovery()).await.0);
-    assert_eq!(session.cancel_pending().status, "connected");
+    assert_eq!(session.cancel_pending().status.as_str(), "connected");
     session.state = State::Authorizing(pending(None, discovery()).await.0);
-    assert_eq!(session.cancel_pending().status, "disconnected");
+    assert_eq!(session.cancel_pending().status.as_str(), "disconnected");
     let (mut flow, _) = pending(None, discovery()).await;
     flow.expires = Instant::now() - Duration::from_secs(1);
     session.state = State::Authorizing(flow);
-    assert_eq!(session.status().status, "disconnected");
+    assert_eq!(session.status().status.as_str(), "disconnected");
 }
 
 #[tokio::test]
@@ -210,7 +209,7 @@ async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
         response.code = Some("authorization-code".into());
         assert!(session.complete(response).await.is_err());
         let status = session.status();
-        assert_eq!(status.status, "connected");
+        assert_eq!(status.status.as_str(), "connected");
         assert_eq!(status.scopes, ["read:issues"]);
         assert!(session.complete(callback(request, &state)).await.is_err());
         server.abort();
@@ -299,7 +298,7 @@ async fn a_sign_in_saved_before_the_rmcp_client_still_refreshes() {
     store::save(dir.path(), Uuid::nil(), &key, &legacy).unwrap();
     let store = Store::new(dir.path().into(), Some(key));
     let mut session = Session::open(store.clone(), None).await.unwrap();
-    assert_eq!(session.status().status, "connected");
+    assert_eq!(session.status().status.as_str(), "connected");
     assert_eq!(session.status().provider.as_deref(), Some(base.as_str()));
     session.refresh(false).await.unwrap();
     let refresh = received.recv().await.unwrap();

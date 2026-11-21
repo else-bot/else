@@ -16,6 +16,7 @@ use super::error::{ApiError, ApiJson, ApiPath};
 use super::turns::bot_deleted;
 use super::{AppState, Routes};
 use crate::db::categories::{self, CategoryError, Created};
+use else_wire::bots::{BotEnvelope, CategoryEnvelope, CategoryList};
 
 pub fn routes() -> Routes {
     Routes {
@@ -55,10 +56,10 @@ impl From<CategoryError> for ApiError {
     }
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
-        json!({ "categories": categories::list(&state.db).await? }),
-    ))
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<CategoryList>, ApiError> {
+    Ok(Json(categories::list_body(
+        categories::list(&state.db).await?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -78,12 +79,12 @@ async fn create(
             Ok((
                 StatusCode::CREATED,
                 [(header::LOCATION, location)],
-                Json(json!({ "category": category })),
+                Json(CategoryEnvelope::from(category)),
             )
                 .into_response())
         }
         Ok(Created::Existing(category)) => {
-            Ok(Json(json!({ "category": category })).into_response())
+            Ok(Json(CategoryEnvelope::from(category)).into_response())
         }
         Err(err) => Err(ApiError::from(err).with_request_id(body.request_id)),
     }
@@ -98,7 +99,7 @@ struct OrderBody {
 async fn reorder(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<OrderBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<CategoryList>, ApiError> {
     let mut seen = std::collections::HashSet::new();
     if !body.category_ids.iter().all(|id| seen.insert(*id)) {
         return Err(ApiError::bad_request(
@@ -107,7 +108,7 @@ async fn reorder(
         ));
     }
     let categories = categories::reorder(&state.db, &body.category_ids).await?;
-    Ok(Json(json!({ "categories": categories })))
+    Ok(Json(categories::list_body(categories)))
 }
 
 #[derive(Deserialize)]
@@ -120,9 +121,9 @@ async fn rename(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<RenameBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<CategoryEnvelope>, ApiError> {
     let category = categories::rename(&state.db, id, &body.name).await?;
-    Ok(Json(json!({ "category": category })))
+    Ok(Json(CategoryEnvelope::from(category)))
 }
 
 async fn remove(
@@ -139,7 +140,7 @@ async fn assign(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<Value>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     let invalid = || {
         ApiError::bad_request(
             "invalid_input",
@@ -159,5 +160,5 @@ async fn assign(
     let bot = crate::db::bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "bot": crate::views::bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }

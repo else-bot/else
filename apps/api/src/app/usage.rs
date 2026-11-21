@@ -13,7 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use else_wire::usage::{
+    Attribution, BotUsage, ProviderUsage, UsageReport, UsageSource, UsageSourceKind, UsageWindow,
+};
 use uuid::Uuid;
 
 use super::providers::LimitWindow;
@@ -30,8 +32,7 @@ const CLEAN_SIGNAL: f64 = 2.0;
 const SAME_RESET: Duration = Duration::seconds(90);
 
 /// What started a turn, worked out from the tables that record each kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum Source {
     Chat,
@@ -40,6 +41,19 @@ pub enum Source {
     Webhook,
     Mail,
     Social,
+}
+
+impl From<Source> for UsageSourceKind {
+    fn from(source: Source) -> Self {
+        match source {
+            Source::Chat => Self::Chat,
+            Source::Routine => Self::Routine,
+            Source::Delegated => Self::Delegated,
+            Source::Webhook => Self::Webhook,
+            Source::Mail => Self::Mail,
+            Source::Social => Self::Social,
+        }
+    }
 }
 
 /// One turn that reported tokens, as the provider and model that ran it.
@@ -169,64 +183,8 @@ pub struct Reading {
     pub observed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct Report {
-    pub generated_at: DateTime<Utc>,
-    pub providers: Vec<ProviderUsage>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProviderUsage {
-    pub provider_id: String,
-    pub windows: Vec<WindowUsage>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WindowUsage {
-    pub minutes: i64,
-    pub attribution: Attribution,
-    pub bots: Vec<BotUsage>,
-}
-
-/// The provider's exact total and any learned attribution of that total.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Attribution {
-    /// `outside` is the estimated part of `used` from outside else.bot.
-    Priced {
-        used: f64,
-        outside: f64,
-        resets_at: DateTime<Utc>,
-        observed_at: DateTime<Utc>,
-    },
-    /// The provider reported `used`, but the cost of a turn is not known yet.
-    Unattributed {
-        used: f64,
-        resets_at: DateTime<Utc>,
-        observed_at: DateTime<Utc>,
-    },
-    /// No current total, either unreported or past its reset.
-    Unreported,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BotUsage {
-    pub bot_id: Uuid,
-    pub name: String,
-    /// Fraction of else.bot's weighted use in the window.
-    pub share: f64,
-    pub sources: Vec<SourceUsage>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SourceUsage {
-    pub source: Source,
-    /// Fraction of the bot's own weighted use.
-    pub share: f64,
-}
-
 /// Builds the report from turns and readings of the last week or so.
-pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Report {
+pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> UsageReport {
     let providers: BTreeSet<&str> = turns
         .iter()
         .map(|t| t.provider_id.as_str())
@@ -247,7 +205,7 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
                     .or_default()
                     .push(reading);
             }
-            let windows: Vec<WindowUsage> = if by_length.is_empty() {
+            let windows: Vec<UsageWindow> = if by_length.is_empty() {
                 vec![window(now, DEFAULT_WINDOW, &turns, &[], None)]
             } else {
                 let series: BTreeMap<i64, Vec<Group>> = by_length
@@ -285,7 +243,7 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
             }
         })
         .collect();
-    Report {
+    UsageReport {
         generated_at: now,
         providers,
     }
@@ -419,7 +377,7 @@ fn window<'a>(
     turns: &[Weighed],
     groups: &'a [Group<'a>],
     rate: Option<f64>,
-) -> WindowUsage {
+) -> UsageWindow {
     let length = Duration::minutes(minutes);
     let current = groups
         .iter()
@@ -459,7 +417,7 @@ fn window<'a>(
         },
         _ => Attribution::Unreported,
     };
-    WindowUsage {
+    UsageWindow {
         minutes,
         attribution,
         bots: bots(&members, |t| in_window(t, starts_at, now)),
@@ -526,10 +484,10 @@ fn bots(turns: &[&Weighed], weight: impl Fn(&Weighed) -> f64) -> Vec<BotUsage> {
             for turn in &turns {
                 *sources.entry(turn.turn.source).or_default() += weight(turn);
             }
-            let mut sources: Vec<SourceUsage> = sources
+            let mut sources: Vec<UsageSource> = sources
                 .into_iter()
-                .map(|(source, weight)| SourceUsage {
-                    source,
+                .map(|(source, weight)| UsageSource {
+                    source: source.into(),
                     share: ratio(weight, bot_weight),
                 })
                 .collect();

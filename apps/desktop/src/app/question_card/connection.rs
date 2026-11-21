@@ -1,8 +1,8 @@
 use super::*;
-use crate::api::EmailProvider;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier, text_field};
-use crate::model::QuestionStatus;
+use else_wire::email::EmailProvider;
+use else_wire::questions::QuestionStatus;
 use flow::{Consent, Flow, Resolution};
 use gpui_kit::component::input::{Input, InputState};
 
@@ -574,7 +574,7 @@ impl ElseApp {
             let editable = !locked && matches!(phase, Phase::Ready(_));
             let help = question
                 .email_connection()
-                .and_then(|email| email.provider.app_password_help());
+                .and_then(|email| app_password_help(email.provider));
             card = card.child(password_field(id, input, editable, help, cx));
         }
         let can_cancel = matches!(
@@ -668,7 +668,7 @@ fn password_field(
     id: Uuid,
     input: &Entity<InputState>,
     editable: bool,
-    help: Option<crate::api::AppPasswordHelp>,
+    help: Option<AppPasswordHelp>,
     cx: &mut Context<ElseApp>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -702,6 +702,24 @@ fn password_field(
             )
         })
         .into_any_element()
+}
+
+fn app_password_help(provider: EmailProvider) -> Option<AppPasswordHelp> {
+    match provider {
+        EmailProvider::Icloud => Some(AppPasswordHelp {
+            note: "Use an app-specific password, not your Apple Account password. \
+                   Two-factor authentication must be on.",
+            link: "Open account.apple.com",
+            url: "https://account.apple.com/",
+        }),
+        _ => None,
+    }
+}
+
+struct AppPasswordHelp {
+    note: &'static str,
+    link: &'static str,
+    url: &'static str,
 }
 
 /// What a connection card signs in to, as its header and facts show it.
@@ -759,6 +777,22 @@ impl Account {
 mod tests {
     use super::{Question, Uuid};
     use serde_json::json;
+
+    #[test]
+    fn a_future_action_leaves_the_question_available() {
+        let turn: else_wire::turns::Turn = serde_json::from_value(json!({
+            "id": Uuid::nil(), "request_id": Uuid::nil(), "turn_no": 1,
+            "provider_id": "test", "status": "waiting", "effect_uncertain": false,
+            "questions": [{
+                "id": Uuid::nil(), "kind": "external", "title": "Future approval",
+                "status": "pending", "choices": [],
+                "action": {"future_action": {"target": "example"}}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(turn.questions[0].title, "Future approval");
+        assert!(turn.questions[0].is_pending());
+    }
 
     #[test]
     fn mcp_cards_parse_typed_consent_and_reject_malformed_metadata() {

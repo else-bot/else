@@ -15,7 +15,6 @@ use super::AppState;
 use super::error::{ApiError, ApiPath};
 use crate::db::turns::{ITEM_COLUMNS, ItemRecord};
 use crate::grants::{Grant, Tool};
-use crate::views::item_json;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -90,7 +89,7 @@ async fn history(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(
-        json!({ "items": items.iter().rev().map(item_json).collect::<Vec<_>>() }),
+        json!({ "items": items.iter().rev().map(else_wire::items::Item::from).collect::<Vec<_>>() }),
     ))
 }
 
@@ -109,5 +108,5 @@ async fn item(
     .fetch_optional(&state.db)
     .await?;
     let item = item.ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "item": item_json(&item) })))
+    Ok(Json(json!({ "item": else_wire::items::Item::from(&item) })))
 }

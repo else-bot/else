@@ -25,7 +25,7 @@ async fn the_owner_names_the_server_for_every_desktop_and_restart() {
         )
         .await;
     assert_eq!(named.status, StatusCode::OK, "{:?}", named.body);
-    assert_eq!(named.body["server"]["name"], "Studio");
+    assert_eq!(named.body, json!({ "server": { "name": "Studio" } }));
     assert_eq!(advertised(&app).await, "Studio");
 
     for name in [String::new(), "   ".into(), "a\nb".into(), "x".repeat(81)] {

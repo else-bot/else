@@ -1,5 +1,5 @@
-use crate::api::UsageWindow;
 use crate::usage_ui::{bar, percent, resets};
+use else_wire::usage::UsageWindow;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 

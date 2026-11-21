@@ -1,3 +1,6 @@
+use else_wire::outgoing::{
+    DraftContent, DraftDelivery, DraftEmailReplyTo, DraftFile, DraftPlatform, DraftStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,30 +26,6 @@ pub const MAX_HANDLE: usize = 200;
 /// Files one draft may name, on any channel.
 pub const MAX_FILES: usize = 10;
 const MIB: u64 = 1024 * 1024;
-
-/// A file attached to a draft. Drafting copies it into the bot's file store
-/// (`attachments`), so the owner approves these exact bytes and a send
-/// refuses bytes whose hash differs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DraftFile {
-    pub id: Uuid,
-    pub name: String,
-    pub media_type: String,
-    pub size: u64,
-    /// Lowercase hex SHA-256 of the approved bytes.
-    pub sha256: String,
-}
-
-impl DraftFile {
-    /// A picture platforms show inline: a photo on Telegram, an image with
-    /// a caption on WhatsApp.
-    pub fn is_image(&self) -> bool {
-        matches!(
-            self.media_type.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        )
-    }
-}
 
 /// Where `attachments` takes a file from, as the bot names it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -181,6 +160,21 @@ impl Status {
     }
 }
 
+impl From<Status> for DraftStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Pending => Self::Pending,
+            Status::Approved => Self::Approved,
+            Status::Sending => Self::Sending,
+            Status::Sent => Self::Sent,
+            Status::Failed => Self::Failed,
+            Status::Uncertain => Self::Uncertain,
+            Status::Discarded => Self::Discarded,
+            Status::Superseded => Self::Superseded,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -190,29 +184,19 @@ pub enum ApprovalSource {
     /// An owner message sent while the draft was open, which the bot read
     /// as approval of that exact version.
     Message,
-    /// The owner approved its kind always ([`DraftKind`]); it was approved
+    /// The owner approved its kind always ([`else_wire::outgoing::DraftKind`]); it was approved
     /// as proposed.
     Standing,
 }
 
-/// What "Approve always" covers: messages on one platform from one sending
-/// account to one destination, whatever they say, or, for a message the bot
-/// files under a recurring task, every message of that task from that
-/// account, to any destination. Emails have no kind (each goes to its own
-/// recipients), nor do X replies without a task (each answers its own
-/// post). WhatsApp sends as the owner's own account, so its kind is always
-/// one chat, never a task. `kind!` in `db::outgoing_drafts` derives it from
-/// stored content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DraftKind {
-    pub platform: Platform,
-    pub account_id: Option<Uuid>,
-    /// The account as the platform shows it, lowercased.
-    pub account: Option<String>,
-    pub destination: Option<String>,
-    /// The recurring task, lowercased.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
+impl From<ApprovalSource> for else_wire::outgoing::ApprovalSource {
+    fn from(source: ApprovalSource) -> Self {
+        match source {
+            ApprovalSource::Button => Self::Button,
+            ApprovalSource::Message => Self::Message,
+            ApprovalSource::Standing => Self::Standing,
+        }
+    }
 }
 
 /// How the bot reports a claimed send ended.
@@ -263,6 +247,32 @@ pub enum Delivery {
         account_id: Uuid,
         action_id: Uuid,
     },
+}
+
+impl From<&Delivery> for DraftDelivery {
+    fn from(delivery: &Delivery) -> Self {
+        match delivery {
+            Delivery::Tool { tool, args } => Self::Tool {
+                tool: tool.clone(),
+                args: args.clone(),
+            },
+            Delivery::Host => Self::Host,
+            Delivery::Mail {
+                account_id,
+                action_id,
+            } => Self::Mail {
+                account_id: *account_id,
+                action_id: *action_id,
+            },
+            Delivery::Social {
+                account_id,
+                action_id,
+            } => Self::Social {
+                account_id: *account_id,
+                action_id: *action_id,
+            },
+        }
+    }
 }
 
 /// A platform a bot can draft a message or post for. The bot sends through
@@ -359,6 +369,17 @@ impl Platform {
     }
 }
 
+impl From<Platform> for DraftPlatform {
+    fn from(platform: Platform) -> Self {
+        match platform {
+            Platform::X => Self::X,
+            Platform::Telegram => Self::Telegram,
+            Platform::Discord => Self::Discord,
+            Platform::WhatsApp => Self::WhatsApp,
+        }
+    }
+}
+
 /// An email: headers, subject, and plain-text body. With `account_id` it
 /// goes from that connected account (`from` is its address) through the
 /// API, optionally in the thread of `reply_to`; without, the bot sends it
@@ -429,6 +450,38 @@ pub struct Edits<'a> {
     pub body: Option<&'a str>,
     /// The attachments the owner keeps, by id: removal only.
     pub attachments: Option<&'a [Uuid]>,
+}
+
+impl From<&Content> for DraftContent {
+    fn from(content: &Content) -> Self {
+        match content {
+            Content::Email(email) => Self::Email {
+                from: email.from.clone(),
+                to: email.to.clone(),
+                cc: email.cc.clone(),
+                bcc: email.bcc.clone(),
+                subject: email.subject.clone(),
+                body: email.body.clone(),
+                account_id: email.account_id,
+                reply_to: email.reply_to.as_ref().map(|reply| DraftEmailReplyTo {
+                    folder: reply.folder.clone(),
+                    uid_validity: reply.uid_validity,
+                    uid: reply.uid,
+                }),
+                attachments: email.attachments.clone(),
+            },
+            Content::Message(message) => Self::Message {
+                platform: message.platform.into(),
+                account_id: message.account_id,
+                reply_to: message.reply_to.clone(),
+                account: message.account.clone(),
+                destination: message.destination.clone(),
+                task: message.task.clone(),
+                body: message.body.clone(),
+                attachments: message.attachments.clone(),
+            },
+        }
+    }
 }
 
 impl Content {

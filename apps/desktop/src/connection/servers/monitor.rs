@@ -2,6 +2,8 @@
 //! or on request.
 
 use super::*;
+use else_wire::maintenance::Report;
+use else_wire::settings::{Capabilities, ServerInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::connection) enum Health {
@@ -21,7 +23,7 @@ pub(in crate::connection) struct Observation {
     pub working: Option<u64>,
     /// `None` when the server does not keep a name or has not answered;
     /// a name of `None` when it keeps one but nobody set it.
-    pub server: Option<crate::api::ServerInfo>,
+    pub server: Option<ServerInfo>,
     /// When the last answered check started.
     pub asked: Option<Instant>,
     /// From the last answered check; `None` when the bot list failed.
@@ -85,17 +87,10 @@ pub(in crate::connection) struct Connections {
     monitors: HashMap<Uuid, Monitor>,
 }
 
-#[derive(Deserialize)]
-struct Report {
-    version: String,
-    active_turns: u64,
-    running_commands: u64,
-}
-
 struct Observed {
     version: Option<String>,
     working: Option<u64>,
-    server: Option<crate::api::ServerInfo>,
+    server: Option<ServerInfo>,
     attention: Option<crate::attention::Attention>,
     bots: Option<Vec<crate::quick_switcher::Bot>>,
 }
@@ -105,12 +100,10 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
     client
         .run(async move {
             let (caps, readiness, report, bots) = tokio::join!(
-                this.send_json::<crate::api::Capabilities>(
-                    this.request(Method::GET, "/v1/capabilities")
-                ),
+                this.send_json::<Capabilities>(this.request(Method::GET, "/v1/capabilities")),
                 this.send_json::<serde_json::Value>(this.request(Method::GET, "/readyz")),
                 this.send_json::<Report>(this.request(Method::GET, "/v1/maintenance/update")),
-                this.send_json::<crate::api::BotList>(this.request(Method::GET, "/v1/bots")),
+                this.send_json::<else_wire::bots::BotList>(this.request(Method::GET, "/v1/bots")),
             );
             let (_, caps) = caps.map_err(|err| match err {
                 ClientError::Unauthorized => (
@@ -138,11 +131,11 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ));
             }
             let (version, working) = match report {
-                Ok((_, report)) => (
-                    Some(report.version),
+                Ok((_, report)) if report.version.is_some() => (
+                    report.version,
                     Some(report.active_turns.saturating_add(report.running_commands)),
                 ),
-                Err(_) => (None, None),
+                _ => (None, None),
             };
             let list = bots.ok().map(|(_, list)| list.bots);
             let attention = list

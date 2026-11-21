@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use uuid::Uuid;
 
-use crate::model::Snapshot;
+use else_wire::conversation::Snapshot;
 
 /// A page larger than this is not saved.
 const MAX_PAGE_BYTES: u64 = 1024 * 1024;

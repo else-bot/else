@@ -3,13 +3,14 @@ mod switch;
 
 pub(super) use monitor::{Connections, Health};
 
+use else_wire::settings::ServerInfo;
+
 use super::*;
 use crate::controls::{Control as _, Scale, Tier};
 use chrono::{DateTime, Utc};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::h_flex;
 use reqwest::Method;
-use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
@@ -68,7 +69,7 @@ enum NameAction {
 }
 
 impl NameAction {
-    fn of(saved: &crate::config::SavedServer, server: crate::api::ServerInfo) -> Self {
+    fn of(saved: &crate::config::SavedServer, server: ServerInfo) -> Self {
         match server.name {
             Some(name) if name != saved.name => Self::Adopt(name),
             None if !saved.has_default_name() => Self::Carry(saved.name.clone()),
@@ -564,7 +565,7 @@ mod tests {
             name: name.into(),
             profile: Profile::parse(origin, TOKEN).unwrap(),
         };
-        let named = |name: Option<&str>| crate::api::ServerInfo {
+        let named = |name: Option<&str>| ServerInfo {
             name: name.map(Into::into),
             icon: Default::default(),
         };

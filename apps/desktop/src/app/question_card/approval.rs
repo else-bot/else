@@ -7,9 +7,9 @@ use super::*;
 use crate::app::clip;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier};
-use crate::model::QuestionChoice;
-use crate::model::QuestionKind;
-use crate::model::QuestionStatus;
+use else_wire::questions::QuestionKind;
+use else_wire::questions::QuestionStatus;
+use else_wire::questions::{QuestionAction, QuestionChoice};
 use gpui_kit::component::radio::Radio;
 
 /// How long an approval choice lasts, as the scope list shows it.
@@ -20,7 +20,7 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
             "Covers exactly this action.".into(),
         ),
         APPROVE_TASK
-            if question.action.as_ref().and_then(|a| a.tool.as_deref())
+            if question.action.as_ref().and_then(QuestionAction::tool)
                 == Some("computer_resize") =>
         {
             let up_to = question
@@ -45,7 +45,7 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
         ),
         APPROVE_TOOL => (
             question.mcp_tool_scope().map_or_else(
-                || match question.action.as_ref().and_then(|a| a.tool.as_deref()) {
+                || match question.action.as_ref().and_then(QuestionAction::tool) {
                     Some(tool) => format!("Always allow {tool}"),
                     None => "Always allow this tool".to_owned(),
                 },
@@ -194,8 +194,8 @@ impl ElseApp {
             source.extend([scope.task.clone(), scope.target.clone()]);
         } else if let Some((integration, tool)) = question.mcp_tool_scope() {
             source.extend([integration.to_owned(), tool.to_owned()]);
-        } else if let Some(tool) = question.action.as_ref().and_then(|a| a.tool.clone()) {
-            source.push(tool);
+        } else if let Some(tool) = question.action.as_ref().and_then(QuestionAction::tool) {
+            source.push(tool.to_owned());
         }
         let mut card =
             super::super::action_card::card(icon, question.title.clone(), source.join(" · "))

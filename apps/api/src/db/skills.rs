@@ -9,6 +9,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use else_wire::skills::{
+    InstalledSkill, SkillFile, SkillInstall, SkillInstallStatus, SkillScope, SkillSource,
+};
 use serde::Serialize;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -18,7 +21,7 @@ use super::events;
 use super::task_secrets::{self, SecretError};
 use crate::credentials::SecretKey;
 use crate::db::in_ids;
-use crate::skills::{FileInfo, Package, Source, secret_name};
+use crate::skills::{Package, secret_name};
 
 /// Install cards per owner request (turn).
 pub const MAX_PER_TURN: i64 = 3;
@@ -55,7 +58,7 @@ pub enum Status {
 }
 
 /// An install card as the conversation shows it, without file contents.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallInfo {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -64,8 +67,8 @@ pub struct InstallInfo {
     pub name: String,
     pub description: String,
     pub reason: String,
-    pub source: Source,
-    pub files: Vec<FileInfo>,
+    pub source: SkillSource,
+    pub files: Vec<SkillFile>,
     pub env: Vec<String>,
     pub secret: String,
     pub status: Status,
@@ -73,6 +76,43 @@ pub struct InstallInfo {
     pub key_stored: bool,
     pub created_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl From<Scope> for SkillScope {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::All => Self::All,
+            Scope::Bot => Self::Bot,
+        }
+    }
+}
+
+impl From<&InstallInfo> for SkillInstall {
+    fn from(install: &InstallInfo) -> Self {
+        Self {
+            id: install.id,
+            bot_id: Some(install.bot_id),
+            turn_id: Some(install.turn_id),
+            skill_id: install.skill_id.clone(),
+            name: install.name.clone(),
+            description: install.description.clone(),
+            reason: install.reason.clone(),
+            source: install.source.clone(),
+            files: install.files.clone(),
+            env: install.env.clone(),
+            secret: install.secret.clone(),
+            status: match install.status {
+                Status::Pending => SkillInstallStatus::Pending,
+                Status::Installed => SkillInstallStatus::Installed,
+                Status::Declined => SkillInstallStatus::Declined,
+                Status::Cancelled => SkillInstallStatus::Cancelled,
+            },
+            scope: install.scope.map(Into::into),
+            key_stored: install.key_stored,
+            created_at: install.created_at,
+            settled_at: install.settled_at,
+        }
+    }
 }
 
 type InstallRow = (
@@ -83,8 +123,8 @@ type InstallRow = (
     String,
     String,
     String,
-    Json<Source>,
-    Json<Vec<FileInfo>>,
+    Json<SkillSource>,
+    Json<Vec<SkillFile>>,
     Json<Vec<String>>,
     Status,
     Option<Scope>,
@@ -483,29 +523,50 @@ pub async fn undelivered(
 }
 
 /// An installed skill as Settings lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfo {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub source: Source,
+    pub source: SkillSource,
     pub scope: Scope,
     pub bot_id: Option<Uuid>,
     pub bot_name: Option<String>,
     pub installed_by: Uuid,
     pub installed_by_name: String,
     pub installed_at: DateTime<Utc>,
-    pub files: Vec<FileInfo>,
+    pub files: Vec<SkillFile>,
     pub env: Vec<String>,
     pub secret: String,
     pub key_stored: bool,
+}
+
+impl From<&SkillInfo> for InstalledSkill {
+    fn from(skill: &SkillInfo) -> Self {
+        Self {
+            id: skill.id.clone(),
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            source: skill.source.clone(),
+            scope: skill.scope.into(),
+            bot_id: skill.bot_id,
+            bot_name: skill.bot_name.clone(),
+            installed_by: skill.installed_by,
+            installed_by_name: skill.installed_by_name.clone(),
+            installed_at: skill.installed_at,
+            files: skill.files.clone(),
+            env: skill.env.clone(),
+            secret: skill.secret.clone(),
+            key_stored: skill.key_stored,
+        }
+    }
 }
 
 type SkillRow = (
     String,
     String,
     String,
-    Json<Source>,
+    Json<SkillSource>,
     Scope,
     Option<Uuid>,
     Option<String>,
@@ -536,7 +597,7 @@ async fn files_of(
     Ok(rows.into_iter().collect())
 }
 
-async fn file_infos(conn: &mut SqliteConnection, id: &str) -> Result<Vec<FileInfo>, sqlx::Error> {
+async fn file_infos(conn: &mut SqliteConnection, id: &str) -> Result<Vec<SkillFile>, sqlx::Error> {
     let rows: Vec<(String, i64, bool)> = sqlx::query_as(
         "SELECT path, length(CAST(content AS BLOB)), substr(content, 1, 2) = '#!'
          FROM skill_files WHERE skill_id = ?1 ORDER BY path",
@@ -546,15 +607,15 @@ async fn file_infos(conn: &mut SqliteConnection, id: &str) -> Result<Vec<FileInf
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(path, size, shebang)| FileInfo {
+        .map(|(path, size, shebang)| SkillFile {
             script: crate::skills::is_script(&path, if shebang { "#!" } else { "" }),
-            size: usize::try_from(size).unwrap_or_default(),
+            size: u64::try_from(size).unwrap_or_default(),
             path,
         })
         .collect())
 }
 
-fn skill(row: SkillRow, files: Vec<FileInfo>) -> SkillInfo {
+fn skill(row: SkillRow, files: Vec<SkillFile>) -> SkillInfo {
     let (id, name, description, source, scope, bot_id, bot_name, by, by_name, at, env, key) = row;
     SkillInfo {
         secret: secret_name(&id),

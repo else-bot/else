@@ -148,9 +148,9 @@ pub struct TurnRecord {
     /// The bot's questions and approval requests to the owner during this turn.
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
-    pub routine: Option<Json<crate::app::providers::RoutineRun>>,
+    pub routine: Option<Json<else_wire::routines::RoutineRun>>,
     /// The emails whose arrival started this turn, oldest first.
-    pub mail: Json<Vec<TurnMail>>,
+    pub mail: Json<Vec<else_wire::email::TurnMail>>,
     /// The outgoing draft revisions shown under this turn.
     #[sqlx(skip)]
     pub outgoing_drafts: Vec<crate::db::outgoing_drafts::OutgoingDraft>,
@@ -200,99 +200,6 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
            FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
            WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
 
-/// An email that started a turn, which the owner can open in the reader.
-/// `message` is where it arrived, which the reader follows to where it is.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnMail {
-    pub account_id: Uuid,
-    pub message: crate::connectors::types::MessageRef,
-    pub subject: Option<String>,
-    pub sender: Option<String>,
-    pub location: MailLocation,
-}
-
-/// Where a turn's email is now ([`crate::connectors::types::Place`]), and
-/// which bot's turn put it there when one did.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum MailLocation {
-    Arrived,
-    Archived(MailMove),
-    Trashed(MailMove),
-    Moved(MailMove),
-    Deleted(MailDeletion),
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MailMove {
-    pub folder: String,
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MailDeletion {
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotTask {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    /// The delegating bot's short name for the task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// What the task declared it needs from the owner; absent until it does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_need: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_line: Option<String>,
-}
-
-/// A delegated bot's settled reply, shown in the delegating bot's
-/// conversation. The item's ID is the delegation's.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotReply {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    pub status: String,
-    /// Why a failed task failed, apart from the progress it wrote.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_need: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_line: Option<String>,
-    /// The owner notices of the task and of the tasks it delegated, oldest
-    /// first, read live so settling one shows in every chat.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<ExchangeAsk>,
-}
-
-/// An owner notice shown on an exchange, with the name of the bot asking.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExchangeAsk {
-    pub id: Uuid,
-    pub bot_id: Uuid,
-    pub bot_name: String,
-    pub turn_id: Uuid,
-    pub kind: String,
-    pub summary: String,
-    #[serde(default)]
-    pub tried: Option<String>,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
-}
-
 /// Whose conversation it is, as stored in `conversations.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -301,6 +208,35 @@ pub enum ConversationKind {
     Owner,
     /// A delegated task's conversation.
     Task,
+}
+
+impl From<TurnStatus> for else_wire::turns::TurnStatus {
+    fn from(status: TurnStatus) -> Self {
+        match status {
+            TurnStatus::Queued => Self::Queued,
+            TurnStatus::Preparing => Self::Preparing,
+            TurnStatus::Sending => Self::Sending,
+            TurnStatus::Running => Self::Running,
+            TurnStatus::Cancelling => Self::Cancelling,
+            TurnStatus::Waiting => Self::Waiting,
+            TurnStatus::Completed => Self::Completed,
+            TurnStatus::Interrupted => Self::Interrupted,
+            TurnStatus::Failed => Self::Failed,
+            TurnStatus::Uncertain => Self::Uncertain,
+        }
+    }
+}
+
+impl From<ItemKind> for else_wire::items::ItemKind {
+    fn from(kind: ItemKind) -> Self {
+        match kind {
+            ItemKind::User => Self::User,
+            ItemKind::Assistant => Self::Assistant,
+            ItemKind::Status => Self::Status,
+            ItemKind::Routine => Self::Routine,
+            ItemKind::Connector => Self::Connector,
+        }
+    }
 }
 
 /// What a conversation item is, as stored in `items.kind`.
@@ -333,31 +269,15 @@ pub struct ItemRecord {
     pub request_id: Option<Uuid>,
     /// Set for an owner's message sent as a reaction to an assistant message.
     pub reaction: Option<Json<Reaction>>,
-    pub bot_task: Option<Json<BotTask>>,
-    pub bot_reply: Option<Json<BotReply>>,
-    pub routine_update: Option<Json<RoutineUpdate>>,
-    pub bot_created: Option<Json<BotCreated>>,
-    pub rules_update: Option<Json<crate::app::rules::RulesUpdate>>,
+    pub bot_task: Option<Json<else_wire::items::BotTask>>,
+    pub bot_reply: Option<Json<else_wire::items::BotReply>>,
+    pub routine_update: Option<Json<else_wire::items::RoutineUpdate>>,
+    pub bot_created: Option<Json<else_wire::items::BotCreated>>,
+    pub rules_update: Option<Json<else_wire::rules::RulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
     /// The provider attempt that wrote an assistant item.
     pub attempt: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RoutineUpdate {
-    pub routine_id: Uuid,
-    pub name: String,
-}
-
-/// The main bot's notice that `creator_bot_id` created `bot_id`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotCreated {
-    pub bot_id: Uuid,
-    pub name: String,
-    pub creator_bot_id: Uuid,
-    pub creator_name: String,
-    pub purpose: String,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,

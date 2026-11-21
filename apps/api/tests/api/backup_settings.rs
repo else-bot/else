@@ -371,6 +371,10 @@ async fn connection_probe_checks_permissions_and_removes_only_its_own_object() {
         .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert_eq!(
+        response.body,
+        json!({"message": "Connection verified. Bucket list, read, write, and delete permissions are available."})
+    );
+    assert_eq!(
         h.snapshot().await["revision"],
         0,
         "testing does not save configuration"
@@ -424,6 +428,7 @@ async fn manual_backup_is_nonblocking_verified_destination_scoped_and_retained()
         store.hold();
         let start = h.app.owner("POST", "/v1/settings/backups/run", None).await;
         assert_eq!(start.status, StatusCode::ACCEPTED, "{}", start.body);
+        assert_eq!(start.body, json!({"accepted": true}));
         // The capture holds the maintenance gate; the upload after it does
         // not, and the store keeps the upload open.
         store.upload_arrived(seen).await;

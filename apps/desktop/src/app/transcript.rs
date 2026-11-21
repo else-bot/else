@@ -3,13 +3,20 @@ use super::pending_send::PendingSend;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource};
 use super::task_reply::state::{TaskReply, place_cards, task_replies};
-use crate::api::ReplyPosition;
-use crate::api::socials::SetupStatus;
-use crate::model::{
-    Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, ItemKind, OwnerNotice,
-    QuestionStatus, SecretRequestStatus, SkillInstallStatus, TurnStatus,
-};
+use crate::model::{Conversation, GapSize};
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use else_wire::bots::ReplyPosition;
+use else_wire::computers::HandoffStatus;
+use else_wire::delegations::DelegationStatus;
+use else_wire::items::ItemKind;
+use else_wire::notices::OwnerNotice;
+use else_wire::notices::OwnerNoticeStatus;
+use else_wire::outgoing::DraftStatus;
+use else_wire::questions::QuestionStatus;
+use else_wire::secrets::SecretRequestStatus;
+use else_wire::skills::SkillInstallStatus;
+use else_wire::socials::SetupStatus;
+use else_wire::turns::TurnStatus;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -81,14 +88,14 @@ impl CardKey {
     }
 
     /// The turn that raised it.
-    pub(super) fn turn(self, c: &Conversation) -> Option<&crate::model::Turn> {
+    pub(super) fn turn(self, c: &Conversation) -> Option<&else_wire::turns::Turn> {
         c.turns_in_order()
             .into_iter()
             .find(|turn| Self::raised_by(turn).any(|card| card == self))
     }
 
     /// Every card `turn` raised.
-    fn raised_by(turn: &crate::model::Turn) -> impl Iterator<Item = Self> + '_ {
+    fn raised_by(turn: &else_wire::turns::Turn) -> impl Iterator<Item = Self> + '_ {
         (turn
             .secret_requests
             .iter()
@@ -128,7 +135,7 @@ pub(super) struct TranscriptRow {
     /// The runs a [`RowKey::QuietRuns`] row stands for, oldest first.
     pub(super) quiet_runs: Vec<Uuid>,
     routine_status: Option<(String, bool)>,
-    reaction: Option<crate::model::ReactionKind>,
+    reaction: Option<else_wire::items::ReactionKind>,
     state: Option<RowState>,
 }
 
@@ -409,7 +416,10 @@ pub(super) fn opens_turns(c: Option<&Conversation>, rows: &[RowKey]) -> Vec<Opti
 }
 
 /// The mail-triggered turn a row opens, whose emails it offers to view.
-pub(super) fn opened_mail(c: &Conversation, opens: Option<Uuid>) -> Option<&crate::model::Turn> {
+pub(super) fn opened_mail(
+    c: &Conversation,
+    opens: Option<Uuid>,
+) -> Option<&else_wire::turns::Turn> {
     c.turn(opens?).filter(|turn| !turn.mail.is_empty())
 }
 
@@ -479,16 +489,13 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
                 .chain(
                     turn.owner_notices
                         .iter()
-                        .filter(|notice| {
-                            notice.status != crate::model::OwnerNoticeStatus::Superseded
-                        })
+                        .filter(|notice| notice.status != OwnerNoticeStatus::Superseded)
                         // A settled notice of a turn outside the loaded page
                         // would otherwise land below newer messages.
                         .filter_map(move |notice| {
                             let anchor = c.question_anchor(turn.id, None);
-                            (notice.status == crate::model::OwnerNoticeStatus::Pending
-                                || anchor.is_some())
-                            .then_some((CardKey::OwnerNotice(notice.id), anchor))
+                            (notice.status == OwnerNoticeStatus::Pending || anchor.is_some())
+                                .then_some((CardKey::OwnerNotice(notice.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
@@ -500,7 +507,7 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
                 .chain(
                     turn.outgoing_drafts
                         .iter()
-                        .filter(|d| d.status != crate::model::DraftStatus::Superseded)
+                        .filter(|d| d.status != DraftStatus::Superseded)
                         .filter_map(move |draft| {
                             let anchor = c.question_anchor(turn.id, draft.settled_at);
                             (draft.settled_at.is_none() || anchor.is_some())
@@ -870,12 +877,14 @@ pub(super) fn build<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ReplyPosition;
     use crate::app::conversation::ConversationView;
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
+    use else_wire::bots::ReplyPosition;
 
-    use crate::model::{Conversation, Snapshot};
+    use crate::model::Conversation;
+
+    use else_wire::conversation::Snapshot;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

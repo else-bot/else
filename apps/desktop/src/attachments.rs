@@ -1,5 +1,5 @@
+use else_wire::items::{Attachment, MessagePart};
 use gpui_kit::component::input::{InlineToken, InputContent};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -8,22 +8,8 @@ pub mod clipboard;
 pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FILES: usize = 8;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Attachment {
-    pub id: Uuid,
-    pub name: String,
-    pub media_type: String,
-    pub size: u64,
-}
-
-impl Attachment {
-    pub fn fallback(&self) -> String {
-        format!("[File: {}]", self.name)
-    }
-
-    pub fn token(&self) -> InlineToken {
-        InlineToken::new(format!("file:{}", self.id), self.fallback()).with_label(self.name.clone())
-    }
+pub fn token(file: &Attachment) -> InlineToken {
+    InlineToken::new(format!("file:{}", file.id), file.fallback()).with_label(file.name.clone())
 }
 
 /// The name a pasted or dropped file arrives with.
@@ -65,13 +51,6 @@ pub fn file_id(token_id: &str) -> Option<Uuid> {
         .and_then(|id| Uuid::parse_str(id).ok())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MessagePart {
-    Text { text: String },
-    File { file: Attachment },
-}
-
 pub fn input_content(text: &str, parts: &[MessagePart]) -> InputContent {
     let mut content = InputContent::new(text.to_owned());
     let mut offset = 0;
@@ -80,7 +59,7 @@ pub fn input_content(text: &str, parts: &[MessagePart]) -> InputContent {
             MessagePart::Text { text } => offset += text.len(),
             MessagePart::File { file } => {
                 let end = offset + file.fallback().len();
-                let Ok(next) = content.with_token(offset..end, file.token()) else {
+                let Ok(next) = content.with_token(offset..end, token(file)) else {
                     return InputContent::new(text.to_owned());
                 };
                 content = next;

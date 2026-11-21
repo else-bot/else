@@ -1,5 +1,6 @@
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
+use else_wire::outgoing::{DraftFile, DraftStatus, OutgoingDraft};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -13,8 +14,10 @@ use super::message_row::{CardPlacement, short_stamp};
 use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::attachments::{MessagePart, byte_size};
-use crate::model::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
+use crate::attachments::byte_size;
+use crate::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
+use else_wire::items::Attachment;
+use else_wire::items::MessagePart;
 
 #[derive(Clone, Copy)]
 enum Choice {
@@ -37,7 +40,12 @@ pub(super) struct DraftImages {
 fn image_parts(files: &[DraftFile]) -> Vec<MessagePart> {
     files
         .iter()
-        .map(DraftFile::attachment)
+        .map(|file| Attachment {
+            id: file.id,
+            name: file.name.clone(),
+            media_type: file.media_type.clone(),
+            size: file.size,
+        })
         .filter(is_image)
         .map(|file| MessagePart::File { file })
         .collect()

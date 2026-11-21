@@ -7,8 +7,8 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::ElseApp;
-use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use else_wire::bots::Bot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MentionQuery {

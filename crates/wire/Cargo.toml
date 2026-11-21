@@ -1,0 +1,14 @@
+[package]
+name = "else-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { workspace = true, features = ["alloc", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+
+[lints]
+workspace = true

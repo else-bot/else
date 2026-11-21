@@ -11,6 +11,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use else_wire::secrets::{Answer, List, RevealedSecret, SavedSecret, VaultEntry};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -108,7 +109,9 @@ pub(super) fn error(err: SecretError) -> ApiError {
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let secrets = task_secrets::list(&state.db).await?;
-    Ok(Json(json!({ "secrets": secrets })))
+    Ok(Json(json!(List {
+        secrets: secrets.iter().map(Into::into).collect()
+    })))
 }
 
 /// Create or replace an entry.
@@ -140,11 +143,11 @@ async fn store(
     let created = task_secrets::put(&state.db, key, name, &body.env, &meta, mode)
         .await
         .map_err(error)?;
-    let short: Vec<&String> = body
+    let short: Vec<String> = body
         .env
         .iter()
         .filter(|(_, v)| v.len() < task_secrets::MIN_REDACTED)
-        .map(|(k, _)| k)
+        .map(|(k, _)| k.clone())
         .collect();
     Ok((
         if created {
@@ -152,10 +155,10 @@ async fn store(
         } else {
             StatusCode::OK
         },
-        Json(json!({
-            "name": name,
-            "env": body.env.keys().collect::<Vec<_>>(),
-            "not_redacted": short,
+        Json(json!(SavedSecret {
+            name: name.to_owned(),
+            env: body.env.keys().cloned().collect(),
+            not_redacted: short
         })),
     ))
 }
@@ -175,7 +178,7 @@ async fn edit(
     let entry = task_secrets::update(&state.db, Some(&*state.secret_key), &name, &patch)
         .await
         .map_err(error)?;
-    Ok(Json(json!(entry)))
+    Ok(Json(json!(VaultEntry::from(&entry))))
 }
 
 /// Show an entry's values to the owner, who confirmed it in the desktop.
@@ -187,8 +190,8 @@ async fn reveal(
         .await
         .map_err(error)?;
     tracing::info!(secret = %name, "the owner revealed a vault entry");
-    let env: BTreeMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    Ok(Json(json!({ "env": env })))
+    let env = env.iter().map(|(k, v)| (k.clone(), v.as_str())).collect();
+    Ok(Json(json!(RevealedSecret { env })))
 }
 
 async fn remove(
@@ -227,7 +230,10 @@ fn settled(state: &AppState, settled: Settled) -> Json<Value> {
     if settled.requeued {
         state.scheduler.wake();
     }
-    Json(json!({ "request": settled.request, "requeued": settled.requeued }))
+    Json(json!(Answer {
+        request: (&settled.request).into(),
+        requeued: settled.requeued
+    }))
 }
 
 /// Answer a bot's secret request: store the requested variables, and any the

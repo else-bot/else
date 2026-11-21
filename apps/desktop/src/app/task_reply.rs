@@ -8,6 +8,7 @@ use super::{ElseApp, RowKey};
 use crate::ambient::looping;
 use crate::avatar::bot_avatar;
 use chrono::{DateTime, Utc};
+use else_wire::notices::OwnerNoticeStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
@@ -445,7 +446,7 @@ impl ElseApp {
     fn task_message(
         &self,
         id: Uuid,
-        reaction: Option<crate::model::ReactionKind>,
+        reaction: Option<else_wire::items::ReactionKind>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -474,7 +475,7 @@ impl ElseApp {
             .is_some_and(|reply| reply.id == id)
         {
             let owner = cx.entity().downgrade();
-            let position = crate::api::ReplyPosition {
+            let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
             };
@@ -503,18 +504,18 @@ impl ElseApp {
     }
 }
 
-fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+fn waits_on_owner(task: &TaskReply, turn: &else_wire::turns::Turn) -> bool {
     task.state == ReplyState::Waiting
         && (turn.waits_on_owner()
             || turn
                 .owner_notices
                 .iter()
-                .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending))
+                .any(|notice| notice.status == OwnerNoticeStatus::Pending))
 }
 
 /// Whether a task row shows only its bot's name: the turn waits on the
 /// owner and has said nothing yet, so the card under it speaks for it.
-pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+pub(super) fn shows_only_name(task: &TaskReply, turn: &else_wire::turns::Turn) -> bool {
     waits_on_owner(task, turn)
         && task.latest.is_none()
         && task.history.is_empty()

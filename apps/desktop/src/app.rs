@@ -45,8 +45,6 @@ mod view;
 mod visuals;
 mod waiting_tray;
 mod warm;
-
-use crate::model::Phase;
 use categories::CategoryFormHolder;
 use conversation::ConversationView;
 use create_bot::CreateFormHolder;
@@ -58,6 +56,9 @@ use settings::BotSettings;
 use settings::model::ModelDialog;
 use transcript::RowKey;
 
+use else_wire::bots::Phase;
+use else_wire::settings::Capabilities;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,10 +67,13 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{
-    Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
-};
-use crate::model::Reaction;
+use crate::api::{Client, ClientError, Live, LiveCommand, LiveEvent};
+
+use else_wire::bots::Bot;
+use else_wire::bots::BotList;
+use else_wire::bots::Category;
+use else_wire::conversation::Sent;
+use else_wire::items::Reaction;
 
 actions!(
     else_desktop,
@@ -885,7 +889,7 @@ impl ElseApp {
             if prefix > 0 {
                 parts.insert(
                     0,
-                    crate::attachments::MessagePart::Text {
+                    else_wire::items::MessagePart::Text {
                         text: message[..prefix].to_owned(),
                     },
                 );
@@ -911,7 +915,7 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         text: String,
-        parts: Vec<crate::attachments::MessagePart>,
+        parts: Vec<else_wire::items::MessagePart>,
         kind: SendKind,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1100,7 +1104,7 @@ impl ElseApp {
             };
             let restored = crate::attachments::input_content(&text, &parts);
             for part in &pending.parts {
-                if let crate::attachments::MessagePart::File { file } = part {
+                if let else_wire::items::MessagePart::File { file } = part {
                     self.drafts
                         .entry(bot)
                         .or_default()
@@ -1169,10 +1173,10 @@ fn next_selection(active: &[Uuid], preferred: [Option<Uuid>; 3]) -> Option<Uuid>
 /// `parts` without the quoted prefix `send` laid before the owner's own
 /// text, as its first text part.
 fn without_prefix(
-    parts: &[crate::attachments::MessagePart],
+    parts: &[else_wire::items::MessagePart],
     prefix: usize,
-) -> Vec<crate::attachments::MessagePart> {
-    use crate::attachments::MessagePart;
+) -> Vec<else_wire::items::MessagePart> {
+    use else_wire::items::MessagePart;
     match parts.split_first() {
         Some((MessagePart::Text { text }, rest)) if text.len() <= prefix => rest.to_vec(),
         Some((MessagePart::Text { text }, rest)) => {
@@ -1189,7 +1193,7 @@ fn without_prefix(
 #[cfg(test)]
 mod prefix_tests {
     use super::without_prefix;
-    use crate::attachments::MessagePart;
+    use else_wire::items::MessagePart;
 
     #[test]
     fn a_restored_reply_drops_only_its_quoted_prefix() {
@@ -1201,7 +1205,7 @@ mod prefix_tests {
         );
         assert_eq!(without_prefix(&[text("> quoted\n\nhi")], 10), [text("hi")]);
         let file = MessagePart::File {
-            file: crate::attachments::Attachment {
+            file: else_wire::items::Attachment {
                 id: uuid::Uuid::nil(),
                 name: "plan.md".into(),
                 media_type: "text/markdown".into(),

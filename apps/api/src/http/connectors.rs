@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     routing::{delete, get, patch, post, put},
 };
+use else_wire::email;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -109,20 +110,48 @@ impl From<MailError> for ApiError {
 }
 
 async fn definitions() -> Json<Value> {
-    let providers = [Provider::Gmail, Provider::Microsoft, Provider::Yahoo, Provider::Icloud, Provider::Imap].into_iter().map(|provider| json!({
-        "provider": provider, "preset": provider.config("you@example.com".into()).ok(),
-        "authentication": match provider { Provider::Gmail | Provider::Microsoft => vec!["oauth2"], Provider::Yahoo => vec!["app_password","oauth2"], _ => vec!["app_password"] },
-        "oauth_wizard": matches!(provider, Provider::Gmail | Provider::Microsoft),
-    })).collect::<Vec<_>>();
-    Json(
-        json!({"connectors":[{"id":"email","version":1,"providers":providers,"credentials":"owner_only_write_only","notifications":"imap_idle","permissions":["read","write","send","wake"]}]}),
-    )
+    use email::Authentication::{AppPassword, OAuth2};
+
+    let providers = [
+        Provider::Gmail,
+        Provider::Microsoft,
+        Provider::Yahoo,
+        Provider::Icloud,
+        Provider::Imap,
+    ]
+    .into_iter()
+    .map(|provider| email::EmailPreset {
+        provider: provider.into(),
+        preset: provider
+            .config("you@example.com".into())
+            .ok()
+            .as_ref()
+            .map(Into::into),
+        authentication: match provider {
+            Provider::Gmail | Provider::Microsoft => vec![OAuth2],
+            Provider::Yahoo => vec![AppPassword, OAuth2],
+            Provider::Icloud | Provider::Imap => vec![AppPassword],
+        },
+        oauth_wizard: matches!(provider, Provider::Gmail | Provider::Microsoft),
+    })
+    .collect();
+    Json(json!(email::Definitions {
+        connectors: vec![email::Definition {
+            id: "email".into(),
+            version: 1,
+            providers,
+            credentials: "owner_only_write_only".into(),
+            notifications: "imap_idle".into(),
+            permissions: ["read", "write", "send", "wake"].map(String::from).into(),
+        }],
+    }))
 }
 
 async fn accounts(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
-        json!({"accounts":store::accounts(&state.db).await.map_err(unavailable)?}),
-    ))
+    let accounts = store::accounts(&state.db).await.map_err(unavailable)?;
+    Ok(Json(json!(email::Accounts {
+        accounts: accounts.iter().map(Into::into).collect(),
+    })))
 }
 /// One message for the owner's reader. It goes to the mail server with the
 /// saved credential, never through a bot, and leaves the message unread.
@@ -142,7 +171,7 @@ async fn view_message(
                 Some((status, message)) => ApiError::new(status, error.code.as_str(), message),
                 None => ApiError::from(error),
             })?;
-    Ok(Json(view))
+    Ok(Json(json!(view)))
 }
 async fn account(
     State(state): State<Arc<AppState>>,
@@ -156,9 +185,15 @@ async fn account(
         .await
         .map_err(unavailable)?
         .into_iter()
-        .map(|(bot_id, permissions)| json!({"bot_id":bot_id,"permissions":permissions}))
+        .map(|(bot_id, permissions)| email::Grant {
+            bot_id,
+            permissions: (&permissions).into(),
+        })
         .collect::<Vec<_>>();
-    Ok(Json(json!({"account":account,"grants":grants})))
+    Ok(Json(json!(email::AccountDetail {
+        account: (&account).into(),
+        grants,
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,7 +218,9 @@ async fn connect(
     .await
     .map_err(unavailable)?;
     manager.changed(account.id).await;
-    Ok(Json(json!({"account":account})))
+    Ok(Json(json!(email::Connected {
+        account: (&account).into(),
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,7 +274,9 @@ async fn activate(
         .map_err(unavailable)?
         .ok_or_else(ApiError::not_found)?;
     manager.changed(id).await;
-    Ok(Json(json!({"account":account})))
+    Ok(Json(json!(email::Connected {
+        account: (&account).into(),
+    })))
 }
 async fn disconnect(
     State(state): State<Arc<AppState>>,
@@ -275,7 +314,9 @@ async fn configure_folders(
         .await
         .map_err(unavailable)?;
     manager.changed(id).await;
-    Ok(Json(json!({"account":account})))
+    Ok(Json(json!(email::Connected {
+        account: (&account).into(),
+    })))
 }
 
 async fn credentials(
@@ -310,7 +351,9 @@ async fn permissions(
     store::set_permissions(&state.db, id, bot, &request)
         .await
         .map_err(unavailable)?;
-    Ok(Json(json!({"permissions":request})))
+    Ok(Json(
+        json!({"permissions":email::Permissions::from(&request)}),
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -348,7 +391,7 @@ async fn revoke(
 async fn oauth_start(
     State(state): State<Arc<AppState>>,
     ApiJson(request): ApiJson<oauth::Start>,
-) -> Result<Json<oauth::Started>, ApiError> {
+) -> Result<Json<email::EmailAuthorization>, ApiError> {
     let accounts = store::accounts(&state.db).await.map_err(unavailable)?;
     if accounts.iter().any(|a| {
         a.config.address.eq_ignore_ascii_case(&request.address) && !a.health.needs_new_credential()
@@ -409,7 +452,9 @@ async fn oauth_complete(
         .await
         .map_err(unavailable)?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({"account":account})))
+    Ok(Json(json!(email::Connected {
+        account: (&account).into(),
+    })))
 }
 
 async fn oauth_cancel(
@@ -705,7 +750,7 @@ async fn trigger_call(
             )
             .await
             .map(|trigger| {
-                json!({"trigger":trigger,
+                json!({"trigger":email::MailTrigger::from(&trigger),
                     "next":"Tell the owner which inbox wakes you and what you will do. They can \
                         pause or delete it in your sidebar."})
             }),

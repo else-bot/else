@@ -1,13 +1,18 @@
 use super::conversation::Spot;
 use super::pending_send::Delivery;
 use super::reply::Author;
+use super::reply::Feedback as _;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::app::transcript::CardKey;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{ItemKind, ReactionKind, TurnStatus};
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
+use else_wire::items::ItemKind;
+use else_wire::items::ReactionKind;
+use else_wire::outgoing::DraftStatus;
+use else_wire::routines::RoutineRun;
+use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::Button;
@@ -64,7 +69,7 @@ impl ElseApp {
             && conversation.is_feedback_acknowledgement(item)
         {
             let bot = view.bot_id;
-            let position = crate::api::ReplyPosition {
+            let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: item.text.len() as i64,
             };
@@ -224,7 +229,7 @@ impl ElseApp {
 
     pub(super) fn render_turn_status(
         &self,
-        turn: &crate::model::Turn,
+        turn: &else_wire::turns::Turn,
         bot: uuid::Uuid,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
@@ -265,7 +270,7 @@ impl ElseApp {
     /// details, which it opens to show how the retry goes.
     pub(super) fn routine_retry(
         &self,
-        turn: &crate::model::Turn,
+        turn: &else_wire::turns::Turn,
         bot: uuid::Uuid,
         cx: &Context<Self>,
     ) -> Option<Button> {
@@ -421,7 +426,7 @@ impl ElseApp {
                 {
                     let owner = cx.entity().downgrade();
                     let bot = view.bot_id;
-                    let position = crate::api::ReplyPosition {
+                    let position = else_wire::bots::ReplyPosition {
                         item_seq: item.seq,
                         text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
                     };
@@ -690,7 +695,7 @@ pub(super) fn with_reaction(
 /// `shown` says whether a no-news run's replies show below it.
 fn routine_run(
     turn: uuid::Uuid,
-    run: &crate::model::RoutineRun,
+    run: &RoutineRun,
     shown: bool,
     cx: &mut Context<ElseApp>,
 ) -> Button {
@@ -905,7 +910,7 @@ const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 /// A Switch model action for a turn that failed because its provider
 /// cannot run now.
 pub(super) fn model_remedy(
-    turn: &crate::model::Turn,
+    turn: &else_wire::turns::Turn,
     bot: uuid::Uuid,
     cx: &Context<ElseApp>,
 ) -> Option<Button> {
@@ -924,8 +929,8 @@ fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
         .on_click(cx.listener(move |app, _, window, cx| app.switch_model(bot, window, cx)))
 }
 
-pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
-    use crate::model::QuestionUse;
+pub(super) fn turn_label(turn: &else_wire::turns::Turn) -> (String, bool) {
+    use else_wire::questions::QuestionUse;
     let (label, error) = status_label(turn);
     if !turn.status.is_unsuccessful() {
         return (label, error);
@@ -946,7 +951,7 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     (format!("{label}. {note}"), error)
 }
 
-fn waiting_label(turn: &crate::model::Turn) -> String {
+fn waiting_label(turn: &else_wire::turns::Turn) -> String {
     let open = turn.open_delegations();
     let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
     for task in &open {
@@ -959,7 +964,7 @@ fn waiting_label(turn: &crate::model::Turn) -> String {
     crate::sidebar::status::waiting_for(&names, open.len(), jobs)
 }
 
-fn status_label(turn: &crate::model::Turn) -> (String, bool) {
+fn status_label(turn: &else_wire::turns::Turn) -> (String, bool) {
     let detail = turn
         .error
         .as_ref()
@@ -988,7 +993,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             if turn
                 .skill_installs
                 .iter()
-                .any(|r| r.status == crate::model::SkillInstallStatus::Pending) =>
+                .any(|r| r.status == else_wire::skills::SkillInstallStatus::Pending) =>
         {
             ("Waiting for your skill approval…".into(), false)
         }
@@ -1000,7 +1005,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             if turn
                 .outgoing_drafts
                 .iter()
-                .any(|d| d.status == crate::model::DraftStatus::Pending) =>
+                .any(|d| d.status == DraftStatus::Pending) =>
         {
             ("Waiting for your approval…".into(), false)
         }

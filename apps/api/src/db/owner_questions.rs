@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use else_wire::questions as wire;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -56,7 +56,7 @@ use crate::db::in_ids;
 use crate::grants::policy::GrantReach;
 
 /// A question as shown to the owner and recorded in events.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuestionInfo {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -73,6 +73,27 @@ pub struct QuestionInfo {
     pub settled_at: Option<DateTime<Utc>>,
     /// What became of the approved tool call once the gate let it run.
     pub used: Option<Use>,
+}
+
+impl From<&QuestionInfo> for wire::Question {
+    fn from(question: &QuestionInfo) -> Self {
+        Self {
+            id: question.id,
+            bot_id: Some(question.bot_id),
+            turn_id: Some(question.turn_id),
+            kind: question.kind.into(),
+            title: question.title.clone(),
+            context: question.context.clone(),
+            choices: question.choices.clone(),
+            multiple: question.multiple,
+            action: question.action.as_ref().map(Into::into),
+            status: question.status.into(),
+            answer: question.answer.clone(),
+            created_at: Some(question.created_at),
+            settled_at: question.settled_at,
+            used: question.used.map(Into::into),
+        }
+    }
 }
 
 impl QuestionInfo {
@@ -987,7 +1008,7 @@ pub async fn mark_delivered(
 }
 
 /// A standing grant the owner gave a bot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permission {
     pub scope: String,
     pub granted_at: DateTime<Utc>,
@@ -1027,6 +1048,17 @@ pub async fn permissions(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<Permissi
         .collect())
 }
 
+impl From<&Permission> for wire::Permission {
+    fn from(grant: &Permission) -> Self {
+        Self {
+            scope: grant.scope.clone(),
+            granted_at: grant.granted_at,
+            question_id: grant.question_id,
+            target: grant.target.as_ref().map(Into::into),
+        }
+    }
+}
+
 /// Withdraw a standing grant. False when the bot did not hold it.
 pub async fn revoke_permission(
     pool: &SqlitePool,
@@ -1043,12 +1075,23 @@ pub async fn revoke_permission(
 }
 
 /// The owner's standing approval of one effect for one routine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineGrant {
     pub routine_id: Uuid,
     pub kind: Kind,
     pub granted_at: DateTime<Utc>,
     pub question_id: Uuid,
+}
+
+impl From<&RoutineGrant> for wire::RoutineGrant {
+    fn from(grant: &RoutineGrant) -> Self {
+        Self {
+            routine_id: grant.routine_id,
+            kind: grant.kind.into(),
+            granted_at: grant.granted_at,
+            question_id: grant.question_id,
+        }
+    }
 }
 
 /// The routine grants of a bot that still apply: to an existing routine,

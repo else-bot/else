@@ -1,8 +1,9 @@
 use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
-use crate::api::{Bot, Category};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::sidebar::known_category;
+use else_wire::bots::Bot;
+use else_wire::bots::Category;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};

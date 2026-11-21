@@ -7,9 +7,8 @@
 //! style and sizes switches at 28×16 or 36×20, so the kit overrides all
 //! three here, once.
 
-use std::rc::Rc;
+use else_wire::bots::Phase;
 
-use crate::model::Phase;
 use gpui_kit::base::{Switch as BaseSwitch, SwitchThumb, spring};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -22,6 +21,7 @@ use gpui_kit::{
     App, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce,
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
+use std::rc::Rc;
 
 /// What a button does in its context: the one main action, a quieter
 /// alternative, a text-like action, or a destructive confirmation.

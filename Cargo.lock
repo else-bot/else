@@ -2469,6 +2469,7 @@ dependencies = [
  "else-plain-text",
  "else-tailnet",
  "else-visual",
+ "else-wire",
  "fastcdc",
  "flate2",
  "futures-util",
@@ -2545,6 +2546,7 @@ dependencies = [
  "else-plain-text",
  "else-tailnet",
  "else-visual",
+ "else-wire",
  "futures-util",
  "gpui-kit",
  "iana-time-zone",
@@ -2598,6 +2600,7 @@ dependencies = [
 name = "else-visual"
 version = "0.0.30"
 dependencies = [
+ "else-wire",
  "futures-channel",
  "futures-executor",
  "html5ever",
@@ -2609,6 +2612,16 @@ dependencies = [
  "takumi",
  "takumi-core",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "else-wire"
+version = "0.0.30"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

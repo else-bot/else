@@ -329,7 +329,7 @@ impl ConnectorManager {
         self: &Arc<Self>,
         account_id: Uuid,
         message: MessageRef,
-    ) -> Result<Value, MailError> {
+    ) -> Result<else_wire::email::EmailMessage, MailError> {
         MailCommand::View {
             message: message.clone(),
         }

@@ -7,10 +7,9 @@ use axum::http::StatusCode;
 use chrono::DateTime;
 use common::TestApp;
 use common::recorder::{self, GATE, Harness, tool};
-use else_api::app::providers::{
-    Availability, Catalog, Model, Profile, Provider, TurnInput, TurnOutcome, TurnSink,
-};
+use else_api::app::providers::{Availability, Profile, Provider, TurnInput, TurnOutcome, TurnSink};
 use else_api::providers::synthetic::Synthetic;
+use else_wire::settings::{Catalog, ModelInfo as Model};
 use serde_json::{Value, json};
 use uuid::Uuid;
 

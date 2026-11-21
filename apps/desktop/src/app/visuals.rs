@@ -4,7 +4,8 @@
 
 use super::{ElseApp, RowKey};
 use crate::api::Client;
-use crate::attachments::{Attachment, MessagePart};
+use else_wire::items::Attachment;
+use else_wire::items::MessagePart;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, v_flex};
 use gpui_kit::*;

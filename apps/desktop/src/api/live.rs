@@ -1,5 +1,6 @@
-use super::{BotList, Client, ServerPause};
+use super::{BotList, Client};
 use crate::model::Frame;
+use else_wire::maintenance::ServerPause;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
 use reqwest::header::AUTHORIZATION;
@@ -138,11 +139,7 @@ pub(super) fn route(
     }
     Some(LiveEvent::Bot {
         bot,
-        message: StreamMessage::Frame(Frame {
-            id: Some(id),
-            event: message["event"].as_str().unwrap_or_default().to_owned(),
-            data: message["data"].to_string(),
-        }),
+        message: StreamMessage::Frame(Frame::decode(Some(id), message)),
     })
 }
 
@@ -340,7 +337,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::PauseReason;
+    use else_wire::maintenance::PauseReason;
 
     #[test]
     fn backup_server_pause_routes_start_progress_update_and_end() {

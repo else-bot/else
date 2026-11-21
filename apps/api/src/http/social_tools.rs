@@ -7,6 +7,7 @@ use crate::{
     grants::Grant,
     socials::{store, types::*},
 };
+use else_wire::socials as wire;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -98,7 +99,7 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         s.grants.park(g.turn_id).await;
     }
     Ok(Done::json(json!({
-        "setup": setup,
+        "setup": wire::SocialSetup::from(&setup),
         "parked": pending,
         "next": if pending && input.provider.setup() == SetupKind::Pairing {
             "The owner sees a QR card. Say it links their personal WhatsApp as a device, that everything you send goes out as them after they approve it, that WhatsApp may ban unofficial clients, and what you will do. Then end this attempt."
@@ -148,12 +149,14 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         let no_chats = destinations.is_empty().then_some(
             "No chats seen yet. A chat appears once it sends the bot a message. Use a public Telegram channel or group by its @username or t.me link as the destination; it is then listed with can_send, which is true when the bot may post there.",
         );
-        let own: Vec<&Trigger> = triggers
+        let own: Vec<_> = triggers
             .iter()
             .filter(|t| t.connection_id == c.id)
+            .map(wire::Trigger::from)
             .collect();
         list.push(json!({
-            "connection": c, "account": c.provider.account_note(), "destinations": destinations, "no_destinations": no_chats,
+            "connection": wire::Connection::from(&c),
+            "account": c.provider.account_note(), "destinations": destinations, "no_destinations": no_chats,
             "your_triggers": own, "capabilities": capabilities,
             "limitations": c.provider.limitations(),
             "sending": "draft_message with account_id then exact approved send_draft"
@@ -184,7 +187,7 @@ async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let change = store::set_trigger(&s.db, g.turn_id, &input).await?;
     reconnect(s, &change).await;
     Ok(Done::json(json!({
-        "trigger": change.value,
+        "trigger": wire::Trigger::from(&change.value),
         "next": "Tell the owner what will wake you and what you will do. They can pause or delete it in your sidebar."
     })))
 }
@@ -196,6 +199,7 @@ async fn list_triggers(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let triggers = store::triggers(&mut *s.db.acquire().await.map_err(Error::from)?, g.bot_id)
         .await
         .map_err(Error::from)?;
+    let triggers: Vec<_> = triggers.iter().map(wire::Trigger::from).collect();
     Ok(Done::json(json!({ "triggers": triggers })))
 }
 

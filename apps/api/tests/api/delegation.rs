@@ -1084,7 +1084,7 @@ async fn the_delegating_turn_shows_its_handoff_as_the_child_progresses() {
         .unwrap()
         .unwrap();
     let turn = snapshot.turns.iter().find(|t| t.id == root).unwrap();
-    let shown = else_api::views::turn_json(turn);
+    let shown = serde_json::to_value(else_wire::turns::Turn::from(turn)).unwrap();
     assert_eq!(
         shown["delegations"][0]["id"],
         delegation.to_string().as_str()
@@ -1135,7 +1135,8 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
             .await
             .unwrap()
             .unwrap();
-        else_api::views::bot_json(&bot)["activity"]["waiting_on"].clone()
+        serde_json::to_value(else_wire::bots::Bot::from(&bot)).unwrap()["activity"]["waiting_on"]
+            .clone()
     };
     assert_eq!(waiting_on().await, Value::Null, "a running turn is working");
 
@@ -2512,7 +2513,7 @@ async fn parent_replies(db: &TestDb, main: Uuid) -> (Vec<(String, String, Uuid)>
             let reply = i.bot_reply.as_ref()?;
             assert_eq!(reply.sender_name, "Target");
             assert_eq!(reply.prompt, "seeded task");
-            Some((reply.status.clone(), i.text.clone(), i.turn_id))
+            Some((reply.status.as_str().to_owned(), i.text.clone(), i.turn_id))
         })
         .collect();
     let upserts = bot_events(&db.pool, main)
@@ -2608,7 +2609,7 @@ async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_pro
         .unwrap();
     let shown = snapshot.items.iter().find(|i| i.id == delegation).unwrap();
     let reply = shown.bot_reply.as_ref().unwrap();
-    assert_eq!(reply.status, "failed");
+    assert_eq!(reply.status, else_wire::items::BotReplyStatus::Failed);
     assert_eq!(shown.text, progress, "the progress stays the reply text");
     assert_eq!(reply.reason.as_deref(), Some(message.as_str()));
     assert!(message.contains("30-minute attempt limit"), "{message}");

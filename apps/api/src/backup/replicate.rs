@@ -71,6 +71,16 @@ pub enum RemoteState {
     Retired,
 }
 
+impl From<RemoteState> for else_wire::backups::RemoteBackupStatus {
+    fn from(value: RemoteState) -> Self {
+        match value {
+            RemoteState::Completed => Self::Completed,
+            RemoteState::Failed => Self::Failed,
+            RemoteState::Retired => Self::Retired,
+        }
+    }
+}
+
 /// How replicating one set ended.
 enum Recorded<'a> {
     Completed { whole: bool, uploaded: u64 },

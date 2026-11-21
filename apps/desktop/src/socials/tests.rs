@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 #[test]
 fn a_bot_whose_messages_go_elsewhere_says_so_instead_of_its_raw_health() {
-    let connection = |health: &str| -> crate::api::socials::Connection {
+    let connection = |health: &str| -> else_wire::socials::Connection {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::new_v4(), "provider": "telegram", "remote_id": "1",
             "display_name": "Proliquid", "username": "proliquid_bot", "state": "active",
@@ -19,7 +19,7 @@ fn a_bot_whose_messages_go_elsewhere_says_so_instead_of_its_raw_health() {
 
 #[test]
 fn trigger_card_titles_prefer_the_chat_name_then_id_then_any_chat() {
-    let mut trigger: crate::api::socials::Trigger = serde_json::from_value(serde_json::json!({
+    let mut trigger: else_wire::socials::Trigger = serde_json::from_value(serde_json::json!({
         "id": Uuid::new_v4(), "connection_id": Uuid::new_v4(), "bot_id": Uuid::new_v4(),
         "provider": "telegram", "connection_name": "Team bot", "username": null,
         "destination_name": "Proliquid", "destination": "-100123", "wake": "all",
@@ -37,7 +37,7 @@ fn trigger_card_titles_prefer_the_chat_name_then_id_then_any_chat() {
 
 #[test]
 fn a_pairing_view_from_the_api_shows_its_code_until_linked() {
-    use crate::api::socials::{Pairing, PairingView, Provider};
+    use else_wire::socials::{Pairing, PairingView, Provider};
     let code: PairingView = serde_json::from_value(serde_json::json!({
         "revision": 3, "state": "code", "code": "2@AbC,xyz==,def", "expires_in": 20
     }))

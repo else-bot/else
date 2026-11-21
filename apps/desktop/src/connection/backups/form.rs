@@ -1,6 +1,7 @@
 use super::*;
-use crate::api::{BackupDestinationInput, BackupService, LocalBackupSettings};
+use crate::api::BackupDestinationInput;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field, toggle};
+use else_wire::backups::{BackupService, LocalBackupSettings};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
@@ -100,7 +101,7 @@ impl DestinationForm {
         Self {
             base_revision: snapshot.revision,
             verified: false,
-            service: destination.map_or(BackupService::R2, |d| d.service),
+            service: destination.map_or(BackupService::R2, |d| d.service.clone()),
             endpoint,
             bucket,
             prefix,
@@ -117,7 +118,7 @@ impl DestinationForm {
     pub fn input(&self, cx: &App) -> Result<BackupDestinationInput, String> {
         let secret = self.secret.read(cx).value().to_string();
         let destination = BackupDestinationInput {
-            service: self.service,
+            service: self.service.clone(),
             endpoint: self.endpoint.read(cx).value().trim().into(),
             bucket: self.bucket.read(cx).value().trim().into(),
             prefix: self.prefix.read(cx).value().trim().into(),
@@ -157,20 +158,19 @@ impl DestinationForm {
             BackupService::S3,
             BackupService::Compatible,
         ] {
-            services =
-                services.child(
-                    segment(
-                        ElementId::Name(format!("backup-service-{service:?}").into()),
-                        service.label(),
-                        self.service == service,
-                        busy,
-                        cx,
-                    )
-                    .toggled(self.service == service)
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        view.select_service(service, window, cx)
-                    })),
-                );
+            services = services.child(
+                segment(
+                    ElementId::Name(format!("backup-service-{service:?}").into()),
+                    service.label().to_owned(),
+                    self.service == service,
+                    busy,
+                    cx,
+                )
+                .toggled(self.service == service)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.select_service(service.clone(), window, cx)
+                })),
+            );
         }
         v_flex().gap_4()
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Backup destination"))
@@ -306,13 +306,13 @@ impl View {
         if form.service == service {
             return;
         }
-        form.service = service;
         form.verified = false;
         let (endpoint, region) = match service {
             BackupService::R2 => ("", "auto"),
             BackupService::S3 => ("https://s3.us-east-1.amazonaws.com", "us-east-1"),
-            BackupService::Compatible => ("", "us-east-1"),
+            BackupService::Compatible | BackupService::Other(_) => ("", "us-east-1"),
         };
+        form.service = service;
         form.endpoint
             .update(cx, |input, cx| input.set_value(endpoint, window, cx));
         form.region

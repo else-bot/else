@@ -9,7 +9,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, h_flex, v_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::model::{SkillFile, SkillSource};
+use else_wire::skills::{SkillFile, SkillSource};
 
 pub(crate) struct SkillKeys {
     fields: Vec<KeyField>,

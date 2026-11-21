@@ -4,7 +4,8 @@
 use super::server_rail::{LABEL_WIDTH, rail_background};
 use super::*;
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::server_icon::{self, EMOJI, HUES, LetterStyle, ServerIcon};
+use crate::server_icon::{self, EMOJI, HUES, ServerIcon};
+use else_wire::settings::LetterStyle;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;

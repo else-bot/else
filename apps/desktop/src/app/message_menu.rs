@@ -1,6 +1,8 @@
+use super::reply::Feedback as _;
 use super::reply::{Author, MessageReference, Quote};
 use super::{Connection, ElseApp, RowKey};
-use crate::model::{Reaction, ReactionKind};
+use else_wire::items::Reaction;
+use else_wire::items::ReactionKind;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::FocusableExt as _;

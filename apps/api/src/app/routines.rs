@@ -138,6 +138,16 @@ pub struct ActiveHours {
     end: NaiveTime,
 }
 
+impl From<&ActiveHours> for else_wire::routines::ActiveHours {
+    fn from(hours: &ActiveHours) -> Self {
+        Self {
+            days: hours.days().into_iter().map(str::to_owned).collect(),
+            start: hours.start(),
+            end: hours.end(),
+        }
+    }
+}
+
 impl ActiveHours {
     /// Monday to Friday, 08:00 to 18:00: the default for new routines.
     pub const WORKING: Self = Self {
@@ -456,6 +466,17 @@ pub struct RoutineModel {
     pub provider_id: String,
     #[serde(flatten)]
     pub profile: Profile,
+}
+
+impl From<&RoutineModel> for else_wire::settings::ProfileChoice {
+    fn from(model: &RoutineModel) -> Self {
+        Self {
+            provider_id: model.provider_id.clone(),
+            model: model.profile.model.clone(),
+            reasoning_effort: model.profile.reasoning_effort.clone(),
+            service_tier: model.profile.service_tier.clone(),
+        }
+    }
 }
 
 /// Which model a routine runs on.

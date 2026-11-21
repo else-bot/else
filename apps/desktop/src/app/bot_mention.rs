@@ -1,3 +1,4 @@
+use else_wire::bots::Avatar;
 use std::ops::Range;
 
 use gpui_kit::base::text::{
@@ -11,8 +12,8 @@ use markdown::mdast::Node;
 use uuid::Uuid;
 
 use super::ElseApp;
-use crate::api::Bot;
-use crate::avatar::{Avatar, bot_avatar};
+use crate::avatar::bot_avatar;
+use else_wire::bots::Bot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MentionBot {
@@ -371,7 +372,7 @@ impl MarkdownPlugin for MentionPlugin {
 #[cfg(test)]
 mod tests {
     use super::{BotMention, MentionDisplay, MentionRegistry};
-    use crate::api::Bot;
+    use else_wire::bots::Bot;
     use uuid::Uuid;
 
     fn bot(id: u128, name: &str) -> Bot {

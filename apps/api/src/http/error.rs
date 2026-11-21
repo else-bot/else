@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use else_wire::settings::{ErrorBody, ErrorDetail};
 
 #[derive(Debug, Clone)]
 pub struct ApiError {
@@ -14,19 +14,6 @@ pub struct ApiError {
     pub retryable: bool,
     pub request_id: Option<String>,
     pub retry_after_secs: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct Body<'a> {
-    error: Inner<'a>,
-}
-
-#[derive(Serialize)]
-struct Inner<'a> {
-    code: &'a str,
-    message: &'a str,
-    retryable: bool,
-    request_id: Option<&'a str>,
 }
 
 impl ApiError {
@@ -89,12 +76,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = Body {
-            error: Inner {
-                code: self.code,
-                message: &self.message,
+        let body = ErrorBody {
+            error: ErrorDetail {
+                code: self.code.to_owned(),
+                message: self.message,
                 retryable: self.retryable,
-                request_id: self.request_id.as_deref(),
+                request_id: self.request_id,
             },
         };
         let mut response = (self.status, Json(body)).into_response();

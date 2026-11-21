@@ -1,45 +1,9 @@
 use super::{Client, ClientError};
 use chrono::{DateTime, Utc};
+use else_wire::secrets::{List, RevealedSecret, SavedSecret, VaultEntry, VaultUse};
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
-use uuid::Uuid;
-
-#[derive(Clone, Deserialize)]
-pub struct VaultEntry {
-    pub name: String,
-    pub description: String,
-    pub website: Option<String>,
-    pub env: Vec<String>,
-    pub updated_at: DateTime<Utc>,
-    pub last_used: Option<VaultUse>,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct VaultUse {
-    pub bot_id: Uuid,
-    pub bot_name: Option<String>,
-    pub r#use: VaultUseKind,
-    pub at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VaultUseKind {
-    Command,
-    Job,
-    Browser,
-}
-
-impl VaultUseKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Command => "command",
-            Self::Job => "job",
-            Self::Browser => "browser",
-        }
-    }
-}
 
 // Value-bearing payloads deliberately do not implement Debug.
 #[derive(Serialize)]
@@ -57,22 +21,8 @@ pub struct PatchSecret {
     pub remove: Vec<String>,
 }
 
-#[derive(Deserialize)]
-pub struct SavedSecret {
-    pub not_redacted: Vec<String>,
-}
-
-#[derive(Deserialize)]
-pub struct RevealedSecret {
-    pub env: BTreeMap<String, String>,
-}
-
 impl Client {
     pub async fn vault(self: Arc<Self>) -> Result<Vec<VaultEntry>, ClientError> {
-        #[derive(Deserialize)]
-        struct List {
-            secrets: Vec<VaultEntry>,
-        }
         self.call::<List>(Method::GET, "/v1/task-secrets".into(), None)
             .await
             .map(|(_, list)| list.secrets)
@@ -191,6 +141,8 @@ pub fn vault_last_used(last: Option<&VaultUse>, now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use else_wire::secrets::VaultUseKind;
+    use uuid::Uuid;
 
     #[test]
     fn vault_names_and_fields_reject_reserved_or_unsafe_names() {
@@ -244,6 +196,18 @@ mod tests {
         }
         assert!(validate_secret_metadata(&"é".repeat(100), "").is_ok());
         assert!(validate_secret_metadata(&"é".repeat(101), "").is_err());
+    }
+
+    #[test]
+    fn a_future_vault_use_keeps_its_label() {
+        let usage: VaultUse = serde_json::from_value(serde_json::json!({
+            "bot_id": "00000000-0000-0000-0000-000000000000",
+            "bot_name": "Helper",
+            "use": "connector",
+            "at": "2026-11-09T01:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(usage.r#use.as_str(), "connector");
     }
 
     #[test]

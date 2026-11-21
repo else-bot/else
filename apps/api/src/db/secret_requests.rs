@@ -124,7 +124,7 @@ pub enum Status {
 }
 
 /// Public metadata of a request. It never holds a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestInfo {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -137,6 +137,32 @@ pub struct RequestInfo {
     pub status: Status,
     pub created_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl From<&RequestInfo> for else_wire::secrets::SecretRequest {
+    fn from(request: &RequestInfo) -> Self {
+        use else_wire::secrets::SecretRequestStatus;
+        Self {
+            id: request.id,
+            bot_id: Some(request.bot_id),
+            turn_id: Some(request.turn_id),
+            name: request.name.clone(),
+            reason: request.reason.clone(),
+            env: request.env.clone(),
+            description: request.description.clone(),
+            website: request
+                .website
+                .as_ref()
+                .map(|website| website.as_str().to_owned()),
+            status: match request.status {
+                Status::Pending => SecretRequestStatus::Pending,
+                Status::Stored => SecretRequestStatus::Stored,
+                Status::Cancelled => SecretRequestStatus::Cancelled,
+            },
+            created_at: Some(request.created_at),
+            settled_at: request.settled_at,
+        }
+    }
 }
 
 type Row = (

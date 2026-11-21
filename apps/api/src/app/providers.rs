@@ -8,85 +8,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use else_wire::routines::RoutineRun;
+use else_wire::settings::{Catalog, ProfileChoice};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::messages::{Attachment, MessagePart};
-
-/// One model an adapter applies exactly, with the efforts and tiers it
-/// takes on that model. `priority` is the Fast tier.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Model {
-    pub id: String,
-    pub label: String,
-    pub efforts: Vec<String>,
-    pub tiers: Vec<String>,
-    /// The newest model of its family, shown before the picker expands.
-    pub featured: bool,
-    /// The newest model of the same family, when this one is older.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upgrade: Option<String>,
-}
-
-/// The models an adapter applies exactly: what the installed CLI last
-/// listed, else the bundled list. Empty for a provider without profiles.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Catalog {
-    /// Featured models first, then older ones, newest first per family.
-    pub models: Vec<Model>,
-    /// When the CLI listed these; `None` for the bundled list.
-    pub listed_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Why the latest ask failed, while an older or bundled list is shown.
-    pub refresh_error: Option<String>,
-}
-
-impl Catalog {
-    pub fn model(&self, id: &str) -> Option<&Model> {
-        self.models.iter().find(|model| model.id == id)
-    }
-
-    pub fn ids(&self) -> Vec<&str> {
-        self.models.iter().map(|model| model.id.as_str()).collect()
-    }
-}
-
-/// Older desktops read the flat lists and apply every effort and tier to
-/// every model, so they get the first model's efforts and tiers and only
-/// the models that take all of them. `details` carries each model's own.
-impl Serialize for Catalog {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let (efforts, tiers): (&[String], &[String]) = self
-            .models
-            .first()
-            .map_or((&[], &[]), |first| (&first.efforts, &first.tiers));
-        let legacy: Vec<&Model> = self
-            .models
-            .iter()
-            .filter(|model| {
-                efforts.iter().all(|e| model.efforts.contains(e))
-                    && tiers.iter().all(|t| model.tiers.contains(t))
-            })
-            .collect();
-        let ids = |featured_only: bool| -> Vec<&str> {
-            legacy
-                .iter()
-                .filter(|model| !featured_only || model.featured)
-                .map(|model| model.id.as_str())
-                .collect()
-        };
-        let mut out = serializer.serialize_struct("Catalog", 7)?;
-        out.serialize_field("models", &ids(false))?;
-        out.serialize_field("featured_models", &ids(true))?;
-        out.serialize_field("efforts", efforts)?;
-        out.serialize_field("tiers", tiers)?;
-        out.serialize_field("details", &self.models)?;
-        out.serialize_field("listed_at", &self.listed_at)?;
-        out.serialize_field("refresh_error", &self.refresh_error)?;
-        out.end()
-    }
-}
 
 /// An execution profile: a provider's saved default, or a bot's own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +22,17 @@ pub struct Profile {
     pub model: String,
     pub reasoning_effort: String,
     pub service_tier: String,
+}
+
+impl Profile {
+    pub fn choice(&self, provider_id: &str) -> ProfileChoice {
+        ProfileChoice {
+            provider_id: provider_id.to_owned(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            service_tier: self.service_tier.clone(),
+        }
+    }
 }
 
 /// Profiles seeded by explicit setup when missing. GPT 6.1 Sol Medium Fast:
@@ -221,7 +160,7 @@ pub struct TurnInput {
     pub standing_permissions: Vec<super::questions::PermissionTarget>,
     /// The recurring message tasks the owner approves always, for drafts to
     /// name exactly; empty when this turn's drafts reach no standing grant.
-    pub draft_tasks: Vec<super::outgoing::DraftKind>,
+    pub draft_tasks: Vec<else_wire::outgoing::DraftKind>,
     /// Owner decisions on this turn's outgoing drafts not yet received,
     /// and the draft open when the owner sent this turn's message.
     pub outgoing_drafts: Vec<super::outgoing::Note>,
@@ -301,22 +240,6 @@ pub struct WebhookRun {
     pub webhook_id: Uuid,
     pub name: String,
     pub requested_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// The routine occurrence a turn runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoutineRun {
-    pub routine_id: Uuid,
-    pub name: String,
-    pub due_at: chrono::DateTime<chrono::Utc>,
-    /// The routine is a reminder, due once.
-    pub reminder: bool,
-    /// The routine lets a run end with no news.
-    #[serde(default)]
-    pub quiet: bool,
-    /// The run completed with no news, so it alerts no one.
-    #[serde(default)]
-    pub no_news: bool,
 }
 
 /// A provider's native session for one conversation.

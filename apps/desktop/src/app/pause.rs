@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::{PauseReason, ServerPause};
+use else_wire::maintenance::{PauseReason, ServerPause};
 use std::time::Instant;
 
 #[derive(Default)]

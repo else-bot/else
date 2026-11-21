@@ -1,217 +1,12 @@
 use super::{Client, ClientError};
+use else_wire::email::{
+    Accounts, Connected, Definitions, EmailAccount, EmailAuthorization, EmailConfig, EmailMessage,
+    EmailPreset, EmailProvider, MessageRef,
+};
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmailProvider {
-    Gmail,
-    Microsoft,
-    Yahoo,
-    Icloud,
-    Imap,
-}
-
-impl EmailProvider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Gmail => "Gmail",
-            Self::Microsoft => "Microsoft 365",
-            Self::Yahoo => "Yahoo",
-            Self::Icloud => "iCloud",
-            Self::Imap => "Other email",
-        }
-    }
-
-    /// Where the owner makes an app password for this provider, shown on a
-    /// card that asks for one.
-    pub fn app_password_help(self) -> Option<AppPasswordHelp> {
-        match self {
-            Self::Icloud => Some(AppPasswordHelp {
-                note: "Use an app-specific password, not your Apple Account password. \
-                       Two-factor authentication must be on.",
-                link: "Open account.apple.com",
-                url: "https://account.apple.com/",
-            }),
-            _ => None,
-        }
-    }
-}
-
-pub struct AppPasswordHelp {
-    pub note: &'static str,
-    pub link: &'static str,
-    pub url: &'static str,
-}
-
-/// Where a message lives in a mailbox.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
-pub struct MessageRef {
-    pub folder: String,
-    pub uid_validity: u32,
-    pub uid: u32,
-}
-
-/// An email as the owner's reader shows it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EmailMessage {
-    #[serde(default)]
-    pub subject: Option<String>,
-    /// The sender's Date header, RFC 3339 when it parsed.
-    #[serde(default)]
-    pub date: Option<String>,
-    #[serde(default)]
-    pub received_at: Option<String>,
-    #[serde(default)]
-    pub from: Vec<EmailPerson>,
-    #[serde(default)]
-    pub to: Vec<EmailPerson>,
-    #[serde(default)]
-    pub cc: Vec<EmailPerson>,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub text_truncated: bool,
-    /// The message's own HTML part, when it has one small enough to show.
-    #[serde(default)]
-    pub html: Option<String>,
-    /// Why an HTML part was left out: `too_large`.
-    #[serde(default)]
-    pub html_omitted: Option<String>,
-    /// The images the HTML part shows from the message itself.
-    #[serde(default)]
-    pub inline: Vec<else_visual::email::Inline>,
-    #[serde(default)]
-    pub attachments: Vec<EmailAttachment>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct EmailPerson {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub address: Option<String>,
-}
-
-impl EmailPerson {
-    /// `Name <address>`, or whichever of the two the header has.
-    pub fn label(&self) -> String {
-        match (self.name.as_deref(), self.address.as_deref()) {
-            (Some(name), Some(address)) if !name.is_empty() => format!("{name} <{address}>"),
-            (_, Some(address)) => address.to_owned(),
-            (Some(name), None) => name.to_owned(),
-            (None, None) => String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct EmailAttachment {
-    #[serde(default)]
-    pub name: Option<String>,
-    pub media_type: String,
-    pub size: u64,
-}
-
-/// A bot's trigger on an inbox: whether new mail wakes it, and what to do
-/// then. A trigger the inbox sign-in card turned on has no instructions.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MailTrigger {
-    pub account_id: Uuid,
-    pub address: String,
-    pub state: AccountState,
-    pub wake: bool,
-    #[serde(default)]
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub last_woke_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct EmailEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub start_tls: bool,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct EmailConfig {
-    pub provider: EmailProvider,
-    pub address: String,
-    pub username: String,
-    pub imap: EmailEndpoint,
-    pub smtp: EmailEndpoint,
-    pub archive_folder: String,
-    pub trash_folder: String,
-    pub drafts_folder: String,
-    pub sent_folder: String,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct EmailAccount {
-    pub id: Uuid,
-    pub config: EmailConfig,
-    pub state: AccountState,
-    pub health: AccountHealth,
-}
-
-crate::model::wire_state! {
-    pub enum AccountState {
-        Active = "active",
-        Paused = "paused",
-        Removed = "removed",
-    }
-    _ => Unknown
-}
-
-crate::model::wire_state! {
-    /// What the server last saw of an account's mail server.
-    pub enum AccountHealth {
-        /// Not checked since the account or its credential changed.
-        Unchecked = "unknown",
-        Connected = "connected",
-    }
-    /// Any failure, sent as its error code.
-    _ => Failing
-}
-
-#[derive(Deserialize)]
-pub struct EmailPreset {
-    pub provider: EmailProvider,
-    pub preset: Option<EmailConfig>,
-}
-
-/// The server's settings for `provider`, signing in as `address`.
-pub fn preset_config(
-    presets: &[EmailPreset],
-    provider: EmailProvider,
-    address: &str,
-) -> Option<EmailConfig> {
-    let mut config = presets
-        .iter()
-        .find(|p| p.provider == provider)?
-        .preset
-        .clone()?;
-    config.address = address.to_owned();
-    config.username = address.to_owned();
-    Some(config)
-}
-
-/// The inbox a bot asked the owner to sign in to from a chat card.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct EmailConsent {
-    pub provider: EmailProvider,
-    pub address: String,
-}
-
-#[derive(Deserialize)]
-pub struct EmailAuthorization {
-    pub request_id: Uuid,
-    pub authorization_url: String,
-}
 
 impl Client {
     pub fn cancel_email_authorization(self: Arc<Self>, request_id: Uuid) {
@@ -249,24 +44,12 @@ impl Client {
     }
 
     pub async fn email_accounts(self: Arc<Self>) -> Result<Vec<EmailAccount>, ClientError> {
-        #[derive(Deserialize)]
-        struct Accounts {
-            accounts: Vec<EmailAccount>,
-        }
         self.call::<Accounts>(Method::GET, "/v1/connectors/email/accounts".into(), None)
             .await
             .map(|(_, body)| body.accounts)
     }
 
     pub async fn email_presets(self: Arc<Self>) -> Result<Vec<EmailPreset>, ClientError> {
-        #[derive(Deserialize)]
-        struct Definition {
-            providers: Vec<EmailPreset>,
-        }
-        #[derive(Deserialize)]
-        struct Definitions {
-            connectors: Vec<Definition>,
-        }
         self.call::<Definitions>(Method::GET, "/v1/connectors".into(), None)
             .await
             .map(|(_, body)| {
@@ -301,10 +84,6 @@ impl Client {
         config: EmailConfig,
         password: String,
     ) -> Result<EmailAccount, ClientError> {
-        #[derive(Deserialize)]
-        struct Connected {
-            account: EmailAccount,
-        }
         self.sign_in::<Connected>(
             Method::POST,
             "/v1/connectors/email/accounts".into(),
@@ -348,10 +127,6 @@ impl Client {
         state: String,
         code: String,
     ) -> Result<EmailAccount, ClientError> {
-        #[derive(Deserialize)]
-        struct Connected {
-            account: EmailAccount,
-        }
         self.sign_in::<Connected>(
             Method::POST,
             "/v1/connectors/email/oauth/complete".into(),

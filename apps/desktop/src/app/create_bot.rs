@@ -1,9 +1,13 @@
 use super::ElseApp;
 use super::request::Request;
-use crate::api::{Category, CreateBotRequest};
-use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
+use crate::api::CreateBotRequest;
+use crate::avatar::{AvatarLook, AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
 use crate::profile_picker::ProfilePicker;
+use else_wire::bots::Avatar;
+use else_wire::bots::AvatarColor;
+use else_wire::bots::AvatarShape;
+use else_wire::bots::Category;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};

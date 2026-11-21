@@ -1,12 +1,13 @@
 use super::super::routines::{RoutineChange, settle_change};
 use super::ModelState;
-use crate::api::{BotProfile, ProfileChoice};
 use crate::app::panel::{muted, note};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, toggle};
-use crate::model::Routine;
 use crate::profile_picker::ProfilePicker;
+use else_wire::routines::Routine;
+use else_wire::settings::BotProfile;
+use else_wire::settings::ProfileChoice;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;

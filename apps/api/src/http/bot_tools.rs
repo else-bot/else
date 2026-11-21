@@ -1,5 +1,6 @@
 //! The tools that list, create, rename, re-model and delete bots.
 
+use else_wire::settings::ProfileChoice;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -161,7 +162,7 @@ pub(super) async fn create_bot(state: &AppState, grant: &Grant, args: &Value) ->
                 "next": next,
             });
             if let Ok(Some(own)) = crate::db::bot_profiles::get(&state.db, bot.id).await {
-                result["model"] = super::settings::choice_json(&own.provider_id, &own.profile);
+                result["model"] = json!(ProfileChoice::from(&own));
             }
             Ok(Done::json(result).logged(log))
         }
@@ -350,7 +351,7 @@ pub(super) async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value)
             );
             Ok(Done::json(json!({
                 "bot_id": parsed.target_bot_id,
-                "model": super::settings::choice_json(&saved.provider_id, &saved.profile),
+                "model": ProfileChoice::from(&saved),
                 "next": "Its next turn uses this model. Routines with their own model keep \
                     it; to change one, delegate to that bot asking it to update the routine.",
             }))

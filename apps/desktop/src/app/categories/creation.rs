@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::api::{Category, Client, ClientError};
+use crate::api::{Client, ClientError};
+
+use else_wire::bots::Category;
 
 #[derive(Debug, Clone)]
 enum Stage {
@@ -225,7 +227,12 @@ mod tests {
         let id = Uuid::new_v4();
         (
             201,
-            json!({ "category": { "id": id, "name": request.body["name"] } }),
+            json!({ "category": {
+                "id": id,
+                "name": request.body["name"],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            } }),
         )
     }
 

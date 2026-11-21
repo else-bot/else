@@ -50,7 +50,6 @@ use uuid::Uuid;
 use super::conversation::{bot_is_active, encode_cursor, parse_cursor};
 use super::{AppState, Routes};
 use crate::db::{bots, events};
-use crate::views::bot_json;
 
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_SUBSCRIPTIONS: usize = 32;
@@ -403,11 +402,7 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
             Read::Cancelled => return,
             Read::Failed => {}
             Read::Done(listing) => {
-                let data = json!({
-                    "default_bot_id": listing.default_bot_id,
-                    "categories": listing.categories,
-                    "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
-                });
+                let data = json!(else_wire::bots::BotList::from(&listing));
                 if last.as_ref() != Some(&data) {
                     let body = json!({ "channel": "bots", "event": "bots.snapshot", "data": data });
                     if !sub.send(body).await {
@@ -426,7 +421,10 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
 async fn server_channel(state: Arc<AppState>, sub: Sub) {
     let mut pause = state.gate.watch_pause();
     loop {
-        let current = pause.borrow_and_update().as_ref().map(|p| p.json());
+        let current = pause
+            .borrow_and_update()
+            .as_ref()
+            .map(else_wire::maintenance::ServerPause::from);
         let body =
             json!({ "channel": "server", "event": "server.pause", "data": { "pause": current } });
         if !sub.send(body).await {

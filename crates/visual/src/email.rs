@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+pub use else_wire::email::Inline;
 use html5ever::tendril::TendrilSink as _;
 use html5ever::{Attribute, QualName, local_name, serialize::SerializeOpts};
 use markup5ever_rcdom::Handle;
@@ -32,15 +33,6 @@ const MAX_LINK_RECTS: usize = 64;
 const MAX_LINK_TEXT: usize = 200;
 /// Image types the renderer decodes.
 const INLINE_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
-
-/// An image part the message carries and its HTML names as `cid:`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Inline {
-    /// The part's Content-ID, without angle brackets.
-    pub content_id: String,
-    pub media_type: String,
-    pub data_base64: String,
-}
 
 /// A clickable `http`, `https` or `mailto` link on a rendered email.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,8 @@
-use chrono::TimeZone;
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use else_wire::usage::{Attribution, BotUsage, UsageReport, UsageSourceKind, UsageWindow};
+use uuid::Uuid;
 
-use super::*;
+use super::{Reading, Source, Turn, report};
 
 fn at(hour: u32, minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 16, hour, minute, 0).unwrap()
@@ -34,21 +36,21 @@ fn reading(minutes: i64, used: f64, observed: DateTime<Utc>, resets: DateTime<Ut
     }
 }
 
-fn used(window: &WindowUsage) -> Option<f64> {
+fn used(window: &UsageWindow) -> Option<f64> {
     match window.attribution {
         Attribution::Priced { used, .. } => Some(used),
         _ => None,
     }
 }
 
-fn outside(window: &WindowUsage) -> Option<f64> {
+fn outside(window: &UsageWindow) -> Option<f64> {
     match window.attribution {
         Attribution::Priced { outside, .. } => Some(outside),
         _ => None,
     }
 }
 
-fn find<'a>(report: &'a Report, provider: &str, minutes: i64) -> &'a WindowUsage {
+fn find<'a>(report: &'a UsageReport, provider: &str, minutes: i64) -> &'a UsageWindow {
     report
         .providers
         .iter()
@@ -97,7 +99,7 @@ fn an_hourly_routine_is_charged_for_what_it_used() {
     let bot = &window.bots[0];
     assert_eq!(bot.share, 1.0);
     assert_eq!(used(window).unwrap() - outside(window).unwrap(), 8.0);
-    assert_eq!(bot.sources[0].source, Source::Routine);
+    assert_eq!(bot.sources[0].source, UsageSourceKind::Routine);
     assert_eq!(bot.sources[0].share, 1.0);
 }
 
@@ -371,7 +373,7 @@ fn shares_and_sources_follow_the_window_without_using_cap_percent() {
         week.attribution,
         Attribution::Unattributed { used: 18.0, .. }
     ));
-    fn bot(window: &WindowUsage) -> &BotUsage {
+    fn bot(window: &UsageWindow) -> &BotUsage {
         window
             .bots
             .iter()
@@ -379,9 +381,9 @@ fn shares_and_sources_follow_the_window_without_using_cap_percent() {
             .unwrap()
     }
     assert_eq!(bot(five).share, 0.5);
-    assert_eq!(bot(five).sources[0].source, Source::Routine);
+    assert_eq!(bot(five).sources[0].source, UsageSourceKind::Routine);
     assert_eq!(bot(week).share, 0.75);
-    assert_eq!(bot(week).sources[0].source, Source::Chat);
+    assert_eq!(bot(week).sources[0].source, UsageSourceKind::Chat);
     assert!((bot(week).sources[0].share - 2.0 / 3.0).abs() < 1e-9);
 }
 
@@ -404,6 +406,6 @@ fn small_shares_keep_their_weight_and_sources_combine_by_kind() {
     assert!(week.bots[1].share > 0.0 && week.bots[1].share < 0.0005);
     let sources = &week.bots[0].sources;
     assert_eq!(sources.len(), 2);
-    assert_eq!(sources[1].source, Source::Routine);
+    assert_eq!(sources[1].source, UsageSourceKind::Routine);
     assert!((sources[1].share - 200.0 / 10_200.0).abs() < 1e-9);
 }

@@ -678,6 +678,16 @@ pub enum SetupStatus {
     Connected,
     Cancelled,
 }
+
+impl From<SetupStatus> for else_wire::socials::SetupStatus {
+    fn from(state: SetupStatus) -> Self {
+        match state {
+            SetupStatus::Pending => Self::Pending,
+            SetupStatus::Connected => Self::Connected,
+            SetupStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
 impl SetupStatus {
     pub fn name(self) -> &'static str {
         match self {
@@ -687,7 +697,7 @@ impl SetupStatus {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Setup {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -699,6 +709,21 @@ pub struct Setup {
     /// What the owner wrote on the card for the bot, in their own words.
     pub note: Option<String>,
 }
+impl From<&Setup> for else_wire::socials::SocialSetup {
+    fn from(setup: &Setup) -> Self {
+        Self {
+            id: setup.id,
+            bot_id: Some(setup.bot_id),
+            turn_id: Some(setup.turn_id),
+            provider: setup.provider.into(),
+            reason: setup.reason.clone(),
+            status: setup.status.into(),
+            connection_id: setup.connection_id,
+            note: setup.note.clone(),
+        }
+    }
+}
+
 const SETUP_COLUMNS: &str = "id,bot_id,turn_id,provider,reason,status,connection_id,note";
 pub async fn setups(
     conn: &mut SqliteConnection,

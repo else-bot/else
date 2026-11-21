@@ -435,7 +435,12 @@ async fn the_owners_stop_wakes_the_bot_and_the_bots_own_stop_does_not() {
     let path = format!("/v1/bots/{}/watchers/{owned}/stop", s.bot);
     let stopped = s.h.app.owner("POST", &path, None).await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+    assert_eq!(stopped.body["watcher"]["status"], "waking");
     assert_eq!(stopped.body["watcher"]["outcome"], "stopped");
+    assert_eq!(
+        stopped.body["watcher"].get("next_check_at"),
+        Some(&Value::Null)
+    );
     let ended = settled(&s, owned, "ended").await;
     assert!(
         ended.wake_turn_id.is_some(),

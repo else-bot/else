@@ -41,7 +41,7 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handoff {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -51,6 +51,34 @@ pub struct Handoff {
     pub created_at: DateTime<Utc>,
     pub taken_at: Option<DateTime<Utc>>,
     pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl From<Status> for else_wire::computers::HandoffStatus {
+    fn from(value: Status) -> Self {
+        match value {
+            Status::Pending => Self::Pending,
+            Status::Taken => Self::Taken,
+            Status::HandedBack => Self::HandedBack,
+            Status::Dismissed => Self::Dismissed,
+            Status::Skipped => Self::Skipped,
+            Status::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<&Handoff> for else_wire::computers::ComputerHandoff {
+    fn from(row: &Handoff) -> Self {
+        Self {
+            id: row.id,
+            bot_id: Some(row.bot_id),
+            turn_id: Some(row.turn_id),
+            reason: row.reason.clone(),
+            status: row.status.into(),
+            created_at: row.created_at,
+            taken_at: row.taken_at,
+            settled_at: row.settled_at,
+        }
+    }
 }
 
 type Row = (

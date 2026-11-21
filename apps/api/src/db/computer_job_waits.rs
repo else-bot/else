@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -156,10 +155,9 @@ pub async fn publish_settled(conn: &mut SqliteConnection, job_id: Uuid) -> Resul
 }
 
 /// A wait whose job still runs, as the owner's turn view shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Pending {
     pub id: Uuid,
-    #[serde(skip)]
     pub turn_id: Uuid,
     pub job_id: Uuid,
     /// The start of the job's command.
@@ -168,6 +166,33 @@ pub struct Pending {
     pub purpose: Option<String>,
     pub job_status: JobStatus,
     pub created_at: String,
+}
+
+impl From<&Pending> for else_wire::waits::ComputerJobWait {
+    fn from(row: &Pending) -> Self {
+        Self {
+            id: row.id,
+            job_id: row.job_id,
+            command: row.command.clone(),
+            purpose: row.purpose.clone(),
+            job_status: Some(row.job_status.into()),
+            created_at: Some(row.created_at.clone()),
+        }
+    }
+}
+
+impl From<JobStatus> for else_wire::waits::JobStatus {
+    fn from(status: JobStatus) -> Self {
+        match status {
+            JobStatus::Starting => Self::Starting,
+            JobStatus::Running => Self::Running,
+            JobStatus::Cancelling => Self::Cancelling,
+            JobStatus::Completed => Self::Completed,
+            JobStatus::Failed => Self::Failed,
+            JobStatus::Cancelled => Self::Cancelled,
+            JobStatus::Lost => Self::Lost,
+        }
+    }
 }
 
 /// The pending waits of these turns.

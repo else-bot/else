@@ -1,3 +1,4 @@
+use else_wire::socials as wire;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -35,6 +36,16 @@ pub enum Provider {
     Telegram,
     Discord,
     WhatsApp,
+}
+
+impl From<Provider> for wire::Provider {
+    fn from(provider: Provider) -> Self {
+        match provider {
+            Provider::Telegram => Self::Telegram,
+            Provider::Discord => Self::Discord,
+            Provider::WhatsApp => Self::WhatsApp,
+        }
+    }
 }
 impl Provider {
     pub fn name(self) -> &'static str {
@@ -209,6 +220,16 @@ pub enum ConnectionState {
     Paused,
     Removed,
 }
+
+impl From<ConnectionState> for wire::ConnectionState {
+    fn from(state: ConnectionState) -> Self {
+        match state {
+            ConnectionState::Active => Self::Active,
+            ConnectionState::Paused => Self::Paused,
+            ConnectionState::Removed => Self::Removed,
+        }
+    }
+}
 impl ConnectionState {
     /// The state to write when the owner asks for `to`, or `None` when the
     /// connection is already there. A removed connection never comes back.
@@ -245,6 +266,21 @@ pub enum Health {
     /// Restored from a backup, paused until the owner resumes it.
     Restored,
 }
+
+impl From<Health> for wire::Health {
+    fn from(health: Health) -> Self {
+        match health {
+            Health::Connecting => Self::Connecting,
+            Health::Connected => Self::Connected,
+            Health::Reconnecting => Self::Reconnecting,
+            Health::ReceiverConflict => Self::ReceiverConflict,
+            Health::SignedOut => Self::SignedOut,
+            Health::Paused => Self::Paused,
+            Health::Removed => Self::Removed,
+            Health::Restored => Self::Restored,
+        }
+    }
+}
 impl Health {
     /// The health an inbox reports once its listener stopped with `result`.
     pub fn after(result: &Result<(), Error>) -> Self {
@@ -260,7 +296,7 @@ impl Health {
         self != Self::SignedOut
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Connection {
     pub id: Uuid,
     pub provider: Provider,
@@ -272,8 +308,24 @@ pub struct Connection {
     pub generation: i64,
     pub instructions: String,
     #[sqlx(default)]
-    #[serde(default)]
     pub message_content: bool,
+}
+
+impl From<&Connection> for wire::Connection {
+    fn from(connection: &Connection) -> Self {
+        Self {
+            id: connection.id,
+            provider: connection.provider.into(),
+            remote_id: connection.remote_id.clone(),
+            display_name: connection.display_name.clone(),
+            username: connection.username.clone(),
+            state: connection.state.into(),
+            health: connection.health.into(),
+            generation: connection.generation,
+            instructions: connection.instructions.clone(),
+            message_content: connection.message_content,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
@@ -355,8 +407,17 @@ pub enum Wake {
     All,
 }
 
+impl From<Wake> for wire::WakePolicy {
+    fn from(wake: Wake) -> Self {
+        match wake {
+            Wake::Mentions => Self::Mentions,
+            Wake::All => Self::All,
+        }
+    }
+}
+
 /// A bot's own rule to wake on incoming messages, set for an owner request.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Trigger {
     pub id: Uuid,
     pub connection_id: Uuid,
@@ -374,6 +435,27 @@ pub struct Trigger {
     pub updated_at: String,
     /// When a message last woke the bot through this trigger.
     pub last_woke_at: Option<String>,
+}
+
+impl From<&Trigger> for wire::Trigger {
+    fn from(trigger: &Trigger) -> Self {
+        Self {
+            id: trigger.id,
+            connection_id: trigger.connection_id,
+            bot_id: trigger.bot_id,
+            provider: trigger.provider.into(),
+            connection_name: trigger.connection_name.clone(),
+            username: trigger.username.clone(),
+            destination: trigger.destination.clone(),
+            destination_name: trigger.destination_name.clone(),
+            wake: trigger.wake.into(),
+            instructions: trigger.instructions.clone(),
+            enabled: trigger.enabled,
+            created_at: trigger.created_at.clone(),
+            updated_at: trigger.updated_at.clone(),
+            last_woke_at: trigger.last_woke_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -7,13 +7,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
+use else_wire::routines::Watcher;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath};
 use super::{AppState, Routes};
 use crate::db::watchers::{self, StopBy, Stopped};
-use crate::views::watcher_json;
 
 pub fn routes() -> Routes {
     Routes::gated(Router::new().route(
@@ -30,7 +30,7 @@ async fn owner_stop(
     match watchers::stop(&state.db, bot_id, watcher_id, StopBy::Owner).await? {
         Stopped::Stopped(watcher) => {
             state.scheduler.wake();
-            Ok(Json(json!({ "watcher": watcher_json(&watcher) })))
+            Ok(Json(json!({ "watcher": Watcher::from(&watcher) })))
         }
         Stopped::NotActive(_) => Err(ApiError::new(
             StatusCode::CONFLICT,

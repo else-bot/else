@@ -83,6 +83,45 @@ fn permissions() -> Permissions {
 }
 
 #[tokio::test]
+async fn the_connector_catalog_describes_email_sign_in_and_permissions() {
+    let app = TestApp::installed().await;
+    let catalog = app.owner("GET", "/v1/connectors", None).await;
+    assert_eq!(catalog.status, StatusCode::OK);
+    let email = &catalog.body["connectors"][0];
+    assert_eq!(email["id"], "email");
+    assert_eq!(email["version"], 1);
+    assert_eq!(email["credentials"], "owner_only_write_only");
+    assert_eq!(email["notifications"], "imap_idle");
+    assert_eq!(
+        email["permissions"],
+        json!(["read", "write", "send", "wake"])
+    );
+    assert_eq!(
+        email["providers"][0],
+        json!({
+            "provider": "gmail",
+            "preset": {
+                "provider": "gmail",
+                "address": "you@example.com",
+                "username": "you@example.com",
+                "imap": {"host": "imap.gmail.com", "port": 993, "start_tls": false},
+                "smtp": {"host": "smtp.gmail.com", "port": 465, "start_tls": false},
+                "archive_folder": "[Gmail]/All Mail",
+                "trash_folder": "[Gmail]/Trash",
+                "drafts_folder": "[Gmail]/Drafts",
+                "sent_folder": "[Gmail]/Sent Mail"
+            },
+            "authentication": ["oauth2"],
+            "oauth_wizard": true
+        })
+    );
+    assert_eq!(
+        email["providers"][4],
+        json!({"provider": "imap", "preset": null, "authentication": ["app_password"], "oauth_wizard": false})
+    );
+}
+
+#[tokio::test]
 async fn microsoft_desktop_sign_in_uses_public_client_pkce_and_outlook_scopes() {
     let app = TestApp::installed().await;
     let client_id = Uuid::new_v4().to_string();
@@ -97,6 +136,7 @@ async fn microsoft_desktop_sign_in_uses_public_client_pkce_and_outlook_scopes() 
         )
         .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    assert_eq!(started.body["expires_in"], 600);
     let url = reqwest::Url::parse(started.body["authorization_url"].as_str().unwrap()).unwrap();
     assert_eq!(url.host_str(), Some("login.microsoftonline.com"));
     assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");

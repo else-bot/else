@@ -13,7 +13,9 @@ use std::cmp::Reverse;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, Category};
+use else_wire::bots::Bot;
+
+use else_wire::bots::Category;
 
 pub mod status;
 
@@ -165,6 +167,7 @@ mod tests {
             selected_provider_id: None,
             activity: None,
             cleanup: None,
+            deleted_at: None,
             category_id: category.map(Uuid::from_u128),
             muted: false,
             created_at: None,
@@ -221,7 +224,7 @@ mod tests {
         let waits = |id, name, category, minute| {
             let mut b = bot(id, name, category);
             b.muted = true;
-            b.sidebar_status = Some(crate::api::SidebarStatus::NeedsTakeover {
+            b.sidebar_status = Some(else_wire::bots::SidebarStatus::NeedsTakeover {
                 preview: "Inspect the open X conversation.".into(),
                 since: at(minute),
             });
@@ -282,6 +285,8 @@ mod tests {
             id: Uuid::from_u128(id),
             name: name.into(),
             position: None,
+            created_at: DateTime::UNIX_EPOCH,
+            updated_at: DateTime::UNIX_EPOCH,
         }
     }
 
@@ -402,8 +407,8 @@ mod tests {
         stale.created_at = at(5);
         let mut deleting = bot(5, "Deleting", None);
         deleting.last_message_at = at(50);
-        deleting.cleanup = Some(crate::api::Cleanup {
-            state: "pending".into(),
+        deleting.cleanup = Some(else_wire::bots::Cleanup {
+            state: else_wire::bots::CleanupState::Pending,
             error: None,
         });
         let bots = vec![stale, older, talked, new, deleting];

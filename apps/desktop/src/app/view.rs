@@ -6,7 +6,6 @@ use super::{
     ToggleSettings,
 };
 use crate::ambient::looping;
-use crate::api::{Bot, SidebarStatus};
 use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
 use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
@@ -14,8 +13,11 @@ use crate::controls::{
     COMPOSER_ACTION, Control as _, Scale, Tier, composer_actions, composer_turn, send_button,
     stop_button,
 };
-use crate::model::{Phase, TurnStatus};
 use crate::sidebar::status::{Kind, Subtitle};
+use else_wire::bots::Bot;
+use else_wire::bots::Phase;
+use else_wire::bots::SidebarStatus;
+use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::Icon;
@@ -73,8 +75,8 @@ impl ElseApp {
     pub(crate) fn provider_label(&self, id: &str) -> String {
         self.caps
             .as_ref()
-            .and_then(|caps| caps.providers.iter().find(|p| p.id == id))
-            .map(|p| p.label.clone())
+            .and_then(|caps| caps.providers.iter().find(|p| p.state.id == id))
+            .map(|p| p.state.label.clone())
             .unwrap_or_else(|| id.to_owned())
     }
 
@@ -1132,7 +1134,9 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
-    if activity.phase == Phase::Working && bot.sidebar_status == Some(SidebarStatus::HasComputer) {
+    if activity.phase == Phase::Working
+        && matches!(bot.sidebar_status, Some(SidebarStatus::HasComputer { .. }))
+    {
         return "You have the computer".to_owned();
     }
     // An owner request outranks the bots it waits on, as in the sidebar.

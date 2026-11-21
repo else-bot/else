@@ -4,7 +4,8 @@ pub(super) use viewer::ImageViewer;
 
 use super::{ElseApp, RowKey};
 use crate::api::Client;
-use crate::attachments::{Attachment, MessagePart};
+use else_wire::items::Attachment;
+use else_wire::items::MessagePart;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -517,7 +518,8 @@ mod tests {
     }
 
     use super::{image_files, load_image, without_images};
-    use crate::attachments::{Attachment, MessagePart};
+    use else_wire::items::Attachment;
+    use else_wire::items::MessagePart;
     use uuid::Uuid;
 
     #[test]

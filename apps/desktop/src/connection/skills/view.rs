@@ -196,9 +196,7 @@ impl View {
                 .border_color(theme.border)
                 .child(header);
             if expanded {
-                let date = chrono::DateTime::parse_from_rfc3339(&entry.installed_at)
-                    .map(|date| date.format("%b %-d, %Y").to_string())
-                    .unwrap_or_else(|_| entry.installed_at.clone());
+                let date = entry.installed_at.format("%b %-d, %Y").to_string();
                 let mut detail = v_flex()
                     .gap_3()
                     .pl_8()

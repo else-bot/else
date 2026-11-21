@@ -46,6 +46,11 @@ async fn onboarding_names_the_main_bot_and_sets_its_model_and_the_defaults() {
         .await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
     assert_eq!(done.body["main_bot_id"], main);
+    assert_eq!(done.body["name"], "Jarvis");
+    assert_eq!(
+        done.body["profile"],
+        json!({ "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "high", "service_tier": "priority" })
+    );
 
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     assert_eq!(caps.body["onboarding_required"], false);

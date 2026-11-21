@@ -8,7 +8,6 @@
 //! the scope keeps a started use, whose outcome is unknown.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -18,8 +17,7 @@ use crate::db::events;
 use crate::db::turns;
 
 /// An approved tool call the gate let run, from `used_at` and `use_outcome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "outcome", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Use {
     /// No result was recorded: the call is still running, or its result was
     /// lost to a crash or to a call the gate could not trace.
@@ -33,6 +31,16 @@ pub enum Use {
     Error {
         at: DateTime<Utc>,
     },
+}
+
+impl From<Use> for else_wire::questions::QuestionUse {
+    fn from(used: Use) -> Self {
+        match used {
+            Use::Started { at } => Self::Started { at },
+            Use::Completed { at } => Self::Completed { at },
+            Use::Error { at } => Self::Error { at },
+        }
+    }
 }
 
 /// `owner_questions.use_outcome`, set once the call's tool returns.

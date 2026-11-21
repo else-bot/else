@@ -20,6 +20,16 @@ pub enum LocalStatus {
     Failed,
 }
 
+impl From<LocalStatus> for else_wire::backups::LocalBackupStatus {
+    fn from(value: LocalStatus) -> Self {
+        match value {
+            LocalStatus::Running => Self::Running,
+            LocalStatus::Completed => Self::Completed,
+            LocalStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 /// How a set's last remote run ended, as `backup_runs.remote_status`
 /// records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]

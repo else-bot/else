@@ -378,6 +378,7 @@ async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
     assert_eq!(undo.status, StatusCode::OK, "{}", undo.body);
 
     let file = rules(&h.app, &main).await;
+    assert_eq!(file["history"][0].get("undone_at"), Some(&Value::Null));
     let versions: Vec<(i64, bool)> = file["history"]
         .as_array()
         .unwrap()

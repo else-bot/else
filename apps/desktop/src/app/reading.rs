@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use super::conversation::ReplyLayout;
 use super::{Connection, ElseApp};
-use crate::api::{ClientError, ReadCommand, ReplyPosition};
+use crate::api::{ClientError, ReadCommand};
 use crate::inbox::{Mark, Outcome};
+use else_wire::bots::ReplyPosition;
 use gpui_kit::*;
 use uuid::Uuid;
 

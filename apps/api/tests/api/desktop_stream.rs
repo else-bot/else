@@ -294,6 +294,7 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
         runtime.clone(),
         ComputerConfig {
             desktop: true,
+            memory_mib: 1024,
             idle_after: Duration::from_secs(3600),
             lease_ttl,
             state_dir: dir.path().to_owned(),
@@ -482,6 +483,22 @@ async fn the_stream_authenticates_and_never_wakes_unless_asked() {
         .owner("GET", &format!("/v1/bots/{}/computer", s.bot), None)
         .await;
     assert_eq!(reply.body["desktop_available"], true, "{:?}", reply.body);
+
+    let new_bot = s.app.create_bot("New viewer").await;
+    let absent = s
+        .app
+        .owner("GET", &format!("/v1/bots/{new_bot}/computer"), None)
+        .await;
+    assert_eq!(
+        absent.body,
+        json!({
+            "bot_id": new_bot,
+            "state": "absent",
+            "desired_state": "auto",
+            "desktop_available": true,
+            "default_memory_mib": 1024,
+        })
+    );
 
     let bot_id: Uuid = s.bot.parse().unwrap();
     s.manager.owner_stop(bot_id).await.unwrap();

@@ -142,10 +142,9 @@ pub struct Accepted {
 
 /// A delegation as shown under the delegating turn: one card per provider
 /// attempt, so a council's reports share a card.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Handoff {
     pub id: Uuid,
-    #[serde(skip)]
     pub turn_id: Uuid,
     pub attempt: i64,
     pub target_bot_id: Uuid,
@@ -160,6 +159,36 @@ pub struct Handoff {
     pub updates: i64,
     /// While the task runs, the start of its latest message.
     pub progress: Option<String>,
+}
+
+impl From<&Handoff> for else_wire::delegations::Delegation {
+    fn from(row: &Handoff) -> Self {
+        Self {
+            id: row.id,
+            attempt: row.attempt,
+            target_bot_id: row.target_bot_id,
+            target_name: row.target_name.clone(),
+            task: row.task.clone(),
+            status: row.status.into(),
+            created_at: row.created_at,
+            finished_at: row.finished_at,
+            seen: row.seen,
+            updates: row.updates,
+            progress: row.progress.clone(),
+        }
+    }
+}
+
+impl From<Status> for else_wire::delegations::DelegationStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Queued => Self::Queued,
+            Status::Running => Self::Running,
+            Status::Completed => Self::Completed,
+            Status::Failed => Self::Failed,
+            Status::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 /// The delegations started by each of `turn_ids`, oldest first.

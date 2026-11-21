@@ -90,26 +90,7 @@ pub struct BotRecord {
     pub sidebar: sidebar::SidebarRow,
     /// Set while its active turn is parked on tasks it handed to other bots
     /// or on its own MCP and computer jobs.
-    pub waiting_on: Option<Json<WaitingOn>>,
-}
-
-/// What a parked turn waits on: the bots doing its tasks, oldest task
-/// first, and its own pending jobs.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct WaitingOn {
-    /// When its oldest unfinished task or job wait began.
-    pub since: DateTime<Utc>,
-    pub bots: Vec<WaitingBot>,
-    /// Its pending MCP and computer job waits.
-    pub jobs: u32,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct WaitingBot {
-    pub id: Uuid,
-    pub name: String,
-    /// Its unfinished tasks from this turn.
-    pub tasks: u32,
+    pub waiting_on: Option<Json<else_wire::bots::WaitingOn>>,
 }
 
 impl BotRecord {
@@ -561,7 +542,7 @@ async fn creation_receipt(
     .bind(seq)
     .bind(receipt_turn)
     .bind(text)
-    .bind(sqlx::types::Json(super::turns::BotCreated {
+    .bind(sqlx::types::Json(else_wire::items::BotCreated {
         bot_id,
         name: name.as_str().to_owned(),
         creator_bot_id: creator,

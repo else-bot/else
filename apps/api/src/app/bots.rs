@@ -84,6 +84,42 @@ pub struct Avatar {
     pub color: AvatarColor,
 }
 
+impl From<Avatar> for else_wire::bots::Avatar {
+    fn from(avatar: Avatar) -> Self {
+        use else_wire::bots as wire;
+        Self {
+            shape: match avatar.shape {
+                AvatarShape::Star => wire::AvatarShape::Star,
+                AvatarShape::Round => wire::AvatarShape::Round,
+                AvatarShape::Cloud => wire::AvatarShape::Cloud,
+                AvatarShape::Tile => wire::AvatarShape::Tile,
+                AvatarShape::Sparkle => wire::AvatarShape::Sparkle,
+                AvatarShape::Flower => wire::AvatarShape::Flower,
+                AvatarShape::Egg => wire::AvatarShape::Egg,
+                AvatarShape::Bean => wire::AvatarShape::Bean,
+                AvatarShape::Cone => wire::AvatarShape::Cone,
+                AvatarShape::House => wire::AvatarShape::House,
+                AvatarShape::Gem => wire::AvatarShape::Gem,
+                AvatarShape::Ghost => wire::AvatarShape::Ghost,
+            },
+            color: match avatar.color {
+                AvatarColor::White => wire::AvatarColor::White,
+                AvatarColor::Brown => wire::AvatarColor::Brown,
+                AvatarColor::Red => wire::AvatarColor::Red,
+                AvatarColor::Orange => wire::AvatarColor::Orange,
+                AvatarColor::Amber => wire::AvatarColor::Amber,
+                AvatarColor::Yellow => wire::AvatarColor::Yellow,
+                AvatarColor::Green => wire::AvatarColor::Green,
+                AvatarColor::Teal => wire::AvatarColor::Teal,
+                AvatarColor::Blue => wire::AvatarColor::Blue,
+                AvatarColor::Purple => wire::AvatarColor::Purple,
+                AvatarColor::Pink => wire::AvatarColor::Pink,
+                AvatarColor::Gray => wire::AvatarColor::Gray,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]

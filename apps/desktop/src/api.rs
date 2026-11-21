@@ -9,7 +9,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use else_wire::notices::{NoticeResponse, OwnerNotice};
+use else_wire::outgoing::{DraftResponse, OutgoingDraft};
+use else_wire::questions::QuestionAnswer;
+use else_wire::routines::{Routine, RoutineEnvelope};
+use else_wire::rules::RulesFile;
+use else_wire::settings::{
+    BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, Onboarded, ProfileChoice,
+    ServerEnvelope, Shared, SharedIconBody, Stored,
+};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -20,40 +28,37 @@ mod attachments;
 mod backups;
 pub use backups::*;
 mod computers;
-pub use computers::*;
 mod usage;
-pub use usage::*;
 mod vault;
 pub use vault::*;
-mod skills;
-pub use skills::*;
-mod mcp;
-pub use mcp::*;
 mod email;
-pub use email::*;
 mod live;
+mod mcp;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
+mod skills;
 pub mod socials;
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
-pub use desktop::{
-    ComputerState, ComputerUpgrade, DesiredState, DesktopCommand, DesktopCommands, DesktopEvent,
-    DesktopMode, MAX_CLIPBOARD_BYTES, RuntimeState,
+pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, MAX_CLIPBOARD_BYTES};
+use else_wire::bots::{
+    Bot, BotEnvelope, BotList, Category, CategoryEnvelope, CategoryList, ReplyPosition,
 };
 use serde_json::json;
 
-use crate::avatar::Avatar;
 use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
+use else_wire::bots::Avatar;
+use else_wire::conversation::Sent;
+use else_wire::conversation::Snapshot;
+use else_wire::items::Reaction;
 
 pub struct SendRequest {
     pub request_id: Uuid,
     pub text: String,
     pub provider_id: Option<String>,
     pub reaction: Option<Reaction>,
-    pub parts: Vec<crate::attachments::MessagePart>,
-    pub open_draft: Option<crate::model::DraftAttachment>,
+    pub parts: Vec<else_wire::items::MessagePart>,
+    pub open_draft: Option<crate::model::outgoing::DraftAttachment>,
     /// The owner ask this message replies to.
     pub answers_notice: Option<Uuid>,
 }
@@ -77,388 +82,6 @@ pub struct CreateBotRequest {
     pub avatar: Option<Avatar>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderInfo {
-    pub id: String,
-    pub label: String,
-    /// Whether the provider's CLI runs on the API's host (older APIs do
-    /// not say: assume it does).
-    #[serde(default = "yes")]
-    pub cli_available: bool,
-    #[serde(default)]
-    pub cli_unavailable_reason: Option<String>,
-    /// The exact models, efforts, and tiers it applies; empty for a
-    /// provider without models (it is not offered in the pickers).
-    #[serde(default)]
-    pub catalog: Catalog,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// The models a provider applies, each with its own efforts and tiers.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(from = "WireCatalog")]
-pub struct Catalog {
-    /// Featured models first, then older ones.
-    pub models: Vec<ModelInfo>,
-    /// When the server's CLI listed these; `None` for the bundled list.
-    pub listed_at: Option<String>,
-    /// Why the server's latest ask failed.
-    pub refresh_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub label: String,
-    pub efforts: Vec<String>,
-    pub tiers: Vec<String>,
-    #[serde(default)]
-    pub featured: bool,
-    /// The newest model of the same family, when this one is older.
-    #[serde(default)]
-    pub upgrade: Option<String>,
-}
-
-impl Catalog {
-    pub fn model(&self, id: &str) -> Option<&ModelInfo> {
-        self.models.iter().find(|model| model.id == id)
-    }
-
-    /// Whether the provider applies `choice` exactly.
-    pub fn applies(&self, choice: &ProfileChoice) -> bool {
-        self.model(&choice.model).is_some_and(|model| {
-            model.efforts.contains(&choice.reasoning_effort)
-                && model.tiers.contains(&choice.service_tier)
-        })
-    }
-}
-
-/// The catalog as sent. APIs before per-model details send only the flat
-/// lists, which apply to every model; empty featured models feature all.
-#[derive(Deserialize)]
-struct WireCatalog {
-    #[serde(default)]
-    models: Vec<String>,
-    #[serde(default)]
-    featured_models: Vec<String>,
-    #[serde(default)]
-    efforts: Vec<String>,
-    #[serde(default)]
-    tiers: Vec<String>,
-    #[serde(default)]
-    details: Vec<ModelInfo>,
-    #[serde(default)]
-    listed_at: Option<String>,
-    #[serde(default)]
-    refresh_error: Option<String>,
-}
-
-impl From<WireCatalog> for Catalog {
-    fn from(wire: WireCatalog) -> Self {
-        let models = if wire.details.is_empty() {
-            let featured =
-                |id: &String| wire.featured_models.is_empty() || wire.featured_models.contains(id);
-            let (first, rest): (Vec<_>, Vec<_>) = wire.models.into_iter().partition(featured);
-            first
-                .into_iter()
-                .map(|id| (id, true))
-                .chain(rest.into_iter().map(|id| (id, false)))
-                .map(|(id, featured)| ModelInfo {
-                    label: crate::profile_picker::model_label(&id),
-                    id,
-                    efforts: wire.efforts.clone(),
-                    tiers: wire.tiers.clone(),
-                    featured,
-                    upgrade: None,
-                })
-                .collect()
-        } else {
-            wire.details
-        };
-        Self {
-            models,
-            listed_at: wire.listed_at,
-            refresh_error: wire.refresh_error,
-        }
-    }
-}
-
-/// A provider and an exact profile for it, as the API takes and reports.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub struct ProfileChoice {
-    pub provider_id: String,
-    pub model: String,
-    pub reasoning_effort: String,
-    pub service_tier: String,
-}
-
-/// The profile a bot's next messages use: its own (`own`), else the
-/// defaults it follows.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct BotProfile {
-    #[serde(flatten)]
-    pub choice: ProfileChoice,
-    pub own: bool,
-}
-
-#[derive(Deserialize)]
-struct BotProfileEnvelope<P> {
-    profile: P,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Limits {
-    pub max_text_bytes: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Capabilities {
-    #[serde(default)]
-    pub api_version: Option<String>,
-    pub providers: Vec<ProviderInfo>,
-    pub limits: Limits,
-    /// What new bots start with.
-    #[serde(default)]
-    pub defaults: Option<ProfileChoice>,
-    /// The welcome screen is still to be completed.
-    #[serde(default)]
-    pub onboarding_required: bool,
-    #[serde(default)]
-    pub bot_avatar_on_create: bool,
-    /// The server settles only the ask a message names; older servers
-    /// refuse the field, so the app sends it only when this is set.
-    #[serde(default)]
-    pub answers_notice: bool,
-    /// Absent from servers that do not keep a name.
-    #[serde(default)]
-    pub server: Option<ServerInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ServerInfo {
-    /// The owner's name for the server, shared by every desktop; `None`
-    /// until someone names it.
-    pub name: Option<String>,
-    #[serde(default, deserialize_with = "shared_icon")]
-    pub icon: crate::server_icon::Shared,
-}
-
-/// `null` is an icon nobody chose; one this desktop cannot read counts as
-/// unsupported, so it keeps its own.
-fn shared_icon<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<crate::server_icon::Shared, D::Error> {
-    use crate::server_icon::Shared;
-    Ok(
-        match Option::<serde_json::Value>::deserialize(deserializer)? {
-            None => Shared::Unset,
-            Some(value) => serde_json::from_value(value).map_or(Shared::Unsupported, Shared::Set),
-        },
-    )
-}
-
-#[derive(Deserialize)]
-struct SharedIconBody {
-    icon: Option<crate::server_icon::Stored>,
-    picture: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ServerEnvelope {
-    server: ServerInfo,
-}
-
-#[derive(Deserialize)]
-struct Onboarded {
-    main_bot_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Activity {
-    pub phase: crate::model::Phase,
-    pub active_turn_id: Option<Uuid>,
-    pub queued_count: u32,
-    /// Set while the active turn is parked on tasks it handed to other
-    /// bots or on its own jobs; absent from older servers.
-    #[serde(default)]
-    pub waiting_on: Option<WaitingOn>,
-}
-
-/// What a parked turn waits on: the bots doing its tasks, oldest task
-/// first, and its own pending jobs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WaitingOn {
-    /// When its oldest unfinished task or job wait began.
-    pub since: DateTime<Utc>,
-    pub bots: Vec<WaitingBot>,
-    /// Its pending MCP and computer job waits; absent from older servers,
-    /// which report only tasks.
-    #[serde(default)]
-    pub jobs: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WaitingBot {
-    pub id: Uuid,
-    pub name: String,
-    pub tasks: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Cleanup {
-    pub state: String,
-    pub error: Option<serde_json::Value>,
-}
-
-/// `since` is when the open request was made; absent from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SidebarStatus {
-    WaitingForAnswer {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsApproval {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsTakeover {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsYou {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-        /// Absent from servers before #508.
-        #[serde(default)]
-        notice_id: Option<Uuid>,
-    },
-    NeedsCredentials {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    /// The owner took over the bot's computer and has not handed it back.
-    HasComputer,
-    Failed,
-    Stopped,
-    Uncertain,
-    #[serde(other)]
-    Unknown,
-}
-
-/// A request the bot waits on the owner to settle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Waiting {
-    pub since: Option<DateTime<Utc>>,
-}
-
-impl SidebarStatus {
-    pub fn waiting(&self) -> Option<Waiting> {
-        match self {
-            Self::WaitingForAnswer { since, .. }
-            | Self::NeedsApproval { since, .. }
-            | Self::NeedsTakeover { since, .. }
-            | Self::NeedsCredentials { since, .. }
-            | Self::NeedsYou { since, .. } => Some(Waiting { since: *since }),
-            Self::HasComputer | Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => {
-                None
-            }
-        }
-    }
-}
-
-/// An active bot, or a deletion receipt (`cleanup` set).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Bot {
-    pub id: Uuid,
-    pub name: String,
-    #[serde(default)]
-    pub metadata_revision: Option<i64>,
-    /// Absent from older servers, which draw every bot the same.
-    #[serde(default)]
-    pub avatar: Avatar,
-    #[serde(default)]
-    pub conversation_id: Option<Uuid>,
-    #[serde(default)]
-    pub selected_provider_id: Option<String>,
-    #[serde(default)]
-    pub activity: Option<Activity>,
-    #[serde(default)]
-    pub cleanup: Option<Cleanup>,
-    /// Its sidebar category; absent (older servers, receipts) or null means
-    /// unassigned.
-    #[serde(default)]
-    pub category_id: Option<Uuid>,
-    /// The owner silenced it: unread and announced only while it waits on
-    /// the owner. Absent from receipts and older servers.
-    #[serde(default)]
-    pub muted: bool,
-    /// Absent from receipts and older servers.
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-    /// The newest owner or bot message; `None` before the first one and
-    /// from older servers.
-    #[serde(default)]
-    pub last_message_at: Option<DateTime<Utc>>,
-    /// Absent from older servers and on receipts.
-    #[serde(default)]
-    pub read_state: Option<ReadState>,
-    #[serde(default)]
-    pub sidebar_status: Option<SidebarStatus>,
-    #[serde(default)]
-    pub watching: usize,
-}
-
-/// A point in a bot's replies: the assistant item, then the UTF-8 bytes of
-/// its text. Field order makes the derived ordering lexicographic.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize,
-)]
-pub struct ReplyPosition {
-    pub item_seq: i64,
-    pub text_bytes: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct LatestReply {
-    pub turn_id: Uuid,
-    pub item_id: Uuid,
-    pub position: ReplyPosition,
-    #[serde(default)]
-    pub preview: String,
-}
-
-impl LatestReply {
-    /// The preview as one line, for surfaces that cannot render markdown.
-    /// The server already strips the markdown, so parsing again would turn
-    /// literal `*stars*` into emphasis.
-    pub fn plain_preview(&self) -> String {
-        self.preview
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-/// The owner's saved read state for a bot's owner conversation.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ReadState {
-    pub latest: Option<LatestReply>,
-    pub read_through: ReplyPosition,
-    pub marked_unread: bool,
-    /// Replies past `read_through`; absent from older servers.
-    #[serde(default)]
-    pub unread_replies: Option<u32>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ReadCommand {
@@ -467,86 +90,10 @@ pub enum ReadCommand {
     MarkUnread,
 }
 
-/// A sidebar category.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Category {
-    pub id: Uuid,
-    pub name: String,
-    /// The owner's sidebar place; absent from older servers, null when
-    /// never placed.
-    #[serde(default)]
-    pub position: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CategoryList {
-    categories: Vec<Category>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CategoryEnvelope {
-    category: Category,
-}
-
-impl Bot {
-    pub fn is_active(&self) -> bool {
-        self.cleanup.is_none()
-    }
-
-    /// The open request this bot waits on the owner to settle, if any.
-    pub fn waiting(&self) -> Option<Waiting> {
-        self.sidebar_status.as_ref()?.waiting()
-    }
-
-    /// Muted and not waiting on the owner: never unread and never announced.
-    pub fn silenced(&self) -> bool {
-        self.muted && self.waiting().is_none()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BotList {
-    pub default_bot_id: Option<Uuid>,
-    /// Absent from servers without categories.
-    #[serde(default)]
-    pub categories: Vec<Category>,
-    pub bots: Vec<Bot>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RoutineEnvelope {
-    routine: Routine,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct BotEnvelope {
-    bot: Bot,
-}
-
 /// A bot's newest conversation page and the response it was read from.
 pub struct Latest {
     pub snapshot: Snapshot,
     pub raw: String,
-}
-
-/// The server's canonical owner item and turn for an accepted message.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Sent {
-    pub item: Item,
-    pub turn: Turn,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ErrorBody {
-    error: ErrorDetail,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ErrorDetail {
-    code: String,
-    message: String,
-    #[serde(default)]
-    retryable: bool,
 }
 
 /// Errors shown to the owner. None of them contain the token.
@@ -766,7 +313,7 @@ impl Client {
             _ => None,
         };
         let body = json!({
-            "icon": crate::server_icon::Stored::of(&icon),
+            "icon": Stored::from(&icon),
             "picture": picture,
             "only_if_unset": only_if_unset,
         });
@@ -786,7 +333,7 @@ impl Client {
             .await?;
         let current = matches!(
             body.icon,
-            Some(crate::server_icon::Stored::Picture { digest: Some(d) }) if d == digest
+            Shared::Set(Stored::Picture { digest: Some(d) }) if d == digest
         );
         let png = body
             .picture
@@ -843,7 +390,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         query: String,
-    ) -> Result<crate::model::SearchHits, ClientError> {
+    ) -> Result<else_wire::conversation::SearchHits, ClientError> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", &query)
             .finish();
@@ -864,7 +411,7 @@ impl Client {
         anchor_seq: i64,
         (older, newer): (i64, i64),
         (below, above): (Option<i64>, Option<i64>),
-    ) -> Result<crate::model::Window, ClientError> {
+    ) -> Result<else_wire::conversation::Window, ClientError> {
         let mut query = format!("anchor_seq={anchor_seq}&older={older}&newer={newer}");
         if let Some(below) = below {
             query.push_str(&format!("&after_seq={below}"));
@@ -920,9 +467,9 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-        edit: crate::model::DraftEdit,
+        edit: crate::model::outgoing::DraftEdit,
         always: bool,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         let mut body = json!(edit);
         if always {
             body["always"] = json!(true);
@@ -935,7 +482,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         self.draft_action(Method::DELETE, bot, draft, "always", None)
             .await
     }
@@ -944,7 +491,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         self.draft_action(Method::POST, bot, draft, "discard", None)
             .await
     }
@@ -956,12 +503,8 @@ impl Client {
         draft: Uuid,
         action: &str,
         body: Option<serde_json::Value>,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
-        #[derive(Deserialize)]
-        struct Envelope {
-            draft: crate::model::OutgoingDraft,
-        }
-        self.call::<Envelope>(
+    ) -> Result<OutgoingDraft, ClientError> {
+        self.call::<DraftResponse>(
             method,
             format!("/v1/bots/{bot}/outgoing-drafts/{draft}/{action}"),
             body,
@@ -1044,12 +587,8 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         notice: Uuid,
-    ) -> Result<crate::model::OwnerNotice, ClientError> {
-        #[derive(Deserialize)]
-        struct Envelope {
-            notice: crate::model::OwnerNotice,
-        }
-        self.call::<Envelope>(
+    ) -> Result<OwnerNotice, ClientError> {
+        self.call::<NoticeResponse>(
             Method::POST,
             format!("/v1/bots/{bot}/owner-notices/{notice}/dismiss"),
             None,
@@ -1064,12 +603,14 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         question: Uuid,
-        answer: crate::model::QuestionAnswer,
+        answer: QuestionAnswer,
     ) -> Result<(), ClientError> {
         let path = format!("/v1/bots/{bot}/questions/{question}/answer");
         let body = match answer {
-            crate::model::QuestionAnswer::Single(choice) => json!({ "choice": choice }),
-            crate::model::QuestionAnswer::Multiple(choices) => json!({ "choices": choices }),
+            QuestionAnswer::Single(choice) => json!({ "choice": choice }),
+            QuestionAnswer::Multiple(choices) => {
+                json!({ "choices": choices })
+            }
         };
         self.call::<serde_json::Value>(Method::POST, path, Some(body))
             .await
@@ -1255,8 +796,8 @@ impl Client {
     }
 
     /// The bot's rules file and every saved version.
-    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<crate::model::RulesFile, ClientError> {
-        self.call::<crate::model::RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
+    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<RulesFile, ClientError> {
+        self.call::<RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
             .await
             .map(|(_, file)| file)
     }
@@ -1640,7 +1181,7 @@ pub(crate) mod tests {
                     .approve_draft(
                         bot,
                         draft,
-                        crate::model::DraftEdit {
+                        crate::model::outgoing::DraftEdit {
                             version: 7,
                             subject: None,
                             body: "See flyer.".into(),
@@ -1700,7 +1241,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn server_icons_are_unsupported_unset_or_set_and_travel_as_the_server_expects() {
-        use crate::server_icon::{ServerIcon, Shared, Stored};
+        use crate::server_icon::ServerIcon;
+        use else_wire::settings::ServerInfo;
         let icon =
             |server: serde_json::Value| serde_json::from_value::<ServerInfo>(server).unwrap().icon;
         assert_eq!(
@@ -1993,7 +1535,7 @@ pub(crate) mod tests {
                 ..
             }) => {
                 assert_eq!(f.id.as_deref(), Some("i:b:2"));
-                assert_eq!(f.event, "item.delta");
+                assert_eq!(f.event, Err(crate::model::Reset::Malformed));
             }
             other => panic!("{other:?}"),
         }

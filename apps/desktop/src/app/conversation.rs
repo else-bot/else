@@ -3,11 +3,13 @@ use super::reply::Author;
 use super::row_text::RowText;
 use super::task_reply::state::ReplyState;
 use super::transcript::{self, Folds, RowKey, Transcript, TranscriptRow, group_open};
-use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
-use crate::model::ItemKind;
-use crate::model::Phase;
-use crate::model::{Applied, Conversation, Snapshot};
+use crate::api::{ClientError, LiveCommand, StreamMessage};
+use crate::model::{Applied, Conversation};
 use chrono::Local;
+use else_wire::bots::Phase;
+use else_wire::bots::ReplyPosition;
+use else_wire::conversation::Snapshot;
+use else_wire::items::ItemKind;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +18,7 @@ use uuid::Uuid;
 
 #[derive(Clone, Copy)]
 pub(super) struct ReplyLayout {
-    pub position: crate::api::ReplyPosition,
+    pub position: else_wire::bots::ReplyPosition,
     pub bounds: Bounds<Pixels>,
 }
 

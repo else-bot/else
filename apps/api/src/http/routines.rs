@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use else_wire::routines::{Routine as WireRoutine, RoutineEnvelope};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -27,7 +28,6 @@ use crate::app::routines::{
 };
 use crate::db::routines::{self, By, Caller, NewRoutine, Patch, Routine, RoutineError};
 use crate::grants::Grant;
-use crate::views::routine_json;
 
 pub fn routes() -> Routes {
     Routes {
@@ -95,7 +95,7 @@ async fn owner_list(
     let list = routines::list(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Json(json!({
-        "routines": list.iter().map(routine_json).collect::<Vec<_>>(),
+        "routines": list.iter().map(WireRoutine::from).collect::<Vec<_>>(),
     })))
 }
 
@@ -112,7 +112,7 @@ struct OwnerPatch {
     enabled: Option<bool>,
     /// A complete choice, or `null` to inherit the bot's model again.
     #[serde(default, deserialize_with = "present")]
-    model: Option<Option<super::settings::ProfileChoice>>,
+    model: Option<Option<super::settings::ProfileRequest>>,
     /// Forget the routine's failed runs.
     #[serde(default)]
     dismiss_failures: bool,
@@ -150,7 +150,10 @@ async fn owner_update(
         Utc::now(),
     )
     .await?;
-    Ok(Json(json!({ "routine": routine_json(&routine) })))
+    Ok(Json(json!(RoutineEnvelope {
+        routine: WireRoutine::from(&routine),
+        queued: None,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -178,9 +181,10 @@ async fn owner_retry(
     if queued {
         state.scheduler.wake();
     }
-    Ok(Json(
-        json!({ "routine": routine_json(&routine), "queued": queued }),
-    ))
+    Ok(Json(json!(RoutineEnvelope {
+        routine: WireRoutine::from(&routine),
+        queued: Some(queued),
+    })))
 }
 
 async fn owner_delete(
@@ -219,7 +223,7 @@ impl From<RoutineError> for Refusal {
 /// A routine as its bot reads it. Any-time hours read back as "always", the
 /// value the tools accept; bots read null as the working-hours default.
 fn tool_routine_json(routine: &Routine) -> Value {
-    let mut json = routine_json(routine);
+    let mut json = json!(WireRoutine::from(routine));
     if routine.run_at.is_none() && routine.active_hours.is_none() {
         json["active_hours"] = json!("always");
     }
@@ -1063,7 +1067,7 @@ pub(crate) async fn create_reminder(state: &AppState, grant: &Grant, args: &Valu
                     .unwrap_or_default()
             );
             let result = json!({
-                "reminder": routine_json(&reminder),
+                "reminder": WireRoutine::from(&reminder),
                 "runs_at_local": reminder.run_at.map(|at| {
                     crate::app::routine_failures::local_time(at, &reminder.timezone)
                 }),

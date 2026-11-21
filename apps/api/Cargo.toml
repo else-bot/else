@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 else-plain-text = { workspace = true }
 else-tailnet = { workspace = true }
 else-visual = { workspace = true }
+else-wire = { workspace = true }
 age = { version = "=0.12.1", default-features = false }
 anyhow = { workspace = true }
 async-trait = "0.1.92"

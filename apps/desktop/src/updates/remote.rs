@@ -1,33 +1,9 @@
 use super::*;
-use serde::Deserialize;
+use else_wire::maintenance::{RemoteState, Report, Status};
 use uuid::Uuid;
 
 const ENDPOINT: &str = "/v1/maintenance/update/installation";
 const RECONNECT_LIMIT: Duration = Duration::from_secs(180);
-
-#[derive(Deserialize)]
-struct Status {
-    version: String,
-    unavailable: Option<String>,
-    operation: Option<RemoteOperation>,
-}
-
-#[derive(Deserialize)]
-struct RemoteOperation {
-    request_id: Uuid,
-    version: String,
-    state: RemoteState,
-    output: String,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RemoteState {
-    Running,
-    Succeeded,
-    Failed,
-}
 
 struct Remote {
     client: Arc<Client>,
@@ -223,6 +199,12 @@ impl Remote {
                     "The installer finished, but the server reports {} instead of {}.",
                     status.version, operation.version
                 ),
+                RemoteState::Unknown => {
+                    return (
+                        Operation::Unconfirmed("The server reported an unknown update state.".into()),
+                        log.text().to_owned(),
+                    );
+                }
                 RemoteState::Failed => operation.error.unwrap_or_else(|| {
                     "The server update failed. Review the output and try again.".into()
                 }),

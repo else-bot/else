@@ -1,306 +1,6 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use else_wire::outgoing::OutgoingDraft;
+use serde::Serialize;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DraftStatus {
-    Pending,
-    Approved,
-    Sending,
-    Sent,
-    Failed,
-    Uncertain,
-    Discarded,
-    Superseded,
-}
-
-impl DraftStatus {
-    pub fn can_follow_up(self) -> bool {
-        matches!(self, Self::Pending | Self::Failed | Self::Uncertain)
-    }
-
-    /// What became of the draft, without who approved it.
-    pub fn label(self, content: &DraftContent) -> &'static str {
-        match self {
-            Self::Pending => "Needs approval",
-            Self::Approved if content.is_post() => "Waiting to post",
-            Self::Approved => "Waiting to send",
-            Self::Sending if content.is_post() => "Posting…",
-            Self::Sending if content.is_email() => "Sending email…",
-            Self::Sending => "Sending message…",
-            Self::Sent if content.is_post() => "Posted",
-            Self::Sent if content.is_email() => "Email sent",
-            Self::Sent => "Message sent",
-            Self::Failed if content.is_post() => "Post not published",
-            Self::Failed if content.is_email() => "Email not sent",
-            Self::Failed => "Message not sent",
-            Self::Uncertain if content.is_post() => "May have been posted",
-            Self::Uncertain => "May have been sent",
-            Self::Discarded => "Draft discarded",
-            Self::Superseded => "Draft replaced",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct DraftFile {
-    pub id: Uuid,
-    pub name: String,
-    pub media_type: String,
-    pub size: u64,
-    pub sha256: String,
-}
-
-impl DraftFile {
-    pub fn attachment(&self) -> crate::attachments::Attachment {
-        crate::attachments::Attachment {
-            id: self.id,
-            name: self.name.clone(),
-            media_type: self.media_type.clone(),
-            size: self.size,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "channel", rename_all = "lowercase")]
-pub enum DraftContent {
-    Email {
-        from: String,
-        to: Vec<String>,
-        cc: Vec<String>,
-        bcc: Vec<String>,
-        subject: String,
-        body: String,
-        #[serde(default)]
-        attachments: Vec<DraftFile>,
-    },
-    Message {
-        platform: String,
-        account: Option<String>,
-        destination: Option<String>,
-        /// The recurring task the bot filed it under.
-        task: Option<String>,
-        body: String,
-        #[serde(default)]
-        attachments: Vec<DraftFile>,
-    },
-}
-
-impl DraftContent {
-    pub fn attachments(&self) -> &[DraftFile] {
-        match self {
-            Self::Email { attachments, .. } | Self::Message { attachments, .. } => attachments,
-        }
-    }
-
-    pub fn attachment_ids(&self) -> Option<Vec<Uuid>> {
-        let files = self.attachments();
-        (!files.is_empty()).then(|| files.iter().map(|file| file.id).collect())
-    }
-
-    pub fn is_email(&self) -> bool {
-        matches!(self, Self::Email { .. })
-    }
-    pub fn is_post(&self) -> bool {
-        matches!(self, Self::Message { platform, .. } if platform == "x")
-    }
-    /// Messages go out as the owner's own account, so Approve always covers
-    /// one chat.
-    pub fn sends_as_owner(&self) -> bool {
-        matches!(self, Self::Message { platform, .. } if platform == "whatsapp")
-    }
-
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Email { .. } => "Mail",
-            Self::Message { platform, .. } => match platform.as_str() {
-                "x" => "X",
-                "telegram" => "Telegram",
-                "discord" => "Discord",
-                "whatsapp" => "WhatsApp",
-                _ => platform,
-            },
-        }
-    }
-
-    pub fn body(&self) -> &str {
-        match self {
-            Self::Email { body, .. } | Self::Message { body, .. } => body,
-        }
-    }
-
-    pub fn subject(&self) -> Option<&str> {
-        match self {
-            Self::Email { subject, .. } => Some(subject),
-            Self::Message { .. } => None,
-        }
-    }
-
-    /// What a receipt inside a task leads with: the email's subject, else
-    /// what the draft is.
-    pub fn title(&self) -> String {
-        match self {
-            Self::Email { subject, .. } if !subject.is_empty() => subject.clone(),
-            Self::Email { .. } => "Email".into(),
-            Self::Message { .. } if self.is_post() => "X post".into(),
-            Self::Message { .. } => format!("{} message", self.label()),
-        }
-    }
-
-    /// Who it goes to, when it names someone.
-    fn recipient(&self) -> Option<String> {
-        match self {
-            Self::Email { to, .. } => Some(to.join(", ")),
-            Self::Message { destination, .. } => destination.clone(),
-        }
-    }
-
-    pub fn audience(&self) -> String {
-        match self {
-            Self::Email { to, .. } => to.join(", "),
-            Self::Message {
-                destination: Some(destination),
-                ..
-            } => destination.clone(),
-            Self::Message {
-                account: Some(account),
-                ..
-            } => account.clone(),
-            Self::Message { .. } if self.is_post() => "Public post".into(),
-            Self::Message { .. } => String::new(),
-        }
-    }
-
-    pub fn metadata(&self) -> Vec<(&'static str, String)> {
-        match self {
-            Self::Email {
-                from, to, cc, bcc, ..
-            } => {
-                let mut rows = vec![("To", to.join(", ")), ("From", from.clone())];
-                if !cc.is_empty() {
-                    rows.push(("Cc", cc.join(", ")));
-                }
-                if !bcc.is_empty() {
-                    rows.push(("Bcc", bcc.join(", ")));
-                }
-                rows
-            }
-            Self::Message {
-                platform,
-                account,
-                destination,
-                task,
-                ..
-            } => {
-                let mut rows = Vec::new();
-                if let Some(task) = task {
-                    rows.push(("Task", task.clone()));
-                }
-                if let Some(account) = account {
-                    rows.push(("Account", account.clone()));
-                }
-                if let Some(destination) = destination {
-                    rows.push((
-                        match platform.as_str() {
-                            "telegram" => "Chat",
-                            "x" => "Reply to",
-                            _ => "Destination",
-                        },
-                        destination.clone(),
-                    ));
-                }
-                rows
-            }
-        }
-    }
-
-    /// Who and where "Approve always" covers, as in "X posts from @acme",
-    /// or for a task, "Initial lead DMs: X messages from @acme to anyone".
-    pub fn kind_label(&self) -> String {
-        let Self::Message {
-            account,
-            destination,
-            task,
-            ..
-        } = self
-        else {
-            return "emails".into();
-        };
-        let mut label = format!(
-            "{}{} {}",
-            task.as_ref().map(|t| format!("{t}: ")).unwrap_or_default(),
-            self.label(),
-            if self.is_post() && destination.is_none() && task.is_none() {
-                "posts"
-            } else {
-                "messages"
-            }
-        );
-        if let Some(account) = account {
-            label.push_str(&format!(" from {account}"));
-        }
-        match (task, destination) {
-            (Some(_), _) => label.push_str(" to anyone"),
-            (None, Some(destination)) => label.push_str(&format!(" to {destination}")),
-            (None, None) => {}
-        }
-        label
-    }
-
-    pub fn approve_label(&self) -> &'static str {
-        if self.is_post() {
-            "Approve & post"
-        } else {
-            "Approve & send"
-        }
-    }
-    pub fn body_label(&self) -> &'static str {
-        if self.is_email() {
-            "Email body"
-        } else if self.is_post() {
-            "Post text"
-        } else {
-            "Message text"
-        }
-    }
-}
-
-/// The detail the API writes when it closes a draft because the owner's reply
-/// moved on (migration `0037_reply_closes_drafts`), not by the Discard button.
-const REPLY_MOVED_ON: &str = "Your reply moved on without sending it.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ApprovalSource {
-    Button,
-    Message,
-    /// Approved as proposed, because the owner approves its kind always.
-    Standing,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct OutgoingDraft {
-    pub id: Uuid,
-    pub lineage_id: Uuid,
-    pub revision: i64,
-    pub content: DraftContent,
-    pub version: i64,
-    pub status: DraftStatus,
-    pub can_approve: bool,
-    /// Handed to the live request of the owner reply it was sent with.
-    #[serde(default)]
-    pub in_reply: bool,
-    pub result_detail: Option<String>,
-    #[serde(default)]
-    pub approval_source: Option<ApprovalSource>,
-    /// What "Approve always" would cover; none for an email or an X reply.
-    #[serde(default)]
-    pub kind: Option<serde_json::Value>,
-    pub updated_at: DateTime<Utc>,
-    pub settled_at: Option<DateTime<Utc>>,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DraftEdit {
@@ -319,54 +19,12 @@ pub struct DraftAttachment {
     pub edit: DraftEdit,
 }
 
-impl OutgoingDraft {
-    /// Open on its card for the owner to edit, approve, or discard.
-    pub fn is_open(&self) -> bool {
-        self.status == DraftStatus::Pending && !self.in_reply
-    }
+pub trait OutgoingDraftEdit {
+    fn edit(&self) -> DraftEdit;
+}
 
-    /// The receipt line: who acted, then what became of the draft.
-    pub fn label(&self) -> String {
-        match self.status {
-            DraftStatus::Pending if self.in_reply => "Continued in your reply".into(),
-            DraftStatus::Discarded if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) => {
-                "Closed by your reply".into()
-            }
-            // Otherwise only the owner's Discard button discards a draft.
-            DraftStatus::Discarded => "You discarded this draft".into(),
-            _ => {
-                let outcome = self.status.label(&self.content);
-                match self.approver() {
-                    Some(who) => format!("{who} · {outcome}"),
-                    None => outcome.into(),
-                }
-            }
-        }
-    }
-
-    /// Who approved the draft, once it has left review.
-    fn approver(&self) -> Option<&'static str> {
-        match (self.status, self.approval_source) {
-            (DraftStatus::Pending | DraftStatus::Superseded, _) => None,
-            (_, Some(ApprovalSource::Button)) => Some("You approved"),
-            (_, Some(ApprovalSource::Message)) => Some("You approved in chat"),
-            (_, Some(ApprovalSource::Standing)) => Some("Approved by your standing rule"),
-            (DraftStatus::Approved, None) => Some("Approved"),
-            (_, None) => None,
-        }
-    }
-
-    /// The receipt's title and outcome lines inside a task, whose meta row
-    /// already carries the time.
-    pub fn task_receipt(&self) -> (String, String) {
-        let outcome = match self.content.recipient() {
-            Some(to) => format!("{} · to {to}", self.label()),
-            None => self.label(),
-        };
-        (self.content.title(), outcome)
-    }
-
-    pub fn edit(&self) -> DraftEdit {
+impl OutgoingDraftEdit for OutgoingDraft {
+    fn edit(&self) -> DraftEdit {
         DraftEdit {
             version: self.version,
             subject: self.content.subject().map(str::to_owned),
@@ -379,6 +37,8 @@ impl OutgoingDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use else_wire::outgoing::{ApprovalSource, DraftContent, DraftStatus};
     use serde_json::json;
 
     fn file_content(channel: &str, attachments: Option<serde_json::Value>) -> DraftContent {
@@ -398,6 +58,8 @@ mod tests {
             id: Uuid::nil(),
             lineage_id: Uuid::nil(),
             revision: 1,
+            bot_id: None,
+            turn_id: None,
             content,
             version: 3,
             status: DraftStatus::Pending,
@@ -405,7 +67,13 @@ mod tests {
             in_reply: false,
             result_detail: None,
             approval_source: None,
+            approved_version: None,
+            approved_item_id: None,
+            approved_at: None,
+            delivery: None,
+            superseded_by: None,
             kind: None,
+            created_at: None,
             updated_at: Utc::now(),
             settled_at: None,
         }
@@ -560,15 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_closed_detail_matches_the_migration_that_writes_it() {
-        assert!(
-            include_str!("../../../api/migrations/0037_reply_closes_drafts.sql")
-                .contains(REPLY_MOVED_ON),
-            "rewording the trigger's detail would credit the owner with its discards"
-        );
-    }
-
-    #[test]
     fn a_receipt_names_who_approved_or_discarded_it() {
         let card = |status: &str, source: Option<&str>, detail: Option<&str>| -> String {
             serde_json::from_value::<OutgoingDraft>(json!({
@@ -611,7 +270,11 @@ mod tests {
             "a failed draft the owner discarded keeps its failure detail"
         );
         assert_eq!(
-            card("discarded", None, Some(REPLY_MOVED_ON)),
+            card(
+                "discarded",
+                None,
+                Some("Your reply moved on without sending it.")
+            ),
             "Closed by your reply"
         );
         assert_eq!(card("superseded", Some("button"), None), "Draft replaced");

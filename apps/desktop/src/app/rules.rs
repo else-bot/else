@@ -3,11 +3,12 @@
 //! history.
 
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
-use crate::model::RuleAuthor;
 use std::collections::HashMap;
 
 use super::ElseApp;
-use crate::model::{DiffLine, DiffOp, RuleChange, RulesFile, RulesUpdate, RulesVersion};
+use else_wire::rules::{
+    DiffLine, DiffOp, RuleAuthor, RuleChange, RulesFile, RulesUpdate, RulesVersion,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -61,6 +62,7 @@ fn change_label(change: RuleChange) -> &'static str {
         RuleChange::Changed => "Changed rule",
         RuleChange::Removed => "Removed rule",
         RuleChange::Restored => "Restored rule",
+        RuleChange::Unknown => "Updated rule",
     }
 }
 
@@ -138,7 +140,9 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
             // The band and the sign carry the colour; the text stays in the
             // body colour so it reads on the tint.
             let (sign, color, text, fill) = match line.op {
-                DiffOp::Same => (" ", theme.muted_foreground, theme.muted_foreground, None),
+                DiffOp::Same | DiffOp::Unknown => {
+                    (" ", theme.muted_foreground, theme.muted_foreground, None)
+                }
                 DiffOp::Add => (
                     "+",
                     theme.success,

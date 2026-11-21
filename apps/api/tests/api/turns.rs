@@ -651,6 +651,17 @@ async fn profiles_validate_snapshot_and_survive_restart() {
 async fn capabilities_list_providers_and_limits() {
     let app = TestApp::installed().await;
     let caps = app.owner("GET", "/v1/capabilities", None).await;
+    assert_eq!(caps.body["api_version"], "v1");
+    assert_eq!(caps.body["answers_notice"], true);
+    assert_eq!(caps.body["bot_avatar_on_create"], true);
+    assert!(
+        caps.body["server_instance_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .is_ok()
+    );
+    assert_eq!(caps.body["server"], json!({ "name": null, "icon": null }));
     assert_eq!(caps.body["default_provider_id"], "synthetic");
     let ids: Vec<_> = caps.body["providers"]
         .as_array()
@@ -659,8 +670,19 @@ async fn capabilities_list_providers_and_limits() {
         .map(|p| p["id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(ids, vec!["synthetic", "codex"]);
-    assert_eq!(caps.body["providers"][0]["label"], "Synthetic (test)");
-    assert_eq!(caps.body["limits"]["max_text_bytes"], 32768);
+    assert_eq!(
+        caps.body["providers"][0],
+        json!({
+            "id": "synthetic", "label": "Synthetic (test)", "available": true,
+            "unavailable_reason": null, "cli_available": true, "cli_unavailable_reason": null,
+            "requires_profile": false, "profile_configured": false,
+            "catalog": { "models": [], "featured_models": [], "efforts": [], "tiers": [], "details": [], "listed_at": null, "refresh_error": null },
+        })
+    );
+    assert_eq!(
+        caps.body["limits"],
+        json!({ "max_text_bytes": 32768, "max_bot_name_chars": 80 })
+    );
     assert_eq!(caps.body["defaults"]["provider_id"], "codex");
     assert_eq!(caps.body["defaults"]["model"], "gpt-6.1-sol");
     assert_eq!(caps.body["providers"][1]["cli_available"], true);

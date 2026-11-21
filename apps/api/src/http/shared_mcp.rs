@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use else_wire::mcp::{Library, McpAuthorization, McpConnectionStatus};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -47,9 +48,9 @@ fn api_error(error: Error) -> ApiError {
     }
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let packages = state.mcps.listings().await.map_err(api_error)?;
-    Ok(Json(json!({"mcps": packages})))
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Library>, ApiError> {
+    let mcps = state.mcps.listings().await.map_err(api_error)?;
+    Ok(Json(Library { mcps }))
 }
 
 async fn remove(
@@ -532,7 +533,7 @@ pub(super) async fn auth_required(
     grant: &Grant,
     id: &PackageId,
     purpose: Option<&str>,
-    connection: crate::mcp::oauth::ConnectionStatus,
+    connection: McpConnectionStatus,
     status: &str,
 ) -> Refusal {
     use crate::app::questions::{McpConnection, Spec};
@@ -593,10 +594,10 @@ struct AuthorizeArgs {
 async fn connection(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<McpConnectionStatus>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
     let status = state.mcps.connection_status(&id).await.map_err(api_error)?;
-    Ok(Json(json!(status)))
+    Ok(Json(status))
 }
 
 async fn disconnect(
@@ -612,14 +613,14 @@ async fn authorize(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
     super::error::ApiJson(body): super::error::ApiJson<AuthorizeArgs>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<McpAuthorization>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
     let started = state
         .mcps
         .authorize(&id, body.redirect_uri)
         .await
         .map_err(api_error)?;
-    Ok(Json(json!(started)))
+    Ok(Json(started))
 }
 
 async fn complete(
@@ -652,12 +653,12 @@ async fn cancel_authorization(
 async fn cancel_pending_authorization(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<McpConnectionStatus>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
     let status = state
         .mcps
         .cancel_pending_authorization(&id)
         .await
         .map_err(api_error)?;
-    Ok(Json(json!(status)))
+    Ok(Json(status))
 }

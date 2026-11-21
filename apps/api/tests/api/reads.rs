@@ -515,7 +515,7 @@ async fn upgrading_counts_existing_history_as_read() {
     let listing = else_api::db::bots::list(&db.pool, false).await.unwrap();
     let state = listing.bots[0].read.state();
     assert!(!state.unread, "{state:?}");
-    let position = else_api::db::reads::ReplyPosition {
+    let position = else_wire::bots::ReplyPosition {
         item_seq: 2,
         text_bytes: "Réponse ✓".len() as i64,
     };

@@ -3,326 +3,53 @@
 //! mismatch, an unknown kind) asks the caller to reload a snapshot rather than
 //! guessing, so a bubble is never duplicated or corrupted.
 
+#[cfg(test)]
 mod skills;
-pub use skills::*;
 
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use else_wire::bots::Activity;
+use else_wire::computers::ComputerHandoff;
+use else_wire::conversation::{BotExtras, BotUpdated, Event, EventKind, Snapshot, Window};
+use else_wire::delegations::Delegation;
+use else_wire::email::MailTrigger;
+use else_wire::items::{Item, ItemKind, MessagePart, ReactionKind};
+use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
+use else_wire::outgoing::{DraftStatus, OutgoingDraft};
+use else_wire::questions::{Question, QuestionStatus};
+use else_wire::routines::{Routine, Watcher, Webhook};
+use else_wire::secrets::SecretRequest;
+use else_wire::skills::{SkillInstall, SkillInstallStatus};
+use else_wire::socials::{SocialSetup, Trigger};
+use else_wire::turns::Turn;
+use else_wire::waits::{ComputerJobWait, McpWait};
+use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::api::MailTrigger;
-use crate::api::socials::Trigger;
-use crate::api::{Activity, Bot};
+pub(crate) mod outgoing;
 
-mod outgoing;
-mod status;
-pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
-pub(crate) use status::wire_state;
-pub use status::{
-    ItemKind, PausedReason, Phase, QuestionKind, QuestionStatus, RuleAuthor, RunStatus,
-    SecretRequestStatus, SkipReason, TurnStatus,
-};
-
-/// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One event of a `bot:<id>` channel: its cursor and its event, decoded
+/// once. An event this build does not know, or one whose data does not
+/// parse, waits for `apply` to ask for a snapshot.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub id: Option<String>,
-    pub event: String,
-    pub data: String,
+    pub event: Result<Event, Reset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Item {
-    pub id: Uuid,
-    pub seq: i64,
-    pub turn_id: Uuid,
-    pub request_id: Option<Uuid>,
-    pub kind: ItemKind,
-    pub text: String,
-    #[serde(default)]
-    pub parts: Vec<crate::attachments::MessagePart>,
-    pub provider_id: Option<String>,
-    /// Absent from older servers.
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-    /// Set on the owner's feedback message sent as a reaction.
-    #[serde(default)]
-    pub reaction: Option<Reaction>,
-    #[serde(default)]
-    pub bot_task: Option<BotTask>,
-    #[serde(default)]
-    pub bot_reply: Option<BotReply>,
-    #[serde(default)]
-    pub routine_update: Option<RoutineUpdate>,
-    #[serde(default)]
-    pub bot_created: Option<BotCreated>,
-    #[serde(default)]
-    pub rules_update: Option<RulesUpdate>,
-    /// The provider attempt that wrote an assistant item. Absent from older servers.
-    #[serde(default)]
-    pub attempt: Option<i64>,
-}
-
-/// How far a joined message got into the reply it joined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SteerStatus {
-    Pending,
-    Sending,
-    /// The reply took it and answers it.
-    Delivered,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuleChange {
-    Added,
-    Changed,
-    Removed,
-    Restored,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffOp {
-    Same,
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct DiffLine {
-    pub op: DiffOp,
-    pub text: String,
-}
-
-/// The card for one saved version of a bot's rules.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesUpdate {
-    pub version: i64,
-    pub section: String,
-    pub change: RuleChange,
-    pub owner_words: String,
-    pub diff: Vec<DiffLine>,
-    /// When the owner undid this change.
-    #[serde(default)]
-    pub undone_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RuleSection {
-    pub title: String,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesVersion {
-    pub version: i64,
-    pub section: String,
-    pub change: RuleChange,
-    pub owner_words: String,
-    pub author: RuleAuthor,
-    pub restored_from: Option<i64>,
-    pub diff: Vec<DiffLine>,
-    pub created_at: DateTime<Utc>,
-    /// When the owner undid this version by restoring the one before it.
-    #[serde(default)]
-    pub undone_at: Option<DateTime<Utc>>,
-}
-
-/// A bot's rules file with every saved version, newest first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesFile {
-    pub version: i64,
-    pub markdown: String,
-    pub sections: Vec<RuleSection>,
-    pub history: Vec<RulesVersion>,
-}
-
-impl RulesFile {
-    /// Titles of the rules changed after version `seen`, lowercased.
-    pub fn changed_since(&self, seen: i64) -> std::collections::HashSet<String> {
-        self.history
-            .iter()
-            .filter(|v| {
-                v.version > seen && v.change != RuleChange::Removed && !v.section.is_empty()
-            })
-            .map(|v| v.section.to_lowercase())
-            .collect()
-    }
-}
-
-/// The main bot's notice that `creator_bot_id` created `bot_id`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotCreated {
-    pub bot_id: Uuid,
-    pub name: String,
-    pub creator_bot_id: Uuid,
-    pub creator_name: String,
-    pub purpose: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct RoutineUpdate {
-    pub routine_id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotTask {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    /// The delegating bot's short name for the task. Absent from older
-    /// servers and older tasks.
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(flatten)]
-    pub declared: Declared,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotReply {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    pub status: BotReplyStatus,
-    /// Why a failed task failed, apart from the progress it wrote. Absent
-    /// from older servers.
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(flatten)]
-    pub declared: Declared,
-    /// The owner notices of the task and of the tasks it delegated, oldest
-    /// first.
-    #[serde(default)]
-    pub asks: Vec<ExchangeAsk>,
-}
-
-/// What a delegated task declared it needs from the owner. The bot's
-/// judgment, shown as its words, never an approval.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnerNeed {
-    Nothing,
-    /// Done, with the bot's one line for the owner.
-    Fyi(String),
-    Decision,
-    Blocked,
-}
-
-/// A task's declared need. `None` when it declared nothing: an older
-/// server or task, or a bot that forgot. Never read as "nothing".
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(from = "DeclaredNeed")]
-pub struct Declared(pub Option<OwnerNeed>);
-
-#[derive(Deserialize)]
-struct DeclaredNeed {
-    #[serde(default)]
-    owner_need: Option<String>,
-    #[serde(default)]
-    owner_line: Option<String>,
-}
-
-impl From<DeclaredNeed> for Declared {
-    fn from(raw: DeclaredNeed) -> Self {
-        Self(match (raw.owner_need.as_deref(), raw.owner_line) {
-            (Some("nothing"), _) => Some(OwnerNeed::Nothing),
-            (Some("fyi"), Some(line)) => Some(OwnerNeed::Fyi(line)),
-            (Some("decision"), _) => Some(OwnerNeed::Decision),
-            (Some("blocked"), _) => Some(OwnerNeed::Blocked),
-            _ => None,
-        })
-    }
-}
-
-/// An owner notice shown on an exchange, with the name of the bot asking.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ExchangeAsk {
-    #[serde(flatten)]
-    pub notice: OwnerNotice,
-    pub bot_name: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BotReplyStatus {
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-/// The owner's reaction to one of the bot's messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reaction {
-    pub item_id: Uuid,
-    pub kind: ReactionKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReactionKind {
-    ThumbsUp,
-    ThumbsDown,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct TurnError {
-    pub code: String,
-    pub message: Option<String>,
-}
-
-/// A bot's request for credentials: metadata only, never a value.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SecretRequest {
-    pub description: Option<String>,
-    pub website: Option<String>,
-    pub id: Uuid,
-    pub name: String,
-    pub reason: String,
-    pub env: Vec<String>,
-    pub status: SecretRequestStatus,
-}
-
-impl SecretRequest {
-    pub fn is_pending(&self) -> bool {
-        self.status == SecretRequestStatus::Pending
-    }
-}
-
-/// A bot's request that the owner take over its computer. Its turn waits
-/// until the owner hands the computer back or declines.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ComputerHandoff {
-    pub id: Uuid,
-    pub reason: String,
-    pub status: HandoffStatus,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub taken_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HandoffStatus {
-    Pending,
-    /// The owner controls the computer and has not handed it back.
-    Taken,
-    HandedBack,
-    Dismissed,
-    Skipped,
-    Cancelled,
-}
-
-impl HandoffStatus {
-    pub fn is_open(self) -> bool {
-        matches!(self, Self::Pending | Self::Taken)
+impl Frame {
+    /// Decode a channel message's `event` and `data`.
+    pub fn decode(id: Option<String>, message: &serde_json::Value) -> Self {
+        let event = Event::deserialize(message).map_err(|_| {
+            match EventKind::deserialize(&message["event"]) {
+                Ok(EventKind::Unknown) | Err(_) => {
+                    Reset::UnknownKind(message["event"].as_str().unwrap_or_default().to_owned())
+                }
+                Ok(_) => Reset::Malformed,
+            }
+        });
+        Self { id, event }
     }
 }
 
@@ -332,412 +59,6 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
 pub const APPROVE_TASK: &str = "approve_task";
-
-/// One option of a bot's question, by its stable id and shown label.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct QuestionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum QuestionAnswer {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-impl QuestionAnswer {
-    pub fn single(&self) -> Option<&str> {
-        match self {
-            Self::Single(id) => Some(id),
-            Self::Multiple(_) => None,
-        }
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        match self {
-            Self::Single(chosen) => chosen == id,
-            Self::Multiple(chosen) => chosen.iter().any(|chosen| chosen == id),
-        }
-    }
-}
-
-/// A bot's question to the owner: a choice between options, or approval of
-/// one destructive or external action. Answered by choosing on its card.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Question {
-    pub id: Uuid,
-    pub kind: QuestionKind,
-    pub title: String,
-    #[serde(default)]
-    pub action: Option<QuestionAction>,
-    #[serde(default)]
-    pub context: Option<String>,
-    pub choices: Vec<QuestionChoice>,
-    #[serde(default)]
-    pub multiple: bool,
-    pub status: QuestionStatus,
-    /// The selected option id or ids once answered.
-    #[serde(default)]
-    pub answer: Option<QuestionAnswer>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
-    /// What became of the approved tool call once it was let run.
-    #[serde(default)]
-    pub used: Option<QuestionUse>,
-}
-
-/// An approved tool call the server let run, and what its tool returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "outcome", rename_all = "lowercase")]
-pub enum QuestionUse {
-    /// No result recorded yet: still running, or lost.
-    Started {
-        at: DateTime<Utc>,
-    },
-    Completed {
-        at: DateTime<Utc>,
-    },
-    Error {
-        at: DateTime<Utc>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct QuestionAction {
-    #[serde(default)]
-    pub tool: Option<String>,
-    #[serde(default)]
-    pub args: serde_json::Value,
-    #[serde(default)]
-    pub mcp_connection: Option<crate::api::McpConsent>,
-    #[serde(default)]
-    pub email_connection: Option<crate::api::EmailConsent>,
-    #[serde(default)]
-    pub task_scope: Option<TaskScope>,
-    #[serde(default)]
-    pub permission: Option<QuestionPermission>,
-    #[serde(default)]
-    pub bot_deletion: Option<BotDeletion>,
-    #[serde(default)]
-    pub mail_attachments: Option<MailAttachments>,
-}
-
-/// Email attachments a bot asks to read, as the card lists them.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MailAttachments {
-    pub address: String,
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub from: Vec<String>,
-    pub files: Vec<MailFile>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MailFile {
-    pub name: String,
-    pub media_type: String,
-    pub size: u64,
-}
-
-impl MailFile {
-    /// The file's kind as people name it: PDF, HTML, or its subtype.
-    pub fn kind(&self) -> String {
-        match self.media_type.as_str() {
-            "application/pdf" => "PDF".into(),
-            "text/html" | "application/xhtml+xml" => "HTML".into(),
-            "text/plain" => "Text".into(),
-            other => other
-                .rsplit('/')
-                .next()
-                .unwrap_or(other)
-                .to_ascii_uppercase(),
-        }
-    }
-}
-
-/// The bot a deletion card would delete, as it was when the card was made.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotDeletion {
-    pub name: String,
-    #[serde(default)]
-    pub avatar: crate::avatar::Avatar,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct TaskScope {
-    pub task: String,
-    pub target: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "scope", rename_all = "lowercase")]
-pub enum QuestionPermission {
-    #[serde(rename = "mcp_tool")]
-    McpTool { mcp_id: String, tool: String },
-    Task {
-        #[serde(flatten)]
-        task_scope: TaskScope,
-    },
-    #[serde(other)]
-    Other,
-}
-
-impl Question {
-    pub fn mcp_tool_scope(&self) -> Option<(&str, &str)> {
-        let action = self.action.as_ref()?;
-        if action.tool.as_deref() == Some("mcp_request") {
-            return Some((action.args["id"].as_str()?, action.args["tool"].as_str()?));
-        }
-        match &action.permission {
-            Some(QuestionPermission::McpTool { mcp_id, tool }) => Some((mcp_id, tool)),
-            _ => None,
-        }
-    }
-
-    pub fn task_scope(&self) -> Option<&TaskScope> {
-        let action = self.action.as_ref()?;
-        action.task_scope.as_ref().or(match &action.permission {
-            Some(QuestionPermission::Task { task_scope }) => Some(task_scope),
-            _ => None,
-        })
-    }
-
-    pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
-        self.action.as_ref()?.mcp_connection.as_ref()
-    }
-
-    pub fn mail_attachments(&self) -> Option<&MailAttachments> {
-        self.action.as_ref()?.mail_attachments.as_ref()
-    }
-
-    pub fn bot_deletion(&self) -> Option<&BotDeletion> {
-        self.action.as_ref()?.bot_deletion.as_ref()
-    }
-
-    pub fn email_connection(&self) -> Option<&crate::api::EmailConsent> {
-        self.action.as_ref()?.email_connection.as_ref()
-    }
-
-    pub fn is_pending(&self) -> bool {
-        self.status == QuestionStatus::Pending
-    }
-
-    /// An approval card, as opposed to a plain choice.
-    pub fn is_approval(&self) -> bool {
-        self.kind != QuestionKind::Choice
-    }
-
-    pub fn chosen(&self) -> Option<&QuestionChoice> {
-        let answer = self.answer.as_ref()?.single()?;
-        self.choices.iter().find(|c| c.id == answer)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerNoticeKind {
-    Blocked,
-    Decision,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerNoticeStatus {
-    Pending,
-    Replied,
-    Dismissed,
-    /// A card on the same turn asks the owner instead.
-    Superseded,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct OwnerNotice {
-    pub id: Uuid,
-    pub bot_id: Uuid,
-    pub turn_id: Uuid,
-    pub kind: OwnerNoticeKind,
-    pub summary: String,
-    pub tried: Option<String>,
-    pub status: OwnerNoticeStatus,
-    pub created_at: DateTime<Utc>,
-    pub settled_at: Option<DateTime<Utc>>,
-}
-
-/// How often the attempt limit cut a turn that continued, of how many
-/// continuations a request may take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct LimitContinued {
-    pub count: i64,
-    pub max: i64,
-    pub minutes: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Turn {
-    pub id: Uuid,
-    pub request_id: Uuid,
-    pub turn_no: i64,
-    /// The turn's latest provider attempt. Absent from older servers.
-    #[serde(default)]
-    pub attempt: Option<i64>,
-    /// Set once the attempt limit cut the turn and it continued. Absent
-    /// from older servers.
-    #[serde(default)]
-    pub limit_continued: Option<LimitContinued>,
-    pub provider_id: String,
-    pub status: TurnStatus,
-    pub error: Option<TurnError>,
-    pub effect_uncertain: bool,
-    #[serde(default)]
-    pub started_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub finished_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub reaction: Option<Reaction>,
-    /// The running reply this message joined. Absent from older servers.
-    #[serde(default)]
-    pub steered_into: Option<Uuid>,
-    /// How far this message got into that reply.
-    #[serde(default)]
-    pub steer_status: Option<SteerStatus>,
-    #[serde(default)]
-    pub secret_requests: Vec<SecretRequest>,
-    #[serde(default)]
-    pub skill_installs: Vec<SkillInstall>,
-    /// Absent from servers without owner questions.
-    #[serde(default)]
-    pub questions: Vec<Question>,
-    #[serde(default)]
-    pub routine: Option<RoutineRun>,
-    /// The emails whose arrival started this turn. Absent from older servers.
-    #[serde(default)]
-    pub mail: Vec<TurnMail>,
-    #[serde(default)]
-    pub outgoing_drafts: Vec<OutgoingDraft>,
-    #[serde(default)]
-    pub social_setups: Vec<crate::api::socials::SocialSetup>,
-    /// Tasks this turn handed to other bots. Absent from older servers.
-    #[serde(default)]
-    pub delegations: Vec<Delegation>,
-    /// MCP jobs this turn waits on. Absent from older servers.
-    #[serde(default)]
-    pub mcp_waits: Vec<McpWait>,
-    /// Background computer jobs this turn waits on. Absent from older servers.
-    #[serde(default)]
-    pub computer_job_waits: Vec<ComputerJobWait>,
-    /// Requests that the owner take over the computer. Absent from older servers.
-    #[serde(default)]
-    pub computer_handoffs: Vec<ComputerHandoff>,
-    #[serde(default)]
-    pub owner_notices: Vec<OwnerNotice>,
-}
-
-/// An email that started a turn, which the owner can open in the reader.
-/// `message` is where it arrived; the server follows it from there.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct TurnMail {
-    pub account_id: Uuid,
-    pub message: crate::api::MessageRef,
-    /// Absent from older servers, and for mail that arrived before them.
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub sender: Option<String>,
-    #[serde(default)]
-    pub location: MailLocation,
-}
-
-/// Where a turn's email is now, and which bot's turn put it there.
-/// Older servers send none, which reads as where it arrived.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum MailLocation {
-    #[default]
-    Arrived,
-    Archived(MailMove),
-    Trashed(MailMove),
-    Moved(MailMove),
-    Deleted(MailDeletion),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct MailMove {
-    pub folder: String,
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct MailDeletion {
-    pub by_bot_id: Option<Uuid>,
-    pub by_turn_id: Option<Uuid>,
-    pub at: DateTime<Utc>,
-}
-
-impl MailLocation {
-    /// The turn that moved or deleted the email, when a bot did.
-    pub fn by_turn(&self) -> Option<Uuid> {
-        match self {
-            Self::Arrived => None,
-            Self::Archived(m) | Self::Trashed(m) | Self::Moved(m) => m.by_turn_id,
-            Self::Deleted(d) => d.by_turn_id,
-        }
-    }
-}
-
-/// A job in an installed MCP that a waiting turn rechecks until it ends.
-/// A pending wait is the only hold of its attempt. The details are absent
-/// from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct McpWait {
-    pub id: Uuid,
-    pub mcp_id: String,
-    #[serde(default)]
-    pub tool: String,
-    /// What the bot waits for, in its own words.
-    #[serde(default)]
-    pub purpose: String,
-    #[serde(default)]
-    pub interval_seconds: i64,
-    #[serde(default)]
-    pub deadline_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub checks: i64,
-    /// The job's status in the last check, when it was readable.
-    #[serde(default)]
-    pub last_status: Option<String>,
-    #[serde(default)]
-    pub last_result: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-}
-
-/// A background job in the bot's computer that a waiting turn continues
-/// after. A pending wait is the only hold of its attempt. The details are
-/// absent from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ComputerJobWait {
-    pub id: Uuid,
-    pub job_id: Uuid,
-    #[serde(default)]
-    pub command: String,
-    /// What the bot said the job is for. Absent for jobs started without
-    /// one and from older servers.
-    #[serde(default)]
-    pub purpose: Option<String>,
-    #[serde(default)]
-    pub job_status: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-}
 
 /// One thing a bot waits on, as the owner sees it above the composer.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -759,8 +80,8 @@ impl Wait<'_> {
 
     pub fn created_at(&self) -> Option<DateTime<Utc>> {
         match self {
-            Self::Mcp(wait) => wait.created_at,
-            Self::Job(wait) => wait.created_at,
+            Self::Mcp(wait) => wait.created_at.as_deref().and_then(|at| at.parse().ok()),
+            Self::Job(wait) => wait.created_at.as_deref().and_then(|at| at.parse().ok()),
             Self::Task(task) => Some(task.created_at),
         }
     }
@@ -773,273 +94,6 @@ impl Wait<'_> {
             Self::Task(task) => !task.status.settled(),
         }
     }
-}
-
-impl Turn {
-    /// The reply this message joined took it, so that reply answers it.
-    pub fn taken_by_reply(&self) -> bool {
-        self.steer_status == Some(SteerStatus::Delivered)
-    }
-
-    /// Whether the turn waits on work of its own rather than on the owner.
-    pub fn waits_on_job(&self) -> bool {
-        !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()
-    }
-
-    /// The tasks it handed to other bots that have not ended.
-    pub fn open_delegations(&self) -> Vec<&Delegation> {
-        self.delegations
-            .iter()
-            .filter(|d| !d.status.settled())
-            .collect()
-    }
-
-    /// Whether the owner holds it: a pending skill install, secret, draft,
-    /// question, or account setup.
-    pub fn waits_on_owner(&self) -> bool {
-        self.skill_installs
-            .iter()
-            .any(|r| r.status == SkillInstallStatus::Pending)
-            || self.secret_requests.iter().any(|r| r.is_pending())
-            || self
-                .outgoing_drafts
-                .iter()
-                .any(|d| d.status == DraftStatus::Pending)
-            || self.questions.iter().any(|q| q.is_pending())
-            || self.social_setups.iter().any(|setup| setup.is_pending())
-    }
-
-    /// Parked only on tasks it handed to other bots.
-    pub fn waits_on_bots(&self) -> bool {
-        self.status == TurnStatus::Waiting
-            && !self.waits_on_job()
-            && !self.waits_on_owner()
-            && !self.open_delegations().is_empty()
-    }
-}
-
-/// A task a turn handed to another bot. Its settled reply is the item
-/// with the same ID.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Delegation {
-    pub id: Uuid,
-    /// The provider attempt that sent it; a council's tasks share one.
-    pub attempt: i64,
-    pub target_bot_id: Uuid,
-    pub target_name: String,
-    pub task: String,
-    pub status: DelegationStatus,
-    pub created_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    /// The delegating turn has read the outcome. Absent from older servers.
-    #[serde(default)]
-    pub seen: bool,
-    /// Messages the task has written so far.
-    #[serde(default)]
-    pub updates: i64,
-    /// While the task runs, the start of its latest message.
-    #[serde(default)]
-    pub progress: Option<String>,
-}
-
-impl Delegation {
-    /// Tasks one provider attempt sent share a handoff. A task carried over
-    /// from an earlier owner message has attempt 0 and stands alone.
-    pub fn shares_handoff(&self, other: &Delegation) -> bool {
-        self.attempt == other.attempt && (self.attempt > 0 || self.id == other.id)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegationStatus {
-    Queued,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl DelegationStatus {
-    pub fn settled(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct RoutineRun {
-    pub routine_id: Uuid,
-    pub name: String,
-    pub due_at: DateTime<Utc>,
-    /// The routine is a reminder, due once. Absent from older servers.
-    #[serde(default)]
-    pub reminder: bool,
-    /// The run completed with nothing to report, so it alerts no one.
-    #[serde(default)]
-    pub no_news: bool,
-}
-
-impl RoutineRun {
-    /// What started the run, as the conversation labels it.
-    pub fn label(&self) -> &'static str {
-        if self.reminder {
-            "Reminder"
-        } else {
-            "Scheduled routine"
-        }
-    }
-}
-
-/// The last due occurrence of a routine: the turn it started, or why it
-/// was skipped.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct LastRun {
-    pub due_at: DateTime<Utc>,
-    pub status: RunStatus,
-    pub skip_reason: Option<SkipReason>,
-    pub error: Option<TurnError>,
-}
-
-/// The days (`mon` to `sun`) and the span, end excluded, when a routine's
-/// runs may start, in its time zone.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ActiveHours {
-    pub days: Vec<String>,
-    pub start: String,
-    pub end: String,
-}
-
-/// A bot's saved task, run on a cron schedule in its conversation, or
-/// once at `run_at` for a reminder.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Routine {
-    pub id: Uuid,
-    pub name: String,
-    pub prompt: String,
-    pub cron: String,
-    /// When a reminder runs once; `None` for a routine on a cron schedule.
-    #[serde(default)]
-    pub run_at: Option<DateTime<Utc>>,
-    pub timezone: String,
-    /// When runs may start; `None` is any time.
-    #[serde(default)]
-    pub active_hours: Option<ActiveHours>,
-    pub enabled: bool,
-    #[serde(default)]
-    pub model: Option<crate::api::ProfileChoice>,
-    #[serde(default)]
-    pub requested_model: Option<String>,
-    pub next_run_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-    pub last_run: Option<LastRun>,
-    /// Consecutive failed runs the owner has not dismissed.
-    #[serde(default)]
-    pub failed_runs: i64,
-    /// Why else.bot switched the routine off.
-    #[serde(default)]
-    pub paused_reason: Option<PausedReason>,
-    /// The last run is the owner's retry of the paused routine, not yet
-    /// settled.
-    #[serde(default)]
-    pub retrying: bool,
-    /// A run with nothing to report may end with no news, alerting no one.
-    #[serde(default)]
-    pub quiet: bool,
-}
-
-/// A bot's webhook: an authenticated call to its URL wakes the bot with
-/// `prompt`, at most as often as its pace allows.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Webhook {
-    pub id: Uuid,
-    pub name: String,
-    pub prompt: String,
-    pub min_interval_minutes: i64,
-    pub enabled: bool,
-    pub last_wake: Option<WebhookWake>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WebhookWake {
-    pub woke_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum WatcherStatus {
-    Waiting {
-        next_check_at: Option<DateTime<Utc>>,
-    },
-    Checking,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Watcher {
-    pub id: Uuid,
-    pub purpose: String,
-    pub until: DateTime<Utc>,
-    #[serde(flatten)]
-    pub status: WatcherStatus,
-    pub last_status: Option<String>,
-    pub last_checked_at: Option<DateTime<Utc>>,
-    pub last_output: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Snapshot {
-    pub selected_provider_id: Option<String>,
-    pub event_cursor: String,
-    pub items: Vec<Item>,
-    pub turns: Vec<Turn>,
-    pub activity: Activity,
-    pub older_before_seq: Option<i64>,
-    /// Absent from servers without routines.
-    #[serde(default)]
-    pub routines: Vec<Routine>,
-    #[serde(default)]
-    pub social_triggers: Vec<Trigger>,
-    /// Absent from servers without email wake-ups.
-    #[serde(default)]
-    pub mail_triggers: Vec<MailTrigger>,
-    /// Absent from servers that don't list webhooks in the snapshot.
-    #[serde(default)]
-    pub webhooks: Vec<Webhook>,
-    #[serde(default)]
-    pub watchers: Vec<Watcher>,
-    /// The kinds of drafts the owner approves always.
-    #[serde(default)]
-    pub draft_grants: Vec<serde_json::Value>,
-    /// Absent from servers without rules.
-    #[serde(default)]
-    pub rules_version: i64,
-}
-
-/// Shown items loaded around one message, between two the owner already
-/// has.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Window {
-    pub items: Vec<Item>,
-    pub turns: Vec<Turn>,
-    /// Shown items still missing below the first item.
-    pub older_gap: i64,
-    /// Shown items still missing above the last item.
-    pub newer_gap: i64,
-}
-
-/// The messages a search found, newest first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SearchHits {
-    /// Matches in all of them.
-    pub total: usize,
-    pub hits: Vec<SearchHit>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct SearchHit {
-    pub item_id: Uuid,
-    pub seq: i64,
-    /// Matches in this message.
-    pub count: usize,
 }
 
 /// How many shown items an unloaded stretch holds.
@@ -1082,13 +136,7 @@ pub struct Conversation {
     gaps: BTreeMap<i64, GapSize>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
-    routines: Vec<Routine>,
-    social_triggers: Vec<Trigger>,
-    mail_triggers: Vec<MailTrigger>,
-    webhooks: Vec<Webhook>,
-    watchers: Vec<Watcher>,
-    draft_grants: Vec<serde_json::Value>,
-    rules_version: i64,
+    extras: BotExtras,
     /// Read from the page saved on disk, so possibly behind the server.
     saved: bool,
 }
@@ -1111,13 +159,7 @@ impl Conversation {
             gaps: BTreeMap::new(),
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
-            routines: snapshot.routines,
-            social_triggers: snapshot.social_triggers,
-            mail_triggers: snapshot.mail_triggers,
-            webhooks: snapshot.webhooks,
-            watchers: snapshot.watchers,
-            draft_grants: snapshot.draft_grants,
-            rules_version: snapshot.rules_version,
+            extras: snapshot.extras,
             saved: false,
         };
         for item in snapshot.items {
@@ -1175,81 +217,34 @@ impl Conversation {
                 got: seq,
             });
         }
-        let data: serde_json::Value =
-            serde_json::from_str(&frame.data).map_err(|_| Reset::Malformed)?;
-        match frame.event.as_str() {
-            "item.upsert" => {
-                let item: Item =
-                    serde_json::from_value(data["item"].clone()).map_err(|_| Reset::Malformed)?;
+        match frame.event.clone()? {
+            Event::ItemUpsert(upsert) => {
+                let item = upsert.item;
                 if self.seq_of.contains_key(&item.id) {
                     self.upsert_item(item);
                 } else {
                     self.insert_unseen(item);
                 }
             }
-            "item.delta" => {
-                let item_id: Uuid = serde_json::from_value(data["item_id"].clone())
-                    .map_err(|_| Reset::Malformed)?;
-                let offset = data["offset_utf8"].as_u64().ok_or(Reset::Malformed)? as usize;
-                let text = data["text"].as_str().ok_or(Reset::Malformed)?;
-                let seq_of_item = *self.seq_of.get(&item_id).ok_or(Reset::UnknownItem)?;
+            Event::ItemDelta(delta) => {
+                let seq_of_item = *self.seq_of.get(&delta.item_id).ok_or(Reset::UnknownItem)?;
                 let item = self.items.get_mut(&seq_of_item).ok_or(Reset::UnknownItem)?;
-                if item.text.len() != offset {
+                if item.text.len() as u64 != delta.offset_utf8 {
                     return Err(Reset::OffsetMismatch);
                 }
-                item.text.push_str(text);
+                item.text.push_str(&delta.text);
             }
-            "turn.updated" => {
-                let turn: Turn =
-                    serde_json::from_value(data["turn"].clone()).map_err(|_| Reset::Malformed)?;
-                self.turns.insert(turn.id, turn);
+            Event::TurnUpdated(update) => {
+                self.turns.insert(update.turn.id, update.turn);
             }
-            "bot.updated" => {
-                let bot: Bot =
-                    serde_json::from_value(data["bot"].clone()).map_err(|_| Reset::Malformed)?;
+            Event::BotUpdated(update) => {
+                let BotUpdated { bot, extras, .. } = *update;
                 self.activity = bot.activity;
                 if bot.selected_provider_id.is_some() {
                     self.selected_provider_id = bot.selected_provider_id;
                 }
-                if let Some(routines) = data.get("routines") {
-                    self.routines =
-                        serde_json::from_value(routines.clone()).map_err(|_| Reset::Malformed)?;
-                }
-                if let Some(version) = data.get("rules_version").and_then(|v| v.as_i64()) {
-                    self.rules_version = version;
-                }
-                self.social_triggers = data
-                    .get("social_triggers")
-                    .map(|triggers| serde_json::from_value(triggers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.mail_triggers = data
-                    .get("mail_triggers")
-                    .map(|triggers| serde_json::from_value(triggers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.webhooks = data
-                    .get("webhooks")
-                    .map(|webhooks| serde_json::from_value(webhooks.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.watchers = data
-                    .get("watchers")
-                    .map(|watchers| serde_json::from_value(watchers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.draft_grants = data
-                    .get("draft_grants")
-                    .map(|grants| serde_json::from_value(grants.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
+                self.extras.update(extras);
             }
-            other => return Err(Reset::UnknownKind(other.to_owned())),
         }
         self.applied = seq;
         Ok(Applied::Changed)
@@ -1531,7 +526,7 @@ impl Conversation {
         waits
     }
 
-    pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {
+    pub fn social_setup(&self, id: Uuid) -> Option<&SocialSetup> {
         self.turns
             .values()
             .flat_map(|t| &t.social_setups)
@@ -1557,7 +552,7 @@ impl Conversation {
         draft
             .kind
             .as_ref()
-            .is_some_and(|kind| self.draft_grants.contains(kind))
+            .is_some_and(|kind| self.extras.draft_grants.contains(kind))
     }
 
     pub fn update_draft(&mut self, draft: OutgoingDraft) {
@@ -1626,33 +621,38 @@ impl Conversation {
     }
 
     pub fn social_triggers(&self) -> &[Trigger] {
-        &self.social_triggers
+        &self.extras.social_triggers
     }
 
     pub fn mail_triggers(&self) -> &[MailTrigger] {
-        &self.mail_triggers
+        &self.extras.mail_triggers
     }
 
     pub fn webhooks(&self) -> &[Webhook] {
-        &self.webhooks
+        &self.extras.webhooks
     }
 
     pub fn watchers(&self) -> &[Watcher] {
-        &self.watchers
+        &self.extras.watchers
     }
 
     pub fn routines(&self) -> &[Routine] {
-        &self.routines
+        self.extras.routines.as_deref().unwrap_or_default()
     }
 
     pub fn rules_version(&self) -> i64 {
-        self.rules_version
+        self.extras.rules_version.unwrap_or_default()
     }
 
     /// A routine from a change response. Only a newer version replaces the
     /// one the stream delivered, so a late response never undoes an event.
     pub fn apply_routine(&mut self, routine: Routine) {
-        if let Some(current) = self.routines.iter_mut().find(|r| r.id == routine.id)
+        if let Some(current) = self
+            .extras
+            .routines
+            .iter_mut()
+            .flatten()
+            .find(|r| r.id == routine.id)
             && routine.updated_at > current.updated_at
         {
             *current = routine;
@@ -1707,7 +707,7 @@ impl Conversation {
                     || item
                         .parts
                         .iter()
-                        .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+                        .any(|part| matches!(part, MessagePart::File { .. }))
             })
             .map(|(_, item)| item)
             .collect()
@@ -1730,7 +730,7 @@ impl Conversation {
             && !item
                 .parts
                 .iter()
-                .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+                .any(|part| matches!(part, MessagePart::File { .. }))
     }
 
     pub fn has_request(&self, request_id: Uuid) -> bool {
@@ -1742,7 +742,16 @@ impl Conversation {
 
 #[cfg(test)]
 mod tests {
+    use super::outgoing::OutgoingDraftEdit as _;
     use super::*;
+    use else_wire::bots::Bot;
+    use else_wire::items::BotReplyStatus;
+    use else_wire::routines::RoutineRun;
+    use else_wire::routines::{RunStatus, WatcherStatus};
+    use else_wire::rules::RulesUpdate;
+    use else_wire::rules::{DiffOp, RuleChange, RulesFile};
+    use else_wire::secrets::SecretRequestStatus;
+    use else_wire::turns::TurnStatus;
     use serde_json::json;
 
     const PREFIX: &str =
@@ -1778,11 +787,10 @@ mod tests {
     }
 
     fn frame(seq: i64, event: &str, data: serde_json::Value) -> Frame {
-        Frame {
-            id: Some(format!("{PREFIX}:{seq}")),
-            event: event.into(),
-            data: data.to_string(),
-        }
+        Frame::decode(
+            Some(format!("{PREFIX}:{seq}")),
+            &json!({ "event": event, "data": data }),
+        )
     }
 
     fn delta(seq: i64, id: u128, offset: usize, text: &str) -> Frame {
@@ -1982,6 +990,69 @@ mod tests {
     }
 
     #[test]
+    fn conversation_loads_with_new_states_in_turn_cards() {
+        let turn = Uuid::from_u128(900);
+        let mut data = snapshot_json(1, vec![], None);
+        data["turns"] = json!([{
+            "id": turn, "request_id": Uuid::from_u128(901), "turn_no": 1,
+            "provider_id": "codex", "status": "waiting", "effect_uncertain": false,
+            "outgoing_drafts": [{
+                "id": Uuid::from_u128(700), "lineage_id": Uuid::from_u128(700), "revision": 1,
+                "content": {"channel":"message", "platform":"matrix", "body":"Hi"},
+                "version": 1, "status": "reviewing", "can_approve": false,
+                "approval_source": "automation", "updated_at": "2026-11-01T00:00:00Z"
+            }],
+            "delegations": [{
+                "id": Uuid::from_u128(600), "attempt": 1, "target_bot_id": bot(),
+                "target_name": "Scout", "task": "Check it", "status": "paused",
+                "created_at": "2026-11-01T00:00:00Z"
+            }],
+            "owner_notices": [{
+                "id": Uuid::from_u128(400), "bot_id": bot(), "turn_id": turn,
+                "kind": "question", "summary": "Choose a bot", "status": "acknowledged",
+                "created_at": "2026-11-01T00:00:00Z"
+            }],
+            "computer_job_waits": [{
+                "id": Uuid::from_u128(200), "job_id": Uuid::from_u128(201), "job_status": "paused"
+            }]
+        }]);
+        let conversation =
+            Conversation::from_snapshot(serde_json::from_value(data).unwrap()).unwrap();
+        let shown = conversation.turn(turn).unwrap();
+        assert_eq!(shown.outgoing_drafts[0].status, DraftStatus::Unknown);
+        assert_eq!(shown.outgoing_drafts[0].content.label(), "matrix");
+        assert_eq!(
+            shown.delegations[0].status,
+            else_wire::delegations::DelegationStatus::Unknown
+        );
+        assert_eq!(shown.owner_notices[0].status.as_str(), "acknowledged");
+        assert_eq!(
+            shown.computer_job_waits[0]
+                .job_status
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "paused"
+        );
+    }
+
+    #[test]
+    fn malformed_wait_timestamps_reject_the_turn_update() {
+        let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let update = json!({"turn": {
+            "id": Uuid::from_u128(900), "request_id": Uuid::from_u128(901), "turn_no": 1,
+            "provider_id": "codex", "status": "waiting", "effect_uncertain": false,
+            "mcp_waits": [{
+                "id": Uuid::from_u128(200), "mcp_id": "t3-code", "deadline_at": "tomorrow"
+            }]
+        }});
+        assert_eq!(
+            conversation.apply(&frame(2, "turn.updated", update)),
+            Err(Reset::Malformed)
+        );
+    }
+
+    #[test]
     fn a_skipped_question_finds_the_owner_message_that_skipped_it() {
         let stamped = |id, seq, kind, text, at: &str| {
             let mut item = item(id, seq, kind, text);
@@ -2114,8 +1185,8 @@ mod tests {
             assert!(!c.is_feedback_acknowledgement(&useful));
         }
         let mut file: Item = serde_json::from_value(reply.clone()).unwrap();
-        file.parts.push(crate::attachments::MessagePart::File {
-            file: crate::attachments::Attachment {
+        file.parts.push(else_wire::items::MessagePart::File {
+            file: else_wire::items::Attachment {
                 id: Uuid::new_v4(),
                 name: "report.txt".into(),
                 media_type: "text/plain".into(),
@@ -2286,6 +1357,10 @@ mod tests {
             c.apply(&frame(2, "mystery", json!({}))),
             Err(Reset::UnknownKind("mystery".into()))
         );
+        assert_eq!(
+            c.apply(&frame(2, "item.delta", json!({ "item_id": "x" }))),
+            Err(Reset::Malformed)
+        );
         let mut other = delta(2, 2, 2, "c");
         other.id = Some(
             "33333333-3333-3333-3333-333333333333:22222222-2222-2222-2222-222222222222:2".into(),
@@ -2404,8 +1479,9 @@ mod tests {
     #[test]
     fn routines_come_from_the_snapshot_and_each_bot_update() {
         let mut first = snapshot(1, vec![], Some(5));
-        first.routines =
-            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        first.extras.routines = Some(vec![
+            serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap(),
+        ]);
         let mut c = Conversation::from_snapshot(first).unwrap();
         assert_eq!(c.routines().len(), 1);
         assert!(c.routines()[0].enabled);
@@ -2437,7 +1513,7 @@ mod tests {
     #[test]
     fn the_rules_version_follows_the_snapshot_and_bot_updates() {
         let mut first = snapshot(1, vec![], None);
-        first.rules_version = 2;
+        first.extras.rules_version = Some(2);
         let mut c = Conversation::from_snapshot(first).unwrap();
         assert_eq!(c.rules_version(), 2);
         c.apply(&bot_updated(2, None)).unwrap();
@@ -2482,6 +1558,18 @@ mod tests {
         assert!(changed.contains("new linear issue"));
         assert!(!changed.contains("tone"));
         assert!(file.changed_since(3).is_empty());
+    }
+
+    #[test]
+    fn a_rules_card_loads_new_change_and_diff_kinds() {
+        let update: RulesUpdate = serde_json::from_value(json!({
+            "version": 2, "section": "Tone", "change": "renamed",
+            "owner_words": "Rename this rule.",
+            "diff": [{ "op": "replace", "text": "Keep it short." }]
+        }))
+        .unwrap();
+        assert_eq!(update.change, RuleChange::Unknown);
+        assert_eq!(update.diff[0].op, DiffOp::Unknown);
     }
 
     fn social_trigger(enabled: bool, provider: &str) -> serde_json::Value {
@@ -2530,7 +1618,7 @@ mod tests {
             "Discord"
         );
         let mut older = snapshot(1, vec![], None);
-        older.social_triggers =
+        older.extras.social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.merge_older(older);
         assert!(
@@ -2602,7 +1690,7 @@ mod tests {
             })
         };
         let mut first = snapshot(1, vec![], None);
-        first.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
+        first.extras.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
         let mut conversation = Conversation::from_snapshot(first).unwrap();
         let listed = &conversation.webhooks()[0];
         assert_eq!(listed.name, "Deploys");
@@ -2651,11 +1739,9 @@ mod tests {
         };
         assert_eq!(active.purpose, "Domain availability");
         assert_eq!(active.until.to_rfc3339(), "2026-12-04T10:00:00+00:00");
-        let WatcherStatus::Waiting { next_check_at } = active.status else {
-            panic!("expected a watcher waiting for its next check")
-        };
+        assert_eq!(active.status, WatcherStatus::Waiting);
         assert_eq!(
-            next_check_at.unwrap().to_rfc3339(),
+            active.next_check_at.unwrap().to_rfc3339(),
             "2026-11-20T08:13:00+00:00"
         );
         assert_eq!(active.last_checked_at, None);
@@ -2679,10 +1765,24 @@ mod tests {
     }
 
     #[test]
+    fn a_new_watcher_status_does_not_prevent_loading_a_snapshot() {
+        let mut page = snapshot_json(1, vec![], None);
+        page["watchers"] = json!([{
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307",
+            "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z",
+            "status": "new_status",
+        }]);
+        let conversation =
+            Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        assert_eq!(conversation.watchers()[0].status, WatcherStatus::Unknown);
+    }
+
+    #[test]
     fn older_servers_without_social_triggers_use_an_empty_list() {
         let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
         assert!(conversation.social_triggers().is_empty());
-        conversation.social_triggers =
+        conversation.extras.social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.apply(&bot_updated(2, None)).unwrap();
         assert!(conversation.social_triggers().is_empty());
@@ -2691,8 +1791,9 @@ mod tests {
     #[test]
     fn a_late_change_response_never_undoes_a_newer_event() {
         let mut first = snapshot(1, vec![], None);
-        first.routines =
-            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        first.extras.routines = Some(vec![
+            serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap(),
+        ]);
         let mut c = Conversation::from_snapshot(first).unwrap();
         let paused: Routine =
             serde_json::from_value(routine(false, "2026-11-02T00:00:00Z", None)).unwrap();
@@ -2920,7 +2021,7 @@ mod tests {
 
 #[cfg(test)]
 mod vault_request_tests {
-    use super::SecretRequest;
+    use else_wire::secrets::SecretRequest;
     #[test]
     fn vault_requests_read_optional_metadata_and_older_payloads() {
         let mut data = serde_json::json!({"id": uuid::Uuid::nil(), "name": "x_login", "reason": "Sign in", "env": ["USERNAME", "PASSWORD"], "status": "pending"});

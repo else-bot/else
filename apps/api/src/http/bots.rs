@@ -5,6 +5,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
+use else_wire::settings::{BotProfile, BotProfileEnvelope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -14,7 +15,7 @@ use super::{AppState, Routes};
 use crate::app::bots::{Avatar, BotName};
 use crate::db::bots::{self, BotError, BotStatus, Created};
 use crate::db::reads::{self, ReadCommand, ReadError};
-use crate::views::*;
+use else_wire::bots::{BotEnvelope, BotList};
 
 pub fn routes() -> Routes {
     Routes {
@@ -51,9 +52,9 @@ async fn mark_read(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(command): ApiJson<ReadCommand>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     let bot = reads::apply(&state.db, bot_id, command).await?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 impl From<BotError> for ApiError {
@@ -97,16 +98,12 @@ struct ListQuery {
 async fn list(
     State(state): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotList>, ApiError> {
     let Query(query) = query.map_err(|_| {
         ApiError::bad_request("invalid_query", "include_deleting must be true or false.")
     })?;
     let listing = bots::list(&state.db, query.include_deleting).await?;
-    Ok(Json(json!({
-        "default_bot_id": listing.default_bot_id,
-        "categories": listing.categories,
-        "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
-    })))
+    Ok(Json(BotList::from(&listing)))
 }
 
 #[derive(Deserialize)]
@@ -116,7 +113,7 @@ struct CreateBot {
     name: String,
     /// The bot's own provider and model; without one it uses the defaults.
     #[serde(default)]
-    profile: Option<super::settings::ProfileChoice>,
+    profile: Option<super::settings::ProfileRequest>,
     #[serde(default)]
     category_id: Option<Uuid>,
     #[serde(default)]
@@ -158,24 +155,22 @@ async fn create(
             (
                 StatusCode::CREATED,
                 [(header::LOCATION, location)],
-                Json(json!({ "bot": bot_json(&bot) })),
+                Json(BotEnvelope::from(&bot)),
             )
                 .into_response()
         }
-        Created::Existing(bot) => {
-            (StatusCode::OK, Json(json!({ "bot": bot_json(&bot) }))).into_response()
-        }
+        Created::Existing(bot) => (StatusCode::OK, Json(BotEnvelope::from(&bot))).into_response(),
     })
 }
 
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     let bot = bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 #[derive(Deserialize)]
@@ -193,7 +188,7 @@ async fn update(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<UpdateBot>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     if body.name.is_none() && body.avatar.is_none() && body.muted.is_none() {
         return Err(ApiError::bad_request(
             "invalid_input",
@@ -212,7 +207,7 @@ async fn update(
         muted: body.muted,
     };
     let bot = bots::update(&state.db, bot_id, patch).await?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 async fn delete(
@@ -224,7 +219,7 @@ async fn delete(
         BotStatus::Deleted => StatusCode::OK,
         _ => StatusCode::ACCEPTED,
     };
-    Ok((status, Json(json!({ "bot": bot_json(&bot) }))).into_response())
+    Ok((status, Json(BotEnvelope::from(&bot))).into_response())
 }
 
 pub(super) async fn delete_bot(
@@ -258,29 +253,28 @@ async fn show_profile(
         .await?
         .filter(|bot| bot.status == BotStatus::Active)
         .ok_or_else(ApiError::not_found)?;
-    if let Some(own) = crate::db::bot_profiles::get(&state.db, bot_id).await? {
-        let mut profile = super::settings::choice_json(&own.provider_id, &own.profile);
-        profile["own"] = json!(true);
-        profile["revision"] = json!(own.revision);
-        return Ok(Json(json!({ "profile": profile })));
-    }
-    let mut defaults = super::settings::defaults(&state).await?;
-    if let Some(profile) = defaults.as_mut() {
-        profile["own"] = json!(false);
-    }
-    Ok(Json(json!({ "profile": defaults })))
+    let profile = match crate::db::bot_profiles::get(&state.db, bot_id).await? {
+        Some(own) => Some(BotProfile::from(&own)),
+        None => super::settings::defaults(&state)
+            .await?
+            .map(|choice| BotProfile {
+                choice,
+                own: false,
+                revision: None,
+            }),
+    };
+    Ok(Json(json!(BotProfileEnvelope { profile })))
 }
 
 async fn set_profile(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-    ApiJson(body): ApiJson<super::settings::ProfileChoice>,
+    ApiJson(body): ApiJson<super::settings::ProfileRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let provider_id = super::settings::validate_choice(&state, &body)?;
     let saved =
         crate::db::bot_profiles::put(&state.db, bot_id, provider_id, &body.profile()).await?;
-    let mut profile = super::settings::choice_json(&saved.provider_id, &saved.profile);
-    profile["own"] = json!(true);
-    profile["revision"] = json!(saved.revision);
-    Ok(Json(json!({ "profile": profile })))
+    Ok(Json(json!(BotProfileEnvelope {
+        profile: BotProfile::from(&saved),
+    })))
 }

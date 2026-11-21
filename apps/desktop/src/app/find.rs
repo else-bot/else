@@ -5,8 +5,9 @@ use super::ElseApp;
 use super::row_text::{Highlights, RowText};
 use super::transcript::RowKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::model::{GapSize, SearchHit};
+use crate::model::GapSize;
 use else_plain_text::find::Needle;
+use else_wire::conversation::SearchHit;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::input::InputEvent;
@@ -516,7 +517,7 @@ pub(super) fn highlights(
 #[cfg(test)]
 mod tests {
     use super::{locate, step};
-    use crate::model::SearchHit;
+    use else_wire::conversation::SearchHit;
     use uuid::Uuid;
 
     fn hit(id: u128, count: usize) -> SearchHit {

@@ -10,8 +10,8 @@ use uuid::Uuid;
 use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{SkillInstall, SkillInstallStatus, SkillScope};
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
+use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
 
 pub(super) struct SkillCard {
     scope: SkillScope,
@@ -407,6 +407,7 @@ impl ElseApp {
         }
         let label = match card.scope {
             SkillScope::All => "Install for all bots".to_owned(),
+            SkillScope::Unknown => "Install skill".to_owned(),
             SkillScope::Bot => format!("Install for {bot}"),
         };
         body.child(

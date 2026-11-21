@@ -3,8 +3,9 @@ mod local;
 mod view;
 
 use super::*;
-use crate::api::{BackupSettingsInput, BackupSnapshot};
+use crate::api::BackupSettingsInput;
 use crate::attachments::byte_size;
+use else_wire::backups::BackupSnapshot;
 use std::time::Duration;
 
 use super::pane::PaneEvent;
@@ -224,7 +225,7 @@ impl View {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let mut settings = snapshot.input();
+        let mut settings = BackupSettingsInput::from(snapshot);
         let result = match &self.editor {
             Some(Editor::Destination(form)) if form.verified => {
                 settings.expected_revision = form.base_revision;
@@ -256,7 +257,7 @@ impl View {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let mut settings = snapshot.input();
+        let mut settings = BackupSettingsInput::from(snapshot);
         settings.enabled = enabled;
         self.save_settings(settings, window, cx);
     }

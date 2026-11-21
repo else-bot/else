@@ -351,9 +351,15 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     assert_eq!(card["content"]["cc"], json!(["bob@example.com"]));
     assert_eq!(card["content"]["bcc"], json!([]));
     assert_eq!(card["content"]["subject"], "Lunch on Friday?");
+    assert!(card["content"].get("account_id").is_none());
+    assert!(card["content"].get("reply_to").is_none());
+    assert!(card["content"].get("attachments").is_none());
     assert_eq!(card["status"], "pending");
     assert_eq!(card["version"], 1);
     assert_eq!(card["can_approve"], true);
+    for key in ["approved_version", "delivery", "kind", "settled_at"] {
+        assert_eq!(card.get(key), Some(&Value::Null), "{key}: {card}");
+    }
     assert_eq!(journaled(app, &main, id).await["status"], "pending");
 
     let edited = owner_action(
@@ -1876,11 +1882,19 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
     assert_eq!(approved.body["draft"]["status"], "approved");
     assert_eq!(approved.body["draft"]["approval_source"], "button");
-    assert_eq!(
-        granted(app, &main).await,
-        json!([{ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
-                 "destination": null }])
-    );
+    let expected_grants = json!([{
+        "platform": "x", "account_id": null, "account": "@proliquid_xyz", "destination": null
+    }]);
+    assert_eq!(granted(app, &main).await, expected_grants);
+    let update: String = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE bot_id = ?1 AND kind = 'bot.updated' ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(main.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    let update: Value = serde_json::from_str(&update).unwrap();
+    assert_eq!(update["draft_grants"], expected_grants);
     let replay = owner_action(
         app,
         &main,

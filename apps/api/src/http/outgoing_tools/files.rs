@@ -11,7 +11,9 @@ use uuid::Uuid;
 use super::super::AppState;
 use crate::app::messages::{MAX_ATTACHMENT_BYTES, media_type, validate_name};
 use crate::app::outgoing::send::Approved;
-use crate::app::outgoing::{DraftFile, EmailPart, FileSource};
+use else_wire::outgoing::DraftFile;
+
+use crate::app::outgoing::{EmailPart, FileSource};
 use crate::connectors::types::{MailCommand, MailErrorCode};
 use crate::grants::{Grant, Tool};
 

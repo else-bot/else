@@ -8,6 +8,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use else_wire::notices::NoticeResponse;
+use else_wire::questions::{Permissions, QuestionSettlement};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -48,11 +50,13 @@ pub fn routes() -> Routes {
 async fn dismiss_notice(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, notice_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<NoticeResponse>, ApiError> {
     use crate::db::owner_notices::{self, DismissError};
     active_bot(&state, bot_id).await?;
     match owner_notices::dismiss(&state.db, bot_id, notice_id).await {
-        Ok(notice) => Ok(Json(json!({ "notice": notice }))),
+        Ok(notice) => Ok(Json(NoticeResponse {
+            notice: (&notice).into(),
+        })),
         Err(DismissError::NotFound) => Err(ApiError::not_found()),
         Err(DismissError::Settled(status)) => Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -113,9 +117,10 @@ async fn answer(
     if settled.requeued {
         state.scheduler.wake();
     }
-    Ok(Json(
-        json!({ "question": settled.question, "requeued": settled.requeued }),
-    ))
+    Ok(Json(json!(QuestionSettlement {
+        question: (&settled.question).into(),
+        requeued: settled.requeued
+    })))
 }
 
 async fn permissions(
@@ -127,9 +132,10 @@ async fn permissions(
         owner_questions::permissions(&state.db, bot_id),
         owner_questions::routine_grants(&state.db, bot_id),
     );
-    Ok(Json(
-        json!({ "permissions": permissions?, "routine_grants": routine_grants? }),
-    ))
+    Ok(Json(json!(Permissions {
+        permissions: permissions?.iter().map(Into::into).collect(),
+        routine_grants: routine_grants?.iter().map(Into::into).collect()
+    })))
 }
 
 async fn revoke_routine(
