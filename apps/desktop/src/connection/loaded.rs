@@ -1,7 +1,8 @@
 //! The one rule every settings pane applies to replies: each fetch takes an
 //! attempt from [`Loaded::begin`], and only the reply to the latest attempt
 //! lands. A local change that a reply from before it would undo calls
-//! [`Loaded::supersede`], and its own reply lands through [`Loaded::replace`].
+//! [`Loaded::supersede`]. A local change whose reply is the whole new value
+//! shows it with [`Loaded::replace`].
 
 use uuid::Uuid;
 

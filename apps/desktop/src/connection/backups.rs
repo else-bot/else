@@ -49,8 +49,8 @@ impl View {
         self.operation != Operation::Idle
     }
 
-    /// Starts an operation. Its own reply carries the newer snapshot, so a
-    /// poll already in flight must not land after it.
+    /// Starts an operation. It may change what the server reports, so a poll
+    /// already in flight must not land after it.
     fn start(&mut self, operation: Operation) {
         self.operation = operation;
         self.error = None;
@@ -150,7 +150,7 @@ impl View {
     fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let poll_client = client.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
-            // An operation's own reply carries the newer snapshot, so no poll
+            // An operation may change what the server reports, so no poll
             // starts while one runs.
             while let Ok(attempt) =
                 this.update(cx, |view, _| (!view.busy()).then(|| view.snapshot.begin()))
