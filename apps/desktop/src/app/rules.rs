@@ -509,11 +509,11 @@ impl ElseApp {
             }));
         let heading = h_flex()
             .w_full()
-            .pb(super::settings::ROW_GAP)
+            .pb(super::panel::ROW_GAP)
             .items_center()
             .child(crate::appearance::section_label("Rules", cx).flex_1())
             .when(only_history, |row| row.child(open));
-        let body = super::settings::section_frame(cx).child(heading);
+        let body = super::panel::section_frame(cx).child(heading);
         let muted = |text: String| {
             div()
                 .text_xs()
@@ -597,7 +597,7 @@ impl ElseApp {
                             .gap_0p5()
                             .items_start()
                             .text_left()
-                            .child(super::settings::item_name(title))
+                            .child(super::panel::item_name(title))
                             .child(
                                 h_flex()
                                     .gap_1p5()

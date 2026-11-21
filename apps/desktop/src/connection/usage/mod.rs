@@ -4,11 +4,13 @@
 mod gauge;
 mod table;
 
+use super::loaded::Loaded;
+use super::pane::PaneEvent;
 use super::*;
 use crate::api::{Bot, UsageReport};
 use crate::avatar::Avatar;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
-use crate::usage_ui::{Loaded, color, local_time};
+use crate::usage_ui::{color, local_time};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::h_flex;
@@ -31,7 +33,8 @@ impl Palette {
 }
 
 pub(super) struct View {
-    id: Uuid,
+    client: Arc<Client>,
+    app: Entity<ElseApp>,
     state: Loaded<UsageReport>,
     provider: Option<String>,
     window_minutes: Option<u64>,
@@ -40,79 +43,74 @@ pub(super) struct View {
     _poll: Task<()>,
 }
 
+impl EventEmitter<PaneEvent> for View {}
+
 impl Shell {
-    /// The connected server's bots, as the sidebar lists them.
-    pub(super) fn known_bots<'a>(&self, cx: &'a App) -> &'a [Bot] {
-        self.active
-            .as_ref()
-            .map(|active| active.app.read(cx).bots())
-            .unwrap_or_default()
+    pub(super) fn focus_usage(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
+        if let Some(super::pane::Pane::Usage(pane)) = self.front.settings().map(Settings::pane) {
+            pane.view.update(cx, |view, cx| view.focus(bot, cx));
+        }
     }
+}
 
-    fn provider_name(&self, id: &str, cx: &App) -> String {
-        self.active
-            .as_ref()
-            .map(|active| active.app.read(cx).provider_label(id))
-            .unwrap_or_else(|| id.to_owned())
-    }
-
-    pub(super) fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = &self.active else { return };
-        let client = active.client.clone();
-        let id = Uuid::new_v4();
+impl View {
+    pub(super) fn new(
+        client: Arc<Client>,
+        app: Entity<ElseApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let poll_client = client.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(Some(attempt)) = this.update(cx, |shell, _| shell.begin_usage(id)) {
-                let result = client.clone().usage().await;
-                let open = this.update_in(cx, |shell, _, cx| {
-                    shell.apply_usage(id, attempt, result, cx)
-                });
-                if !matches!(open, Ok(true)) {
+            while let Ok(attempt) = this.update(cx, |view, _| view.state.begin()) {
+                let result = poll_client.clone().usage().await;
+                if this
+                    .update(cx, |view, cx| view.apply(attempt, result, cx))
+                    .is_err()
+                {
                     break;
                 }
                 cx.background_executor().timer(REFRESH).await;
             }
         });
-        self.usage = Some(View {
-            id,
-            state: Loaded::Loading(Uuid::nil()),
+        Self {
+            client,
+            app,
+            state: Loaded::default(),
             provider: None,
             window_minutes: None,
             show_more: false,
             expanded: None,
             _poll: poll,
-        });
-        cx.notify();
+        }
     }
 
-    /// Starts a fetch for the usage view with this `id`, if it is still
-    /// open.
-    fn begin_usage(&mut self, id: Uuid) -> Option<Uuid> {
-        let view = self.usage.as_mut().filter(|view| view.id == id)?;
-        Some(view.state.begin())
+    /// The connected server's bots, as the sidebar lists them.
+    fn known_bots<'a>(&self, cx: &'a App) -> &'a [Bot] {
+        self.app.read(cx).bots()
     }
 
-    /// Applies the reply to `attempt` to the usage view with this `id`;
-    /// false once that view is gone.
-    fn apply_usage(
+    fn provider_name(&self, id: &str, cx: &App) -> String {
+        self.app.read(cx).provider_label(id)
+    }
+
+    /// Applies the reply to `attempt`.
+    fn apply(
         &mut self,
-        id: Uuid,
         attempt: Uuid,
         result: Result<UsageReport, crate::api::ClientError>,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(view) = self.usage.as_mut().filter(|view| view.id == id) else {
-            return false;
-        };
-        if !view.state.awaits(attempt) {
-            return true;
+    ) {
+        if !self.state.awaits(attempt) {
+            return;
         }
         if let Ok(report) = &result
             && !report
                 .providers
                 .iter()
-                .any(|provider| Some(&provider.provider_id) == view.provider.as_ref())
+                .any(|provider| Some(&provider.provider_id) == self.provider.as_ref())
         {
-            view.provider = view
+            self.provider = self
                 .expanded
                 .and_then(|bot| {
                     report
@@ -122,44 +120,32 @@ impl Shell {
                 })
                 .or_else(|| report.default_provider())
                 .map(|provider| provider.provider_id.clone());
-            view.window_minutes = None;
+            self.window_minutes = None;
         }
-        view.state
+        self.state
             .settle(attempt, result.map_err(|error| error.to_string()));
         cx.notify();
-        true
     }
 
     /// Fetches the report once, keeping the page as it is until it arrives.
-    fn refetch_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(id)) = (
-            self.active.as_ref().map(|active| active.client.clone()),
-            self.usage.as_ref().map(|view| view.id),
-        ) else {
-            return;
-        };
-        let Some(attempt) = self.begin_usage(id) else {
-            return;
-        };
+    fn refetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let attempt = self.state.begin();
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.usage().await;
-            this.update_in(cx, |shell, _, cx| {
-                shell.apply_usage(id, attempt, result, cx);
-            })
-            .ok();
+            this.update(cx, |view, cx| view.apply(attempt, result, cx))
+                .ok();
         })
         .detach();
     }
 
-    pub(super) fn focus_usage(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
-        if let Some(view) = &mut self.usage {
-            view.expanded = bot;
-            view.show_more = bot.is_some();
-            cx.notify();
-        }
+    fn focus(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
+        self.expanded = bot;
+        self.show_more = bot.is_some();
+        cx.notify();
     }
 
-    pub(super) fn render_usage(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut body = v_flex()
             .w_full()
@@ -170,13 +156,10 @@ impl Shell {
                 "How much of each AI subscription is used, and which bots use it.",
                 cx,
             ));
-        let (view, report, error) = match self.usage.as_ref().map(|view| (view, &view.state)) {
-            None | Some((_, Loaded::Loading(_))) => {
-                return body.child("Loading usage…").into_any_element();
-            }
-            Some((view, Loaded::Failed(error))) => (view, None, Some(error)),
-            Some((view, Loaded::Ready { value, error, .. })) => (view, Some(value), error.as_ref()),
-        };
+        if self.state.pending() {
+            return body.child("Loading usage…").into_any_element();
+        }
+        let (report, error) = (self.state.value(), self.state.error());
         if let Some(error) = error {
             body = body.child(
                 h_flex()
@@ -192,9 +175,7 @@ impl Shell {
                         Button::new("usage-retry")
                             .control(Tier::Secondary, Scale::Compact, false, cx)
                             .label("Retry")
-                            .on_click(
-                                cx.listener(|shell, _, window, cx| shell.refetch_usage(window, cx)),
-                            ),
+                            .on_click(cx.listener(|view, _, window, cx| view.refetch(window, cx))),
                     ),
             );
         }
@@ -211,10 +192,7 @@ impl Shell {
                     Button::new("usage-empty-chat")
                         .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Back to chat")
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            window.close_dialog(cx);
-                            shell.cancel(window, cx);
-                        })),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Leave))),
                     cx,
                 ))
                 .into_any_element();
@@ -226,25 +204,23 @@ impl Shell {
                 segment(
                     SharedString::from(format!("usage-provider-{id}")),
                     SharedString::from(self.provider_name(&id, cx)),
-                    view.provider.as_ref() == Some(&id),
+                    self.provider.as_ref() == Some(&id),
                     false,
                     cx,
                 )
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    if let Some(view) = &mut shell.usage {
-                        view.provider = Some(id.clone());
-                        view.expanded = None;
-                        view.window_minutes = None;
-                        view.show_more = false;
-                        cx.notify();
-                    }
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.provider = Some(id.clone());
+                    view.expanded = None;
+                    view.window_minutes = None;
+                    view.show_more = false;
+                    cx.notify();
                 }))
             }));
         body = body.child(provider_control);
         let Some(provider) = report
             .providers
             .iter()
-            .find(|provider| Some(&provider.provider_id) == view.provider.as_ref())
+            .find(|provider| Some(&provider.provider_id) == self.provider.as_ref())
         else {
             return body.into_any_element();
         };
@@ -256,7 +232,7 @@ impl Shell {
                 .map(|bot| (bot.id, bot.avatar))
                 .collect(),
         };
-        let selected = provider.selected_window(view.window_minutes);
+        let selected = provider.selected_window(self.window_minutes);
         let reported: Vec<_> = provider
             .windows
             .iter()
@@ -289,8 +265,14 @@ impl Shell {
                 )));
         }
         if let Some(window) = selected {
-            body = body.child(self.usage_table(provider, window, &name, &palette, view, cx));
+            body = body.child(self.usage_table(provider, window, &name, &palette, cx));
         }
         body.into_any_element()
+    }
+}
+
+impl Render for View {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_page(cx)
     }
 }

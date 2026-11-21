@@ -54,10 +54,9 @@ fn result(status: LocalBackupStatus, theme: &Theme) -> (&'static str, Hsla) {
     }
 }
 
-impl Shell {
-    pub(super) fn render_local_backups(
+impl View {
+    pub(super) fn render_local(
         &self,
-        view: &View,
         snapshot: &BackupSnapshot,
         local: &LocalBackupSettings,
         stacked: bool,
@@ -240,11 +239,11 @@ impl Shell {
         v_flex()
             .gap_6()
             .child(summary)
-            .when_some(view.local_form.as_ref(), |section, form| {
+            .when_some(self.local_form.as_ref(), |section, form| {
                 section.child(form.render(
                     local,
-                    view.operation == Operation::SavingLocal,
-                    view.busy() || view.editor.is_some() || snapshot.pause.is_some(),
+                    self.operation == Operation::SavingLocal,
+                    self.busy() || self.editor.is_some() || snapshot.pause.is_some(),
                     stacked,
                     cx,
                 ))

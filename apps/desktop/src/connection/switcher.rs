@@ -93,12 +93,7 @@ impl Shell {
         let Some(active) = self.active.as_ref().map(|active| active.id) else {
             return;
         };
-        if window.has_active_dialog(cx)
-            || self
-                .setup
-                .as_ref()
-                .is_some_and(|setup| setup.presentation == Presentation::Onboarding)
-        {
+        if window.has_active_dialog(cx) || matches!(self.front, Front::Onboarding(_)) {
             return;
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
@@ -225,7 +220,7 @@ impl Shell {
         match target {
             Target::Bot { bot, .. } if here => self.open_active_bot(bot, window, cx),
             Target::Server { .. } if here => {
-                if self.setup.is_some() {
+                if !matches!(self.front, Front::Session) {
                     self.cancel(window, cx);
                 }
             }
@@ -258,7 +253,7 @@ impl Shell {
         if !app.read(cx).may_have_bot(bot) {
             return;
         }
-        if self.setup.is_some() {
+        if !matches!(self.front, Front::Session) {
             if self.settings_section().is_some() {
                 window.close_dialog(cx);
             }

@@ -1,6 +1,5 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
-use super::settings::watching_label;
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, ElseApp, FindInConversation, FocusComposer,
     FocusSidebar, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
@@ -1234,4 +1233,9 @@ impl Render for ElseApp {
             .children(self.render_quote_editor(cx))
             .into_any_element()
     }
+}
+
+fn watching_label(count: usize) -> String {
+    let noun = if count == 1 { "thing" } else { "things" };
+    format!("Watching {count} {noun}")
 }

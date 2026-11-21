@@ -164,21 +164,16 @@ impl Shell {
     }
 
     fn rail_shown(&self) -> bool {
-        let onboarding = self
-            .setup
-            .as_ref()
-            .is_some_and(|setup| setup.presentation == Presentation::Onboarding);
-        self.active.is_some() && !onboarding
+        self.active.is_some() && !matches!(self.front, Front::Onboarding(_))
     }
 
     /// Whether focus is in the chat or in settings, not in a dialog such
     /// as a confirmation that a switch would bypass.
     fn owns_focus(&self, window: &Window, cx: &App) -> bool {
         let settings = self
-            .setup
-            .as_ref()
-            .filter(|_| self.settings_section().is_some())
-            .is_some_and(|setup| setup.focus.contains_focused(window, cx));
+            .front
+            .settings()
+            .is_some_and(|settings| settings.focus.contains_focused(window, cx));
         window.focused(cx).is_none() || settings || self.settings_focus.contains_focused(window, cx)
     }
 }

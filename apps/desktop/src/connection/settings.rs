@@ -1,4 +1,8 @@
-use super::view::{missing_local, notice};
+mod editor;
+mod state;
+
+pub(super) use state::{ServerPage, Settings};
+
 use super::*;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
 
@@ -21,12 +25,6 @@ pub(super) enum SettingsSection {
     Computers,
     Backups,
     Updates,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Presentation {
-    Onboarding,
-    Settings(SettingsSection),
 }
 
 impl Shell {
@@ -73,15 +71,14 @@ impl Shell {
                 }
             },
         );
-        self.email = Some((view, subscription));
+        if let Some(settings) = self.front.settings_mut() {
+            settings.email = Some((view, subscription));
+        }
         cx.notify();
     }
 
     pub(super) fn settings_section(&self) -> Option<SettingsSection> {
-        match self.setup.as_ref()?.presentation {
-            Presentation::Onboarding => None,
-            Presentation::Settings(section) => Some(section),
-        }
+        self.front.settings().map(|settings| settings.section)
     }
 
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -91,23 +88,12 @@ impl Shell {
         if self.settings_section().is_some() {
             self.cancel(window, cx);
         }
-        self.server_editor = None;
-        self.server_update_target = None;
         let Some(active) = &self.active else { return };
-        let profile = active.profile.clone();
-        let local = self
-            .launch
-            .local
-            .as_ref()
-            .is_ok_and(|local| local.origin() == &profile.origin);
         active
             .app
             .update(cx, |app, cx| app.set_hidden(true, window, cx));
-        self.open_setup(None, window, cx);
-        if !local {
-            self.open_remote(Some(&profile), window, cx);
-        }
-        self.setup.as_mut().unwrap().presentation = Presentation::Settings(SettingsSection::Server);
+        let settings = Settings::new(cx);
+        self.set_front(Front::Settings(Box::new(settings)), window, cx);
         self.refresh_servers(window, cx);
         self.settings_focus.focus(window, cx);
         let shell = cx.weak_entity();
@@ -116,9 +102,9 @@ impl Shell {
         window.open_dialog(cx, move |dialog, window, cx| {
             if first.replace(false)
                 && let Some(shell) = shell.upgrade()
-                && let Some(setup) = &shell.read(cx).setup
+                && let Some(settings) = shell.read(cx).front.settings()
             {
-                let focus = setup.navigation_focus[0].clone();
+                let focus = settings.navigation_focus[0].clone();
                 focus.focus(window, cx);
             }
             let shell = shell.clone();
@@ -152,24 +138,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if section != SettingsSection::Socials {
-            self.clear_socials(window, cx);
-        } else if self.socials.is_none()
-            && let Some(active) = &self.active
-        {
-            let client = active.app.read(cx).social_client();
-            self.socials =
-                Some(cx.new(|cx| crate::socials::SocialsView::new(client, None, window, cx)));
-            if !active.app.read(cx).social_network_available() {
-                self.socials
-                    .as_ref()
-                    .unwrap()
-                    .update(cx, |view, cx| view.set_available(false, window, cx));
+        let Some(current) = self
+            .front
+            .settings()
+            .map(|settings| settings.pane().section())
+        else {
+            return;
+        };
+        let pane = (current != Some(section)).then(|| self.new_pane(section, window, cx));
+        if let Some(settings) = self.front.settings_mut() {
+            if let Some(pane) = pane {
+                settings.show(pane, window, cx);
             }
-        }
-        if let Some(setup) = &mut self.setup {
-            setup.presentation = Presentation::Settings(section);
-            setup.navigation_focus[match section {
+            settings.section = section;
+            if section == SettingsSection::Updates
+                && matches!(settings.servers, ServerPage::Update(_))
+            {
+                settings.servers = ServerPage::List;
+            }
+            settings.navigation_focus[match section {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
                 SettingsSection::Socials => 2,
@@ -184,70 +171,57 @@ impl Shell {
             .focus(window, cx);
             cx.notify();
         }
-        if section == SettingsSection::Vault {
-            if self.vault.is_none() {
-                self.open_vault(window, cx);
-            }
-        } else {
-            self.clear_vault(window, cx);
-        }
-        if section == SettingsSection::Skills {
-            if self.skills.is_none() {
-                self.open_skills(window, cx);
-            }
-        } else {
-            self.clear_skills(window, cx);
-        }
-        if section == SettingsSection::Usage {
-            if self.usage.is_none() {
-                self.open_usage(window, cx);
-            }
-        } else {
-            self.usage = None;
-        }
-        if section == SettingsSection::Computers {
-            if self.computers.is_none() {
-                self.open_computers(window, cx);
-            }
-        } else {
-            self.computers = None;
-        }
-        if section == SettingsSection::Mcp {
-            if self.mcp.is_none() {
-                self.open_mcp(window, cx);
-            }
-        } else {
-            self.mcp = None;
-        }
-        if section == SettingsSection::Backups && self.backups.is_none() {
+        let (backups, email) = self
+            .front
+            .settings()
+            .map(|settings| (settings.backups.is_some(), settings.email.is_some()))
+            .unwrap_or_default();
+        if section == SettingsSection::Backups && !backups {
             self.open_backups(window, cx);
         }
-        if section == SettingsSection::Email && self.email.is_none() {
+        if section == SettingsSection::Email && !email {
             self.open_email(None, window, cx);
         }
         if section == SettingsSection::Server {
             self.refresh_servers(window, cx);
         }
         if section == SettingsSection::Updates {
-            self.server_update_target = None;
             self.updates.refresh();
         }
     }
 
-    pub(super) fn clear_socials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.socials.take() {
-            view.update(cx, |view, cx| view.clear(window, cx));
+    /// Follows the active server's connection: losing it wipes typed
+    /// skill keys and closes the Vault, which reopens once it is back.
+    pub(super) fn connection_changed(
+        &mut self,
+        connected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.front.settings_mut() else {
+            return;
+        };
+        match settings.pane() {
+            pane::Pane::Skills(skills) => skills
+                .view
+                .update(cx, |view, cx| view.set_connected(connected, window, cx)),
+            pane::Pane::Vault(_) if !connected => settings.show(pane::Pane::None, window, cx),
+            pane::Pane::None if connected && settings.section == SettingsSection::Vault => {
+                let pane = self.new_pane(SettingsSection::Vault, window, cx);
+                if let Some(settings) = self.front.settings_mut() {
+                    settings.show(pane, window, cx);
+                }
+            }
+            _ => {}
         }
     }
 
     fn render_app_settings(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(setup) = &self.setup else {
+        let Some(settings) = self.front.settings() else {
             return div().into_any_element();
         };
-        let Some(section) = self.settings_section() else {
-            return div().into_any_element();
-        };
+        let section = settings.section;
         let nav_item = |id, label, icon, target, focus: &FocusHandle| {
             Button::new(id)
                 .focus_ring(false)
@@ -293,14 +267,14 @@ impl Shell {
                 "Servers",
                 IconName::Server,
                 SettingsSection::Server,
-                &setup.navigation_focus[0],
+                &settings.navigation_focus[0],
             ))
             .child(nav_item(
                 "settings-updates",
                 "App updates",
                 IconName::Download,
                 SettingsSection::Updates,
-                &setup.navigation_focus[7],
+                &settings.navigation_focus[7],
             ))
             .child(
                 crate::appearance::section_label("This server", cx)
@@ -314,74 +288,78 @@ impl Shell {
                 "Email",
                 IconName::Mail,
                 SettingsSection::Email,
-                &setup.navigation_focus[1],
+                &settings.navigation_focus[1],
             ))
             .child(nav_item(
                 "settings-socials",
                 "Socials",
                 IconName::MessageSquare,
                 SettingsSection::Socials,
-                &setup.navigation_focus[2],
+                &settings.navigation_focus[2],
             ))
             .child(nav_item(
                 "settings-mcp",
                 "MCP",
                 IconName::Plug,
                 SettingsSection::Mcp,
-                &setup.navigation_focus[3],
+                &settings.navigation_focus[3],
             ))
             .child(nav_item(
                 "settings-skills",
                 "Skills",
                 IconName::FileText,
                 SettingsSection::Skills,
-                &setup.navigation_focus[4],
+                &settings.navigation_focus[4],
             ))
             .child(nav_item(
                 "settings-vault",
                 "Vault",
                 IconName::Lock,
                 SettingsSection::Vault,
-                &setup.navigation_focus[9],
+                &settings.navigation_focus[9],
             ))
             .child(nav_item(
                 "settings-usage",
                 "Usage",
                 IconName::Gauge,
                 SettingsSection::Usage,
-                &setup.navigation_focus[5],
+                &settings.navigation_focus[5],
             ))
             .child(nav_item(
                 "settings-computers",
                 "Computers",
                 IconName::Monitor,
                 SettingsSection::Computers,
-                &setup.navigation_focus[8],
+                &settings.navigation_focus[8],
             ))
             .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[6],
+                &settings.navigation_focus[6],
             ));
         let body = match section {
-            SettingsSection::Server => self.render_server_settings(setup, window, cx),
+            SettingsSection::Server => self.render_server_settings(&settings.servers, window, cx),
             SettingsSection::Email => div()
-                .children(self.email.as_ref().map(|(view, _)| view.clone()))
+                .children(settings.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
-            SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
-            SettingsSection::Mcp => self.render_mcp(window, cx),
-            SettingsSection::Skills => self.render_skills(cx),
-            SettingsSection::Vault => match &self.vault {
-                Some(view) => div().child(view.clone()).into_any_element(),
+            SettingsSection::Vault if settings.pane().section().is_none() => div()
+                .child("Reconnect to the server to open the Vault.")
+                .into_any_element(),
+            SettingsSection::Socials
+            | SettingsSection::Mcp
+            | SettingsSection::Skills
+            | SettingsSection::Vault
+            | SettingsSection::Usage
+            | SettingsSection::Computers => settings.pane().element(),
+            SettingsSection::Backups => match &settings.backups {
+                Some(pane) => pane.view.clone().into_any_element(),
                 None => div()
-                    .child("Reconnect to the server to open the Vault.")
+                    .p_8()
+                    .child("Loading backup settings…")
                     .into_any_element(),
             },
-            SettingsSection::Usage => self.render_usage(cx),
-            SettingsSection::Computers => self.render_computers(cx),
-            SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
         // Every page scrolls in the same frame, whose 32 px padding keeps
@@ -408,7 +386,7 @@ impl Shell {
         };
         v_flex()
             .id("app-settings")
-            .track_focus(&setup.focus)
+            .track_focus(&settings.focus)
             .on_modifiers_changed(cx.listener(|shell, event: &ModifiersChangedEvent, _, cx| {
                 shell.modifiers_changed(event.modifiers, cx)
             }))
@@ -497,363 +475,34 @@ impl Shell {
 
     fn render_server_settings(
         &self,
-        setup: &Setup,
+        page: &ServerPage,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.server_update_target.is_some() {
-            return v_flex()
-                .gap_4()
-                .child(
-                    h_flex().child(
-                        Button::new("server-update-back")
-                            .control(Tier::Ghost, Scale::Compact, false, cx)
-                            .label("Back to servers")
-                            .icon(IconName::ChevronLeft)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.close_server_update(window, cx)
-                            })),
-                    ),
-                )
-                .child(self.render_updates(cx))
-                .into_any_element();
-        }
-        if self.server_editor.is_none() {
-            return self.render_server_list(cx);
-        }
-        self.render_connection_editor(setup, window, cx)
-    }
-
-    fn render_connection_editor(
-        &self,
-        setup: &Setup,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let stacked = window.viewport_size().width < px(800.);
-        let busy = setup.draft.busy();
-        let origin = match &setup.page {
-            Page::Welcome => self
-                .launch
-                .local
-                .as_ref()
-                .ok()
-                .map(|local| local.origin().clone()),
-            Page::Remote(form) => Origin::parse(&form.origin.read(cx).value()).ok(),
-        };
-        let active = self.active.as_ref().filter(|active| {
-            let local = self
-                .launch
-                .local
-                .as_ref()
-                .is_ok_and(|local| local.origin() == &active.profile.origin);
-            local == matches!(setup.page, Page::Welcome)
-                && Some(&active.profile.origin) == origin.as_ref()
-        });
-        let connected = active.is_some_and(|active| active.app.read(cx).connected());
-        let status = active
-            .map(|active| active.app.read(cx).status_text().0)
-            .unwrap_or_else(|| "Not connected".into());
-        let status_color = if connected {
-            theme.success
-        } else if active.is_some() {
-            theme.warning
-        } else {
-            theme.muted_foreground
-        };
-        let status = h_flex()
-            .gap_1p5()
-            .text_xs()
-            .text_color(status_color)
-            .child(div().size_1p5().rounded_full().bg(status_color))
-            .child(status);
-        let location = segment_track(cx)
-            .w_full()
-            .when(self.launch.local.is_ok(), |row| {
-                row.child(
-                    segment(
-                        "settings-local-server",
-                        "This machine",
-                        matches!(setup.page, Page::Welcome),
-                        false,
-                        cx,
+        let (setup, editing) = match page {
+            ServerPage::List => return self.render_server_list(cx),
+            ServerPage::Add(form) => (form, false),
+            ServerPage::Edit { form, .. } => (form, true),
+            ServerPage::Update(_) => {
+                return v_flex()
+                    .gap_4()
+                    .child(
+                        h_flex().child(
+                            Button::new("server-update-back")
+                                .control(Tier::Ghost, Scale::Compact, false, cx)
+                                .label("Back to servers")
+                                .icon(IconName::ChevronLeft)
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.close_server_update(window, cx)
+                                })),
+                        ),
                     )
-                    .toggled(matches!(setup.page, Page::Welcome))
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        if shell
-                            .setup
-                            .as_ref()
-                            .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
-                        {
-                            shell.back_to_welcome(window, cx);
-                        }
-                    })),
-                )
-            })
-            .child(
-                segment(
-                    "settings-remote-server",
-                    "Remote server",
-                    matches!(setup.page, Page::Remote(_)),
-                    false,
-                    cx,
-                )
-                .toggled(matches!(setup.page, Page::Remote(_)))
-                .on_click(cx.listener(|shell, _, window, cx| {
-                    if shell
-                        .setup
-                        .as_ref()
-                        .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
-                    {
-                        let profile = shell.active.as_ref().map(|active| active.profile.clone());
-                        shell.open_remote(profile.as_ref(), window, cx);
-                    }
-                })),
-            );
-        let mut content = v_flex()
-            .child(
-                h_flex().child(
-                    Button::new("connection-editor-back")
-                        .control(Tier::Ghost, Scale::Compact, false, cx)
-                        .label("Back to servers")
-                        .icon(IconName::ChevronLeft)
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            shell.close_server_editor(window, cx)
-                        })),
-                ),
-            )
-            .child(div().pt_4().child(section_heading(
-                if matches!(self.server_editor, Some(servers::Editor::Edit(_))) {
-                    "Edit server"
-                } else {
-                    "Add server"
-                },
-                "Test the connection before saving it.",
-                cx,
-            )))
-            .child(div().h_6())
-            .child(settings_row(
-                "Name",
-                "A name for this connection",
-                text_field(Input::new(&setup.name), cx).aria_label("Server name"),
-                stacked,
-                theme,
-            ))
-            .child(settings_row(
-                "Run bots on",
-                "Choose a location",
-                location,
-                stacked,
-                theme,
-            ));
-        let failure = match &setup.draft.check {
-            Check::Failed(err) => Some(err.as_str()),
-            _ => setup.error.as_deref(),
-        };
-        let action = match &setup.page {
-            Page::Welcome => match &self.launch.local {
-                Err(why) => {
-                    let (title, text) = missing_local(why);
-                    content = content.child(div().pt_4().child(notice(title, &text, theme)));
-                    None
-                }
-                Ok(local) => {
-                    let key = self.key.as_ref().unwrap_or(&KeyState::Missing);
-                    let shown_key = match key {
-                        KeyState::Loaded => "••••••••••••",
-                        KeyState::Missing => "Not found",
-                        KeyState::Unreadable(_) => "Cannot be read",
-                    };
-                    content = content
-                        .child(settings_row(
-                            "Server address",
-                            "Local connection",
-                            v_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .child(local.origin().as_str().to_owned()),
-                                )
-                                .child(status),
-                            stacked,
-                            theme,
-                        ))
-                        .child(settings_row(
-                            "Owner key",
-                            "On this device",
-                            h_flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_sm()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .child(shown_key),
-                                )
-                                .when(*key == KeyState::Loaded, |row| {
-                                    row.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Loaded"),
-                                    )
-                                }),
-                            stacked,
-                            theme,
-                        ));
-                    let incomplete = match key {
-                        KeyState::Loaded => None,
-                        KeyState::Missing => Some(
-                            "No local key was found. Finish installing the local server, then try again. \
-                             You can also connect to a remote server.",
-                        ),
-                        KeyState::Unreadable(err) => Some(err.as_str()),
-                    };
-                    content = content.when_some(
-                        incomplete.filter(|_| failure.is_none()),
-                        |content, err| {
-                            content.child(notice("Local setup is incomplete", err, theme))
-                        },
-                    );
-                    let label = match busy {
-                        Some(Phase::Connecting) => "Connecting…",
-                        Some(Phase::Starting) => "Starting local server…",
-                        Some(Phase::Waiting) => "Waiting for the local server…",
-                        None if failure.is_some() || *key != KeyState::Loaded => "Try local again",
-                        None if local.manages_service() => "Start local server",
-                        None => "Connect locally",
-                    };
-                    (!connected || busy.is_some()).then(|| {
-                        Button::new("connection-start")
-                            .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
-                            .label(label)
-                            .loading(busy.is_some())
-                            .on_click(
-                                cx.listener(|shell, _, window, cx| shell.start_local(window, cx)),
-                            )
-                    })
-                }
-            },
-            Page::Remote(form) => {
-                content = content
-                    .child(settings_row(
-                        "Server address",
-                        "HTTPS, Tailscale IP, or a local SSH tunnel",
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                text_field(Input::new(&form.origin), cx)
-                                    .aria_label("Server address"),
-                            )
-                            .when(active.is_some(), |column| column.child(status)),
-                        stacked,
-                        theme,
-                    ))
-                    .child(settings_row(
-                        "Owner key",
-                        "From your remote server",
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                text_field(Input::new(&form.token), cx)
-                                    .aria_label("Owner key")
-                                    .mask_toggle(),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("On your server, open ~/.else/data/owner-token."),
-                            ),
-                        stacked,
-                        theme,
-                    ));
-                Some(
-                    Button::new("connection-connect")
-                        .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
-                        .label(if busy.is_some() {
-                            "Connecting…"
-                        } else {
-                            "Test and save ↵"
-                        })
-                        .loading(busy.is_some())
-                        .on_click(
-                            cx.listener(|shell, _, window, cx| shell.connect_remote(window, cx)),
-                        ),
-                )
+                    .child(self.render_updates(cx))
+                    .into_any_element();
             }
         };
-        if let Some(active) = self.active.as_ref().filter(|_| active.is_none()) {
-            let (status, _) = active.app.read(cx).status_text();
-            content = content.child(
-                div()
-                    .pt_4()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "Current connection: {} · {status}",
-                        active.profile.origin.as_str()
-                    )),
-            );
-        }
-        content
-            .when_some(failure, |content, err| {
-                content.child(div().pt_4().child(notice("Could not connect", err, theme)))
-            })
-            .child(h_flex().justify_end().gap_2().pt_5().children(action).when(
-                matches!(setup.page, Page::Welcome) && connected,
-                |row| {
-                    row.child(
-                        Button::new("app-settings-done")
-                            .control(Tier::Secondary, Scale::Standard, false, cx)
-                            .label("Done")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.cancel(window, cx);
-                                window.close_dialog(cx);
-                            })),
-                    )
-                },
-            ))
-            .into_any_element()
+        self.render_connection_editor(setup, editing, window, cx)
     }
-}
-
-fn settings_row(
-    label: &'static str,
-    hint: &'static str,
-    value: impl IntoElement,
-    stacked: bool,
-    theme: &Theme,
-) -> Div {
-    h_flex()
-        .items_center()
-        .when(stacked, |row| row.flex_col().items_start().gap_3())
-        .py_5()
-        .border_t_1()
-        .border_color(theme.border)
-        .child(
-            v_flex()
-                .when(stacked, |label| label.w_full())
-                .when(!stacked, |label| label.flex_none().w(relative(0.43)).pr_6())
-                .gap_1()
-                .child(div().text_sm().child(label))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(hint),
-                ),
-        )
-        .child(
-            div()
-                .when(stacked, |value| value.w_full())
-                .when(!stacked, |value| value.flex_1())
-                .min_w_0()
-                .child(value),
-        )
 }
 
 /// Inset of the content column from the edges of the Settings pane.

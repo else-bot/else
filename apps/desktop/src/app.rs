@@ -24,6 +24,7 @@ mod mentions;
 mod message_menu;
 mod message_row;
 mod notice_card;
+mod panel;
 mod pause;
 mod pending_send;
 mod question_card;
@@ -52,7 +53,8 @@ use dialogs::Welcome;
 pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
-use settings::{BotSettings, ModelDialog};
+use settings::BotSettings;
+use settings::model::{ModelDialog, ModelUpgrade};
 use transcript::RowKey;
 
 use std::collections::{HashMap, HashSet};
@@ -369,7 +371,7 @@ pub struct ElseApp {
     _welcome_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
     model_dialog: Option<Entity<ModelDialog>>,
-    model_upgrade: Option<settings::ModelUpgrade>,
+    model_upgrade: Option<ModelUpgrade>,
     _category_enter: Option<Subscription>,
     moving: HashSet<Uuid>,
     category_notice: Option<String>,

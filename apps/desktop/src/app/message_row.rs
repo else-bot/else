@@ -274,7 +274,7 @@ impl ElseApp {
         let routine = (conversation.routines().iter()).find(|r| r.id == run.routine_id)?;
         let latest = (routine.last_run.as_ref()).is_some_and(|last| last.due_at == run.due_at);
         let id = routine.id;
-        (latest && super::settings::retryable(routine)).then(|| {
+        (latest && super::settings::routines::retryable(routine)).then(|| {
             Button::new(SharedString::from(format!("routine-retry-{}", turn.id)))
                 .control(
                     Tier::Ghost,

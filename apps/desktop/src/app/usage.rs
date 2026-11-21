@@ -17,7 +17,7 @@ impl ElseApp {
                 app.sidebar_focus.focus(window, cx);
                 window.dispatch_action(Box::new(crate::connection::OpenUsageSettings), cx);
             }));
-        super::settings::section_frame(cx)
+        super::panel::section_frame(cx)
             .child(
                 h_flex()
                     .w_full()
