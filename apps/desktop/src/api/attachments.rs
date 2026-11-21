@@ -29,7 +29,7 @@ impl Client {
                 .json(&body);
             drop(body);
             drop(data);
-            let (_, file): (_, Attachment) = this.send_json(request).await?;
+            let file: Attachment = this.send_json(request).await?;
             if file.id != expected.id || file.name != expected.name || file.size != expected.size {
                 return Err(ClientError::Protocol(
                     "The server returned different attachment metadata.".into(),

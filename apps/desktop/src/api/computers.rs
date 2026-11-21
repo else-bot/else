@@ -9,7 +9,7 @@ impl Client {
         let this = self.clone();
         self.run(async move {
             let request = this.request(Method::GET, "/v1/computers");
-            this.send_json(request).await.map(|(_, value)| value)
+            this.send_json(request).await
         })
         .await
     }
@@ -20,7 +20,7 @@ impl Client {
             let request = this.request(Method::POST, "/v1/computers/upgrade-all");
             this.send_json::<QueuedComputers>(request)
                 .await
-                .map(|(_, value)| value.queued)
+                .map(|value| value.queued)
         })
         .await
     }
@@ -31,7 +31,7 @@ impl Client {
             let request = this.request(Method::POST, "/v1/computers/upgrade-all/cancel");
             this.send_json::<CancelledComputers>(request)
                 .await
-                .map(|(_, value)| value.cancelled)
+                .map(|value| value.cancelled)
         })
         .await
     }

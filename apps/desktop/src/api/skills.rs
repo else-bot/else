@@ -19,7 +19,6 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, detail)| detail)
     }
 
     pub async fn answer_skill_install(
@@ -44,25 +43,23 @@ impl Client {
             body,
         )
         .await
-        .map(|(_, answer)| answer.install)
+        .map(|answer| answer.install)
     }
 
     pub async fn installed_skills(self: Arc<Self>) -> Result<Vec<InstalledSkill>, ClientError> {
         self.call::<Library>(Method::GET, "/v1/settings/skills".into(), None)
             .await
-            .map(|(_, library)| library.skills)
+            .map(|library| library.skills)
     }
 
     pub async fn skill_detail(self: Arc<Self>, id: String) -> Result<SkillContents, ClientError> {
         self.call::<SkillContents>(Method::GET, format!("/v1/settings/skills/{id}"), None)
             .await
-            .map(|(_, detail)| detail)
     }
 
     pub async fn remove_skill(self: Arc<Self>, id: String) -> Result<(), ClientError> {
-        self.call::<()>(Method::DELETE, format!("/v1/settings/skills/{id}"), None)
+        self.call_unit(Method::DELETE, format!("/v1/settings/skills/{id}"), None)
             .await
-            .map(|_| ())
     }
 
     pub async fn save_skill_key(
@@ -74,8 +71,7 @@ impl Client {
             Some(env) => (Method::PUT, Some(json!({"env": env}))),
             None => (Method::DELETE, None),
         };
-        self.call::<serde_json::Value>(method, format!("/v1/task-secrets/{secret}"), body)
+        self.call_unit(method, format!("/v1/task-secrets/{secret}"), body)
             .await
-            .map(|_| ())
     }
 }

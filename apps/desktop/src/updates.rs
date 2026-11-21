@@ -785,10 +785,10 @@ impl Counter {
         let origin = server.origin().as_str();
         let request = client.request(Method::GET, "/v1/maintenance/update");
         match tokio::time::timeout(limit, client.send_json::<Report>(request)).await {
-            Ok(Ok((_, report))) if report.active_turns == 0 && report.running_commands == 0 => {
+            Ok(Ok(report)) if report.active_turns == 0 && report.running_commands == 0 => {
                 Work::Idle
             }
-            Ok(Ok((_, report))) => Work::Busy {
+            Ok(Ok(report)) => Work::Busy {
                 turns: report.active_turns,
                 commands: report.running_commands,
             },

@@ -1,7 +1,5 @@
 use super::{Client, ClientError};
-use else_wire::backups::{
-    BackupAccepted, BackupDestination, BackupService, BackupSnapshot, Tested,
-};
+use else_wire::backups::{BackupDestination, BackupService, BackupSnapshot, Tested};
 use reqwest::Method;
 use serde::Serialize;
 use std::sync::Arc;
@@ -69,7 +67,6 @@ impl Client {
     pub async fn backups(self: Arc<Self>) -> Result<BackupSnapshot, ClientError> {
         self.call(Method::GET, "/v1/settings/backups".into(), None)
             .await
-            .map(|(_, snapshot)| snapshot)
     }
 
     pub async fn save_local_backups(
@@ -82,7 +79,6 @@ impl Client {
             Some(serde_json::json!(settings)),
         )
         .await
-        .map(|(_, snapshot)| snapshot)
     }
 
     pub async fn save_backups(
@@ -95,7 +91,6 @@ impl Client {
             Some(serde_json::json!(settings)),
         )
         .await
-        .map(|(_, snapshot)| snapshot)
     }
 
     pub async fn test_backup_destination(
@@ -111,15 +106,14 @@ impl Client {
                 .json(&serde_json::json!({ "expected_revision": expected_revision, "destination": destination }));
             this.send_json::<Tested>(request)
                 .await
-                .map(|(_, tested)| tested.message)
+                .map(|tested| tested.message)
         })
         .await
     }
 
     pub async fn run_backup(self: Arc<Self>) -> Result<(), ClientError> {
-        self.call::<BackupAccepted>(Method::POST, "/v1/settings/backups/run".into(), None)
+        self.call_unit(Method::POST, "/v1/settings/backups/run".into(), None)
             .await
-            .map(|_| ())
     }
 }
 

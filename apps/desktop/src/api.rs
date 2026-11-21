@@ -21,7 +21,7 @@ use else_wire::settings::{
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use uuid::Uuid;
 
 mod attachments;
@@ -257,7 +257,7 @@ impl Client {
     pub(crate) async fn send_json<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<(StatusCode, T), ClientError> {
+    ) -> Result<T, ClientError> {
         let response = self.send_request(request).await?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
@@ -280,16 +280,14 @@ impl Client {
         } else {
             bytes.as_ref()
         };
-        serde_json::from_slice(body)
-            .map(|value| (status, value))
-            .map_err(|err| ClientError::Protocol(err.to_string()))
+        serde_json::from_slice(body).map_err(|err| ClientError::Protocol(err.to_string()))
     }
 
     pub async fn capabilities(self: Arc<Self>) -> Result<Capabilities, ClientError> {
         let this = self.clone();
         self.run(async move {
             let request = this.request(Method::GET, "/v1/capabilities");
-            this.send_json(request).await.map(|(_, caps)| caps)
+            this.send_json(request).await
         })
         .await
     }
@@ -304,7 +302,7 @@ impl Client {
         let body = json!({ "name": name, "only_if_unnamed": only_if_unnamed });
         self.call::<ServerEnvelope>(Method::PUT, "/v1/settings/server".into(), Some(body))
             .await
-            .map(|(_, v)| v.server.name)
+            .map(|v| v.server.name)
     }
 
     /// Give the server `icon` for every desktop, or only if nobody chose
@@ -327,9 +325,8 @@ impl Client {
             "picture": picture,
             "only_if_unset": only_if_unset,
         });
-        self.call::<serde_json::Value>(Method::PUT, "/v1/settings/server/icon".into(), Some(body))
+        self.call_unit(Method::PUT, "/v1/settings/server/icon".into(), Some(body))
             .await
-            .map(drop)
     }
 
     /// The server's picture when its icon is still the one with `digest`.
@@ -338,7 +335,7 @@ impl Client {
         digest: String,
     ) -> Result<Option<Vec<u8>>, ClientError> {
         use base64::Engine as _;
-        let (_, body) = self
+        let body = self
             .call::<SharedIconBody>(Method::GET, "/v1/settings/server/icon".into(), None)
             .await?;
         let current = matches!(
@@ -358,7 +355,7 @@ impl Client {
         method: Method,
         path: String,
         body: Option<serde_json::Value>,
-    ) -> Result<(StatusCode, T), ClientError> {
+    ) -> Result<T, ClientError> {
         let this = self.clone();
         self.run(async move {
             let mut request = this.request(method, &path);
@@ -370,6 +367,16 @@ impl Client {
         .await
     }
 
+    /// A request whose response body nobody reads: an empty 204 or any JSON.
+    async fn call_unit(
+        self: Arc<Self>,
+        method: Method,
+        path: String,
+        body: Option<serde_json::Value>,
+    ) -> Result<(), ClientError> {
+        self.call::<IgnoredAny>(method, path, body).await.map(drop)
+    }
+
     pub async fn snapshot(
         self: Arc<Self>,
         bot: Uuid,
@@ -379,14 +386,14 @@ impl Client {
             Some(seq) => format!("/v1/bots/{bot}/conversation?limit=50&before_seq={seq}"),
             None => format!("/v1/bots/{bot}/conversation?limit=50"),
         };
-        self.call(Method::GET, path, None).await.map(|(_, s)| s)
+        self.call(Method::GET, path, None).await
     }
 
     /// The newest page of `bot`'s conversation, with the response as sent
     /// so it can be saved and read back.
     pub async fn latest(self: Arc<Self>, bot: Uuid) -> Result<Latest, ClientError> {
         let path = format!("/v1/bots/{bot}/conversation?limit=50");
-        let (_, value): (_, serde_json::Value) = self.call(Method::GET, path, None).await?;
+        let value: serde_json::Value = self.call(Method::GET, path, None).await?;
         let snapshot =
             Snapshot::deserialize(&value).map_err(|err| ClientError::Protocol(err.to_string()))?;
         Ok(Latest {
@@ -410,7 +417,6 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, hits)| hits)
     }
 
     /// Up to `older` shown items at or before `anchor_seq` and `newer` after
@@ -435,7 +441,6 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, window)| window)
     }
 
     pub async fn send(
@@ -470,7 +475,6 @@ impl Client {
         }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await
-            .map(|(_, sent)| sent)
     }
 
     pub async fn approve_draft(
@@ -520,7 +524,7 @@ impl Client {
             body,
         )
         .await
-        .map(|(_, response)| response.draft)
+        .map(|response| response.draft)
     }
 
     /// Resolve a send whose response was lost. `Ok(None)` means the server
@@ -532,7 +536,7 @@ impl Client {
     ) -> Result<Option<Sent>, ClientError> {
         let path = format!("/v1/bots/{bot}/turns/by-request/{request_id}");
         match self.call(Method::GET, path, None).await {
-            Ok((_, sent)) => Ok(Some(sent)),
+            Ok(sent) => Ok(Some(sent)),
             Err(ClientError::Api { status: 404, .. }) => Ok(None),
             Err(err) => Err(err),
         }
@@ -546,7 +550,7 @@ impl Client {
         let body = json!({ "request_id": request_id });
         self.call::<serde_json::Value>(Method::POST, format!("/v1/bots/{bot}/cancel"), Some(body))
             .await
-            .map(|(_, v)| v["state"].as_str().unwrap_or_default().to_owned())
+            .map(|v| v["state"].as_str().unwrap_or_default().to_owned())
     }
 
     /// Save requested and owner-added fields, or decline with `None`.
@@ -561,9 +565,7 @@ impl Client {
             None => ("cancel", None),
         };
         let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
-        self.call::<serde_json::Value>(Method::POST, path, body)
-            .await
-            .map(|_| ())
+        self.call_unit(Method::POST, path, body).await
     }
 
     /// Act on a bot's request to take over its computer.
@@ -579,18 +581,14 @@ impl Client {
             HandoffAction::Dismiss => "dismiss",
         };
         let path = format!("/v1/bots/{bot}/computer-handoffs/{handoff}/{action}");
-        self.call::<serde_json::Value>(Method::POST, path, None)
-            .await
-            .map(|_| ())
+        self.call_unit(Method::POST, path, None).await
     }
 
     /// Stop one thing a bot waits on: an MCP job, a computer job, or a
     /// task it delegated. A wait that already ended is `409 wait_ended`.
     pub async fn cancel_wait(self: Arc<Self>, bot: Uuid, wait: Uuid) -> Result<(), ClientError> {
         let path = format!("/v1/bots/{bot}/waits/{wait}/cancel");
-        self.call::<serde_json::Value>(Method::POST, path, None)
-            .await
-            .map(|_| ())
+        self.call_unit(Method::POST, path, None).await
     }
 
     pub async fn dismiss_owner_notice(
@@ -604,7 +602,7 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, envelope)| envelope.notice)
+        .map(|envelope| envelope.notice)
     }
 
     /// Answer a bot's question by its selected choice ids. A stale card gets
@@ -622,9 +620,7 @@ impl Client {
                 json!({ "choices": choices })
             }
         };
-        self.call::<serde_json::Value>(Method::POST, path, Some(body))
-            .await
-            .map(|_| ())
+        self.call_unit(Method::POST, path, Some(body)).await
     }
 
     pub async fn create_bot(
@@ -633,7 +629,7 @@ impl Client {
     ) -> Result<Bot, ClientError> {
         self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(json!(request)))
             .await
-            .map(|(_, v)| v.bot)
+            .map(|v| v.bot)
     }
 
     pub async fn create_category(
@@ -644,7 +640,7 @@ impl Client {
         let body = json!({ "request_id": request_id, "name": name });
         self.call::<CategoryEnvelope>(Method::POST, "/v1/categories".into(), Some(body))
             .await
-            .map(|(_, v)| v.category)
+            .map(|v| v.category)
     }
 
     pub async fn rename_category(
@@ -655,7 +651,7 @@ impl Client {
         let body = json!({ "name": name });
         self.call::<CategoryEnvelope>(Method::PATCH, format!("/v1/categories/{id}"), Some(body))
             .await
-            .map(|(_, v)| v.category)
+            .map(|v| v.category)
     }
 
     /// Place categories in this order for every client.
@@ -666,13 +662,12 @@ impl Client {
         let body = json!({ "category_ids": ids });
         self.call::<CategoryList>(Method::PUT, "/v1/categories/order".into(), Some(body))
             .await
-            .map(|(_, v)| v.categories)
+            .map(|v| v.categories)
     }
 
     pub async fn delete_category(self: Arc<Self>, id: Uuid) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(Method::DELETE, format!("/v1/categories/{id}"), None)
+        self.call_unit(Method::DELETE, format!("/v1/categories/{id}"), None)
             .await
-            .map(|_| ())
     }
 
     /// Assign a bot to a category, or unassign it with `None`.
@@ -688,7 +683,7 @@ impl Client {
             Some(body),
         )
         .await
-        .map(|(_, v)| v.bot)
+        .map(|v| v.bot)
     }
 
     /// Mute or unmute a bot. Repeating it is a no-op.
@@ -699,7 +694,7 @@ impl Client {
             Some(json!({ "muted": muted })),
         )
         .await
-        .map(|(_, v)| v.bot)
+        .map(|v| v.bot)
     }
 
     /// Change a bot's name, avatar, or both in one save; `None` keeps the
@@ -721,7 +716,7 @@ impl Client {
         let body = serde_json::Value::Object(body);
         self.call::<BotEnvelope>(Method::PATCH, format!("/v1/bots/{bot}"), Some(body))
             .await
-            .map(|(_, v)| v.bot)
+            .map(|v| v.bot)
     }
 
     /// The bot's effective profile; `None` before any defaults exist.
@@ -735,7 +730,7 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, v)| v.profile)
+        .map(|v| v.profile)
     }
 
     /// Give the bot its own profile, used from its next message.
@@ -750,7 +745,7 @@ impl Client {
             Some(json!(choice)),
         )
         .await
-        .map(|(_, v)| v.profile)
+        .map(|v| v.profile)
     }
 
     /// Complete the welcome screen: name the main bot and set its provider
@@ -763,7 +758,7 @@ impl Client {
         let body = json!({ "name": name, "profile": profile });
         self.call::<Onboarded>(Method::POST, "/v1/onboarding".into(), Some(body))
             .await
-            .map(|(_, done)| done.main_bot_id)
+            .map(|done| done.main_bot_id)
     }
 
     /// Switch a routine on or off. Setting its current value is a no-op, so
@@ -802,14 +797,13 @@ impl Client {
             Some(body),
         )
         .await
-        .map(|(_, v)| v.routine)
+        .map(|v| v.routine)
     }
 
     /// The bot's rules file and every saved version.
     pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<RulesFile, ClientError> {
         self.call::<RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
             .await
-            .map(|(_, file)| file)
     }
 
     /// Restore an earlier rules version as a new one; 0 is the empty file.
@@ -821,13 +815,12 @@ impl Client {
         version: i64,
         expected: i64,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::POST,
             format!("/v1/bots/{bot}/rules/restore"),
             Some(json!({ "version": version, "expected_version": expected })),
         )
         .await
-        .map(drop)
     }
 
     /// Forget a routine's failed runs. Repeating it is a no-op.
@@ -842,7 +835,7 @@ impl Client {
             Some(json!({ "dismiss_failures": true })),
         )
         .await
-        .map(|(_, v)| v.routine)
+        .map(|v| v.routine)
     }
 
     /// Run a paused routine now; a success switches it back on. Repeating
@@ -859,7 +852,7 @@ impl Client {
             Some(json!({ "request_id": request_id })),
         )
         .await
-        .map(|(_, v)| v.routine)
+        .map(|v| v.routine)
     }
 
     pub async fn set_routine_model(
@@ -874,7 +867,7 @@ impl Client {
             Some(json!({ "model": model })),
         )
         .await
-        .map(|(_, v)| v.routine)
+        .map(|v| v.routine)
     }
 
     /// Delete a routine: it never runs again and a run already admitted
@@ -884,13 +877,12 @@ impl Client {
         bot: Uuid,
         routine: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/bots/{bot}/routines/{routine}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     /// Pause or resume a webhook. Pausing drops a wake it was waiting for.
@@ -900,13 +892,12 @@ impl Client {
         webhook: Uuid,
         enabled: bool,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::PATCH,
             format!("/v1/bots/{bot}/webhooks/{webhook}"),
             Some(json!({ "enabled": enabled })),
         )
         .await
-        .map(|_| ())
     }
 
     /// Delete a webhook: its URL stops working at once. Deleting it again
@@ -916,13 +907,12 @@ impl Client {
         bot: Uuid,
         webhook: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/bots/{bot}/webhooks/{webhook}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn stop_watcher(
@@ -930,37 +920,35 @@ impl Client {
         bot: Uuid,
         watcher: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::POST,
             format!("/v1/bots/{bot}/watchers/{watcher}/stop"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     /// Change the owner's read state. Every command is safe to repeat.
     pub async fn read(self: Arc<Self>, bot: Uuid, command: ReadCommand) -> Result<(), ClientError> {
-        self.call::<BotEnvelope>(
+        self.call_unit(
             Method::POST,
             format!("/v1/bots/{bot}/read"),
             Some(json!(command)),
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {
         self.call::<BotEnvelope>(Method::DELETE, format!("/v1/bots/{bot}"), None)
             .await
-            .map(|(_, v)| v.bot)
+            .map(|v| v.bot)
     }
 
     pub async fn bots(self: Arc<Self>) -> Result<BotList, ClientError> {
         let this = self.clone();
         self.run(async move {
             let request = this.request(Method::GET, "/v1/bots?include_deleting=true");
-            this.send_json(request).await.map(|(_, list)| list)
+            this.send_json(request).await
         })
         .await
     }
