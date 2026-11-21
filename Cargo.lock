@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "else-api"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "age",
  "anyhow",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "else-desktop"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "anyhow",
  "axum",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "else-plain-text"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "markdown",
  "unicode-normalization",
@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "else-tailnet"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "serde",
  "serde_json",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "else-visual"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "else-wire",
  "futures-channel",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "else-wire"
-version = "0.0.30"
+version = "0.0.94"
 dependencies = [
  "chrono",
  "serde",
