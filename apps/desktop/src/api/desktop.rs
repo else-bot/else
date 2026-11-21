@@ -520,10 +520,33 @@ mod tests {
     use crate::config::{Origin, OwnerToken};
     use else_wire::computers::ComputerUpgrade;
 
-    #[test]
-    fn a_newer_servers_status_message_decodes_instead_of_closing_the_stream() {
-        let event = serde_json::from_str::<ServerEvent>(r#"{"type":"clipboard","text":"copied"}"#);
-        assert_eq!(event.unwrap(), ServerEvent::Unknown);
+    #[tokio::test]
+    async fn a_newer_servers_status_message_is_skipped_and_the_stream_continues() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            for text in [
+                r#"{"type":"size","width":1,"height":1}"#,
+                r#"{"type":"clipboard","text":"copied"}"#,
+                r#"{"type":"mode","mode":"watch"}"#,
+            ] {
+                ws.send(Message::Text(text.into())).await.unwrap();
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        });
+        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Size { .. })
+        ));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Mode(DesktopMode::Watch))
+        ));
+        drop(stream);
+        server.await.unwrap();
     }
 
     #[test]

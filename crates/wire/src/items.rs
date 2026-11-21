@@ -107,17 +107,16 @@ fn known_parts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Message
         #[serde(other)]
         Other,
     }
-    let parts = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    if parts
-        .iter()
-        .any(|part| matches!(Tag::deserialize(part), Ok(Tag::Other)))
-    {
-        return Ok(Vec::new());
+    let mut unknown = false;
+    let mut known = Vec::new();
+    for part in Vec::<serde_json::Value>::deserialize(deserializer)? {
+        if matches!(Tag::deserialize(&part), Ok(Tag::Other)) {
+            unknown = true;
+        } else {
+            known.push(MessagePart::deserialize(part).map_err(serde::de::Error::custom)?);
+        }
     }
-    parts
-        .into_iter()
-        .map(|part| MessagePart::deserialize(part).map_err(serde::de::Error::custom))
-        .collect()
+    Ok(if unknown { Vec::new() } else { known })
 }
 
 /// The owner's reaction to one of the bot's messages.
@@ -254,11 +253,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_known_part_that_does_not_parse_still_fails_the_item() {
+    fn a_known_part_that_does_not_parse_fails_the_item_even_beside_an_unknown_one() {
         let item = json!({
             "id": Uuid::nil(), "seq": 1, "turn_id": Uuid::nil(), "request_id": null,
             "kind": "user", "text": "hi", "provider_id": null,
-            "parts": [{ "type": "file" }],
+            "parts": [{ "type": "poll" }, { "type": "file" }],
         });
         assert!(Item::deserialize(&item).is_err());
     }

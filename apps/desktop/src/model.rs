@@ -540,11 +540,15 @@ impl Conversation {
             .find(|d| d.id == id)
     }
 
+    /// The draft the owner's next message follows up, which goes with it.
+    /// None when the newest such draft is on a channel this build does not
+    /// know: the desktop cannot say what it would send back.
     pub fn open_draft(&self) -> Option<&OutgoingDraft> {
         self.turns_in_order()
             .into_iter()
             .flat_map(|t| &t.outgoing_drafts)
             .rfind(|d| d.status.can_follow_up())
+            .filter(|d| d.content != else_wire::outgoing::DraftContent::Unknown)
     }
 
     /// The owner approves `draft`'s kind always.
@@ -831,6 +835,7 @@ mod tests {
         let turn = json!({
             "id": Uuid::nil(), "request_id": Uuid::nil(), "turn_no": 1, "provider_id": "codex",
             "status": "completed", "error": null, "effect_uncertain": false,
+            "reaction": { "item_id": Uuid::from_u128(2), "kind": "heart" },
             "outgoing_drafts": [{
                 "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1, "bot_id": null,
                 "turn_id": null, "content": { "channel": "fax", "number": "+1 555" },
@@ -844,6 +849,7 @@ mod tests {
         let Ok(Event::TurnUpdated(updated)) = updated.event else {
             panic!("expected a turn, got {:?}", updated.event);
         };
+        assert_eq!(updated.turn.reaction, None);
         assert_eq!(
             updated.turn.outgoing_drafts[0].content,
             else_wire::outgoing::DraftContent::Unknown
@@ -1970,6 +1976,39 @@ mod tests {
             DraftStatus::Sent,
             "a delayed approval response cannot undo a sent event"
         );
+    }
+
+    #[test]
+    fn a_reply_follows_up_no_draft_when_the_newest_is_on_an_unknown_channel() {
+        let turn = |turn: u128, number: i64, content: serde_json::Value| {
+            json!({
+                "id": Uuid::from_u128(turn), "request_id": Uuid::from_u128(turn + 10),
+                "turn_no": number, "provider_id": "synthetic", "status": "waiting", "error": null,
+                "effect_uncertain": false,
+                "outgoing_drafts": [{"id": Uuid::from_u128(turn + 100),
+                    "lineage_id": Uuid::from_u128(turn + 100), "revision": 1, "content": content,
+                    "version": 1, "status": "failed", "can_approve": false,
+                    "result_detail": null, "updated_at": "2026-11-05T00:00:02Z",
+                    "settled_at": null}]
+            })
+        };
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let telegram = json!({"channel": "message", "platform": "telegram", "body": "Hi"});
+        c.apply(&frame(
+            2,
+            "turn.updated",
+            json!({"turn": turn(900, 1, telegram)}),
+        ))
+        .unwrap();
+        assert_eq!(c.open_draft().unwrap().id, Uuid::from_u128(1000));
+        let fax = json!({"channel": "fax", "body": "Hi"});
+        c.apply(&frame(
+            3,
+            "turn.updated",
+            json!({"turn": turn(901, 2, fax)}),
+        ))
+        .unwrap();
+        assert_eq!(c.open_draft(), None, "nor the older Telegram draft");
     }
 
     #[test]

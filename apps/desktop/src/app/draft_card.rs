@@ -1,6 +1,6 @@
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
-use else_wire::outgoing::{DraftFile, DraftStatus, OutgoingDraft};
+use else_wire::outgoing::{DraftContent, DraftFile, DraftStatus, OutgoingDraft};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -575,7 +575,10 @@ impl ElseApp {
                     cx,
                 )));
             }
-            if expanded {
+            // A channel this build does not know has no body, details, or
+            // standing rule it could show.
+            let readable = draft.content != DraftContent::Unknown;
+            if expanded && readable {
                 card = card.child(
                     v_flex()
                         .p_4()
@@ -594,10 +597,11 @@ impl ElseApp {
                         ),
                 );
             }
-            if view
-                .conversation
-                .as_ref()
-                .is_some_and(|c| c.approves_always(draft))
+            if readable
+                && view
+                    .conversation
+                    .as_ref()
+                    .is_some_and(|c| c.approves_always(draft))
             {
                 let connected = self.connection == Connection::Connected;
                 card = card.child(
