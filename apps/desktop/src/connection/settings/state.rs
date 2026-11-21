@@ -123,7 +123,6 @@ impl Settings {
         self.backups.as_ref()
     }
 
-    /// Replaces the Backups pane, wiping a dropped editor's secret key.
     pub(in crate::connection) fn set_backups(
         &mut self,
         pane: Option<Mounted<backups::View>>,
@@ -139,7 +138,6 @@ impl Settings {
         self.email.as_ref()
     }
 
-    /// Replaces the Email pane, wiping a dropped form's app password.
     pub(in crate::connection) fn set_email(
         &mut self,
         pane: Option<EmailPane>,

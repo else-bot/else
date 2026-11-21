@@ -230,7 +230,6 @@ impl View {
         }
     }
 
-    /// Wipes the open editor's typed secret before the pane drops.
     pub(super) fn close(&mut self, window: &mut Window, cx: &mut App) {
         self.set_editor(None, window, cx);
     }
