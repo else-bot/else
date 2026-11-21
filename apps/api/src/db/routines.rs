@@ -29,7 +29,6 @@
 //! lane and starts a fresh one there, so it neither resets nor replays the
 //! bot's chat session or earlier runs.
 
-use crate::db::bots::{self, BotStatus};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
@@ -45,6 +44,7 @@ use crate::app::routines::{
     RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
 };
 use crate::computers::ComputerManager;
+use crate::db::bots::{self, BotStatus};
 use crate::providers::Registry;
 
 mod checks;
@@ -128,10 +128,7 @@ impl By {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastRun {
     pub due_at: DateTime<Utc>,
-    /// `checking`, `queued`, `running`, `skipped`, or the turn's terminal
-    /// status.
-    pub status: String,
-    pub skip_reason: Option<Skip>,
+    pub state: RunState,
     pub turn_id: Option<Uuid>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -209,7 +206,7 @@ struct Row {
 /// Where a run is, decoded from its row; the table's checks keep a turn
 /// and a skip reason exclusive, and a run with neither awaits its check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunState {
+pub enum RunState {
     Checking,
     Skipped(Skip),
     Turn(TurnStatus),
@@ -227,7 +224,9 @@ impl RunState {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// `checking`, `queued`, `running`, `skipped`, `no_news`, or the turn's
+    /// terminal status.
+    pub fn label(self) -> &'static str {
         match self {
             Self::Checking => "checking",
             Self::Skipped(_) => "skipped",
@@ -244,10 +243,7 @@ impl From<Row> for Routine {
     fn from(row: Row) -> Self {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
-            status: RunState::of(row.turn_status, row.skip_reason, row.report)
-                .label()
-                .to_owned(),
-            skip_reason: row.skip_reason,
+            state: RunState::of(row.turn_status, row.skip_reason, row.report),
             turn_id: row.turn_id,
             error_code: row.error_code,
             error_message: row.error_message,

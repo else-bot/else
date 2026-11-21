@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::app::routines::ModelSetting;
 use crate::db::bots::{BotRecord, BotStatus};
-use crate::db::routines::Routine;
+use crate::db::routines::{Routine, RunState};
 use crate::db::turns::{ItemRecord, TurnRecord, TurnStatus};
 
 /// Public projection of an active bot or a deletion receipt.
@@ -174,8 +174,11 @@ pub fn routine_json(routine: &Routine) -> Value {
     let last_run = routine.last_run.as_ref().map(|run| {
         json!({
             "due_at": run.due_at,
-            "status": run.status,
-            "skip_reason": run.skip_reason,
+            "status": run.state.label(),
+            "skip_reason": match run.state {
+                RunState::Skipped(skip) => Some(skip),
+                _ => None,
+            },
             "turn_id": run.turn_id,
             "error": run.error_code.as_ref().map(|code| json!({ "code": code, "message": run.error_message })),
             "finished_at": run.finished_at,
