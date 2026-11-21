@@ -381,7 +381,14 @@ impl ElseApp {
                 }
                 match result {
                     Ok(bot) => {
-                        let closing = app.create.as_ref() == Some(&holder);
+                        let closing = app.create.as_ref().is_some_and(|current| {
+                            let request = &current.read(cx).form.request;
+                            current == &holder
+                                || request
+                                    .pending()
+                                    .or(request.unconfirmed_op())
+                                    .is_some_and(|op| op.request_id == request_id)
+                        });
                         if closing {
                             app.create = None;
                             window.close_dialog(cx);
