@@ -1022,6 +1022,26 @@ pub async fn run_of(
 /// Ended routine runs read per query of [`review_ended`].
 const REVIEW_BATCH: i64 = 8;
 
+/// Failed reviews after which [`review_ended`] gives up on a run.
+pub const REVIEW_ATTEMPTS: i64 = 5;
+
+/// What an ended, unreviewed run needs next. The stored count of failed
+/// reviews decides it, so giving up survives a restart.
+enum Pending {
+    Review,
+    Release,
+}
+
+impl Pending {
+    fn of(review_failures: i64) -> Self {
+        if review_failures >= REVIEW_ATTEMPTS {
+            Self::Release
+        } else {
+            Self::Review
+        }
+    }
+}
+
 /// SQL condition on `turns t`: an earlier turn of its conversation ran a
 /// routine that ended and is not reviewed yet. The review writes the
 /// failure notice and session rewind `t` must read, so `t` is not claimed
@@ -1042,9 +1062,11 @@ pub(crate) fn behind_unreviewed_run() -> String {
 /// keep failing. Each run is reviewed once, in one transaction with all it
 /// causes, whichever path ended its turn. All of them are handled in one
 /// pass, so their retries queue before the pass's watcher wakes. A run
-/// whose review fails is logged and left for the next pass, and the others
-/// still go ahead, since each holds back its conversation's next turn
-/// ([`behind_unreviewed_run`]). Returns how many retries were queued. The
+/// whose review fails is left for the next pass, and the others still go
+/// ahead, since each holds back its conversation's next turn
+/// ([`behind_unreviewed_run`]). Once reviews of a run have failed
+/// [`REVIEW_ATTEMPTS`] times it is released instead ([`release`]), also
+/// after a restart. Returns how many retries were queued. The
 /// caller holds a maintenance admission.
 pub async fn review_ended(
     pool: &SqlitePool,
@@ -1054,8 +1076,8 @@ pub async fn review_ended(
     let mut tried: Vec<Uuid> = Vec::new();
     let mut retried = 0;
     loop {
-        let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT rr.id FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+        let ended: Vec<(Uuid, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT rr.id, rr.review_failures FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
              WHERE NOT rr.reviewed AND rr.turn_id IS NOT NULL
                AND t.status IN {ENDED_STATUSES} AND NOT {}
              ORDER BY rr.due_at, rr.id LIMIT ?2",
@@ -1068,17 +1090,187 @@ pub async fn review_ended(
         if ended.is_empty() {
             return Ok(retried);
         }
-        for id in ended {
+        for (id, failures) in ended {
             tried.push(id);
+            if let Pending::Release = Pending::of(failures) {
+                give_up(pool, id, None).await;
+                continue;
+            }
             match review(pool, registry, id, now).await {
                 Ok(true) => retried += 1,
                 Ok(false) => {}
-                Err(err) => {
-                    tracing::warn!(run = %id, error = %err, "reviewing an ended routine run failed");
-                }
+                Err(err) => review_failed(pool, id, &err).await,
             }
         }
     }
+}
+
+/// Count a failed attempt to review or release run `id`. None when the
+/// run is reviewed by now or the count could not be written.
+async fn count_failure(pool: &SqlitePool, id: Uuid) -> Option<i64> {
+    sqlx::query_scalar(
+        "UPDATE routine_runs SET review_failures = review_failures + 1
+         WHERE id = ?1 AND NOT reviewed RETURNING review_failures",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|err| {
+        tracing::warn!(run = %id, error = %err, "counting a failed routine review failed");
+        None
+    })
+}
+
+/// Count a failed review of run `id`, and give up on the run once reviews
+/// have failed [`REVIEW_ATTEMPTS`] times. Warns on the first failure only.
+async fn review_failed(pool: &SqlitePool, id: Uuid, err: &sqlx::Error) {
+    let Some(failures) = count_failure(pool, id).await else {
+        return;
+    };
+    if let Pending::Release = Pending::of(failures) {
+        give_up(pool, id, Some(err)).await;
+    } else if failures == 1 {
+        tracing::warn!(run = %id, error = %err, "reviewing an ended routine run failed; retrying");
+    } else {
+        tracing::debug!(run = %id, error = %err, failures, "reviewing an ended routine run failed");
+    }
+}
+
+/// Release run `id` after its reviews kept failing with `cause`. A failed
+/// release is counted too, and warns only when the count is a power of two.
+async fn give_up(pool: &SqlitePool, id: Uuid, cause: Option<&sqlx::Error>) {
+    let cause = cause.map(ToString::to_string);
+    match release(pool, id).await {
+        Ok(true) => tracing::warn!(run = %id, error = ?cause,
+            "gave up reviewing an ended routine run; released its conversation"),
+        Ok(false) => {}
+        Err(err) => match count_failure(pool, id).await {
+            Some(failures) if failures.count_ones() != 1 => tracing::debug!(run = %id,
+                error = %err, failures, "releasing an ended routine run failed"),
+            failures => tracing::warn!(run = %id, error = %err, ?failures,
+                "releasing an ended routine run failed"),
+        },
+    }
+}
+
+/// Mark run `id` reviewed without reacting to its outcome, once its
+/// reviews have failed [`REVIEW_ATTEMPTS`] times, then tell the owner.
+/// Reads no column whose stored value could fail to decode. The notice is
+/// written after the release commits and is best effort, since a notice
+/// that cannot be written may be why the review failed. False when the run
+/// is reviewed or not given up.
+async fn release(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<Released> = sqlx::query_as(
+        "SELECT rr.turn_id, t.turn_no, r.bot_id, r.conversation_id, rr.name,
+                r.run_at IS NOT NULL AS reminder,
+                r.deleted_at IS NULL AND b.status = 'active' AS live
+         FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+         JOIN routines r ON r.id = rr.routine_id JOIN bots b ON b.id = r.bot_id
+         WHERE rr.id = ?1 AND NOT rr.reviewed AND rr.review_failures >= ?2",
+    )
+    .bind(id)
+    .bind(REVIEW_ATTEMPTS)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    let marked =
+        sqlx::query("UPDATE routine_runs SET reviewed = true WHERE id = ?1 AND NOT reviewed")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    if marked != 1 {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    if run.live
+        && let Err(err) = announce_release(pool, id, &run).await
+    {
+        tracing::warn!(run = %id, error = %err, "telling the owner about a released routine run failed");
+    }
+    Ok(true)
+}
+
+#[derive(sqlx::FromRow)]
+struct Released {
+    turn_id: Uuid,
+    turn_no: i64,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    name: String,
+    reminder: bool,
+    live: bool,
+}
+
+/// Post the notice about released run `id`. A quiet run that reported no
+/// news reports news instead, so its turn no longer folds the notice away.
+async fn announce_release(pool: &SqlitePool, id: Uuid, run: &Released) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let unfolded =
+        sqlx::query("UPDATE routine_runs SET report = 'news' WHERE id = ?1 AND report = 'no_news'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    let text = crate::app::routine_failures::review_failed_notice(&run.name, run.reminder);
+    post_notice(
+        &mut tx,
+        run.bot_id,
+        run.conversation_id,
+        run.turn_id,
+        run.turn_no,
+        &text,
+    )
+    .await?;
+    if unfolded > 0 {
+        events::turn_changed(&mut tx, run.bot_id, run.turn_id).await?;
+    } else {
+        events::bot_updated(&mut tx, run.bot_id).await?;
+    }
+    tx.commit().await
+}
+
+/// Add the bot's notice `text` to `turn_id`, and rewind warm sessions that
+/// already considered that turn so their next turn sees it.
+async fn post_notice(
+    tx: &mut SqliteConnection,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    turn_id: Uuid,
+    turn_no: i64,
+    text: &str,
+) -> Result<(), sqlx::Error> {
+    let (seq,): (i64,) = sqlx::query_as(
+        "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
+         RETURNING last_item_seq",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let item_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
+    )
+    .bind(item_id)
+    .bind(conversation_id)
+    .bind(seq)
+    .bind(turn_id)
+    .bind(text)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE provider_sessions SET considered_through_turn = ?2 - 1
+         WHERE conversation_id = ?1 AND status = 'active' AND considered_through_turn >= ?2",
+    )
+    .bind(conversation_id)
+    .bind(turn_no)
+    .execute(&mut *tx)
+    .await?;
+    events::item_upsert(tx, bot_id, item_id).await
 }
 
 #[derive(sqlx::FromRow)]
@@ -1317,36 +1509,15 @@ async fn review(
             },
             reaction,
         );
-        let (seq,): (i64,) = sqlx::query_as(
-            "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
-             RETURNING last_item_seq",
+        post_notice(
+            &mut tx,
+            run.bot_id,
+            run.conversation_id,
+            run.turn_id,
+            run.turn_no,
+            &text,
         )
-        .bind(run.conversation_id)
-        .fetch_one(&mut *tx)
         .await?;
-        let item_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
-        )
-        .bind(item_id)
-        .bind(run.conversation_id)
-        .bind(seq)
-        .bind(run.turn_id)
-        .bind(&text)
-        .execute(&mut *tx)
-        .await?;
-        // Warm sessions already considered this turn; rewind them so their
-        // next turn sees the notice.
-        sqlx::query(
-            "UPDATE provider_sessions SET considered_through_turn = ?2 - 1
-             WHERE conversation_id = ?1 AND status = 'active' AND considered_through_turn >= ?2",
-        )
-        .bind(run.conversation_id)
-        .bind(run.turn_no)
-        .execute(&mut *tx)
-        .await?;
-        events::item_upsert(&mut tx, run.bot_id, item_id).await?;
         updated = true;
     }
     if updated {
