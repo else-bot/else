@@ -15,13 +15,13 @@ pub(super) struct SocialCard {
 impl ElseApp {
     pub(super) fn clear_social_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = &mut self.view {
-            for (_, card) in view.social_forms.drain() {
+            for (_, card) in view.cards.socials.drain() {
                 card.view.update(cx, |form, cx| form.clear(window, cx));
             }
         }
     }
 
-    pub(super) fn sync_social_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_social_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hidden || self.connection != Connection::Connected {
             self.clear_social_forms(window, cx);
             return;
@@ -37,7 +37,7 @@ impl ElseApp {
             .filter(|s| s.is_pending() || s.status == SetupStatus::Connected)
             .cloned()
             .collect();
-        view.social_forms.retain(|id, card| {
+        view.cards.socials.retain(|id, card| {
             let keep = setups.iter().any(|s| s.id == *id);
             if !keep {
                 card.view.update(cx, |form, cx| form.clear(window, cx));
@@ -45,7 +45,7 @@ impl ElseApp {
             keep
         });
         for setup in setups {
-            if let Some(card) = view.social_forms.get_mut(&setup.id) {
+            if let Some(card) = view.cards.socials.get_mut(&setup.id) {
                 if card.status != setup.status {
                     card.status = setup.status;
                     if let Some(connection) = setup
@@ -84,7 +84,7 @@ impl ElseApp {
                 let layout = cx.observe_in(&form, window, move |app, _, _, cx| {
                     app.remeasure_row(RowKey::Card(CardKey::SocialSetup(id)), cx);
                 });
-                view.social_forms.insert(
+                view.cards.socials.insert(
                     id,
                     SocialCard {
                         view: form,
@@ -108,7 +108,7 @@ impl ElseApp {
         if setup.is_pending() {
             row = row.child(div().text_sm().child(setup.reason.clone()));
         }
-        if let Some(card) = view.social_forms.get(&id) {
+        if let Some(card) = view.cards.socials.get(&id) {
             return row.child(card.view.clone()).into_any_element();
         }
         let text = match setup.status {

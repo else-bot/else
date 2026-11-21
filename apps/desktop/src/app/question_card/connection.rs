@@ -39,11 +39,6 @@ impl ElseApp {
             return;
         };
         let conversation = view.conversation.as_ref();
-        view.connections.retain(|id, _| {
-            conversation
-                .and_then(|c| c.question(*id))
-                .is_some_and(Question::is_pending)
-        });
         let missing = view
             .rows
             .iter()
@@ -52,7 +47,7 @@ impl ElseApp {
                     return None;
                 };
                 let question = conversation?.question(id)?;
-                if !question.is_pending() || view.connections.contains_key(&id) {
+                if !question.is_pending() || view.cards.connection(id).is_some() {
                     return None;
                 }
                 Some((id, Consent::of(question)?))
@@ -72,21 +67,20 @@ impl ElseApp {
                         .placeholder("App-specific password")
                 })
             });
-            view.connections.insert(
-                question,
-                Form {
-                    flow,
-                    phase: Phase::Checking,
-                    request: None,
-                    signin_url: None,
-                    password,
-                },
-            );
+            view.cards.question_mut(question).connection = Some(Form {
+                flow,
+                phase: Phase::Checking,
+                request: None,
+                signin_url: None,
+                password,
+            });
         }
         let checking = view
-            .connections
+            .cards
+            .questions
             .iter()
-            .filter_map(|(id, form)| {
+            .filter_map(|(id, card)| {
+                let form = card.connection.as_ref()?;
                 (matches!(form.phase, Phase::Checking) && form.request.is_none()).then_some(*id)
             })
             .collect::<Vec<_>>();
@@ -109,7 +103,7 @@ impl ElseApp {
             .view
             .as_mut()
             .filter(|v| v.bot_id == flow.bot)
-            .and_then(|v| v.connections.get_mut(&flow.question))
+            .and_then(|v| v.cards.connection_mut(flow.question))
         else {
             return;
         };
@@ -127,7 +121,7 @@ impl ElseApp {
         let Some(form) = self
             .view
             .as_mut()
-            .and_then(|v| v.connections.get_mut(&question))
+            .and_then(|v| v.cards.connection_mut(question))
         else {
             return;
         };
@@ -144,7 +138,7 @@ impl ElseApp {
         let Some(form) = self
             .view
             .as_mut()
-            .and_then(|v| v.connections.get_mut(&question))
+            .and_then(|v| v.cards.connection_mut(question))
         else {
             return;
         };
@@ -169,7 +163,7 @@ impl ElseApp {
         let Some(form) = self
             .view
             .as_mut()
-            .and_then(|v| v.connections.get_mut(&question))
+            .and_then(|v| v.cards.connection_mut(question))
         else {
             return;
         };
@@ -194,7 +188,7 @@ impl ElseApp {
                                 .view
                                 .as_mut()
                                 .filter(|v| v.bot_id == flow.bot)
-                                .and_then(|v| v.connections.get_mut(&question))
+                                .and_then(|v| v.cards.connection_mut(question))
                             {
                                 form.signin_url = Some(signin.url().to_owned());
                             }
@@ -222,7 +216,7 @@ impl ElseApp {
                             {
                                 return false;
                             }
-                            if let Some(form) = view.connections.get_mut(&question) {
+                            if let Some(form) = view.cards.connection_mut(question) {
                                 form.phase = Phase::Exchanging;
                             }
                             app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
@@ -240,7 +234,7 @@ impl ElseApp {
                             .view
                             .as_mut()
                             .filter(|v| v.bot_id == flow.bot)
-                            .and_then(|v| v.connections.get_mut(&question))
+                            .and_then(|v| v.cards.connection_mut(question))
                         {
                             form.phase = Phase::Confirming;
                         }
@@ -259,7 +253,7 @@ impl ElseApp {
         let Some(form) = self
             .view
             .as_mut()
-            .and_then(|v| v.connections.get_mut(&question))
+            .and_then(|v| v.cards.connection_mut(question))
         else {
             return;
         };
@@ -283,7 +277,7 @@ impl ElseApp {
                             .view
                             .as_mut()
                             .filter(|v| v.bot_id == flow.bot)
-                            .and_then(|v| v.connections.get_mut(&question))
+                            .and_then(|v| v.cards.connection_mut(question))
                         {
                             form.phase = Phase::Confirming;
                         }
@@ -302,7 +296,7 @@ impl ElseApp {
         let url = self
             .view
             .as_ref()
-            .and_then(|v| v.connections.get(&question))
+            .and_then(|v| v.cards.connection(question))
             .filter(|form| matches!(form.phase, Phase::SigningIn))
             .and_then(|form| form.signin_url.clone());
         if let Some(url) = url {
@@ -314,7 +308,7 @@ impl ElseApp {
         let Some(form) = self
             .view
             .as_mut()
-            .and_then(|v| v.connections.get_mut(&question))
+            .and_then(|v| v.cards.connection_mut(question))
         else {
             return;
         };
@@ -347,7 +341,7 @@ impl ElseApp {
         let expanded = self
             .view
             .as_ref()
-            .is_some_and(|v| v.expanded_questions.contains(&id));
+            .is_some_and(|v| v.cards.questions.get(&id).is_some_and(|card| card.expanded));
         let note = |text: SharedString| {
             div()
                 .text_xs()
@@ -408,7 +402,7 @@ impl ElseApp {
             }
             return card.into_any_element();
         }
-        let form = self.view.as_ref().and_then(|v| v.connections.get(&id));
+        let form = self.view.as_ref().and_then(|v| v.cards.connection(id));
         let phase = form.map_or(&Phase::Checking, |f| &f.phase);
         let error = match phase {
             Phase::Ready(Some(error))

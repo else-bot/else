@@ -309,7 +309,7 @@ impl ElseApp {
             self.clear_social_forms(window, cx);
         } else {
             self.sync_skill_cards(window, cx);
-            self.sync_social_forms(window, cx);
+            self.sync_social_cards(window, cx);
         }
         if !hidden {
             self.ensure_settings(window, cx);

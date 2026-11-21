@@ -101,14 +101,10 @@ impl ElseApp {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        if view
-            .question_submits
-            .get(&question)
-            .is_some_and(QuestionForm::locks)
-        {
+        if view.cards.submit(question).is_some_and(QuestionForm::locks) {
             return;
         }
-        view.approval_scopes.insert(question, choice);
+        view.cards.question_mut(question).scope = Some(choice);
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
@@ -124,7 +120,11 @@ impl ElseApp {
         };
         let theme = cx.theme().clone();
         let id = question.id;
-        let expanded = view.expanded_questions.contains(&id);
+        let expanded = view
+            .cards
+            .questions
+            .get(&id)
+            .is_some_and(|card| card.expanded);
         let note = |text: String| {
             div()
                 .text_xs()
@@ -327,7 +327,7 @@ impl ElseApp {
         let selected = submit
             .filter(|s| s.locks())
             .and_then(|s| s.answer.single())
-            .or_else(|| view.approval_scopes.get(&id).map(String::as_str))
+            .or_else(|| view.cards.questions.get(&id)?.scope.as_deref())
             .and_then(|chosen| grants.iter().find(|c| c.id == chosen))
             .or(grants.first())
             .copied();

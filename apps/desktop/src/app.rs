@@ -4,6 +4,7 @@ mod bot_activity;
 mod bot_mention;
 mod bot_menu;
 mod card_markdown;
+mod cards;
 mod categories;
 mod clip;
 mod computer;
@@ -584,8 +585,9 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                self.sync_secret_forms(window, cx);
-                self.sync_social_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
+                self.sync_social_cards(window, cx);
                 self.warm.for_each(|view| view.stream_problem = None);
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = None;
@@ -603,14 +605,16 @@ impl ElseApp {
                 }
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             LiveEvent::Unauthorized => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             LiveEvent::ServerPause(pause) => self.set_server_pause(pause, window, cx),
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
@@ -639,7 +643,8 @@ impl ElseApp {
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             Err(_) => {}
         }

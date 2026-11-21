@@ -17,6 +17,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::card_markdown::{self, CardText};
@@ -29,10 +30,8 @@ use crate::model::{
 };
 
 mod approval;
-mod choice;
+pub(super) mod choice;
 pub(super) mod connection;
-
-pub(super) use choice::WriteIn;
 
 /// Which part of a card's context a formatted view shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,29 +133,39 @@ fn letter(choice_id: &str) -> String {
 
 impl ElseApp {
     fn toggle_question_details(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut()
-            && !view.expanded_questions.remove(&id)
-        {
-            view.expanded_questions.insert(id);
+        if let Some(view) = self.view.as_mut() {
+            let card = view.cards.question_mut(id);
+            card.expanded = !card.expanded;
         }
         self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
-    pub(super) fn sync_question_submits(&mut self) {
+    /// Keeps one entry per loaded question, and drops what a question
+    /// keeps only while it is pending once it settles.
+    pub(super) fn sync_question_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let conversation = view.conversation.as_ref();
-        view.question_submits.retain(|id, _| {
-            conversation
-                .and_then(|c| c.question(*id))
-                .is_some_and(Question::is_pending)
-        });
-        view.approval_scopes.retain(|id, _| {
-            conversation
-                .and_then(|c| c.question(*id))
-                .is_some_and(Question::is_pending)
-        });
+        let pending: HashMap<Uuid, bool> = view
+            .conversation
+            .iter()
+            .flat_map(|c| c.questions())
+            .map(|q| (q.id, q.is_pending()))
+            .collect();
+        view.cards
+            .questions
+            .retain(|id, _| pending.contains_key(id));
+        for (id, pending) in pending {
+            let card = view.cards.question_mut(id);
+            if !pending {
+                card.submit = None;
+                card.scope = None;
+                card.connection = None;
+            }
+        }
+        self.sync_write_ins(window, cx);
+        self.sync_card_contexts(cx);
+        self.sync_connections(window, cx);
     }
 
     /// Parses each question context that formats, so its card measures
@@ -188,17 +197,20 @@ impl ElseApp {
                 wanted.push(((question.id, Extent::Preview), short));
             }
         }
-        view.card_contexts
-            .retain(|key, _| wanted.iter().any(|(wanted, _)| wanted == key));
-        for (key, source) in wanted {
-            if view.card_contexts.contains_key(&key) {
+        for (id, card) in &mut view.cards.questions {
+            card.contexts
+                .retain(|extent, _| wanted.iter().any(|(key, _)| *key == (*id, *extent)));
+        }
+        for ((id, extent), source) in wanted {
+            let card = view.cards.question_mut(id);
+            if card.contexts.contains_key(&extent) {
                 continue;
             }
             let state = cx.new(|cx| TextViewState::markdown(&source, cx));
-            let row = RowKey::Card(CardKey::Question(key.0));
+            let row = RowKey::Card(CardKey::Question(id));
             let _parsed = cx.observe(&state, move |app, _, cx| app.remeasure_row(row, cx));
-            view.card_contexts
-                .insert(key, FormattedContext { state, _parsed });
+            card.contexts
+                .insert(extent, FormattedContext { state, _parsed });
         }
     }
 
@@ -212,7 +224,14 @@ impl ElseApp {
         code_background: Hsla,
         cx: &App,
     ) -> Option<AnyElement> {
-        let context = self.view.as_ref()?.card_contexts.get(&(id, extent))?;
+        let context = self
+            .view
+            .as_ref()?
+            .cards
+            .questions
+            .get(&id)?
+            .contexts
+            .get(&extent)?;
         Some(
             super::row_text::card_markdown_view(&context.state, ink, code_background, cx)
                 .into_any_element(),
@@ -236,22 +255,15 @@ impl ElseApp {
             .as_ref()
             .and_then(|c| c.question(question))
             .is_some_and(Question::is_pending);
-        if !pending
-            || view
-                .question_submits
-                .get(&question)
-                .is_some_and(QuestionForm::locks)
-        {
+        if !pending || view.cards.submit(question).is_some_and(QuestionForm::locks) {
             return;
         }
-        view.expanded_questions.remove(&question);
-        view.question_submits.insert(
-            question,
-            QuestionForm {
-                answer: answer.clone(),
-                state: SubmitState::Sending,
-            },
-        );
+        let card = view.cards.question_mut(question);
+        card.expanded = false;
+        card.submit = Some(QuestionForm {
+            answer: answer.clone(),
+            state: SubmitState::Sending,
+        });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_question(bot, question, answer).await;
             let _ = this.update_in(cx, |app, _window, cx| {
@@ -275,7 +287,12 @@ impl ElseApp {
         let Some(view) = self.view_of(bot) else {
             return;
         };
-        let Some(submit) = view.question_submits.get_mut(&question) else {
+        let Some(submit) = view
+            .cards
+            .questions
+            .get_mut(&question)
+            .and_then(|card| card.submit.as_mut())
+        else {
             return;
         };
         submit.state = match result {
@@ -304,7 +321,7 @@ impl ElseApp {
         let Some(question) = view.conversation.as_ref().and_then(|c| c.question(id)) else {
             return div().into_any_element();
         };
-        let submit = view.question_submits.get(&id);
+        let submit = view.cards.submit(id);
         let bot_name = self
             .bots
             .iter()
@@ -343,17 +360,17 @@ impl ElseApp {
             .filter(|(_, row)| match row.key {
                 RowKey::Card(CardKey::Question(id)) => {
                     conversation.question(id).is_some_and(Question::is_pending)
-                        && !view
-                            .question_submits
-                            .get(&id)
-                            .is_some_and(QuestionForm::locks)
+                        && !view.cards.submit(id).is_some_and(QuestionForm::locks)
                 }
                 RowKey::Card(CardKey::SecretRequest(id)) => {
                     conversation
                         .secret_request(id)
                         .is_some_and(|request| request.is_pending())
-                        && !view.answered.contains(&id)
-                        && !view.secret_forms.get(&id).is_some_and(|form| form.locks())
+                        && !view
+                            .cards
+                            .secrets
+                            .get(&id)
+                            .is_some_and(super::cards::SecretCard::locks)
                 }
                 _ => false,
             })

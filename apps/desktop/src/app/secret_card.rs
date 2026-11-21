@@ -83,8 +83,7 @@ impl SecretForm {
 }
 
 impl ElseApp {
-    pub(super) fn sync_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_skill_cards(window, cx);
+    pub(super) fn sync_secret_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -95,24 +94,26 @@ impl ElseApp {
             .filter(|(_, r)| r.is_pending())
             .map(|(_, r)| r.clone())
             .collect();
-        view.secret_forms.retain(|id, form| {
+        view.cards.secrets.retain(|id, card| {
             let keep = pending.iter().any(|r| r.id == *id);
-            if !keep {
+            if !keep && let Some(form) = card.form.as_mut() {
                 form.clear(window, cx);
             }
             keep
         });
-        view.answered
-            .retain(|id| pending.iter().any(|r| r.id == *id));
         let connected = self.connection == Connection::Connected;
         for request in pending {
-            if !view.answered.contains(&request.id) {
-                view.secret_forms
-                    .entry(request.id)
-                    .or_insert_with(|| SecretForm::new(&request, window, cx));
+            let card = view.cards.secrets.entry(request.id).or_default();
+            if !card.answered && card.form.is_none() {
+                card.form = Some(SecretForm::new(&request, window, cx));
             }
         }
-        for form in view.secret_forms.values() {
+        for form in view
+            .cards
+            .secrets
+            .values()
+            .filter_map(|card| card.form.as_ref())
+        {
             let busy = form.submitting || !connected;
             form.fields.update(cx, |fields, cx| {
                 if fields.busy != busy {
@@ -126,8 +127,11 @@ impl ElseApp {
     pub(super) fn clear_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_skill_cards(window, cx);
         if let Some(view) = self.view.as_mut() {
-            for (_, mut form) in view.secret_forms.drain() {
-                form.clear(window, cx);
+            // An answered request stays locked until it settles.
+            for card in view.cards.secrets.values_mut() {
+                if let Some(mut form) = card.form.take() {
+                    form.clear(window, cx);
+                }
             }
         }
     }
@@ -144,7 +148,12 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
-        let Some(form) = view.secret_forms.get_mut(&request) else {
+        let Some(form) = view
+            .cards
+            .secrets
+            .get_mut(&request)
+            .and_then(|card| card.form.as_mut())
+        else {
             return;
         };
         if form.submitting {
@@ -189,7 +198,8 @@ impl ElseApp {
         if matches!(&result, Err(ClientError::Unauthorized)) {
             self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
             self.clear_secret_forms(window, cx);
-            self.sync_secret_forms(window, cx);
+            self.sync_skill_cards(window, cx);
+            self.sync_secret_cards(window, cx);
             cx.notify();
             return;
         }
@@ -198,13 +208,19 @@ impl ElseApp {
         };
         match result {
             Ok(()) => {
-                if let Some(mut form) = view.secret_forms.remove(&request) {
+                let card = view.cards.secrets.entry(request).or_default();
+                if let Some(mut form) = card.form.take() {
                     form.clear(window, cx);
                 }
-                view.answered.insert(request);
+                card.answered = true;
             }
             Err(err) => {
-                if let Some(form) = view.secret_forms.get_mut(&request) {
+                if let Some(form) = view
+                    .cards
+                    .secrets
+                    .get_mut(&request)
+                    .and_then(|card| card.form.as_mut())
+                {
                     form.submitting = false;
                     form.fields.update(cx, |fields, cx| {
                         fields.busy = false;
@@ -243,7 +259,11 @@ impl ElseApp {
                 .child(text)
         };
         let row = v_flex().w_full();
-        let form = view.secret_forms.get(&id);
+        let form = view
+            .cards
+            .secrets
+            .get(&id)
+            .and_then(|card| card.form.as_ref());
         let (Some(form), true) = (form, request.is_pending()) else {
             let text = match request.status {
                 SecretRequestStatus::Stored => format!(

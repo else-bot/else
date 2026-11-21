@@ -30,26 +30,10 @@ pub(super) struct ConversationView {
     pub(super) rows: Vec<TranscriptRow>,
     pub(super) list: ListState,
     pub(super) texts: HashMap<RowKey, RowText>,
-    pub(super) skill_cards: HashMap<Uuid, super::skill_card::SkillCard>,
-    pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
-    pub(super) answered: HashSet<Uuid>,
-    pub(super) connections: HashMap<Uuid, super::question_card::connection::Form>,
-    pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionForm>,
+    pub(super) cards: super::cards::Cards,
     /// Where cards that can pause the bot were last painted, so the paused
     /// strip can step aside while one is on screen.
     pub(super) sightings: super::question_card::Sightings,
-    /// The typed answer field on each pending single-choice card.
-    pub(super) write_ins: HashMap<Uuid, super::question_card::WriteIn>,
-    /// The parsed markdown of each question context that formats.
-    pub(super) card_contexts:
-        HashMap<(Uuid, super::question_card::Extent), super::question_card::FormattedContext>,
-    /// The approval scope picked on each pending approval card.
-    pub(super) approval_scopes: HashMap<Uuid, String>,
-    pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
-    pub(super) draft_images: HashMap<Uuid, super::draft_card::DraftImages>,
-    pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
-    pub(super) expanded_drafts: HashSet<Uuid>,
-    pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
     /// Replies whose folded earlier updates are open.
     pub(super) expanded_folds: HashSet<Uuid>,
@@ -182,20 +166,8 @@ impl ConversationView {
             rows: Vec::new(),
             list,
             texts: HashMap::new(),
-            secret_forms: HashMap::new(),
-            skill_cards: HashMap::new(),
-            answered: HashSet::new(),
-            question_submits: HashMap::new(),
+            cards: Default::default(),
             sightings: Default::default(),
-            write_ins: HashMap::new(),
-            card_contexts: HashMap::new(),
-            connections: HashMap::new(),
-            approval_scopes: HashMap::new(),
-            draft_forms: HashMap::new(),
-            draft_images: HashMap::new(),
-            social_forms: HashMap::new(),
-            expanded_drafts: HashSet::new(),
-            expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
             expanded_folds: HashSet::new(),
             expanded_councils: HashSet::new(),
@@ -225,9 +197,7 @@ impl ConversationView {
     /// older pages and gaps that were loading, a pending jump and the
     /// unread divider. Its newest page keeps loading.
     pub(super) fn park(&mut self) {
-        // Forms hold typed credentials and in-flight checks; showing the
-        // view again builds them anew.
-        self.connections.clear();
+        self.cards.park();
         self._reply_clock = None;
         self.unread_since = None;
         self._unread_dismissal = None;
@@ -884,13 +854,7 @@ impl ElseApp {
                 }
             }));
         }
-        self.sync_secret_forms(window, cx);
-        self.sync_question_submits();
-        self.sync_write_ins(window, cx);
-        self.sync_card_contexts(cx);
-        self.sync_connections(window, cx);
-        self.sync_draft_forms(window, cx);
-        self.sync_social_forms(window, cx);
+        self.sync_cards(window, cx);
         self.check_reading(window, cx);
         cx.notify();
     }

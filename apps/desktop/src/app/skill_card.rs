@@ -37,7 +37,7 @@ impl ElseApp {
             .cloned()
             .collect();
         let ids: HashSet<_> = installs.iter().map(|i| i.id).collect();
-        view.skill_cards.retain(|id, card| {
+        view.cards.skills.retain(|id, card| {
             if ids.contains(id) {
                 return true;
             }
@@ -50,7 +50,8 @@ impl ElseApp {
         for install in installs {
             if install.status == SkillInstallStatus::Pending
                 && view
-                    .skill_cards
+                    .cards
+                    .skills
                     .get(&install.id)
                     .is_none_or(|card| card.files.selected.is_none())
                 && install.files.iter().any(|file| file.path == "SKILL.md")
@@ -58,7 +59,8 @@ impl ElseApp {
                 unopened.push(install.id);
             }
             let card = view
-                .skill_cards
+                .cards
+                .skills
                 .entry(install.id)
                 .or_insert_with(|| SkillCard {
                     scope: SkillScope::All,
@@ -82,7 +84,7 @@ impl ElseApp {
 
     pub(super) fn clear_skill_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_mut() {
-            for (_, card) in view.skill_cards.drain() {
+            for (_, card) in view.cards.skills.drain() {
                 if let Some(keys) = card.keys {
                     keys.update(cx, |keys, cx| keys.clear(window, cx));
                 }
@@ -101,7 +103,7 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
-        let Some(card) = view.skill_cards.get_mut(&id) else {
+        let Some(card) = view.cards.skills.get_mut(&id) else {
             return;
         };
         card.files.selected = Some(path);
@@ -115,7 +117,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_install(bot, id).await;
             let _ = this.update_in(cx, |app, _, cx| {
-                let Some(card) = app.view_of(bot).and_then(|v| v.skill_cards.get_mut(&id)) else {
+                let Some(card) = app.view_of(bot).and_then(|v| v.cards.skills.get_mut(&id)) else {
                     return;
                 };
                 card.files.loading = false;
@@ -153,7 +155,8 @@ impl ElseApp {
         }
         let bot = view.bot_id;
         let Some(card) = view
-            .skill_cards
+            .cards
+            .skills
             .get_mut(&id)
             .filter(|card| !card.submitting)
         else {
@@ -216,7 +219,7 @@ impl ElseApp {
         let Some(view) = self.view_of(bot) else {
             return;
         };
-        if let Some(card) = view.skill_cards.get_mut(&id) {
+        if let Some(card) = view.cards.skills.get_mut(&id) {
             card.submitting = false;
             match result {
                 Ok(install) => {
@@ -307,7 +310,7 @@ impl ElseApp {
             }
             return body.child(settled).into_any_element();
         }
-        let Some(card) = view.skill_cards.get(&id) else {
+        let Some(card) = view.cards.skills.get(&id) else {
             return body.child("Connecting…").into_any_element();
         };
         let busy = card.submitting || self.connection != Connection::Connected;
@@ -365,7 +368,8 @@ impl ElseApp {
                     cx,
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(card) = app.view.as_mut().and_then(|v| v.skill_cards.get_mut(&id)) {
+                    if let Some(card) = app.view.as_mut().and_then(|v| v.cards.skills.get_mut(&id))
+                    {
                         card.scope = scope;
                     }
                     app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
@@ -436,7 +440,7 @@ impl ElseApp {
                 let typing = app
                     .view
                     .as_ref()
-                    .and_then(|view| view.skill_cards.get(&id))
+                    .and_then(|view| view.cards.skills.get(&id))
                     .and_then(|card| card.keys.as_ref())
                     .is_some_and(|keys| !keys.read(cx).is_empty(cx));
                 if typing {

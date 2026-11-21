@@ -115,7 +115,7 @@ impl DraftForm {
 }
 
 impl ElseApp {
-    pub(super) fn sync_draft_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_draft_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -126,39 +126,38 @@ impl ElseApp {
             .flat_map(|t| &t.outgoing_drafts)
             .cloned()
             .collect();
-        view.draft_forms
-            .retain(|id, _| drafts.iter().any(|d| d.id == *id && d.is_open()));
-        for draft in drafts.iter().filter(|draft| draft.is_open()) {
-            match view.draft_forms.get_mut(&draft.id) {
-                Some(form) if form.baseline.version != draft.version => {
-                    let local = form.edit(cx);
-                    if local == form.baseline
-                        || (local.subject.as_deref() == draft.content.subject()
-                            && local.body == draft.content.body()
-                            && local.attachments.unwrap_or_default()
-                                == draft.content.attachment_ids().unwrap_or_default())
-                    {
-                        *form = DraftForm::new(draft, window, cx);
-                    } else {
-                        form.error = Some("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.".into());
-                    }
-                }
-                Some(_) => {}
-                None => {
-                    view.draft_forms
-                        .insert(draft.id, DraftForm::new(draft, window, cx));
-                }
-            }
-        }
-        view.draft_images
+        view.cards
+            .drafts
             .retain(|id, _| drafts.iter().any(|d| d.id == *id));
         for draft in &drafts {
-            let files = view
-                .draft_forms
-                .get(&draft.id)
+            let card = view.cards.drafts.entry(draft.id).or_default();
+            if !draft.is_open() {
+                card.form = None;
+            } else {
+                match card.form.as_mut() {
+                    Some(form) if form.baseline.version != draft.version => {
+                        let local = form.edit(cx);
+                        if local == form.baseline
+                            || (local.subject.as_deref() == draft.content.subject()
+                                && local.body == draft.content.body()
+                                && local.attachments.unwrap_or_default()
+                                    == draft.content.attachment_ids().unwrap_or_default())
+                        {
+                            *form = DraftForm::new(draft, window, cx);
+                        } else {
+                            form.error = Some("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.".into());
+                        }
+                    }
+                    Some(_) => {}
+                    None => card.form = Some(DraftForm::new(draft, window, cx)),
+                }
+            }
+            let files = card
+                .form
+                .as_ref()
                 .map_or(draft.content.attachments(), |form| form.files.as_slice());
             let parts = image_parts(files);
-            if let Some(images) = view.draft_images.get(&draft.id) {
+            if let Some(images) = &card.images {
                 images.sync(files, cx);
             } else if !parts.is_empty() {
                 let (gallery, _observe) = Self::message_images(
@@ -169,8 +168,7 @@ impl ElseApp {
                     window,
                     cx,
                 );
-                view.draft_images
-                    .insert(draft.id, DraftImages { gallery, _observe });
+                card.images = Some(DraftImages { gallery, _observe });
             }
         }
     }
@@ -179,15 +177,15 @@ impl ElseApp {
         let view = self.view.as_ref()?;
         let draft = view.conversation.as_ref()?.open_draft()?;
         if view
-            .draft_forms
-            .get(&draft.id)
+            .cards
+            .draft_form(draft.id)
             .is_some_and(|form| form.operation.is_some())
         {
             return None;
         }
         let edit = view
-            .draft_forms
-            .get(&draft.id)
+            .cards
+            .draft_form(draft.id)
             .map_or_else(|| draft.edit(), |form| form.edit(cx));
         Some(DraftAttachment { id: draft.id, edit })
     }
@@ -213,7 +211,7 @@ impl ElseApp {
         let Some(view) = self.view.as_ref() else {
             return;
         };
-        let operation = match (view.draft_forms.get(&id), choice) {
+        let operation = match (view.cards.draft_form(id), choice) {
             (Some(form), _) if form.retryable => form.operation.clone(),
             (Some(form), Choice::Approve | Choice::ApproveAlways)
                 if form.operation.is_none() && !form.body.read(cx).value().trim().is_empty() =>
@@ -229,7 +227,7 @@ impl ElseApp {
         };
         let Some(operation) = operation else { return };
         let bot = view.bot_id;
-        if let Some(form) = self.view.as_mut().and_then(|v| v.draft_forms.get_mut(&id)) {
+        if let Some(form) = self.view.as_mut().and_then(|v| v.cards.draft_form_mut(id)) {
             form.operation = Some(operation.clone());
             form.retryable = false;
             form.error = None;
@@ -272,7 +270,7 @@ impl ElseApp {
                 self.sync_rows(window, cx);
             }
             Err(err) => {
-                if let Some(form) = view.draft_forms.get_mut(&id) {
+                if let Some(form) = view.cards.draft_form_mut(id) {
                     form.retryable = err.outcome_unknown();
                     if !form.retryable {
                         form.operation = None;
@@ -310,9 +308,9 @@ impl ElseApp {
             .and_then(|c| c.outgoing_draft(id))
             .cloned();
         if let (Some(draft), Some(view)) = (draft, self.view.as_mut()) {
-            view.draft_forms
-                .insert(id, DraftForm::new(&draft, window, cx));
-            self.sync_draft_forms(window, cx);
+            view.cards.drafts.entry(id).or_default().form =
+                Some(DraftForm::new(&draft, window, cx));
+            self.sync_draft_cards(window, cx);
         }
         self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
     }
@@ -361,11 +359,14 @@ impl ElseApp {
                                     let Some(view) = app.view.as_mut() else {
                                         return;
                                     };
-                                    let Some(form) = view.draft_forms.get_mut(&id) else {
+                                    let Some(card) = view.cards.drafts.get_mut(&id) else {
+                                        return;
+                                    };
+                                    let Some(form) = card.form.as_mut() else {
                                         return;
                                     };
                                     form.files.retain(|file| file.id != file_id);
-                                    if let Some(images) = view.draft_images.get(&id) {
+                                    if let Some(images) = &card.images {
                                         images.sync(&form.files, cx);
                                     }
                                     app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
@@ -376,7 +377,7 @@ impl ElseApp {
             .when_some(
                 self.view
                     .as_ref()
-                    .and_then(|view| view.draft_images.get(&id)),
+                    .and_then(|view| view.cards.drafts.get(&id)?.images.as_ref()),
                 |column, images| column.child(images.gallery.clone()),
             )
             .into_any_element()
@@ -440,7 +441,7 @@ impl ElseApp {
             .rounded(theme.radius_lg)
             .bg(theme.secondary)
             .overflow_hidden();
-        let expanded = view.expanded_drafts.contains(&id);
+        let expanded = view.cards.drafts.get(&id).is_some_and(|card| card.expanded);
         if !draft.is_open() {
             let color = match draft.status {
                 DraftStatus::Sent => theme.success,
@@ -517,10 +518,9 @@ impl ElseApp {
                     .text_color(theme.muted_foreground),
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(view) = app.view.as_mut()
-                        && !view.expanded_drafts.remove(&id)
-                    {
-                        view.expanded_drafts.insert(id);
+                    if let Some(view) = app.view.as_mut() {
+                        let card = view.cards.drafts.entry(id).or_default();
+                        card.expanded = !card.expanded;
                     }
                     app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }));
@@ -608,7 +608,7 @@ impl ElseApp {
             }
             return row.child(card).into_any_element();
         }
-        let Some(form) = view.draft_forms.get(&id) else {
+        let Some(form) = view.cards.draft_form(id) else {
             return row.into_any_element();
         };
         let connected = self.connection == Connection::Connected;
