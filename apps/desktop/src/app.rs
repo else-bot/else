@@ -52,7 +52,6 @@ use dialogs::Welcome;
 pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
-use settings::BotSettings;
 use settings::model::ModelDialog;
 use transcript::RowKey;
 
@@ -345,7 +344,7 @@ const CATALOG_REFRESH: std::time::Duration = std::time::Duration::from_secs(5 * 
 pub struct ElseApp {
     client: Arc<Client>,
     connection: Connection,
-    caps: Option<Capabilities>,
+    caps: Option<Arc<Capabilities>>,
     bots: Vec<Bot>,
     /// When a bot list last arrived, if one has since the last connection
     /// event. The live stream reports a connection before its first list, so
@@ -372,9 +371,6 @@ pub struct ElseApp {
     quote_press: Option<Point<Pixels>>,
     quote_editor: Option<quotes::QuoteEditor>,
     expanded_quotes: HashSet<Uuid>,
-    /// Routines whose banner shows its whole reason, with the reason it was
-    /// opened on, so a new reason starts folded.
-    expanded_routine_problems: HashMap<Uuid, String>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
@@ -399,9 +395,8 @@ pub struct ElseApp {
     /// rail and a client-drawn window frame take part of the window.
     width: Option<f32>,
     details: settings::DetailsPanel,
-    watcher_clock: Option<Task<()>>,
     image_viewer: Option<Entity<images::ImageViewer>>,
-    settings: HashMap<Uuid, BotSettings>,
+    panels: HashMap<Uuid, settings::PanelSlot>,
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
@@ -464,6 +459,7 @@ impl ElseApp {
         });
         let bounds =
             cx.observe_window_bounds(window, |app, window, cx| app.check_reading(window, cx));
+        let panels = cx.observe_self(|app, cx| app.sync_panel_inputs(cx));
         let mut app = Self {
             client,
             connection: Connection::Connecting,
@@ -487,7 +483,6 @@ impl ElseApp {
             quote_press: None,
             quote_editor: None,
             expanded_quotes: HashSet::new(),
-            expanded_routine_problems: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
             inbox: Default::default(),
@@ -508,9 +503,8 @@ impl ElseApp {
             _save_preferences: None,
             width: None,
             details: Default::default(),
-            watcher_clock: None,
             image_viewer: None,
-            settings: HashMap::new(),
+            panels: HashMap::new(),
             rules: HashMap::new(),
             rules_dialog: None,
             sidebar_focus,
@@ -524,6 +518,7 @@ impl ElseApp {
                 activation,
                 visibility,
                 bounds,
+                panels,
             ],
         };
         app.start_live(window, cx);
@@ -641,7 +636,7 @@ impl ElseApp {
                 } else if self.welcome.is_none() {
                     self.open_welcome(&caps, window, cx);
                 }
-                self.caps = Some(caps);
+                self.caps = Some(Arc::new(caps));
             }
             Err(err) => {
                 self.unauthorized(&err, window, cx);

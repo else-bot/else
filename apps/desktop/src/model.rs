@@ -13,15 +13,14 @@ use else_wire::bots::Activity;
 use else_wire::computers::ComputerHandoff;
 use else_wire::conversation::{BotExtras, BotUpdated, Event, EventKind, Snapshot, Window};
 use else_wire::delegations::Delegation;
-use else_wire::email::MailTrigger;
 use else_wire::items::{Item, ItemKind, MessagePart, ReactionKind};
 use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
-use else_wire::routines::{Routine, Watcher, Webhook};
+use else_wire::routines::Routine;
 use else_wire::secrets::SecretRequest;
 use else_wire::skills::{SkillInstall, SkillInstallStatus};
-use else_wire::socials::{SocialSetup, Trigger};
+use else_wire::socials::SocialSetup;
 use else_wire::turns::Turn;
 use else_wire::waits::{ComputerJobWait, McpWait};
 use serde::Deserialize;
@@ -624,20 +623,8 @@ impl Conversation {
             .map(|item| item.id)
     }
 
-    pub fn social_triggers(&self) -> &[Trigger] {
-        &self.extras.social_triggers
-    }
-
-    pub fn mail_triggers(&self) -> &[MailTrigger] {
-        &self.extras.mail_triggers
-    }
-
-    pub fn webhooks(&self) -> &[Webhook] {
-        &self.extras.webhooks
-    }
-
-    pub fn watchers(&self) -> &[Watcher] {
-        &self.extras.watchers
+    pub fn extras(&self) -> &BotExtras {
+        &self.extras
     }
 
     pub fn routines(&self) -> &[Routine] {
@@ -1635,8 +1622,8 @@ mod tests {
         }))
         .unwrap();
         let mut conversation = Conversation::from_snapshot(first).unwrap();
-        assert_eq!(conversation.social_triggers().len(), 1);
-        let trigger = &conversation.social_triggers()[0];
+        assert_eq!(conversation.extras().social_triggers.len(), 1);
+        let trigger = &conversation.extras().social_triggers[0];
         assert_eq!(trigger.id, Uuid::from_u128(80));
         assert_eq!(trigger.connection_id, Uuid::from_u128(81));
         assert_eq!(trigger.bot_id, bot());
@@ -1656,9 +1643,9 @@ mod tests {
         conversation
             .apply(&update(2, json!([social_trigger(false, "discord")])))
             .unwrap();
-        assert!(!conversation.social_triggers()[0].enabled);
+        assert!(!conversation.extras().social_triggers[0].enabled);
         assert_eq!(
-            conversation.social_triggers()[0].provider.label(),
+            conversation.extras().social_triggers[0].provider.label(),
             "Discord"
         );
         let mut older = snapshot(1, vec![], None);
@@ -1666,12 +1653,12 @@ mod tests {
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.merge_older(older);
         assert!(
-            !conversation.social_triggers()[0].enabled,
+            !conversation.extras().social_triggers[0].enabled,
             "older pages keep the current triggers"
         );
         conversation.apply(&update(3, json!([]))).unwrap();
         assert!(
-            conversation.social_triggers().is_empty(),
+            conversation.extras().social_triggers.is_empty(),
             "deleted triggers leave the list"
         );
         assert_eq!(
@@ -1696,7 +1683,7 @@ mod tests {
         }))
         .unwrap();
         let mut conversation = Conversation::from_snapshot(first).unwrap();
-        let trigger = &conversation.mail_triggers()[0];
+        let trigger = &conversation.extras().mail_triggers[0];
         assert_eq!(trigger.account_id, Uuid::from_u128(90));
         assert_eq!(trigger.address, "owner@example.com");
         assert!(trigger.wake);
@@ -1712,10 +1699,10 @@ mod tests {
         conversation
             .apply(&update(2, json!([inbox(false)])))
             .unwrap();
-        assert!(!conversation.mail_triggers()[0].wake);
+        assert!(!conversation.extras().mail_triggers[0].wake);
         conversation.apply(&update(3, json!([]))).unwrap();
         assert!(
-            conversation.mail_triggers().is_empty(),
+            conversation.extras().mail_triggers.is_empty(),
             "removed inboxes leave the list"
         );
     }
@@ -1736,7 +1723,7 @@ mod tests {
         let mut first = snapshot(1, vec![], None);
         first.extras.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
         let mut conversation = Conversation::from_snapshot(first).unwrap();
-        let listed = &conversation.webhooks()[0];
+        let listed = &conversation.extras().webhooks[0];
         assert_eq!(listed.name, "Deploys");
         assert_eq!(
             listed.last_wake.as_ref().unwrap().woke_at.to_rfc3339(),
@@ -1752,15 +1739,15 @@ mod tests {
         conversation
             .apply(&update(2, json!([webhook(false)])))
             .unwrap();
-        assert!(!conversation.webhooks()[0].enabled);
+        assert!(!conversation.extras().webhooks[0].enabled);
         conversation.apply(&update(3, json!([]))).unwrap();
-        assert!(conversation.webhooks().is_empty());
+        assert!(conversation.extras().webhooks.is_empty());
     }
 
     #[test]
     fn watchers_default_to_empty_on_older_servers() {
         let conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
-        assert!(conversation.watchers().is_empty());
+        assert!(conversation.extras().watchers.is_empty());
         let bot: Bot = serde_json::from_value(json!({ "id": bot(), "name": "Assistant" })).unwrap();
         assert_eq!(bot.watching, 0);
     }
@@ -1778,7 +1765,7 @@ mod tests {
         page["watchers"] = json!([watcher]);
         let mut conversation =
             Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
-        let [active] = conversation.watchers() else {
+        let [active] = conversation.extras().watchers.as_slice() else {
             panic!("expected one active watcher")
         };
         assert_eq!(active.purpose, "Domain availability");
@@ -1800,12 +1787,12 @@ mod tests {
         watcher["last_status"] = json!("unavailable");
         watcher["last_output"] = json!("Domain is registered");
         conversation.apply(&update(2, 1, json!([watcher]))).unwrap();
-        let active = &conversation.watchers()[0];
+        let active = &conversation.extras().watchers[0];
         assert_eq!(active.status, WatcherStatus::Checking);
         assert_eq!(active.last_status.as_deref(), Some("unavailable"));
         assert_eq!(active.last_output.as_deref(), Some("Domain is registered"));
         conversation.apply(&update(3, 0, json!([]))).unwrap();
-        assert!(conversation.watchers().is_empty());
+        assert!(conversation.extras().watchers.is_empty());
     }
 
     #[test]
@@ -1819,17 +1806,20 @@ mod tests {
         }]);
         let conversation =
             Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
-        assert_eq!(conversation.watchers()[0].status, WatcherStatus::Unknown);
+        assert_eq!(
+            conversation.extras().watchers[0].status,
+            WatcherStatus::Unknown
+        );
     }
 
     #[test]
     fn older_servers_without_social_triggers_use_an_empty_list() {
         let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
-        assert!(conversation.social_triggers().is_empty());
+        assert!(conversation.extras().social_triggers.is_empty());
         conversation.extras.social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.apply(&bot_updated(2, None)).unwrap();
-        assert!(conversation.social_triggers().is_empty());
+        assert!(conversation.extras().social_triggers.is_empty());
     }
 
     #[test]

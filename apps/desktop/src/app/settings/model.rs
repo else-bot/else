@@ -6,9 +6,10 @@ use else_wire::settings::BotProfile;
 
 use else_wire::settings::Capabilities;
 
+use super::{BotPanel, PanelEvent};
+use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::request::Request;
-use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::profile_picker::{ProfilePicker, effort_label};
 use else_wire::settings::ModelInfo;
@@ -89,22 +90,17 @@ impl ModelState {
     }
 }
 
-impl ElseApp {
-    pub(super) fn load_profile(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+impl BotPanel {
+    pub(super) fn load_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let Some(entry) = self.settings.get_mut(&bot) else {
-            return;
-        };
+        let bot = self.bot;
         let attempt = Uuid::new_v4();
-        entry.model.reload(attempt);
+        self.model.reload(attempt);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.bot_profile(bot).await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(entry) = app.settings.get_mut(&bot) else {
-                    return;
-                };
-                if entry
+            let _ = this.update(cx, |panel, cx| {
+                if panel
                     .model
                     .answer(attempt, result.map_err(|err| err.to_string()))
                 {
@@ -115,12 +111,29 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn render_model(
-        &self,
-        bot: Uuid,
-        state: &ModelState,
+    /// The profile shown, once one loaded.
+    pub(in crate::app) fn shown_profile(&self) -> Option<&Option<BotProfile>> {
+        self.model.shown()
+    }
+
+    /// A profile read again elsewhere replaces the one shown.
+    pub(in crate::app) fn set_profile(
+        &mut self,
+        profile: Option<BotProfile>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) {
+        self.model = ModelState::Ready(profile);
+        cx.notify();
+    }
+
+    /// A profile the model dialog saved.
+    pub(in crate::app) fn saved_profile(&mut self, profile: BotProfile, cx: &mut Context<Self>) {
+        self.model.saved(profile);
+        cx.notify();
+    }
+
+    pub(super) fn render_model(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state = &self.model;
         let body = section("Model", cx);
         let Some(saved) = state.shown() else {
             let ModelState::Failed(err) = state else {
@@ -133,23 +146,23 @@ impl ElseApp {
                         Button::new("retry-model")
                             .control(Tier::Secondary, Scale::Standard, false, cx)
                             .label("Retry")
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.load_profile(bot, window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|panel, _, window, cx| panel.load_profile(window, cx)),
+                            ),
                     ),
                 )
                 .into_any_element();
         };
-        body.child(self.render_current_model(bot, saved.as_ref(), cx))
+        body.child(self.render_current_model(saved.as_ref(), cx))
             .into_any_element()
     }
 
     fn render_current_model(
         &self,
-        bot: Uuid,
         saved: Option<&BotProfile>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let caps = self.caps();
         let content = match saved {
             None => v_flex().child(muted("No model yet. Choose a bot model.", cx)),
             Some(saved) => {
@@ -161,22 +174,22 @@ impl ElseApp {
                 };
                 v_flex()
                     .gap_0p5()
-                    .child(item_name(self.model_name(choice)))
+                    .child(item_name(model_name(caps, choice)))
                     .child(meta(
                         format!(
                             "{} · {} reasoning · {speed}",
-                            self.provider_label(&choice.provider_id),
+                            provider_label(caps, &choice.provider_id),
                             effort_label(&choice.reasoning_effort),
                         ),
                         cx,
                     ))
             }
         };
-        let upgrade = saved.and_then(|saved| self.render_model_upgrade(bot, &saved.choice, cx));
+        let upgrade = saved.and_then(|saved| self.render_model_upgrade(&saved.choice, cx));
         // The warning sits under the button: a button keeps its label on one
         // line, which would clip the sentence.
         let unavailable = saved
-            .is_some_and(|saved| !self.model_available(&saved.choice))
+            .is_some_and(|saved| !model_available(caps, &saved.choice))
             .then(|| {
                 alert(
                     "Saved model is unavailable. Choose another model.",
@@ -195,7 +208,7 @@ impl ElseApp {
             .px(ROW_BLEED)
             .py(ROW_BLEED)
             .accessibility_label("Change model")
-            .disabled(self.caps.is_none() || self.connection != Connection::Connected)
+            .disabled(caps.is_none() || !self.connected())
             .child(
                 content
                     .flex_1()
@@ -209,9 +222,7 @@ impl ElseApp {
                     .flex_none()
                     .text_color(cx.theme().muted_foreground),
             )
-            .on_click(
-                cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)),
-            );
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(PanelEvent::ChangeModel)));
         v_flex()
             .w_full()
             .child(button)
@@ -220,41 +231,20 @@ impl ElseApp {
             .into_any_element()
     }
 
-    /// The catalog entry of a saved choice, when its provider lists it.
-    fn model_info(&self, choice: &ProfileChoice) -> Option<&ModelInfo> {
-        self.caps
-            .as_ref()?
-            .providers
-            .iter()
-            .find(|provider| provider.state.id == choice.provider_id)?
-            .catalog
-            .model(&choice.model)
-    }
-
-    /// The provider's name for a model, else one read from its ID.
-    pub(in crate::app) fn model_name(&self, choice: &ProfileChoice) -> String {
-        self.model_info(choice)
-            .map_or_else(|| model_label(&choice.model), |model| model.label.clone())
-    }
-
     /// "Claude Fable 5.2 available" with a Switch button, when the saved
     /// model's family has a newer model. Never switches on its own.
-    fn render_model_upgrade(
-        &self,
-        bot: Uuid,
-        choice: &ProfileChoice,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let newer = self.model_info(choice)?.upgrade.clone()?;
+    fn render_model_upgrade(&self, choice: &ProfileChoice, cx: &mut Context<Self>) -> Option<Div> {
+        let caps = self.caps();
+        let newer = model_info(caps, choice)?.upgrade.clone()?;
         let target = ProfileChoice {
             model: newer,
             ..choice.clone()
         };
-        let label = self.model_info(&target)?.label.clone();
-        let upgrade = &self.settings.get(&bot)?.model_upgrade;
+        let label = model_info(caps, &target)?.label.clone();
+        let upgrade = &self.model_upgrade;
         let saving = upgrade.busy();
         let error = upgrade.error().map(str::to_owned);
-        let connected = self.connection == Connection::Connected;
+        let connected = self.connected();
         Some(
             v_flex()
                 .w_full()
@@ -284,8 +274,8 @@ impl ElseApp {
                                 .label("Switch")
                                 .loading(saving)
                                 .accessibility_label(format!("Switch to {label}"))
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.upgrade_model(bot, target.clone(), window, cx)
+                                .on_click(cx.listener(move |panel, _, window, cx| {
+                                    panel.upgrade_model(target.clone(), window, cx)
                                 })),
                         ),
                 )
@@ -299,12 +289,11 @@ impl ElseApp {
     /// it takes them.
     fn upgrade_model(
         &mut self,
-        bot: Uuid,
         target: ProfileChoice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self.caps.as_ref().and_then(|caps| {
+        let Some(provider) = self.caps().and_then(|caps| {
             caps.providers
                 .iter()
                 .find(|p| p.state.id == target.provider_id)
@@ -314,37 +303,64 @@ impl ElseApp {
         let Some(choice) = crate::profile_picker::catalog_choice(provider, Some(&target)) else {
             return;
         };
-        let Some(attempt) = self
-            .settings
-            .get_mut(&bot)
-            .and_then(|entry| entry.model_upgrade.begin(()))
-        else {
+        let Some(attempt) = self.model_upgrade.begin(()) else {
             return;
         };
         cx.notify();
         let client = self.client.clone();
+        let bot = self.bot;
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_bot_profile(bot, choice).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update(cx, |panel, cx| {
                 if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
+                    panel.unauthorized(err, cx);
                 }
-                let Some(entry) = app.settings.get_mut(&bot) else {
-                    return;
-                };
-                if !entry.model_upgrade.settle(attempt, &result) {
+                if !panel.model_upgrade.settle(attempt, &result) {
                     return;
                 }
                 if let Ok(saved) = result {
-                    entry.model.saved(saved);
-                    entry.model_upgrade = Request::Idle;
+                    panel.model.saved(saved);
+                    panel.model_upgrade = Request::Idle;
                 }
                 cx.notify();
             });
         })
         .detach();
     }
+}
 
+/// The catalog entry of a saved choice, when its provider lists it.
+fn model_info<'a>(caps: Option<&'a Capabilities>, choice: &ProfileChoice) -> Option<&'a ModelInfo> {
+    caps?
+        .providers
+        .iter()
+        .find(|provider| provider.state.id == choice.provider_id)?
+        .catalog
+        .model(&choice.model)
+}
+
+/// The provider's name for a model, else one read from its ID.
+pub(super) fn model_name(caps: Option<&Capabilities>, choice: &ProfileChoice) -> String {
+    model_info(caps, choice).map_or_else(|| model_label(&choice.model), |model| model.label.clone())
+}
+
+pub(in crate::app) fn provider_label(caps: Option<&Capabilities>, id: &str) -> String {
+    caps.and_then(|caps| caps.providers.iter().find(|p| p.state.id == id))
+        .map(|p| p.state.label.clone())
+        .unwrap_or_else(|| id.to_owned())
+}
+
+pub(super) fn model_available(caps: Option<&Capabilities>, choice: &ProfileChoice) -> bool {
+    caps.is_none_or(|caps| {
+        caps.providers.iter().any(|provider| {
+            provider.state.id == choice.provider_id
+                && provider.state.cli_available
+                && provider.catalog.applies(choice)
+        })
+    })
+}
+
+impl ElseApp {
     /// A model picker that badges models listed since the owner last
     /// opened one.
     pub(in crate::app) fn profile_picker(
@@ -356,16 +372,6 @@ impl ElseApp {
         let new = self.preferences.see_models(caps);
         self.save_preferences(cx);
         ProfilePicker::new(caps, initial).with_new(new)
-    }
-
-    pub(super) fn model_available(&self, choice: &ProfileChoice) -> bool {
-        self.caps.as_ref().is_none_or(|caps| {
-            caps.providers.iter().any(|provider| {
-                provider.state.id == choice.provider_id
-                    && provider.state.cli_available
-                    && provider.catalog.applies(choice)
-            })
-        })
     }
 }
 

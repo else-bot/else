@@ -1,10 +1,10 @@
-use super::{BotSettings, automation_section};
+use super::{BotPanel, automation_section};
+use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::panel::{alert, item_name, meta, meta_line};
 use crate::app::request::Request;
-use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::controls::toggle;
-use crate::model::Conversation;
 use chrono::{DateTime, Utc};
+use else_wire::conversation::BotExtras;
 use else_wire::socials::Provider;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -21,9 +21,9 @@ pub(super) enum TriggerChange {
     Delete,
 }
 
-impl BotSettings {
-    pub(super) fn sync_triggers(&mut self, conversation: &Conversation) {
-        let cards = trigger_cards(conversation);
+impl BotPanel {
+    pub(super) fn sync_triggers(&mut self, automations: &BotExtras) {
+        let cards = trigger_cards(automations);
         self.triggers.retain(|key, save| {
             let enabled = cards
                 .iter()
@@ -32,19 +32,15 @@ impl BotSettings {
             still_pending(save, enabled)
         });
     }
-}
 
-impl ElseApp {
-    fn changeable_trigger(&self, bot: Uuid, source: TriggerSource) -> Option<TriggerCard> {
-        if self.connection != Connection::Connected {
+    fn changeable_trigger(&self, source: TriggerSource) -> Option<TriggerCard> {
+        if !self.connected() {
             return None;
         }
-        let entry = self.settings.get(&bot)?;
-        if entry.triggers.get(&source.key()).is_some_and(Request::busy) {
+        if self.triggers.get(&source.key()).is_some_and(Request::busy) {
             return None;
         }
-        let conversation = self.automations(bot)?;
-        trigger_cards(conversation)
+        trigger_cards(self.automations()?)
             .into_iter()
             .find(|card| card.source == source)
     }
@@ -52,30 +48,23 @@ impl ElseApp {
     /// Pause or resume a trigger, or delete it with `None`.
     fn change_trigger(
         &mut self,
-        bot: Uuid,
         source: TriggerSource,
         enabled: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.changeable_trigger(bot, source).is_none() {
+        if self.changeable_trigger(source).is_none() {
             return;
         }
         let change = match enabled {
             Some(enabled) => TriggerChange::Enable(enabled),
             None => TriggerChange::Delete,
         };
-        let Some(attempt) = self.settings.get_mut(&bot).and_then(|entry| {
-            entry
-                .triggers
-                .entry(source.key())
-                .or_default()
-                .begin(change)
-        }) else {
+        let Some(attempt) = self.triggers.entry(source.key()).or_default().begin(change) else {
             return;
         };
         cx.notify();
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         cx.spawn_in(window, async move |this, cx| {
             let result = match (source, enabled) {
                 (TriggerSource::Mail { account }, Some(wake)) => {
@@ -94,18 +83,14 @@ impl ElseApp {
                 }
                 (TriggerSource::Webhook { id }, None) => client.delete_webhook(bot, id).await,
             };
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update(cx, |panel, cx| {
                 if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
+                    panel.unauthorized(err, cx);
                 }
                 let action = if enabled.is_some() { "save" } else { "delete" };
-                let settled = app
-                    .settings
-                    .get_mut(&bot)
-                    .and_then(|entry| entry.triggers.get_mut(&source.key()))
-                    .is_some_and(|save| {
-                        save.settle_as(attempt, &result, |err| format!("Couldn't {action}. {err}"))
-                    });
+                let settled = panel.triggers.get_mut(&source.key()).is_some_and(|save| {
+                    save.settle_as(attempt, &result, |err| format!("Couldn't {action}. {err}"))
+                });
                 if settled && result.is_err() {
                     cx.notify();
                 }
@@ -116,12 +101,11 @@ impl ElseApp {
 
     fn open_trigger_delete_dialog(
         &mut self,
-        bot: Uuid,
         source: TriggerSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(card) = self.changeable_trigger(bot, source) else {
+        let Some(card) = self.changeable_trigger(source) else {
             return;
         };
         let target = match source {
@@ -130,23 +114,18 @@ impl ElseApp {
                 DeleteTarget::Trigger(card.delete_name)
             }
         };
-        self.open_delete_confirmation(target, window, cx, move |app, window, cx| {
-            app.change_trigger(bot, source, None, window, cx);
+        open_delete_confirmation(target, window, cx, move |panel, window, cx| {
+            panel.change_trigger(source, None, window, cx);
         });
     }
 
-    pub(super) fn render_triggers(
-        &self,
-        bot: Uuid,
-        entry: &BotSettings,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = self.automations(bot).map(|conversation| {
-            trigger_cards(conversation)
+    pub(super) fn render_triggers(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.automations().map(|automations| {
+            trigger_cards(automations)
                 .into_iter()
                 .map(|card| {
-                    let save = entry.triggers.get(&card.source.key());
-                    self.render_trigger(bot, card, save, cx)
+                    let save = self.triggers.get(&card.source.key());
+                    self.render_trigger(card, save, cx)
                 })
                 .collect()
         });
@@ -163,7 +142,6 @@ impl ElseApp {
 
     fn render_trigger(
         &self,
-        bot: Uuid,
         card: TriggerCard,
         save: Option<&Request<TriggerChange>>,
         cx: &mut Context<Self>,
@@ -176,7 +154,7 @@ impl ElseApp {
             Some(TriggerChange::Enable(enabled)) => *enabled,
             _ => card.enabled,
         };
-        let disabled = save.is_some_and(Request::busy) || self.connection != Connection::Connected;
+        let disabled = save.is_some_and(Request::busy) || !self.connected();
         let switch = toggle(
             ElementId::Name(format!("trigger-{key}").into()),
             checked,
@@ -184,8 +162,8 @@ impl ElseApp {
             cx,
         )
         .accessibility_label(format!("Run the trigger for {}", card.title))
-        .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
-            app.change_trigger(bot, source, Some(*enabled), window, cx)
+        .on_click(cx.listener(move |panel, enabled: &bool, window, cx| {
+            panel.change_trigger(source, Some(*enabled), window, cx)
         }));
         let delete = Button::new(ElementId::Name(format!("trigger-delete-{key}").into()))
             .focus_ring(false)
@@ -199,8 +177,8 @@ impl ElseApp {
             .accessibility_label(format!("Delete the trigger for {}", card.title))
             .loading(pending == Some(&TriggerChange::Delete))
             .disabled(disabled)
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_trigger_delete_dialog(bot, source, window, cx)
+            .on_click(cx.listener(move |panel, _, window, cx| {
+                panel.open_trigger_delete_dialog(source, window, cx)
             }));
         let error = save.and_then(Request::error).map(str::to_owned);
         let mut facts = card.pills;
@@ -296,8 +274,8 @@ struct TriggerCard {
 }
 
 /// Every trigger that can wake the bot: mail, then chats, then webhooks.
-fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
-    let mail = conversation.mail_triggers().iter().map(|trigger| {
+fn trigger_cards(automations: &BotExtras) -> Vec<TriggerCard> {
+    let mail = automations.mail_triggers.iter().map(|trigger| {
         let mut pills = vec!["Email".to_owned(), "New mail".to_owned()];
         if trigger.state == else_wire::email::AccountState::Paused {
             pills.push("inbox paused".to_owned());
@@ -321,7 +299,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
                 .and_then(|at| at.parse().ok()),
         }
     });
-    let social = conversation.social_triggers().iter().map(|trigger| {
+    let social = automations.social_triggers.iter().map(|trigger| {
         let connection = trigger
             .username
             .as_ref()
@@ -354,7 +332,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
                 .and_then(|at| at.parse().ok()),
         }
     });
-    let webhooks = conversation.webhooks().iter().map(|webhook| TriggerCard {
+    let webhooks = automations.webhooks.iter().map(|webhook| TriggerCard {
         source: TriggerSource::Webhook { id: webhook.id },
         icon: Icon::new(gpui_kit::assets::IconName::Webhook),
         title: webhook.name.clone(),
@@ -460,7 +438,7 @@ mod tests {
         }))
         .unwrap();
         let conversation = Conversation::from_snapshot(snapshot).unwrap();
-        let cards = trigger_cards(&conversation);
+        let cards = trigger_cards(conversation.extras());
         let titles: Vec<_> = cards.iter().map(|card| card.title.as_str()).collect();
         assert_eq!(titles, ["owner@example.com", "Any chat", "Deploys"]);
         let mail = &cards[0];

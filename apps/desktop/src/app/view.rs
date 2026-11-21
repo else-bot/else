@@ -73,11 +73,7 @@ impl ElseApp {
     }
 
     pub(crate) fn provider_label(&self, id: &str) -> String {
-        self.caps
-            .as_ref()
-            .and_then(|caps| caps.providers.iter().find(|p| p.state.id == id))
-            .map(|p| p.state.label.clone())
-            .unwrap_or_else(|| id.to_owned())
+        super::settings::model::provider_label(self.caps.as_deref(), id)
     }
 
     fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1202,7 +1198,6 @@ impl Render for ElseApp {
                 .children(self.render_handoff_panel(cx))
                 .into_any_element();
         }
-        self.sync_watcher_clock(cx);
         let settings = self
             .settings_shown()
             .then(|| self.selected_bot().cloned())

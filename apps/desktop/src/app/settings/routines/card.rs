@@ -1,6 +1,7 @@
+use super::super::model::{model_available, model_name, provider_label};
 use super::super::schedule_text::{describe_cron, describe_hours, local_time};
+use super::super::{BotPanel, PanelEvent};
 use super::{Banner, RoutineChange, banner, last_run, retryable};
-use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, meta_line};
 use crate::app::request::Request;
 use crate::controls::{Control as _, Scale, Tier, toggle};
@@ -19,10 +20,9 @@ use gpui_kit::*;
 use std::time::Duration;
 use uuid::Uuid;
 
-impl ElseApp {
+impl BotPanel {
     pub(super) fn render_routine(
         &self,
-        bot: Uuid,
         routine: &Routine,
         save: Option<&Request<RoutineChange>>,
         connected: bool,
@@ -30,6 +30,7 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = routine.id;
+        let caps = self.caps();
         let busy = save.is_some_and(Request::busy);
         let pending = save.and_then(Request::pending);
         let checked = match pending {
@@ -44,8 +45,8 @@ impl ElseApp {
             cx,
         )
         .accessibility_label(format!("Run {}", routine.name))
-        .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
-            app.set_routine(bot, id, *enabled, window, cx)
+        .on_click(cx.listener(move |panel, enabled: &bool, window, cx| {
+            panel.set_routine(id, *enabled, window, cx)
         }));
         let retrying = routine.retrying || matches!(pending, Some(RoutineChange::Retry));
         let dismiss = (routine.failed_runs > 0 && !retrying).then(|| {
@@ -54,8 +55,8 @@ impl ElseApp {
                 .label("Dismiss")
                 .loading(matches!(pending, Some(RoutineChange::DismissFailures)))
                 .accessibility_label(format!("Dismiss the failures of {}", routine.name))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.dismiss_routine_failures(bot, id, window, cx)
+                .on_click(cx.listener(move |panel, _, window, cx| {
+                    panel.dismiss_routine_failures(id, window, cx)
                 }))
         });
         let retry = (retrying || retryable(routine)).then(|| {
@@ -70,7 +71,7 @@ impl ElseApp {
                 .loading(retrying)
                 .accessibility_label(format!("Retry {} now", routine.name))
                 .on_click(
-                    cx.listener(move |app, _, window, cx| app.retry_routine(bot, id, window, cx)),
+                    cx.listener(move |panel, _, window, cx| panel.retry_routine(id, window, cx)),
                 )
         });
         // Separate tokens, so a narrow panel wraps between them. Only a
@@ -83,15 +84,13 @@ impl ElseApp {
         };
         let schedule = format!("{} · {}", when.join(" · "), routine.timezone);
         let last = last_run(routine);
-        let choice = routine.model.as_ref().or_else(|| {
-            self.settings
-                .get(&bot)
-                .and_then(|entry| entry.model.shown()?.as_ref())
-                .map(|profile| &profile.choice)
-        });
+        let choice = routine
+            .model
+            .as_ref()
+            .or_else(|| self.model.shown()?.as_ref().map(|profile| &profile.choice));
         let model_title = match (&routine.model, choice) {
-            (Some(choice), _) => self.model_name(choice),
-            (None, Some(choice)) => format!("Bot model · {}", self.model_name(choice)),
+            (Some(choice), _) => model_name(caps, choice),
+            (None, Some(choice)) => format!("Bot model · {}", model_name(caps, choice)),
             (None, None) => "Bot model".to_owned(),
         };
         let model_details = choice
@@ -103,7 +102,7 @@ impl ElseApp {
                 };
                 format!(
                     "{} · {} reasoning · {speed}",
-                    self.provider_label(&choice.provider_id),
+                    provider_label(caps, &choice.provider_id),
                     effort_label(&choice.reasoning_effort)
                 )
             })
@@ -111,7 +110,7 @@ impl ElseApp {
         let unavailable = routine
             .model
             .as_ref()
-            .is_some_and(|choice| !self.model_available(choice));
+            .is_some_and(|choice| !model_available(caps, choice));
         let warning = routine
             .requested_model
             .as_ref()
@@ -137,7 +136,7 @@ impl ElseApp {
         );
         if let Some(choice) = routine.model.as_ref().filter(|_| routine.run_at.is_none()) {
             tokens.push(
-                meta(self.model_name(choice), cx)
+                meta(model_name(caps, choice), cx)
                     .flex_none()
                     .whitespace_nowrap()
                     .into_any_element(),
@@ -266,19 +265,19 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let owner = cx.entity().downgrade();
         let reminder = routine.run_at.is_some();
-        let no_models = self.caps.is_none();
+        let no_models = caps.is_none();
         let (model_badge, model_hint) = match (&routine.model, choice) {
             (Some(choice), _) => (
                 "Custom",
                 Hint {
-                    title: format!("{}, for this routine only", self.model_name(choice)).into(),
+                    title: format!("{}, for this routine only", model_name(caps, choice)).into(),
                     body: format!("{model_details}. The bot's chats keep their own model.").into(),
                 },
             ),
             (None, Some(choice)) => (
                 "Bot",
                 Hint {
-                    title: format!("{}, from the bot", self.model_name(choice)).into(),
+                    title: format!("{}, from the bot", model_name(caps, choice)).into(),
                     body: format!(
                         "{model_details}. Pick another model for this routine only; \
                          the bot's chats keep theirs."
@@ -317,10 +316,10 @@ impl ElseApp {
             ))
             .disabled(busy || !connected)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let act = |f: fn(&mut Self, Uuid, Uuid, &mut Window, &mut Context<Self>)| {
+                let act = |f: fn(&mut Self, Uuid, &mut Window, &mut Context<Self>)| {
                     let owner = owner.clone();
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                        let _ = owner.update(cx, |app, cx| f(app, bot, id, window, cx));
+                        let _ = owner.update(cx, |panel, cx| f(panel, id, window, cx));
                     }
                 };
                 // Each item draws its own icon, so the hint card anchors at
@@ -345,12 +344,12 @@ impl ElseApp {
                             })
                             .checked(quiet)
                             .on_click(if quiet {
-                                act(|app, bot, id, window, cx| {
-                                    app.set_routine_quiet(bot, id, false, window, cx)
+                                act(|panel, id, window, cx| {
+                                    panel.set_routine_quiet(id, false, window, cx)
                                 })
                             } else {
-                                act(|app, bot, id, window, cx| {
-                                    app.set_routine_quiet(bot, id, true, window, cx)
+                                act(|panel, id, window, cx| {
+                                    panel.set_routine_quiet(id, true, window, cx)
                                 })
                             }),
                         )
@@ -367,11 +366,11 @@ impl ElseApp {
                                 )
                             })
                             .disabled(no_models)
-                            .on_click(act(
-                                |app, bot, id, window, cx| {
-                                    app.open_routine_model_dialog(bot, id, window, cx)
-                                },
-                            )),
+                            .on_click(act(|panel, id, _, cx| {
+                                if panel.changeable_routine(id).is_some() {
+                                    cx.emit(PanelEvent::ChangeRoutineModel(id));
+                                }
+                            })),
                         )
                         .separator()
                 };
@@ -383,8 +382,8 @@ impl ElseApp {
                             .child(Icon::new(gpui_kit::assets::IconName::Trash).xsmall())
                             .child("Delete…")
                     })
-                    .on_click(act(|app, bot, id, window, cx| {
-                        app.open_routine_delete_dialog(bot, id, window, cx)
+                    .on_click(act(|panel, id, window, cx| {
+                        panel.open_routine_delete_dialog(id, window, cx)
                     })),
                 )
             });
@@ -413,8 +412,8 @@ impl ElseApp {
         let shown = banner.as_ref().map_or("", Banner::text).to_owned();
         let problem = matches!(banner, Some(Banner::Problem(_)));
         let expanded = banner.is_some() && self.expanded_routine_problems.get(&id) == Some(&shown);
-        // The panel's 1 px border and its sections' 16 px sides.
-        let column = px(self.details_panel_width(window) - 33.);
+        // The sections' 16 px sides.
+        let column = px(self.width - 32.);
         let width = if problem {
             column - REASON_ICON
         } else {
@@ -427,11 +426,11 @@ impl ElseApp {
                 .control(Tier::Ghost, Scale::Compact, false, cx)
                 .flush_start(Scale::Compact)
                 .label(if expanded { "Show less" } else { "Show more" })
-                .on_click(cx.listener(move |app, _, _, cx| {
+                .on_click(cx.listener(move |panel, _, _, cx| {
                     if expanded {
-                        app.expanded_routine_problems.remove(&id);
+                        panel.expanded_routine_problems.remove(&id);
                     } else {
-                        app.expanded_routine_problems.insert(id, opened.clone());
+                        panel.expanded_routine_problems.insert(id, opened.clone());
                     }
                     cx.notify();
                 }))

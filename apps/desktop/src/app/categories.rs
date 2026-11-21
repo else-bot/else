@@ -1,4 +1,4 @@
-use super::delete_dialog::DeleteTarget;
+use super::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use super::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::sidebar::known_category;
@@ -118,7 +118,7 @@ impl ElseApp {
             .iter()
             .filter(|b| b.is_active() && b.category_id == Some(category.id))
             .count();
-        self.open_delete_confirmation(
+        open_delete_confirmation(
             DeleteTarget::Category {
                 name: category.name,
                 bots,

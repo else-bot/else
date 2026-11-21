@@ -1,4 +1,4 @@
-use super::delete_dialog::DeleteTarget;
+use super::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use super::request::Request;
 use super::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, text_field};
@@ -194,7 +194,7 @@ impl ElseApp {
         let Some(bot) = self.deletable_bot(id, cx) else {
             return;
         };
-        self.open_delete_confirmation(
+        open_delete_confirmation(
             DeleteTarget::Bot(bot.name),
             window,
             cx,
