@@ -14,13 +14,19 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    Application, Artifact, ArtifactKind, BackupError, BotEntry, COMPLETE, Completion, Coverage,
-    Covered, DATABASE, MANIFEST, Manifest, ObjectRef, ProjectState, ProviderState, SCHEMA_VERSION,
-    Sqlite, TableDigest, VmState,
+    Application, Artifact, ArtifactKind, BackupError, BotEntry, Completion, Coverage, Covered,
+    DATABASE, MANIFEST, Manifest, ObjectRef, ProjectState, ProviderState, SCHEMA_VERSION, Sqlite,
+    TableDigest, VmState,
 };
 use crate::credentials::SecretKey;
 use crate::db::bots::BotStatus;
 use crate::maintenance::{Closed, Step};
+
+mod sources;
+mod staging;
+
+use sources::{capture_computers, capture_files, capture_mcp, capture_projects};
+use staging::StagedSet;
 
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
@@ -113,72 +119,6 @@ pub async fn table_digests(
     Ok(digests)
 }
 
-fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), BackupError> {
-    use std::io::Write;
-    let path = set_dir.join(COMPLETE);
-    let fail = |e| BackupError::io(path.display(), e);
-    let mut file = crate::private_file::staged(set_dir, &path).map_err(fail)?;
-    let bytes = serde_json::to_vec_pretty(completion).expect("serializable");
-    file.write_all(&bytes)
-        .and_then(|()| file.as_file().sync_all())
-        .map_err(fail)?;
-    file.persist_noclobber(&path).map_err(|e| fail(e.error))?;
-    super::sync_dir(set_dir)
-}
-
-/// A staging directory this attempt created and marked as its own. Dropping
-/// it removes the directory, so a failed or aborted capture (a shutdown
-/// that outlives its grace) leaves no plaintext behind; after
-/// [`Self::move_into`] nothing is left at the staging path.
-struct StagedSet(PathBuf);
-
-impl Drop for StagedSet {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A set directory this attempt renamed into place, not yet complete.
-struct OwnedFinalSet(PathBuf);
-
-impl StagedSet {
-    fn create(dir: &Path, set_id: &str) -> Result<Self, BackupError> {
-        let staging = super::staging_path(dir, set_id);
-        super::private_dir(&staging)?;
-        let staged = Self(staging);
-        super::mark_owned(&staged.0)?;
-        Ok(staged)
-    }
-
-    /// A failed rename never touches the destination: another set may own it.
-    fn move_into(self, dir: &Path, set_id: &str) -> Result<OwnedFinalSet, BackupError> {
-        let final_dir = dir.join(set_id);
-        super::rename_noreplace(&self.0, &final_dir)?;
-        let owned = OwnedFinalSet(final_dir);
-        match super::sync_dir(dir) {
-            Ok(()) => Ok(owned),
-            Err(err) => Err(owned.discard(err)),
-        }
-    }
-}
-
-impl OwnedFinalSet {
-    fn discard(self, err: BackupError) -> BackupError {
-        let _ = std::fs::remove_dir_all(&self.0);
-        err
-    }
-
-    fn publish(self, completion: &Completion) -> Result<PathBuf, BackupError> {
-        if crate::faults::hit("backup.before_complete") {
-            return Err(BackupError::Interrupted);
-        }
-        match publish_completion(&self.0, completion) {
-            Ok(()) => Ok(self.0),
-            Err(err) => Err(self.discard(err)),
-        }
-    }
-}
-
 /// Capture, encrypt, and publish a set with the configured checkpoint sources.
 pub async fn create_set(
     pool: &SqlitePool,
@@ -247,146 +187,6 @@ pub struct Turns {
     pub gate: std::sync::Arc<crate::maintenance::Gate>,
 }
 
-async fn seal_file(
-    plain: PathBuf,
-    target: PathBuf,
-    identity: age::x25519::Identity,
-    limit: u64,
-) -> Result<super::Sealed, BackupError> {
-    super::blocking(move || {
-        let result = std::fs::File::open(&plain)
-            .map_err(|e| BackupError::io(plain.display(), e))
-            .and_then(|mut file| super::seal(&target, &identity, &mut file, limit));
-        let _ = std::fs::remove_file(&plain);
-        result
-    })
-    .await
-}
-
-async fn capture_computers(
-    computers: &crate::computers::ComputerManager,
-    bots: &[(uuid::Uuid, String, BotStatus)],
-    staging: &Path,
-    identity: &age::x25519::Identity,
-    limit: u64,
-    progress: &(dyn Fn(usize, usize) + Sync),
-) -> Result<
-    (
-        Vec<Artifact>,
-        std::collections::HashMap<uuid::Uuid, (VmState, Option<super::ComputerEntry>)>,
-    ),
-    BackupError,
-> {
-    use crate::computers::{ComputerError, DiskCapture};
-    let mut artifacts = Vec::new();
-    let mut entries = std::collections::HashMap::new();
-    let mut carried = std::collections::HashSet::new();
-    let total = bots
-        .iter()
-        .filter(|(_, _, status)| *status == BotStatus::Active)
-        .count();
-    let mut done = 0;
-    progress(done, total);
-    for (bot, name, status) in bots {
-        if *status != BotStatus::Active {
-            entries.insert(*bot, (VmState::OmittedDeletedBot, None));
-            continue;
-        }
-        let object = format!("vm-{bot}.msb.age");
-        let plain = staging.join(format!("vm-{bot}.msb"));
-        let captured = computers.capture_disk(*bot, &plain, &carried).await;
-        let captured = match captured {
-            Ok(captured) => captured,
-            Err(ComputerError::Busy(why)) => {
-                let _ = std::fs::remove_file(&plain);
-                return Err(BackupError::Deferred(format!(
-                    "bot {name}'s computer is {why}"
-                )));
-            }
-            Err(err) => {
-                let _ = std::fs::remove_file(&plain);
-                return Err(BackupError::Producer(format!(
-                    "bot {name}'s computer: {err}"
-                )));
-            }
-        };
-        match captured {
-            DiskCapture::NoComputer => {
-                entries.insert(*bot, (VmState::None, None));
-            }
-            DiskCapture::Missing => {
-                entries.insert(*bot, (VmState::Missing, None));
-            }
-            DiskCapture::Exported {
-                runtime_name,
-                image,
-                cpus,
-                memory_mib,
-                desired_state,
-                desktop_port,
-                was_running,
-                browser_checkpoint,
-                project_mount,
-                carries_image,
-            } => {
-                let sealed =
-                    seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
-                if carries_image {
-                    carried.insert(image.clone());
-                }
-                let password_file = computers.desktop_password_file(*bot);
-                let desktop_password = std::fs::read_to_string(&password_file)
-                    .ok()
-                    .map(|p| p.trim().to_owned())
-                    .filter(|p| !p.is_empty() && p.len() <= 64);
-                if desktop_port.is_some() && desktop_password.is_none() {
-                    return Err(BackupError::Producer(format!(
-                        "bot {name}'s desktop password ({}) is missing or invalid",
-                        password_file.display()
-                    )));
-                }
-                artifacts.push(Artifact {
-                    kind: ArtifactKind::Vm,
-                    object: object.clone(),
-                    bot_id: Some(*bot),
-                    ciphertext_bytes: sealed.ciphertext_bytes,
-                    ciphertext_sha256: sealed.ciphertext_sha256,
-                    plaintext_bytes: sealed.plaintext_bytes,
-                    plaintext_sha256: sealed.plaintext_sha256,
-                });
-                entries.insert(
-                    *bot,
-                    (
-                        VmState::Included,
-                        Some(super::ComputerEntry {
-                            object,
-                            runtime_name,
-                            runtime_version: crate::computers::runtime::VERIFIED_VERSION.into(),
-                            image,
-                            cpus,
-                            memory_mib,
-                            desired_state,
-                            network: computers.config().network.clone(),
-                            desktop_port,
-                            desktop_password,
-                            was_running,
-                            browser_checkpoint,
-                            project_mount: project_mount.map(|m| super::ProjectMount {
-                                guest: m.guest,
-                                uid: m.uid,
-                            }),
-                            carries_image,
-                        }),
-                    ),
-                );
-            }
-        }
-        done += 1;
-        progress(done, total);
-    }
-    Ok((artifacts, entries))
-}
-
 /// How long the last complete backup of the bot computers paused new
 /// work. Runs from before `paused_ms` existed count their whole duration.
 async fn last_pause(pool: &SqlitePool) -> Result<Option<std::time::Duration>, sqlx::Error> {
@@ -402,142 +202,6 @@ async fn last_pause(pool: &SqlitePool) -> Result<Option<std::time::Duration>, sq
     .await?
     .flatten();
     Ok(ms.map(|ms| std::time::Duration::from_millis(ms.max(0) as u64)))
-}
-
-async fn capture_files(
-    pool: &SqlitePool,
-    state_dir: &Path,
-    staging: &Path,
-    identity: &age::x25519::Identity,
-    limit: u64,
-) -> Result<(Vec<Artifact>, Vec<uuid::Uuid>), BackupError> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, i64, Vec<u8>)> =
-        sqlx::query_as("SELECT id, bot_id, size_bytes, sha256 FROM artifacts ORDER BY id")
-            .fetch_all(pool)
-            .await?;
-    let mut artifacts = Vec::new();
-    let mut missing = Vec::new();
-    for (id, bot, size, sha) in rows {
-        let source = state_dir
-            .join("artifacts")
-            .join(bot.to_string())
-            .join(id.to_string());
-        let regular =
-            std::fs::symlink_metadata(&source).is_ok_and(|m| m.is_file() && m.len() == size as u64);
-        if !regular {
-            missing.push(id);
-            continue;
-        }
-        let object = format!("file-{id}.age");
-        let target = staging.join(&object);
-        let identity = identity.clone();
-        let sealed = super::blocking(move || {
-            let mut file =
-                std::fs::File::open(&source).map_err(|e| BackupError::io(source.display(), e))?;
-            super::seal(&target, &identity, &mut file, limit)
-        })
-        .await?;
-        if sealed.plaintext_sha256 != hex::encode(&sha) {
-            let _ = std::fs::remove_file(staging.join(&object));
-            missing.push(id);
-            continue;
-        }
-        artifacts.push(Artifact {
-            kind: ArtifactKind::File,
-            object,
-            bot_id: Some(bot),
-            ciphertext_bytes: sealed.ciphertext_bytes,
-            ciphertext_sha256: sealed.ciphertext_sha256,
-            plaintext_bytes: sealed.plaintext_bytes,
-            plaintext_sha256: sealed.plaintext_sha256,
-        });
-    }
-    Ok((artifacts, missing))
-}
-
-async fn capture_projects(
-    bots: &[(uuid::Uuid, String, BotStatus)],
-    projects_dir: &Path,
-    staging: &Path,
-    identity: &age::x25519::Identity,
-    limit: u64,
-) -> Result<
-    (
-        Vec<Artifact>,
-        std::collections::HashMap<uuid::Uuid, ProjectState>,
-    ),
-    BackupError,
-> {
-    let mut artifacts = Vec::new();
-    let mut states = std::collections::HashMap::new();
-    for (bot, name, status) in bots {
-        if *status != BotStatus::Active {
-            states.insert(*bot, ProjectState::OmittedDeletedBot);
-            continue;
-        }
-        let dir = projects_dir.join(bot.to_string());
-        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-            states.insert(*bot, ProjectState::None);
-            continue;
-        }
-        let object = super::projects::Format::TarZstd.object(*bot);
-        let plain = staging.join(format!("project-{bot}.tar.zst"));
-        let archive_target = plain.clone();
-        let unreadable = super::blocking(move || super::projects::archive(&dir, &archive_target))
-            .await
-            .inspect_err(|_| {
-                let _ = std::fs::remove_file(&plain);
-            })?;
-        if !unreadable.is_empty() {
-            tracing::warn!(bot = %name, entries = unreadable.len(), "project entries could not be read and are not in the set");
-        }
-        let sealed = seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
-        artifacts.push(Artifact {
-            kind: ArtifactKind::Project,
-            object,
-            bot_id: Some(*bot),
-            ciphertext_bytes: sealed.ciphertext_bytes,
-            ciphertext_sha256: sealed.ciphertext_sha256,
-            plaintext_bytes: sealed.plaintext_bytes,
-            plaintext_sha256: sealed.plaintext_sha256,
-        });
-        states.insert(
-            *bot,
-            if unreadable.is_empty() {
-                ProjectState::Included
-            } else {
-                ProjectState::Partial
-            },
-        );
-    }
-    Ok((artifacts, states))
-}
-
-async fn capture_mcp(
-    dir: PathBuf,
-    staging: &Path,
-    identity: &age::x25519::Identity,
-    limit: u64,
-) -> Result<Artifact, BackupError> {
-    let plain = staging.join("mcp.tar");
-    let archive_target = plain.clone();
-    super::blocking(move || super::mcp::archive(&dir, &archive_target, limit)).await?;
-    let sealed = seal_file(
-        plain,
-        staging.join(super::mcp::OBJECT),
-        identity.clone(),
-        limit,
-    )
-    .await?;
-    Ok(Artifact {
-        kind: ArtifactKind::Mcp,
-        object: super::mcp::OBJECT.into(),
-        bot_id: None,
-        ciphertext_bytes: sealed.ciphertext_bytes,
-        ciphertext_sha256: sealed.ciphertext_sha256,
-        plaintext_bytes: sealed.plaintext_bytes,
-        plaintext_sha256: sealed.plaintext_sha256,
-    })
 }
 
 /// One capture: what it reads, where it stages, and the set's identity.
