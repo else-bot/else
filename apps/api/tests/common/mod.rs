@@ -145,7 +145,7 @@ pub struct Builder {
     config: Option<Config>,
     max_active: usize,
     providers: Option<Providers>,
-    projects: Option<std::path::PathBuf>,
+    pub(crate) projects: Option<std::path::PathBuf>,
     computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
     mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
     social: Option<std::sync::Arc<dyn else_api::socials::providers::Transport>>,
@@ -180,8 +180,7 @@ impl Builder {
         self
     }
 
-    /// The projects root the default synthetic provider or the recorder
-    /// reports to the API.
+    /// The projects root the recorder reports to the API.
     pub fn projects(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.projects = Some(root.into());
         self
@@ -226,21 +225,13 @@ impl Builder {
         self
     }
 
-    /// The synthetic provider, reporting the builder's projects root.
-    pub(crate) fn synthetic(&self) -> else_api::providers::synthetic::Synthetic {
-        let synthetic =
-            else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5));
-        match &self.projects {
-            Some(root) => synthetic.with_projects(root.clone()),
-            None => synthetic,
-        }
-    }
-
     pub async fn start(mut self) -> TestApp {
         let providers: Providers = match self.providers.take() {
             Some(providers) => providers,
             None => vec![
-                std::sync::Arc::new(self.synthetic()),
+                std::sync::Arc::new(else_api::providers::synthetic::Synthetic::new(
+                    std::time::Duration::from_millis(5),
+                )),
                 std::sync::Arc::new(ProfiledFake),
             ],
         };

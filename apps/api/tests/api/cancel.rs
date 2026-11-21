@@ -47,7 +47,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
     let h = recorder::harness(TestApp::builder()).await;
     let app = &h.app;
     let bot = app.main_bot().await;
-    h.recorder.inner.hold_hangs(true).await;
+    h.recorder.hold_hangs(true);
     let running = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -70,7 +70,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
     assert_eq!(rejected.body["error"]["code"], "cancellation_pending");
     let bot_view = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(bot_view.body["bot"]["activity"]["phase"], "cancelling");
-    h.recorder.inner.hold_hangs(false).await;
+    h.recorder.hold_hangs(false);
     let done = wait_receipt(app, &bot, request).await;
     assert_eq!(done.status, StatusCode::OK);
     for turn in [&running, &queued_a, &queued_b] {

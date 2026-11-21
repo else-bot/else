@@ -89,12 +89,54 @@ impl State {
     }
 }
 
+/// Wraps [`Synthetic`] with test controls: gates, held hangs, failing
+/// checkpoints, forgotten sessions and a projects root.
 pub struct Recorder {
     pub inner: Synthetic,
     mailbox: mpsc::Sender<Message>,
+    projects: Option<std::path::PathBuf>,
+    hangs_held: watch::Sender<bool>,
+    checkpoint_error: watch::Sender<Option<String>>,
+    forgotten: watch::Sender<HashSet<String>>,
 }
 
 impl Recorder {
+    pub fn new(inner: Synthetic, projects: Option<std::path::PathBuf>) -> Self {
+        let (mailbox, mut messages) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut state = State::default();
+            while let Some(message) = messages.recv().await {
+                state.handle(message);
+            }
+        });
+        Self {
+            inner,
+            mailbox,
+            projects,
+            hangs_held: watch::Sender::new(false),
+            checkpoint_error: watch::Sender::new(None),
+            forgotten: watch::Sender::new(HashSet::new()),
+        }
+    }
+
+    /// Hold or release the drain of every cancelled `[synthetic:hang]` turn,
+    /// so a test can queue messages behind one at any speed.
+    pub fn hold_hangs(&self, held: bool) {
+        self.hangs_held.send_replace(held);
+    }
+
+    /// Make checkpoints fail with `reason` (or succeed again with `None`).
+    pub fn fail_checkpoints(&self, reason: Option<&str>) {
+        self.checkpoint_error
+            .send_replace(reason.map(str::to_owned));
+    }
+
+    /// Lose these native sessions, as if their files were removed.
+    pub fn forget_sessions(&self, native_ids: &[String]) {
+        self.forgotten
+            .send_modify(|forgotten| forgotten.extend(native_ids.iter().cloned()));
+    }
+
     async fn ask<T>(&self, message: impl FnOnce(oneshot::Sender<T>) -> Message) -> T {
         let (reply, response) = oneshot::channel();
         self.mailbox.send(message(reply)).await.unwrap();
@@ -181,7 +223,8 @@ impl Provider for Recorder {
         self.inner.label()
     }
     fn project_dir(&self, bot: Uuid) -> Option<std::path::PathBuf> {
-        self.inner.project_dir(bot)
+        let root = self.projects.as_deref()?;
+        else_api::providers::host::project_dir(root, bot).ok()
     }
     fn availability(&self) -> Availability {
         Availability::Available
@@ -197,23 +240,32 @@ impl Provider for Recorder {
         request: CheckpointRequest,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<String, String> {
+        if let Some(reason) = self.checkpoint_error.borrow().clone() {
+            return Err(reason);
+        }
         self.inner.checkpoint(request, cancel).await
     }
     async fn run(
         &self,
-        input: TurnInput,
+        mut input: TurnInput,
         sink: &dyn TurnSink,
         stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
+        let forgotten = input
+            .session
+            .as_ref()
+            .is_some_and(|s| self.forgotten.borrow().contains(&s.native_id));
+        if forgotten {
+            input.session = None;
+        }
         let opening = input.attempt == 1 && input.text.contains(GATE_AFTER_OPENING);
         let gated = input.text.contains(GATE_EVERY_ATTEMPT)
             || opening
             || (input.attempt == 1 && input.text.contains(GATE));
-        let hangs = std::iter::once(&input.text)
-            .chain(input.steered.iter().map(|s| &s.message.text))
-            .any(|text| {
-                text.contains("[synthetic:hang]") || text.contains("[synthetic:ignore-cancel]")
-            });
+        let directives =
+            || std::iter::once(&input.text).chain(input.steered.iter().map(|s| &s.message.text));
+        let hang = directives().any(|text| text.contains("[synthetic:hang]"));
+        let hangs = hang || directives().any(|text| text.contains("[synthetic:ignore-cancel]"));
         self.mailbox
             .send(Message::Record {
                 input: Box::new(input.clone()),
@@ -228,7 +280,10 @@ impl Provider for Recorder {
             open: tokio::sync::OnceCell::new(),
             stop: stop.clone(),
         };
-        let outcome = self.inner.run(input, &sink, stop).await;
+        let outcome = self.inner.run(input, &sink, stop.clone()).await;
+        if hang && stop.token().is_cancelled() {
+            let _ = self.hangs_held.subscribe().wait_for(|held| !held).await;
+        }
         // A reply that ended inside its opening still reaches the turn.
         let opened = sink.opening.lock().unwrap().take();
         if let Some((_, text)) = opened {
@@ -250,17 +305,10 @@ pub async fn harness(mut builder: Builder) -> Harness {
         .execute(&db.pool)
         .await
         .unwrap();
-    let (mailbox, mut messages) = mpsc::channel(64);
-    tokio::spawn(async move {
-        let mut state = State::default();
-        while let Some(message) = messages.recv().await {
-            state.handle(message);
-        }
-    });
-    let recorder = Arc::new(Recorder {
-        inner: builder.synthetic(),
-        mailbox,
-    });
+    let recorder = Arc::new(Recorder::new(
+        Synthetic::new(std::time::Duration::from_millis(5)),
+        builder.projects.clone(),
+    ));
     let mut providers: Vec<Arc<dyn Provider>> = vec![recorder.clone()];
     providers.extend(builder.extra_providers());
     let app = builder.start_with(providers).await;
