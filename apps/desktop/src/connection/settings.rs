@@ -152,9 +152,9 @@ impl Shell {
             }
             settings.section = section;
             if section == SettingsSection::Updates
-                && matches!(settings.servers, ServerPage::Update(_))
+                && matches!(settings.servers(), ServerPage::Update(_))
             {
-                settings.servers = ServerPage::List;
+                settings.set_servers(ServerPage::List, window, cx);
             }
             settings.navigation_focus[match section {
                 SettingsSection::Server => 0,
@@ -340,7 +340,7 @@ impl Shell {
                 &settings.navigation_focus[6],
             ));
         let body = match section {
-            SettingsSection::Server => self.render_server_settings(&settings.servers, window, cx),
+            SettingsSection::Server => self.render_server_settings(settings.servers(), window, cx),
             SettingsSection::Email => div()
                 .children(settings.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
