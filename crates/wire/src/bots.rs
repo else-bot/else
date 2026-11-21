@@ -13,9 +13,9 @@ wire_state! {
     _ => Unknown
 }
 
-/// An active bot, or a deletion receipt (`cleanup` set). A receipt carries
+/// An active bot, or a deletion receipt (`cleanup` set). A receipt sets
 /// only `id`, `name`, `avatar`, `deleted_at` and `cleanup`; its other
-/// fields read as unset.
+/// fields are null, false or zero, or omitted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Bot {
     pub id: Uuid,
