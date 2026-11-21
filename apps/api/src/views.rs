@@ -5,9 +5,7 @@
 use else_wire as wire;
 use serde_json::{Value, json};
 
-use crate::app::routines::ModelSetting;
 use crate::db::bots::{BotRecord, BotStatus};
-use crate::db::routines::{Routine, RunState};
 use crate::db::turns::{ItemRecord, TurnRecord, TurnStatus};
 
 impl From<&BotRecord> for wire::bots::Bot {
@@ -161,100 +159,5 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "rules_update": item.rules_update,
         "parts": item.parts.as_ref().map_or(&[][..], |parts| &parts.0[..]),
         "attempt": item.attempt,
-    })
-}
-
-/// A watcher with its schedule and what its last check saw.
-pub fn watcher_json(watcher: &crate::db::watchers::Watcher) -> Value {
-    json!({
-        "id": watcher.id,
-        "purpose": watcher.purpose,
-        "check": watcher.check_command,
-        "secrets": watcher.secrets.0,
-        "every_minutes": watcher.every_minutes,
-        "until": watcher.watch_until,
-        "status": watcher.status,
-        "outcome": watcher.outcome,
-        "last_status": watcher.last_status,
-        "last_checked_at": watcher.last_checked_at,
-        "next_check_at": watcher.next_check_at,
-        "last_output": watcher.last_output,
-        "checks": watcher.checks,
-        "failures": watcher.failures,
-        "created_at": watcher.created_at,
-        "created_turn_id": watcher.created_turn_id,
-    })
-}
-
-/// A webhook with its pace, waiting wake and last wake. Never its token.
-pub fn webhook_json(webhook: &crate::db::webhooks::Webhook) -> Value {
-    json!({
-        "id": webhook.id,
-        "bot_id": webhook.bot_id,
-        "name": webhook.name,
-        "prompt": webhook.prompt,
-        "min_interval_minutes": webhook.pace.min_interval_minutes(),
-        "daily_limit": webhook.pace.daily_limit(),
-        "enabled": webhook.enabled,
-        "requested_at": webhook.requested_at,
-        "wake_not_before": webhook.not_before,
-        "created_at": webhook.created_at,
-        "updated_at": webhook.updated_at,
-        "last_wake": webhook.last_wake.as_ref().map(|wake| json!({
-            "woke_at": wake.woke_at,
-            "status": wake.status,
-            "turn_id": wake.turn_id,
-        })),
-    })
-}
-
-/// A routine with its derived last-run state. The prompt is included: the
-/// owner may read what each run will do.
-pub fn routine_json(routine: &Routine) -> Value {
-    let last_run = routine.last_run.as_ref().map(|run| {
-        json!({
-            "due_at": run.due_at,
-            "status": run.state.label(),
-            "skip_reason": match run.state {
-                RunState::Skipped(skip) => Some(skip),
-                _ => None,
-            },
-            "turn_id": run.turn_id,
-            "error": run.error_code.as_ref().map(|code| json!({ "code": code, "message": run.error_message })),
-            "finished_at": run.finished_at,
-        })
-    });
-    json!({
-        "id": routine.id,
-        "bot_id": routine.bot_id,
-        "name": routine.name,
-        "prompt": routine.prompt,
-        "prompt_revision": routine.prompt_revision,
-        "check": routine.check,
-        "cron": routine.cron,
-        "run_at": routine.run_at,
-        "timezone": routine.timezone,
-        "active_hours": routine.active_hours.map(|hours| json!({
-            "days": hours.days(),
-            "start": hours.start(),
-            "end": hours.end(),
-        })),
-        "enabled": routine.enabled,
-        "model": match &routine.model {
-            ModelSetting::Own(model) => json!(model),
-            ModelSetting::Inherit { .. } => Value::Null,
-        },
-        "requested_model": match &routine.model {
-            ModelSetting::Inherit { requested } => json!(requested),
-            ModelSetting::Own(_) => Value::Null,
-        },
-        "next_run_at": routine.next_run_at,
-        "created_at": routine.created_at,
-        "updated_at": routine.updated_at,
-        "last_run": last_run,
-        "failed_runs": routine.failed_runs,
-        "paused_reason": routine.paused_reason,
-        "retrying": routine.retrying,
-        "quiet": routine.quiet,
     })
 }

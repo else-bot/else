@@ -9,6 +9,7 @@ use crate::controls::{Control as _, Scale, Tier};
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use else_wire::items::ItemKind;
+use else_wire::routines::RoutineRun;
 use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
@@ -692,7 +693,7 @@ pub(super) fn with_reaction(
 /// `shown` says whether a no-news run's replies show below it.
 fn routine_run(
     turn: uuid::Uuid,
-    run: &crate::model::RoutineRun,
+    run: &RoutineRun,
     shown: bool,
     cx: &mut Context<ElseApp>,
 ) -> Button {

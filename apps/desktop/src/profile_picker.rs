@@ -8,8 +8,13 @@ use gpui_kit::*;
 
 use std::collections::HashSet;
 
+use else_wire::settings::Capabilities;
+
+use else_wire::settings::ModelInfo;
+
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
-use else_wire::settings::{Capabilities, ModelInfo, ProfileChoice, ProviderInfo};
+use else_wire::settings::ProfileChoice;
+use else_wire::settings::ProviderInfo;
 
 const FAST: &str = "priority";
 

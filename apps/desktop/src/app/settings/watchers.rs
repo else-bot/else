@@ -2,8 +2,9 @@ use super::BotSettings;
 use crate::app::panel::{alert, item_name, list_rows, meta, meta_line, section};
 use crate::app::{Connection, ElseApp, computer::DetailsTab};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{Conversation, Watcher, WatcherStatus};
+use crate::model::Conversation;
 use chrono::{DateTime, Utc};
+use else_wire::routines::{Watcher, WatcherStatus};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -244,7 +245,8 @@ fn watcher_last_check(watcher: &Watcher, now: DateTime<Utc>) -> String {
 fn watcher_next(watcher: &Watcher, now: DateTime<Utc>) -> Option<String> {
     let at = match watcher.status {
         WatcherStatus::Checking => return Some("checking now".to_owned()),
-        WatcherStatus::Waiting { next_check_at } => next_check_at?,
+        WatcherStatus::Waiting => watcher.next_check_at?,
+        WatcherStatus::Waking | WatcherStatus::Ended | WatcherStatus::Unknown => return None,
     };
     Some(match (at - now).num_minutes() {
         _ if at <= now => "next check due now".to_owned(),
@@ -257,7 +259,7 @@ fn watcher_next(watcher: &Watcher, now: DateTime<Utc>) -> Option<String> {
 mod tests {
     use super::{WatcherStop, stop_result, watcher_deadline, watcher_last_check, watcher_next};
     use crate::api::ClientError;
-    use crate::model::Watcher;
+    use else_wire::routines::Watcher;
     use serde_json::json;
 
     #[test]

@@ -503,6 +503,8 @@ async fn the_owner_sees_pauses_and_deletes_webhooks_in_the_sidebar() {
         .owner("PATCH", &path, Some(json!({ "enabled": false })))
         .await;
     assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
+    assert_eq!(paused.body["webhook"]["enabled"], false);
+    assert_eq!(paused.body["webhook"].get("last_wake"), Some(&Value::Null));
     assert_eq!(webhooks().await[0]["enabled"], false);
     assert_eq!(
         trigger(&h.app, &id, &secret).await.status,

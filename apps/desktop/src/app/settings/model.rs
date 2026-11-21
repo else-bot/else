@@ -2,12 +2,18 @@ mod editor;
 
 pub(in crate::app) use editor::ModelDialog;
 
+use else_wire::settings::BotProfile;
+
+use else_wire::settings::Capabilities;
+
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::profile_picker::{ProfilePicker, effort_label};
-use else_wire::settings::{BotProfile, Capabilities, ModelInfo, ProfileChoice, model_label};
+use else_wire::settings::ModelInfo;
+use else_wire::settings::ProfileChoice;
+use else_wire::settings::model_label;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _, Size,
@@ -366,7 +372,8 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::ModelState;
-    use else_wire::settings::{BotProfile, ProfileChoice};
+    use else_wire::settings::BotProfile;
+    use else_wire::settings::ProfileChoice;
     use uuid::Uuid;
 
     fn profile(model: &str) -> Option<BotProfile> {

@@ -148,7 +148,7 @@ pub struct TurnRecord {
     /// The bot's questions and approval requests to the owner during this turn.
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
-    pub routine: Option<Json<crate::app::providers::RoutineRun>>,
+    pub routine: Option<Json<else_wire::routines::RoutineRun>>,
     /// The emails whose arrival started this turn, oldest first.
     pub mail: Json<Vec<TurnMail>>,
     /// The outgoing draft revisions shown under this turn.
@@ -337,7 +337,7 @@ pub struct ItemRecord {
     pub bot_reply: Option<Json<BotReply>>,
     pub routine_update: Option<Json<RoutineUpdate>>,
     pub bot_created: Option<Json<BotCreated>>,
-    pub rules_update: Option<Json<crate::app::rules::RulesUpdate>>,
+    pub rules_update: Option<Json<else_wire::rules::RulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
     /// The provider attempt that wrote an assistant item.

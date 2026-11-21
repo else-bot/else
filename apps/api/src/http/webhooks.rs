@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
+use else_wire::routines::Webhook;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -26,7 +27,6 @@ use crate::app::webhooks::{
 use crate::db::routines::{By, Caller};
 use crate::db::webhooks::{self, FireError, Fired, NewWebhook, Patch, WebhookError};
 use crate::grants::Grant;
-use crate::views::webhook_json;
 
 /// The owner's routes to pause, resume, and delete a bot's webhooks.
 pub fn routes() -> Routes {
@@ -63,7 +63,7 @@ async fn owner_update(
     let (webhook, _) = webhooks::update(&state.db, By::Owner { bot_id }, webhook_id, patch)
         .await
         .map_err(owner_error)?;
-    Ok(Json(json!({ "webhook": webhook_json(&webhook) })))
+    Ok(Json(json!({ "webhook": Webhook::from(&webhook) })))
 }
 
 async fn owner_delete(
@@ -378,7 +378,7 @@ pub(crate) async fn create(state: &AppState, grant: &Grant, args: &Value) -> Too
                 note.map(|n| format!(", {n}")).unwrap_or_default(),
             );
             let result = json!({
-                "webhook": webhook_json(&webhook),
+                "webhook": Webhook::from(&webhook),
                 "token": token,
                 "trigger_path": format!("/webhooks/v1/{}", webhook.id),
                 "next": next,
@@ -399,7 +399,7 @@ pub(crate) async fn list(state: &AppState, grant: &Grant) -> ToolResult {
         Ok(list) => {
             let log = format!("{} webhooks", list.len());
             let result = json!({
-                "webhooks": list.iter().map(webhook_json).collect::<Vec<_>>(),
+                "webhooks": list.iter().map(Webhook::from).collect::<Vec<_>>(),
                 "limit": MAX_PER_BOT,
                 "default_pace": {
                     "min_interval_minutes": Pace::DEFAULT.min_interval_minutes(),
@@ -499,7 +499,7 @@ pub(crate) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Too
                 note.map(|n| format!(", {n}")).unwrap_or_default(),
             );
             Ok(
-                Done::json(json!({ "webhook": webhook_json(&webhook), "token": token }))
+                Done::json(json!({ "webhook": Webhook::from(&webhook), "token": token }))
                     .logged(log),
             )
         }

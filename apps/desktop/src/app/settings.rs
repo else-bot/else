@@ -13,6 +13,7 @@ use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
 use crate::model::Conversation;
 use else_wire::bots::Bot;
+use else_wire::routines::Routine;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, IconName, Sizable as _, h_flex, v_flex,
@@ -126,7 +127,7 @@ impl ElseApp {
             .and_then(|view| view.conversation.as_ref())
     }
 
-    fn apply_routine(&mut self, bot: Uuid, saved: crate::model::Routine) {
+    fn apply_routine(&mut self, bot: Uuid, saved: Routine) {
         if let Some(conversation) = self
             .view_of(bot)
             .and_then(|view| view.conversation.as_mut())

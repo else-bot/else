@@ -9,6 +9,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use else_wire::routines::{Routine, RoutineEnvelope};
+use else_wire::rules::RulesFile;
 use else_wire::settings::{
     BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, Onboarded, ProfileChoice,
     ServerEnvelope, Shared, SharedIconBody, Stored,
@@ -49,7 +51,7 @@ use else_wire::bots::{
 use serde_json::json;
 
 use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
+use crate::model::{Item, Reaction, Snapshot, Turn};
 use else_wire::bots::Avatar;
 
 pub struct SendRequest {
@@ -88,11 +90,6 @@ pub enum ReadCommand {
     Through { position: ReplyPosition },
     MarkRead { position: Option<ReplyPosition> },
     MarkUnread,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RoutineEnvelope {
-    routine: Routine,
 }
 
 /// A bot's newest conversation page and the response it was read from.
@@ -814,8 +811,8 @@ impl Client {
     }
 
     /// The bot's rules file and every saved version.
-    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<crate::model::RulesFile, ClientError> {
-        self.call::<crate::model::RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
+    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<RulesFile, ClientError> {
+        self.call::<RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
             .await
             .map(|(_, file)| file)
     }

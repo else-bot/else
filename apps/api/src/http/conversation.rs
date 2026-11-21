@@ -4,6 +4,7 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use else_plain_text::find::Needle;
+use else_wire::routines::{Routine, Watcher, Webhook};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -13,7 +14,7 @@ use super::turns::bot_deleted;
 use super::{AppState, Routes};
 use crate::db::bots::BotStatus;
 use crate::db::conversation::{self, WindowQuery};
-use crate::views::{item_json, routine_json, turn_json};
+use crate::views::{item_json, turn_json};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -83,12 +84,12 @@ async fn snapshot(
         "turns": snapshot.turns.iter().map(turn_json).collect::<Vec<_>>(),
         "activity": else_wire::bots::Activity::from(bot),
         "older_before_seq": snapshot.older_before_seq,
-        "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
+        "routines": snapshot.routines.iter().map(Routine::from).collect::<Vec<_>>(),
         "social_triggers": snapshot.social_triggers,
         "mail_triggers": snapshot.mail_triggers,
         "draft_grants": snapshot.draft_grants,
-        "webhooks": snapshot.webhooks.iter().map(crate::views::webhook_json).collect::<Vec<_>>(),
-        "watchers": snapshot.watchers.iter().map(crate::views::watcher_json).collect::<Vec<_>>(),
+        "webhooks": snapshot.webhooks.iter().map(Webhook::from).collect::<Vec<_>>(),
+        "watchers": snapshot.watchers.iter().map(Watcher::from).collect::<Vec<_>>(),
         "rules_version": snapshot.rules_version,
     })))
 }

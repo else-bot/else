@@ -38,3 +38,9 @@ impl TurnStatus {
         matches!(self, Self::Interrupted | Self::Failed | Self::Uncertain)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnError {
+    pub code: String,
+    pub message: Option<String>,
+}

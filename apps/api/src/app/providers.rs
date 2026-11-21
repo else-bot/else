@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use else_wire::routines::RoutineRun;
 use else_wire::settings::{Catalog, ProfileChoice};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -239,22 +240,6 @@ pub struct WebhookRun {
     pub webhook_id: Uuid,
     pub name: String,
     pub requested_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// The routine occurrence a turn runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoutineRun {
-    pub routine_id: Uuid,
-    pub name: String,
-    pub due_at: chrono::DateTime<chrono::Utc>,
-    /// The routine is a reminder, due once.
-    pub reminder: bool,
-    /// The routine lets a run end with no news.
-    #[serde(default)]
-    pub quiet: bool,
-    /// The run completed with no news, so it alerts no one.
-    #[serde(default)]
-    pub no_news: bool,
 }
 
 /// A provider's native session for one conversation.

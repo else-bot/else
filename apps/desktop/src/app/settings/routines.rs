@@ -4,10 +4,10 @@ use super::schedule_text::local_time;
 use super::{BotSettings, automation_section};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
-use crate::model::{LastRun, Routine};
 use else_wire::routines::PausedReason;
 use else_wire::routines::RunStatus;
 use else_wire::routines::SkipReason;
+use else_wire::routines::{LastRun, Routine};
 use gpui_kit::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -408,10 +408,11 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
 #[cfg(test)]
 mod tests {
     use super::{Banner, Request, banner, last_run, retryable};
+    use else_wire::routines::Routine;
 
     #[test]
     fn a_failed_change_shows_over_a_retry_in_progress() {
-        let retrying: crate::model::Routine = serde_json::from_value(serde_json::json!({
+        let retrying: Routine = serde_json::from_value(serde_json::json!({
             "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
             "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": false,
             "next_run_at": null, "updated_at": "2026-11-08T03:00:00Z",
@@ -435,7 +436,7 @@ mod tests {
     #[test]
     fn a_routine_whose_last_run_failed_offers_retry_while_enabled_or_paused() {
         let routine = |enabled: bool, failed_runs: i64, paused: Option<&str>| {
-            serde_json::from_value::<crate::model::Routine>(serde_json::json!({
+            serde_json::from_value::<Routine>(serde_json::json!({
                 "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
                 "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "enabled": enabled,
                 "next_run_at": null, "updated_at": "2026-11-20T09:00:00Z",
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn a_routine_card_flags_pauses_and_undismissed_failures_only() {
-        let routine = |extra: serde_json::Value| -> crate::model::Routine {
+        let routine = |extra: serde_json::Value| -> Routine {
             let mut value = serde_json::json!({
                 "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
                 "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": true,

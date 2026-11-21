@@ -4,13 +4,14 @@
 //! sequences follow commit order. EventHub observes committed data versions;
 //! rows remain authoritative and streams also poll as a fallback.
 
+use else_wire::routines::{Routine, Watcher, Webhook};
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::db::turns::{ConversationKind, ItemKind};
 use crate::db::{bots, routines, turns};
-use crate::views::{item_json, routine_json, turn_json};
+use crate::views::{item_json, turn_json};
 
 async fn append(
     conn: &mut SqliteConnection,
@@ -50,22 +51,22 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
                 .bind(bot_id)
                 .fetch_one(&mut *conn)
                 .await?;
-        let routines: Vec<Value> = routines::list(conn, bot_id)
+        let routines: Vec<Routine> = routines::list(conn, bot_id)
             .await?
             .iter()
-            .map(routine_json)
+            .map(Routine::from)
             .collect();
         let social_triggers = crate::socials::store::triggers(conn, bot_id).await?;
         let mail_triggers = crate::connectors::store::mail_triggers(conn, bot_id).await?;
-        let webhooks: Vec<Value> = super::webhooks::list(conn, bot_id)
+        let webhooks: Vec<Webhook> = super::webhooks::list(conn, bot_id)
             .await?
             .iter()
-            .map(crate::views::webhook_json)
+            .map(Webhook::from)
             .collect();
-        let watchers: Vec<Value> = super::watchers::list_active(conn, bot_id)
+        let watchers: Vec<Watcher> = super::watchers::list_active(conn, bot_id)
             .await?
             .iter()
-            .map(crate::views::watcher_json)
+            .map(Watcher::from)
             .collect();
         let rules_version = super::rules::version(conn, bot_id).await?;
         let draft_grants = super::outgoing_drafts::always_approved(conn, bot_id).await?;

@@ -30,6 +30,8 @@
 //! bot's chat session or earlier runs.
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use else_wire::routines::{PausedReason, RoutineRun, RunStatus, SkipReason};
+use else_wire::turns::TurnError;
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -38,7 +40,7 @@ use uuid::Uuid;
 use super::turns::{ENDED_STATUSES, Phase, TurnStatus};
 use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Availability, FailureCode, Origin, Profile, RoutineRun};
+use crate::app::providers::{Availability, FailureCode, Origin, Profile};
 use crate::app::routines::{
     ActiveHours, AfterCheck, CheckSkip, InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineCheck,
     RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
@@ -170,6 +172,57 @@ pub struct Routine {
     pub quiet: bool,
 }
 
+impl From<&LastRun> for else_wire::routines::LastRun {
+    fn from(run: &LastRun) -> Self {
+        Self {
+            due_at: run.due_at,
+            status: run.state.into(),
+            skip_reason: match run.state {
+                RunState::Skipped(skip) => Some(skip.into()),
+                _ => None,
+            },
+            turn_id: run.turn_id,
+            error: run.error_code.as_ref().map(|code| TurnError {
+                code: code.clone(),
+                message: run.error_message.clone(),
+            }),
+            finished_at: run.finished_at,
+        }
+    }
+}
+
+impl From<&Routine> for else_wire::routines::Routine {
+    fn from(routine: &Routine) -> Self {
+        let (model, requested_model) = match &routine.model {
+            ModelSetting::Own(model) => (Some(model.into()), None),
+            ModelSetting::Inherit { requested } => (None, requested.clone()),
+        };
+        Self {
+            id: routine.id,
+            bot_id: routine.bot_id,
+            name: routine.name.clone(),
+            prompt: routine.prompt.clone(),
+            prompt_revision: routine.prompt_revision,
+            check: routine.check.clone(),
+            cron: routine.cron.clone(),
+            run_at: routine.run_at,
+            timezone: routine.timezone.clone(),
+            active_hours: routine.active_hours.as_ref().map(Into::into),
+            enabled: routine.enabled,
+            model,
+            requested_model,
+            next_run_at: routine.next_run_at,
+            created_at: routine.created_at,
+            updated_at: routine.updated_at,
+            last_run: routine.last_run.as_ref().map(Into::into),
+            failed_runs: routine.failed_runs,
+            paused_reason: routine.paused_reason.clone().map(PausedReason::from),
+            retrying: routine.retrying,
+            quiet: routine.quiet,
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct Row {
     id: Uuid,
@@ -224,17 +277,17 @@ impl RunState {
             (None, None, _) => Self::Checking,
         }
     }
+}
 
-    /// `checking`, `queued`, `running`, `skipped`, `no_news`, or the turn's
-    /// terminal status.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Checking => "checking",
-            Self::Skipped(_) => "skipped",
-            Self::NoNews => "no_news",
-            Self::Turn(status) => match status.phase() {
-                Phase::Active | Phase::Waiting => "running",
-                Phase::Queued | Phase::Ended => status.as_str(),
+impl From<RunState> for RunStatus {
+    fn from(state: RunState) -> Self {
+        match state {
+            RunState::Checking => Self::Checking,
+            RunState::Skipped(_) => Self::Skipped,
+            RunState::NoNews => Self::NoNews,
+            RunState::Turn(status) => match status.phase() {
+                Phase::Active | Phase::Waiting => Self::Running,
+                Phase::Queued | Phase::Ended => Self::from(status.as_str().to_owned()),
             },
         }
     }
@@ -1354,6 +1407,19 @@ pub enum Skip {
     NothingNew,
     CheckCancelled,
     CheckUnavailable,
+}
+
+impl From<Skip> for SkipReason {
+    fn from(skip: Skip) -> Self {
+        match skip {
+            Skip::Overlap => Self::Overlap,
+            Skip::QueueFull => Self::QueueFull,
+            Skip::ProviderUnavailable => Self::ProviderUnavailable,
+            Skip::NothingNew => Self::NothingNew,
+            Skip::CheckCancelled => Self::CheckCancelled,
+            Skip::CheckUnavailable => Self::CheckUnavailable,
+        }
+    }
 }
 
 impl From<CheckSkip> for Skip {

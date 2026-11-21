@@ -11,11 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{DateTime, Utc};
 use else_wire::items::ItemKind;
 use else_wire::questions::{QuestionKind, QuestionStatus};
-use else_wire::routines::{PausedReason, RunStatus, SkipReason};
-use else_wire::rules::RuleAuthor;
+use else_wire::routines::{Routine, RoutineRun, Watcher, Webhook};
+use else_wire::rules::RulesUpdate;
 use else_wire::secrets::SecretRequestStatus;
-use else_wire::settings::ProfileChoice;
-use else_wire::turns::TurnStatus;
+use else_wire::turns::{TurnError, TurnStatus};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -75,85 +74,6 @@ pub enum SteerStatus {
     Sending,
     /// The reply took it and answers it.
     Delivered,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuleChange {
-    Added,
-    Changed,
-    Removed,
-    Restored,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffOp {
-    Same,
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct DiffLine {
-    pub op: DiffOp,
-    pub text: String,
-}
-
-/// The card for one saved version of a bot's rules.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesUpdate {
-    pub version: i64,
-    pub section: String,
-    pub change: RuleChange,
-    pub owner_words: String,
-    pub diff: Vec<DiffLine>,
-    /// When the owner undid this change.
-    #[serde(default)]
-    pub undone_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RuleSection {
-    pub title: String,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesVersion {
-    pub version: i64,
-    pub section: String,
-    pub change: RuleChange,
-    pub owner_words: String,
-    pub author: RuleAuthor,
-    pub restored_from: Option<i64>,
-    pub diff: Vec<DiffLine>,
-    pub created_at: DateTime<Utc>,
-    /// When the owner undid this version by restoring the one before it.
-    #[serde(default)]
-    pub undone_at: Option<DateTime<Utc>>,
-}
-
-/// A bot's rules file with every saved version, newest first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RulesFile {
-    pub version: i64,
-    pub markdown: String,
-    pub sections: Vec<RuleSection>,
-    pub history: Vec<RulesVersion>,
-}
-
-impl RulesFile {
-    /// Titles of the rules changed after version `seen`, lowercased.
-    pub fn changed_since(&self, seen: i64) -> std::collections::HashSet<String> {
-        self.history
-            .iter()
-            .filter(|v| {
-                v.version > seen && v.change != RuleChange::Removed && !v.section.is_empty()
-            })
-            .map(|v| v.section.to_lowercase())
-            .collect()
-    }
 }
 
 /// The main bot's notice that `creator_bot_id` created `bot_id`.
@@ -270,12 +190,6 @@ pub struct Reaction {
 pub enum ReactionKind {
     ThumbsUp,
     ThumbsDown,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct TurnError {
-    pub code: String,
-    pub message: Option<String>,
 }
 
 /// A bot's request for credentials: metadata only, never a value.
@@ -866,125 +780,6 @@ impl DelegationStatus {
     pub fn settled(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct RoutineRun {
-    pub routine_id: Uuid,
-    pub name: String,
-    pub due_at: DateTime<Utc>,
-    /// The routine is a reminder, due once. Absent from older servers.
-    #[serde(default)]
-    pub reminder: bool,
-    /// The run completed with nothing to report, so it alerts no one.
-    #[serde(default)]
-    pub no_news: bool,
-}
-
-impl RoutineRun {
-    /// What started the run, as the conversation labels it.
-    pub fn label(&self) -> &'static str {
-        if self.reminder {
-            "Reminder"
-        } else {
-            "Scheduled routine"
-        }
-    }
-}
-
-/// The last due occurrence of a routine: the turn it started, or why it
-/// was skipped.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct LastRun {
-    pub due_at: DateTime<Utc>,
-    pub status: RunStatus,
-    pub skip_reason: Option<SkipReason>,
-    pub error: Option<TurnError>,
-}
-
-/// The days (`mon` to `sun`) and the span, end excluded, when a routine's
-/// runs may start, in its time zone.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ActiveHours {
-    pub days: Vec<String>,
-    pub start: String,
-    pub end: String,
-}
-
-/// A bot's saved task, run on a cron schedule in its conversation, or
-/// once at `run_at` for a reminder.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Routine {
-    pub id: Uuid,
-    pub name: String,
-    pub prompt: String,
-    pub cron: String,
-    /// When a reminder runs once; `None` for a routine on a cron schedule.
-    #[serde(default)]
-    pub run_at: Option<DateTime<Utc>>,
-    pub timezone: String,
-    /// When runs may start; `None` is any time.
-    #[serde(default)]
-    pub active_hours: Option<ActiveHours>,
-    pub enabled: bool,
-    #[serde(default)]
-    pub model: Option<ProfileChoice>,
-    #[serde(default)]
-    pub requested_model: Option<String>,
-    pub next_run_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-    pub last_run: Option<LastRun>,
-    /// Consecutive failed runs the owner has not dismissed.
-    #[serde(default)]
-    pub failed_runs: i64,
-    /// Why else.bot switched the routine off.
-    #[serde(default)]
-    pub paused_reason: Option<PausedReason>,
-    /// The last run is the owner's retry of the paused routine, not yet
-    /// settled.
-    #[serde(default)]
-    pub retrying: bool,
-    /// A run with nothing to report may end with no news, alerting no one.
-    #[serde(default)]
-    pub quiet: bool,
-}
-
-/// A bot's webhook: an authenticated call to its URL wakes the bot with
-/// `prompt`, at most as often as its pace allows.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Webhook {
-    pub id: Uuid,
-    pub name: String,
-    pub prompt: String,
-    pub min_interval_minutes: i64,
-    pub enabled: bool,
-    pub last_wake: Option<WebhookWake>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WebhookWake {
-    pub woke_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum WatcherStatus {
-    Waiting {
-        next_check_at: Option<DateTime<Utc>>,
-    },
-    Checking,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Watcher {
-    pub id: Uuid,
-    pub purpose: String,
-    pub until: DateTime<Utc>,
-    #[serde(flatten)]
-    pub status: WatcherStatus,
-    pub last_status: Option<String>,
-    pub last_checked_at: Option<DateTime<Utc>>,
-    pub last_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1745,6 +1540,8 @@ impl Conversation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use else_wire::routines::{RunStatus, WatcherStatus};
+    use else_wire::rules::{DiffOp, RuleChange, RulesFile};
     use serde_json::json;
 
     const PREFIX: &str =
@@ -2486,6 +2283,18 @@ mod tests {
         assert!(file.changed_since(3).is_empty());
     }
 
+    #[test]
+    fn a_rules_card_loads_new_change_and_diff_kinds() {
+        let update: RulesUpdate = serde_json::from_value(json!({
+            "version": 2, "section": "Tone", "change": "renamed",
+            "owner_words": "Rename this rule.",
+            "diff": [{ "op": "replace", "text": "Keep it short." }]
+        }))
+        .unwrap();
+        assert_eq!(update.change, RuleChange::Unknown);
+        assert_eq!(update.diff[0].op, DiffOp::Unknown);
+    }
+
     fn social_trigger(enabled: bool, provider: &str) -> serde_json::Value {
         json!({
             "id": Uuid::from_u128(80), "connection_id": Uuid::from_u128(81),
@@ -2653,11 +2462,9 @@ mod tests {
         };
         assert_eq!(active.purpose, "Domain availability");
         assert_eq!(active.until.to_rfc3339(), "2026-12-04T10:00:00+00:00");
-        let WatcherStatus::Waiting { next_check_at } = active.status else {
-            panic!("expected a watcher waiting for its next check")
-        };
+        assert_eq!(active.status, WatcherStatus::Waiting);
         assert_eq!(
-            next_check_at.unwrap().to_rfc3339(),
+            active.next_check_at.unwrap().to_rfc3339(),
             "2026-11-20T08:13:00+00:00"
         );
         assert_eq!(active.last_checked_at, None);
@@ -2678,6 +2485,20 @@ mod tests {
         assert_eq!(active.last_output.as_deref(), Some("Domain is registered"));
         conversation.apply(&update(3, 0, json!([]))).unwrap();
         assert!(conversation.watchers().is_empty());
+    }
+
+    #[test]
+    fn a_new_watcher_status_does_not_prevent_loading_a_snapshot() {
+        let mut page = snapshot_json(1, vec![], None);
+        page["watchers"] = json!([{
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307",
+            "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z",
+            "status": "new_status",
+        }]);
+        let conversation =
+            Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        assert_eq!(conversation.watchers()[0].status, WatcherStatus::Unknown);
     }
 
     #[test]

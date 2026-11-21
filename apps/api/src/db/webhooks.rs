@@ -102,6 +102,35 @@ pub struct Webhook {
     pub last_wake: Option<LastWake>,
 }
 
+impl From<&LastWake> for else_wire::routines::WebhookWake {
+    fn from(wake: &LastWake) -> Self {
+        Self {
+            woke_at: wake.woke_at,
+            status: Some(wake.status.clone().into()),
+            turn_id: Some(wake.turn_id),
+        }
+    }
+}
+
+impl From<&Webhook> for else_wire::routines::Webhook {
+    fn from(webhook: &Webhook) -> Self {
+        Self {
+            id: webhook.id,
+            bot_id: webhook.bot_id,
+            name: webhook.name.clone(),
+            prompt: webhook.prompt.clone(),
+            min_interval_minutes: webhook.pace.min_interval_minutes(),
+            daily_limit: webhook.pace.daily_limit(),
+            enabled: webhook.enabled,
+            requested_at: webhook.requested_at,
+            wake_not_before: webhook.not_before,
+            created_at: webhook.created_at,
+            updated_at: webhook.updated_at,
+            last_wake: webhook.last_wake.as_ref().map(Into::into),
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct Row {
     id: Uuid,

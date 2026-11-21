@@ -5,8 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use else_wire::rules::{DiffLine, DiffOp, RuleChange, RuleSection};
 use similar::{Algorithm, ChangeTag};
 
 pub const MAX_TITLE_CHARS: usize = 80;
@@ -50,20 +49,13 @@ pub enum InvalidRules {
     Nul,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Section {
-    pub title: String,
-    pub body: String,
-}
-
 /// The parsed rules file, in the order the bot wrote its sections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rules {
-    pub sections: Vec<Section>,
+    pub sections: Vec<RuleSection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ChangeKind {
     Added,
@@ -78,31 +70,15 @@ impl ChangeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffOp {
-    Same,
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiffLine {
-    pub op: DiffOp,
-    pub text: String,
-}
-
-/// The owner's card for one saved version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RulesUpdate {
-    pub version: i64,
-    pub section: String,
-    pub change: ChangeKind,
-    pub owner_words: String,
-    pub diff: Vec<DiffLine>,
-    /// When the owner undid this change by restoring the version before it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub undone_at: Option<DateTime<Utc>>,
+impl From<ChangeKind> for RuleChange {
+    fn from(change: ChangeKind) -> Self {
+        match change {
+            ChangeKind::Added => Self::Added,
+            ChangeKind::Changed => Self::Changed,
+            ChangeKind::Removed => Self::Removed,
+            ChangeKind::Restored => Self::Restored,
+        }
+    }
 }
 
 /// A validated request to set one section's text; empty text removes it.
@@ -220,12 +196,12 @@ fn same_title(a: &str, b: &str) -> bool {
 
 impl Rules {
     pub fn parse(markdown: &str) -> Self {
-        let mut sections: Vec<Section> = Vec::new();
+        let mut sections: Vec<RuleSection> = Vec::new();
         let mut body: Vec<&str> = Vec::new();
         let mut title: Option<String> = None;
         let mut flush = |title: Option<String>, body: &mut Vec<&str>| {
             if let Some(title) = title {
-                sections.push(Section {
+                sections.push(RuleSection {
                     title,
                     body: trim_blank_lines(&body.join("\n")),
                 });
@@ -282,7 +258,7 @@ impl Rules {
                     return Ok(Applied::Unchanged);
                 }
                 check_prose(&edit.body, Lengths::of(&old.body).prose)?;
-                let new = Section {
+                let new = RuleSection {
                     title: old.title.clone(),
                     body: edit.body.clone(),
                 };
@@ -295,7 +271,7 @@ impl Rules {
                     return Err(InvalidRules::TooManySections);
                 }
                 check_prose(&edit.body, 0)?;
-                let new = Section {
+                let new = RuleSection {
                     title: edit.title.clone(),
                     body: edit.body.clone(),
                 };
@@ -330,7 +306,7 @@ fn check_prose(body: &str, old_prose: usize) -> Result<(), InvalidRules> {
     Ok(())
 }
 
-fn section_lines(section: Option<&Section>) -> Vec<String> {
+fn section_lines(section: Option<&RuleSection>) -> Vec<String> {
     section.map_or_else(Vec::new, |s| {
         std::iter::once(format!("## {}", s.title))
             .chain(s.body.lines().map(str::to_owned))
@@ -338,7 +314,7 @@ fn section_lines(section: Option<&Section>) -> Vec<String> {
     })
 }
 
-fn section_diff(old: Option<&Section>, new: Option<&Section>) -> Vec<DiffLine> {
+fn section_diff(old: Option<&RuleSection>, new: Option<&RuleSection>) -> Vec<DiffLine> {
     diff_lines(&section_lines(old), &section_lines(new))
 }
 
@@ -423,7 +399,7 @@ mod tests {
     fn ops(diff: &[DiffLine]) -> String {
         diff.iter()
             .map(|l| match l.op {
-                DiffOp::Same => ' ',
+                DiffOp::Same | DiffOp::Unknown => ' ',
                 DiffOp::Add => '+',
                 DiffOp::Remove => '-',
             })
@@ -555,7 +531,7 @@ mod tests {
     #[test]
     fn a_full_file_refuses_new_rules_by_count_and_by_size() {
         let full = Rules {
-            sections: Vec::from_fn(MAX_SECTIONS, |i| Section {
+            sections: Vec::from_fn(MAX_SECTIONS, |i| RuleSection {
                 title: format!("Rule {i}"),
                 body: "x".into(),
             }),
@@ -566,7 +542,7 @@ mod tests {
         );
         assert!(full.apply(&edit("Rule 0", "y")).is_ok());
         let big = Rules {
-            sections: Vec::from_fn(MAX_SECTIONS - 1, |i| Section {
+            sections: Vec::from_fn(MAX_SECTIONS - 1, |i| RuleSection {
                 title: format!("Rule {i}"),
                 body: "é".repeat(MAX_PROSE_CHARS),
             }),

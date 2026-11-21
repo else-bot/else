@@ -52,6 +52,17 @@ pub enum Status {
     Ended,
 }
 
+impl From<Status> for else_wire::routines::WatcherStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Waiting => Self::Waiting,
+            Status::Checking => Self::Checking,
+            Status::Waking => Self::Waking,
+            Status::Ended => Self::Ended,
+        }
+    }
+}
+
 impl Status {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Waiting | Self::Checking)
@@ -81,6 +92,17 @@ pub enum Outcome {
     /// Its deadline passed first.
     Expired,
     Stopped,
+}
+
+impl From<Outcome> for else_wire::routines::WatcherOutcome {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Met => Self::Met,
+            Outcome::Failed => Self::Failed,
+            Outcome::Expired => Self::Expired,
+            Outcome::Stopped => Self::Stopped,
+        }
+    }
 }
 
 /// What one ended check does to its watcher.

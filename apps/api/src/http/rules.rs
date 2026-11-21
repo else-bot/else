@@ -9,6 +9,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use else_wire::rules::{RuleChange, RulesFile, RulesVersion};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -16,8 +17,7 @@ use uuid::Uuid;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::{AppState, Routes};
 use crate::app::rules::{
-    ChangeKind, Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules,
-    parse_owner_words,
+    Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules, parse_owner_words,
 };
 use crate::db::routines;
 use crate::db::rules::{self, Caller, RulesError, Saved};
@@ -114,7 +114,7 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Too
                 "section": update.section,
                 "change": update.change,
             });
-            if update.change != ChangeKind::Removed
+            if update.change != RuleChange::Removed
                 && let Some(next) = routines_next(state, grant.bot_id).await
             {
                 result["next"] = json!(next);
@@ -175,32 +175,11 @@ async fn show(
     let (version, markdown) = versions
         .first()
         .map_or((0, ""), |v| (v.version, v.markdown.as_str()));
-    let sections: Vec<Value> = Rules::parse(markdown)
-        .sections
-        .iter()
-        .map(|s| json!({ "title": s.title, "body": s.body }))
-        .collect();
-    let history: Vec<Value> = versions
-        .iter()
-        .map(|v| {
-            json!({
-                "version": v.version,
-                "section": v.section,
-                "change": v.change,
-                "owner_words": v.owner_words,
-                "author": v.author,
-                "restored_from": v.restored_from,
-                "diff": v.diff,
-                "created_at": v.created_at,
-                "undone_at": v.undone_at,
-            })
-        })
-        .collect();
-    Ok(Json(json!({
-        "version": version,
-        "markdown": markdown,
-        "sections": sections,
-        "history": history,
+    Ok(Json(json!(RulesFile {
+        version,
+        markdown: markdown.to_owned(),
+        sections: Rules::parse(markdown).sections,
+        history: versions.iter().map(RulesVersion::from).collect(),
     })))
 }
 

@@ -69,7 +69,7 @@ pub(super) fn tools(guest: &Value) -> Vec<Value> {
 }
 
 fn watcher_result(watcher: &watchers::Watcher) -> Value {
-    let mut value = crate::views::watcher_json(watcher);
+    let mut value = json!(else_wire::routines::Watcher::from(watcher));
     value["watch_id"] = json!(watcher.id);
     value
 }

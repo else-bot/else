@@ -1953,6 +1953,7 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
     assert_eq!(paused.body["routine"]["enabled"], false);
     assert_eq!(paused.body["routine"]["next_run_at"], Value::Null);
+    assert_eq!(paused.body.get("queued"), None);
     h.release(run).await;
     h.app.wait_turn(run, &["completed"]).await;
     let far = Utc::now() + chrono::Duration::days(3650);

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use else_wire::routines::ActiveHours;
 
 pub(super) fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
     match timezone.parse::<chrono_tz::Tz>() {
@@ -120,7 +121,7 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     }
 }
 
-pub(super) fn describe_hours(hours: &crate::model::ActiveHours) -> String {
+pub(super) fn describe_hours(hours: &ActiveHours) -> String {
     let has = |names: &[&str]| {
         hours.days.len() == names.len() && names.iter().all(|n| hours.days.iter().any(|d| d == n))
     };
@@ -150,6 +151,7 @@ pub(super) fn describe_hours(hours: &crate::model::ActiveHours) -> String {
 #[cfg(test)]
 mod tests {
     use super::{describe_cron, describe_hours};
+    use else_wire::routines::ActiveHours;
 
     #[test]
     fn common_cron_schedules_read_as_prose() {
@@ -179,7 +181,7 @@ mod tests {
 
     #[test]
     fn active_hours_read_as_days_and_a_span() {
-        let hours = |days: &[&str], start: &str, end: &str| crate::model::ActiveHours {
+        let hours = |days: &[&str], start: &str, end: &str| ActiveHours {
             days: days.iter().map(|d| (*d).to_owned()).collect(),
             start: start.to_owned(),
             end: end.to_owned(),
