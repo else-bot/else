@@ -40,6 +40,10 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Created {
     Waiting(Uuid),
+    /// A pending wait from an earlier attempt of the turn already watches
+    /// the job; the turn keeps it after this attempt ends. This attempt
+    /// holds nothing, so it is not parked.
+    Carried(Uuid),
     /// The job had already ended, so nothing waits.
     Ended,
 }
@@ -64,8 +68,9 @@ impl From<sqlx::Error> for CreateError {
 }
 
 /// Park `attempt` of `turn_id` on its bot's job `job_id`. A retry of the
-/// same wait in this attempt returns its id; a job that already ended
-/// returns [`Created::Ended`].
+/// same wait in this attempt returns its id, a pending wait on the job from
+/// an earlier attempt returns [`Created::Carried`], and a job that already
+/// ended returns [`Created::Ended`].
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -104,6 +109,17 @@ pub async fn create(
     }
     if super::turns::attempt_parked(&mut tx, turn_id, attempt).await? {
         return Err(CreateError::AttemptParked);
+    }
+    let carried: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM computer_job_waits
+         WHERE turn_id = ?1 AND job_id = ?2 AND status = 'pending'",
+    )
+    .bind(turn_id)
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(id) = carried {
+        return Ok(Created::Carried(id));
     }
     let id = Uuid::new_v4();
     sqlx::query(

@@ -1042,3 +1042,37 @@ async fn upgrading_continues_a_turn_whose_settled_carried_wait_its_own_wait_stra
         "only the turn with an undelivered result continues"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_that_waits_again_on_the_same_job_keeps_the_one_wait() {
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(first).await;
+    app.wait_turn(first, &["waiting"]).await;
+
+    follow(app, &main, first).await;
+    let token = h.continued(first, &token).await;
+    let again = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(again.result["status"], "already_waiting", "{}", again.body);
+    assert_eq!(again.result["wait_id"], parked.result["wait_id"]);
+    assert_eq!(again.result["parked"], false, "{}", again.body);
+    h.release(first).await;
+    rests_after(
+        app,
+        first,
+        2,
+        "waiting",
+        "the reply parks on its first wait",
+    )
+    .await;
+    assert_eq!(carried(app, first).await, vec![(1, "pending".into())]);
+}

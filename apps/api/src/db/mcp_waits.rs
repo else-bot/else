@@ -88,6 +88,16 @@ pub enum Check {
     },
 }
 
+/// What [`create`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Created {
+    Waiting(Uuid),
+    /// A pending wait from an earlier attempt of the turn already checks
+    /// the same status; the turn keeps it after this attempt ends. This
+    /// attempt holds nothing, so it is not parked.
+    Carried(Uuid),
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CreateError {
     #[error("this attempt already waits or asked; end it and wait for the result")]
@@ -122,40 +132,47 @@ pub async fn caller(
 
 /// Park `attempt` of `turn_id` on `spec`, whose first check returned
 /// `first` and found the job running. A retry of the same wait in this
-/// attempt returns its id.
+/// attempt returns its id, and a pending wait on the same status from an
+/// earlier attempt returns [`Created::Carried`].
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
     attempt: i32,
     spec: &Spec,
     first: &str,
-) -> Result<Uuid, CreateError> {
+) -> Result<Created, CreateError> {
+    type Row = (Uuid, i32, String, String, Json<Value>, String);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = super::turns::asking_caller(&mut tx, turn_id)
         .await?
         .filter(|caller| caller.attempt == attempt)
         .ok_or(CreateError::NotRunning)?;
-    let existing: Option<(Uuid, String, String, Json<Value>, String)> = sqlx::query_as(
-        "SELECT id, mcp_id, tool, arguments, status_pointer FROM mcp_waits
-         WHERE turn_id = ?1 AND attempt = ?2",
+    let waits: Vec<Row> = sqlx::query_as(
+        "SELECT id, attempt, mcp_id, tool, arguments, status_pointer FROM mcp_waits
+         WHERE turn_id = ?1 AND (attempt = ?2 OR status = 'pending')",
     )
     .bind(turn_id)
     .bind(caller.attempt)
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    if let Some((id, mcp_id, tool, Json(arguments), pointer)) = existing {
-        let same = mcp_id == spec.mcp_id
-            && tool == spec.tool
-            && arguments == spec.arguments
-            && pointer == spec.status_pointer;
-        return if same {
-            Ok(id)
+    let same = |(_, _, mcp_id, tool, Json(arguments), pointer): &&Row| {
+        *mcp_id == spec.mcp_id
+            && *tool == spec.tool
+            && *arguments == spec.arguments
+            && *pointer == spec.status_pointer
+    };
+    if let Some(own) = waits.iter().find(|wait| wait.1 == caller.attempt) {
+        return if same(&own) {
+            Ok(Created::Waiting(own.0))
         } else {
             Err(CreateError::AttemptParked)
         };
     }
     if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
         return Err(CreateError::AttemptParked);
+    }
+    if let Some(carried) = waits.iter().find(same) {
+        return Ok(Created::Carried(carried.0));
     }
     let id = Uuid::new_v4();
     sqlx::query(
@@ -183,7 +200,7 @@ pub async fn create(
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(Created::Waiting(id))
 }
 
 /// Pending waits whose next check is due: the oldest of each package not
