@@ -18,6 +18,16 @@ use crate::db::turns::UNFINISHED_STATUSES;
 use crate::db::{bot_profiles, events};
 use crate::providers::Registry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub(crate) enum DeliveryStatus {
+    Pending,
+    Delivered,
+    Revoked,
+    Cancelled,
+}
+
 /// Events one connector turn carries.
 pub const MAX_PER_TURN: i64 = 16;
 /// Bot and account pairs one scan considers.
@@ -119,12 +129,13 @@ async fn admit<S: Source>(
     let (deliveries, key, accounts) = (S::DELIVERIES, S::KEY, S::ACCOUNTS);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE {deliveries} SET status = 'revoked', settled_at = {NOW}
+        "UPDATE {deliveries} SET status = ?3, settled_at = {NOW}
          WHERE bot_id = ?1 AND {key} = ?2 AND status = 'pending' AND ({})",
         S::REVOKED
     )))
     .bind(bot_id)
     .bind(account_id)
+    .bind(DeliveryStatus::Revoked)
     .execute(&mut *tx)
     .await?;
     let target: Option<(Uuid, i64, i64, String, Option<String>)> =
@@ -229,7 +240,7 @@ async fn admit<S: Source>(
         .await?;
     for p in &pending {
         let delivered = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE {deliveries} SET status = 'delivered', turn_id = ?3, settled_at = {NOW}
+            "UPDATE {deliveries} SET status = ?5, turn_id = ?3, settled_at = {NOW}
              WHERE event_id = ?1 AND bot_id = ?2 AND {key} = ?4 AND status = 'pending'"
         )));
         let delivered = match S::event_id(p) {
@@ -240,6 +251,7 @@ async fn admit<S: Source>(
             .bind(bot_id)
             .bind(turn_id)
             .bind(account_id)
+            .bind(DeliveryStatus::Delivered)
             .execute(&mut *tx)
             .await?;
     }

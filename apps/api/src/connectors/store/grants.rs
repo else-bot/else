@@ -245,11 +245,12 @@ async fn write_grant(
         Some((id, read, _, _, wake)) => {
             if (read && !p.read) || (wake && !p.wake) {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "UPDATE connector_deliveries SET status = 'revoked', settled_at = {NOW}
+                    "UPDATE connector_deliveries SET status = ?3, settled_at = {NOW}
                      WHERE account_id = ?1 AND bot_id = ?2 AND status = 'pending'"
                 )))
                 .bind(account_id)
                 .bind(bot_id)
+                .bind(DeliveryStatus::Revoked)
                 .execute(&mut *tx)
                 .await?;
                 Uuid::new_v4()

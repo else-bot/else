@@ -306,7 +306,7 @@ async fn uid_identity_peek_flags_move_and_bounded_arrivals() {
         ..message
     };
     assert_eq!(
-        client.body(&stale).await.unwrap_err().code,
+        client.body(&stale).await.unwrap_err().code.as_str(),
         "stale_message_reference"
     );
     let commands = fixture.commands.lock().unwrap();
@@ -862,7 +862,8 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
     assert_eq!(
         compose("owner@example.org", &invalid, None)
             .unwrap_err()
-            .code,
+            .code
+            .as_str(),
         "invalid_mail_attachment"
     );
     let mut oversized = draft;
@@ -871,7 +872,8 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
     assert_eq!(
         compose("owner@example.org", &oversized, None)
             .unwrap_err()
-            .code,
+            .code
+            .as_str(),
         "mail_attachments_too_large"
     );
 }

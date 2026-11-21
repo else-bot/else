@@ -70,10 +70,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(29 * 60);
 pub struct Pimalaya;
 
 fn failure(_: impl std::fmt::Debug) -> MailError {
-    MailError::new("mail_transport_failed")
+    MailError::new(MailErrorCode::MailTransportFailed)
 }
 fn invalid(_: impl std::fmt::Debug) -> MailError {
-    MailError::new("invalid_mail_request")
+    MailError::new(MailErrorCode::InvalidMailRequest)
 }
 fn mailbox(s: &str) -> Result<Mailbox<'static>, MailError> {
     Mailbox::try_from(s.to_owned()).map_err(invalid)
@@ -81,7 +81,7 @@ fn mailbox(s: &str) -> Result<Mailbox<'static>, MailError> {
 fn sequence(uid: u32) -> Result<SequenceSet, MailError> {
     NonZeroU32::new(uid)
         .map(SequenceSet::from)
-        .ok_or_else(|| MailError::new("invalid_message_uid"))
+        .ok_or_else(|| MailError::new(MailErrorCode::InvalidMessageUid))
 }
 fn items(names: Vec<MessageDataItemName<'static>>) -> MacroOrMessageDataItemNames<'static> {
     MacroOrMessageDataItemNames::MessageDataItemNames(names)
@@ -94,7 +94,7 @@ impl Imap {
             .map_err(failure)?;
         if message.uid == 0 || data.uid_validity.map(NonZeroU32::get) != Some(message.uid_validity)
         {
-            return Err(MailError::new("stale_message_reference"));
+            return Err(MailError::new(MailErrorCode::StaleMessageReference));
         }
         Ok(())
     }
@@ -145,10 +145,10 @@ impl Imap {
                     None
                 }
             })
-            .ok_or_else(|| MailError::new("message_not_found"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MessageNotFound))?;
         let received_at = first_items().find_map(internal_date).map(rfc3339);
         let too_large = || {
-            MailError::new("mail_message_too_large").detail(
+            MailError::new(MailErrorCode::MailMessageTooLarge).detail(
                 "the message is over 64 MiB, so neither its body nor its attachments can be read",
             )
         };
@@ -157,13 +157,13 @@ impl Imap {
         }
         let mut bytes = Vec::with_capacity(size);
         let mut chunk_bytes = body_chunk(&first, message.uid)
-            .ok_or_else(|| MailError::new("message_not_found"))?
+            .ok_or_else(|| MailError::new(MailErrorCode::MessageNotFound))?
             .to_vec();
         loop {
             // Servers may count RFC822.SIZE slightly differently, so only a
             // chunk that stops dead short of it is treated as a cut-off read.
             if chunk_bytes.is_empty() && bytes.len() < size {
-                return Err(MailError::new("mail_message_incomplete")
+                return Err(MailError::new(MailErrorCode::MailMessageIncomplete)
                     .detail("the server stopped sending the message; try again"));
             }
             if bytes.len() + chunk_bytes.len() > MESSAGE_LIMIT {
@@ -182,7 +182,7 @@ impl Imap {
                 .await
                 .map_err(failure)?;
             chunk_bytes = body_chunk(&data, message.uid)
-                .ok_or_else(|| MailError::new("message_not_found"))?
+                .ok_or_else(|| MailError::new(MailErrorCode::MessageNotFound))?
                 .to_vec();
         }
     }
@@ -193,7 +193,7 @@ impl Imap {
         limit: usize,
     ) -> Result<Value, MailError> {
         if limit == 0 || limit > 100 {
-            return Err(MailError::new("invalid_mail_limit"));
+            return Err(MailError::new(MailErrorCode::InvalidMailLimit));
         }
         let selected = self
             .examine(mailbox(folder)?, Default::default())
@@ -201,11 +201,11 @@ impl Imap {
             .map_err(failure)?;
         let validity = selected
             .uid_validity
-            .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
+            .ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidValidity))?
             .get();
         let key = if let Some(query) = query {
             if query.len() > 2048 {
-                return Err(MailError::new("mail_query_too_large"));
+                return Err(MailError::new(MailErrorCode::MailQueryTooLarge));
             }
             SearchKey::Text(query.to_owned().try_into().map_err(invalid)?)
         } else {
@@ -312,7 +312,7 @@ impl Imap {
         let bytes = self.body(message).await?;
         let parsed = MessageParser::default()
             .parse(&bytes)
-            .ok_or_else(|| MailError::new("invalid_email_message"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))?;
         let found: Vec<_> = parsed.attachments().collect();
         let files = parts
             .iter()
@@ -383,7 +383,7 @@ impl Imap {
                 .map_err(failure)?;
             copied
         } else {
-            return Err(MailError::new("mail_move_not_supported"));
+            return Err(MailError::new(MailErrorCode::MailMoveNotSupported));
         };
         let moved = result.as_ref().and_then(|(validity, _, uids)| {
             uids.first().map(|uid| MessageRef {
@@ -426,7 +426,7 @@ impl MailTransport for Pimalaya {
             execute(config, auth, command, &mut phase),
         )
         .await
-        .unwrap_or_else(|_| Err(MailError::new("mail_timeout")));
+        .unwrap_or_else(|_| Err(MailError::new(MailErrorCode::MailTimeout)));
         if command.sends() {
             result.map_err(|error| error.at(phase))
         } else {
@@ -456,7 +456,7 @@ impl MailTransport for Pimalaya {
             })
         })
         .await
-        .unwrap_or_else(|_| Err(MailError::new("mail_timeout")))
+        .unwrap_or_else(|_| Err(MailError::new(MailErrorCode::MailTimeout)))
     }
     async fn reader(
         &self,
@@ -495,11 +495,11 @@ async fn wait_for_mail(
     tokio::select! {
         _=stop.cancelled()=>Ok(()),
         result=async {
-            let mut client=timeout(COMMAND_TIMEOUT, Imap::connect(endpoint,auth,connector)).await.map_err(|_|MailError::new("mail_timeout"))??;
-            if !client.has("IDLE") {return Err(MailError::new("mail_idle_not_supported"));}
+            let mut client=timeout(COMMAND_TIMEOUT, Imap::connect(endpoint,auth,connector)).await.map_err(|_|MailError::new(MailErrorCode::MailTimeout))??;
+            if !client.has("IDLE") {return Err(MailError::new(MailErrorCode::MailIdleNotSupported));}
             let selected = client.examine(mailbox("INBOX")?,Default::default()).await.map_err(failure)?;
-            let validity = selected.uid_validity.ok_or_else(|| MailError::new("mail_missing_uid_validity"))?.get();
-            let next = selected.uid_next.ok_or_else(|| MailError::new("mail_missing_uid_next"))?.get();
+            let validity = selected.uid_validity.ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidValidity))?.get();
+            let next = selected.uid_next.ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidNext))?.get();
             if validity != cursor.uid_validity || next.saturating_sub(1) > cursor.last_uid { return Ok(()); }
             client.idle().await
         }=>result,
@@ -534,7 +534,7 @@ impl Imap {
                         let n = self.socket.read(&mut bytes).await.map_err(failure)?;
                         budget = budget
                             .checked_sub(n)
-                            .ok_or_else(|| MailError::new("mail_response_too_large"))?;
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailResponseTooLarge))?;
                         arg = Some(bytes[..n].to_vec());
                     }
                 }
@@ -641,7 +641,7 @@ impl Imap {
                 .map_err(failure)?;
             let uid_validity = selected
                 .uid_validity
-                .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
+                .ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidValidity))?
                 .get();
             let key = SearchKey::Header(
                 "Message-ID".try_into().map_err(invalid)?,
@@ -749,11 +749,11 @@ async fn scan(client: &mut Imap, cursor: Option<&Cursor>) -> Result<Scan, MailEr
         .map_err(failure)?;
     let uid_validity = data
         .uid_validity
-        .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
+        .ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidValidity))?
         .get();
     let last = data
         .uid_next
-        .ok_or_else(|| MailError::new("mail_missing_uid_next"))?
+        .ok_or_else(|| MailError::new(MailErrorCode::MailMissingUidNext))?
         .get()
         - 1;
     let Some(previous) = cursor.filter(|c| c.uid_validity == uid_validity) else {
@@ -843,7 +843,7 @@ async fn execute(
                 .await
         }
         MailCommand::Read { .. } | MailCommand::View { .. } => {
-            Err(MailError::new("invalid_mail_request"))
+            Err(MailError::new(MailErrorCode::InvalidMailRequest))
         }
         MailCommand::OpenAttachments { message, parts } => {
             client.open_attachments(message, parts).await
@@ -859,7 +859,7 @@ async fn execute(
         MailCommand::Trash { message } => client.move_message(message, &config.trash_folder).await,
         MailCommand::Delete { message } => {
             if !client.has("UIDPLUS") {
-                return Err(MailError::new("mail_uid_expunge_not_supported"));
+                return Err(MailError::new(MailErrorCode::MailUidExpungeNotSupported));
             }
             client.flag(message, Flag::Deleted, true).await?;
             client
@@ -874,7 +874,7 @@ async fn execute(
                     let raw = client.body(message).await?;
                     let parsed = MessageParser::default()
                         .parse(&raw)
-                        .ok_or_else(|| MailError::new("invalid_email_message"))?;
+                        .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))?;
                     Some(thread(&parsed))
                 }
                 None => None,
@@ -890,7 +890,7 @@ async fn execute(
             let raw = client.body(message).await?;
             let parsed = MessageParser::default()
                 .parse(&raw)
-                .ok_or_else(|| MailError::new("invalid_email_message"))?;
+                .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))?;
             let (draft, headers) = reply(&parsed, &config.address, body, *all)?;
             send(config, auth, &draft, Some(headers), phase).await
         }
@@ -903,7 +903,7 @@ async fn execute(
             let raw = client.body(message).await?;
             let parsed = MessageParser::default()
                 .parse(&raw)
-                .ok_or_else(|| MailError::new("invalid_email_message"))?;
+                .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))?;
             let draft = mime::forward(&parsed, to.clone(), body);
             let bytes = compose_forward(&config.address, &draft, &raw)?;
             send_prepared(config, auth, &draft, bytes, phase).await
@@ -951,7 +951,7 @@ async fn execute(
 fn parse(fetched: &Fetched) -> Result<mail_parser::Message<'_>, MailError> {
     MessageParser::default()
         .parse(&fetched.raw[..])
-        .ok_or_else(|| MailError::new("invalid_email_message"))
+        .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))
 }
 
 /// A message as a bot reads it: headers, up to 32,000 characters of text,
@@ -1117,26 +1117,29 @@ fn safe_text(error: &impl std::fmt::Display) -> String {
 /// A connection failure, with its kind as the cause.
 fn io_failure(error: io::Error) -> MailError {
     let (code, cause) = match error.kind() {
-        io::ErrorKind::TimedOut => ("mail_timeout", "the mail server stopped responding"),
+        io::ErrorKind::TimedOut => (
+            MailErrorCode::MailTimeout,
+            "the mail server stopped responding",
+        ),
         io::ErrorKind::ConnectionRefused => (
-            "mail_transport_failed",
+            MailErrorCode::MailTransportFailed,
             "the mail server refused the connection",
         ),
         io::ErrorKind::UnexpectedEof
         | io::ErrorKind::ConnectionReset
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::BrokenPipe => (
-            "mail_transport_failed",
+            MailErrorCode::MailTransportFailed,
             "the mail server closed the connection",
         ),
         io::ErrorKind::NotFound
         | io::ErrorKind::HostUnreachable
         | io::ErrorKind::NetworkUnreachable => (
-            "mail_transport_failed",
+            MailErrorCode::MailTransportFailed,
             "the mail server could not be reached",
         ),
         _ => (
-            "mail_transport_failed",
+            MailErrorCode::MailTransportFailed,
             "the connection to the mail server failed",
         ),
     };
@@ -1148,7 +1151,7 @@ fn io_failure(error: io::Error) -> MailError {
 fn smtp_failure(error: SmtpClientError) -> MailError {
     use io_smtp::rfc5321::{mail::SmtpMailError, rcpt::SmtpRcptError};
     let refused = |what: &str, code: u16| {
-        MailError::new("mail_rejected")
+        MailError::new(MailErrorCode::MailRejected)
             .cause(format!("the mail server refused {what} with code {code}"))
     };
     match error {
@@ -1161,7 +1164,7 @@ fn smtp_failure(error: SmtpClientError) -> MailError {
         SmtpClientError::Data(SmtpDataError::BodyRejected { code, .. }) => {
             refused("the message", code)
         }
-        _ => MailError::new("mail_transport_failed")
+        _ => MailError::new(MailErrorCode::MailTransportFailed)
             .cause("the mail server's reply was not understood"),
     }
 }

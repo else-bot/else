@@ -20,9 +20,12 @@ pub const MAX_RESULT: usize = 256 * 1024;
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')";
 
 /// An action's state, as stored in `status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Status {
     Dispatching,
     Succeeded,

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use super::types::{Credential, MailError, Provider, REAUTHENTICATION_REQUIRED};
+use super::types::{Credential, MailError, MailErrorCode, Provider};
 use crate::actor::Actor;
 
 #[derive(Deserialize)]
@@ -78,7 +78,7 @@ fn client(provider: Provider, id: &str, secret: Option<&str>) -> Result<Client, 
 }
 
 fn redirect(uri: &str) -> Result<RedirectUrl, MailError> {
-    RedirectUrl::new(uri.to_owned()).map_err(|_| MailError::new("invalid_redirect"))
+    RedirectUrl::new(uri.to_owned()).map_err(|_| MailError::new(MailErrorCode::InvalidRedirect))
 }
 
 /// Sends the token request without following redirects. A 401 is returned as
@@ -120,7 +120,7 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
         RequestTokenError::Request(error)
             if error.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            REAUTHENTICATION_REQUIRED
+            MailErrorCode::OauthReauthenticationRequired
         }
         RequestTokenError::ServerResponse(response)
             if matches!(
@@ -128,11 +128,13 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
                 InvalidGrant | InvalidClient | UnauthorizedClient
             ) =>
         {
-            REAUTHENTICATION_REQUIRED
+            MailErrorCode::OauthReauthenticationRequired
         }
-        RequestTokenError::ServerResponse(_) => "oauth_request_rejected",
-        RequestTokenError::Request(_) => "oauth_unavailable",
-        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => "invalid_oauth_response",
+        RequestTokenError::ServerResponse(_) => MailErrorCode::OauthRequestRejected,
+        RequestTokenError::Request(_) => MailErrorCode::OauthUnavailable,
+        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => {
+            MailErrorCode::InvalidOauthResponse
+        }
     })
 }
 
@@ -152,7 +154,7 @@ impl OAuth {
 
     pub async fn start(&self, request: Start) -> Result<Started, MailError> {
         if !matches!(request.provider, Provider::Gmail | Provider::Microsoft) {
-            return Err(MailError::new("oauth_wizard_unavailable"));
+            return Err(MailError::new(MailErrorCode::OauthWizardUnavailable));
         }
         if request.provider != Provider::Gmail || !request.address.is_empty() {
             request
@@ -161,7 +163,7 @@ impl OAuth {
                 .validate()?;
         }
         let redirect_url = reqwest::Url::parse(&request.redirect_uri)
-            .map_err(|_| MailError::new("invalid_redirect"))?;
+            .map_err(|_| MailError::new(MailErrorCode::InvalidRedirect))?;
         let loopback = matches!(
             redirect_url.host_str(),
             Some("localhost" | "127.0.0.1" | "[::1]")
@@ -177,7 +179,7 @@ impl OAuth {
                 .as_ref()
                 .is_some_and(|s| s.len() > 4096)
         {
-            return Err(MailError::new("invalid_oauth_client"));
+            return Err(MailError::new(MailErrorCode::InvalidOauthClient));
         }
         let (_, _, scopes) = request.provider.oauth_endpoints()?;
         let client = client(
@@ -208,7 +210,7 @@ impl OAuth {
             .call(move |map| {
                 map.retain(|_, p| p.expires > Instant::now());
                 if map.len() >= 32 {
-                    return Err(MailError::new("oauth_setup_limit"));
+                    return Err(MailError::new(MailErrorCode::OauthSetupLimit));
                 }
                 map.insert(request_id, pending);
                 Ok(())
@@ -226,15 +228,15 @@ impl OAuth {
         request: Complete,
     ) -> Result<(Provider, String, Credential), MailError> {
         if request.code.is_empty() || request.code.len() > 8192 || request.state.len() > 128 {
-            return Err(MailError::new("invalid_oauth_callback"));
+            return Err(MailError::new(MailErrorCode::InvalidOauthCallback));
         }
         let pending = self
             .pending
             .call(move |map| map.remove(&request.request_id))
             .await
-            .ok_or_else(|| MailError::new("oauth_setup_expired"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::OauthSetupExpired))?;
         if pending.expires <= Instant::now() || pending.state != CsrfToken::new(request.state) {
-            return Err(MailError::new("invalid_oauth_state"));
+            return Err(MailError::new(MailErrorCode::InvalidOauthState));
         }
         let Pending {
             request: setup,
@@ -259,7 +261,7 @@ impl OAuth {
                     .any(|scope| scope.as_str() == "https://mail.google.com/")
             })
         {
-            return Err(MailError::new("oauth_mail_access_required"));
+            return Err(MailError::new(MailErrorCode::OauthMailAccessRequired));
         }
         let access_token = token.access_token().secret();
         let address = if setup.provider == Provider::Gmail {
@@ -273,7 +275,7 @@ impl OAuth {
         };
         let refresh_token = token
             .refresh_token()
-            .ok_or_else(|| MailError::new("oauth_refresh_token_required"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::OauthRefreshTokenRequired))?;
         let credential = Credential::OAuth2 {
             client_id: setup.client_id.clone(),
             client_secret: setup.client_secret.clone(),
@@ -295,20 +297,20 @@ async fn gmail_address(endpoint: &str, access_token: &str) -> Result<String, Mai
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| MailError::new("oauth_unavailable"))?;
+        .map_err(|_| MailError::new(MailErrorCode::OauthUnavailable))?;
     let response = client
         .get(endpoint)
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|_| MailError::new("oauth_unavailable"))?;
+        .map_err(|_| MailError::new(MailErrorCode::OauthUnavailable))?;
     if !response.status().is_success() {
-        return Err(MailError::new(REAUTHENTICATION_REQUIRED));
+        return Err(MailError::new(MailErrorCode::OauthReauthenticationRequired));
     }
     let profile: Profile = response
         .json()
         .await
-        .map_err(|_| MailError::new("invalid_oauth_response"))?;
+        .map_err(|_| MailError::new(MailErrorCode::InvalidOauthResponse))?;
     Provider::Gmail
         .config(profile.address.clone())?
         .validate()?;
@@ -375,7 +377,7 @@ mod tests {
             code: "code".into(),
         };
         assert_eq!(
-            oauth.complete(wrong).await.unwrap_err().code,
+            oauth.complete(wrong).await.unwrap_err().code.as_str(),
             "invalid_oauth_state"
         );
         let replay = Complete {
@@ -384,7 +386,7 @@ mod tests {
             code: "code".into(),
         };
         assert_eq!(
-            oauth.complete(replay).await.unwrap_err().code,
+            oauth.complete(replay).await.unwrap_err().code.as_str(),
             "oauth_setup_expired"
         );
     }
@@ -395,14 +397,19 @@ mod tests {
         let mut unsafe_redirect = request();
         unsafe_redirect.redirect_uri = "http://example.com/callback".into();
         assert_eq!(
-            oauth.start(unsafe_redirect).await.unwrap_err().code,
+            oauth
+                .start(unsafe_redirect)
+                .await
+                .unwrap_err()
+                .code
+                .as_str(),
             "invalid_oauth_client"
         );
         for _ in 0..32 {
             oauth.start(request()).await.unwrap();
         }
         assert_eq!(
-            oauth.start(request()).await.unwrap_err().code,
+            oauth.start(request()).await.unwrap_err().code.as_str(),
             "oauth_setup_limit"
         );
     }
@@ -432,7 +439,8 @@ mod tests {
                 })
                 .await
                 .unwrap_err()
-                .code,
+                .code
+                .as_str(),
             "oauth_setup_expired"
         );
         for _ in 0..40 {
@@ -535,7 +543,11 @@ mod tests {
                 .request_async(&http)
                 .await
                 .unwrap_err();
-            assert_eq!(token_error(result).code, expected, "{status} {error}");
+            assert_eq!(
+                token_error(result).code.as_str(),
+                expected,
+                "{status} {error}"
+            );
             server.abort();
         }
     }

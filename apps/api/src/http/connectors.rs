@@ -3,6 +3,7 @@ use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use axum::{
     Json, Router,
     extract::State,
+    http::StatusCode,
     routing::{delete, get, patch, post, put},
 };
 use serde::Deserialize;
@@ -92,44 +93,17 @@ fn unavailable(error: store::StoreError) -> ApiError {
 }
 impl From<MailError> for ApiError {
     fn from(error: MailError) -> Self {
-        if error.code == "oauth_request_rejected" {
-            return ApiError::bad_request(
-                error.code,
-                "The mail provider rejected the token request. Check the OAuth app's settings, then try again.",
-            );
-        }
-        if error.code == "oauth_mail_access_required" {
-            return ApiError::bad_request(
-                error.code,
-                "Allow Gmail access when signing in with Google, then try again.",
-            );
-        }
+        let code = error.code.as_str();
+        let status = error.code.http_status();
+        let message = error.code.http_message();
         if matches!(
-            error.code,
-            "mail_unavailable"
-                | "oauth_unavailable"
-                | "mail_account_unavailable"
-                | "maintenance_in_progress"
+            status,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
         ) {
-            return ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                error.code,
-                error.code,
-            )
-            .retryable();
+            ApiError::new(status, code, code).retryable()
+        } else {
+            ApiError::new(status, code, message.or(error.detail).unwrap_or(code))
         }
-        if matches!(
-            error.code,
-            "connector_limit" | "oauth_setup_limit" | "mail_account_busy"
-        ) {
-            return ApiError::new(
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                error.code,
-                error.code,
-            )
-            .retryable();
-        }
-        ApiError::bad_request(error.code, error.detail.unwrap_or(error.code))
     }
 }
 
@@ -159,32 +133,14 @@ async fn view_message(
     let axum::extract::Query(message) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use folder, uid_validity and uid."))?;
     let manager = &state.connectors;
-    let view = manager.view(id, message).await.map_err(|error| {
-        use axum::http::StatusCode;
-        let (status, message) = match error.code {
-            "message_deleted" => (StatusCode::NOT_FOUND, "This email was deleted."),
-            "message_not_found" | "stale_message_reference" => (
-                StatusCode::NOT_FOUND,
-                "This email left its folder, and the mail server did not say where it went.",
-            ),
-            "mail_forbidden" => (StatusCode::NOT_FOUND, "This inbox is no longer connected."),
-            "mail_account_paused" => (
-                StatusCode::CONFLICT,
-                "This inbox is paused. Resume it in Settings, Email, to read its mail.",
-            ),
-            "mail_message_too_large" => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "This email is over 64 MiB, too large to show.",
-            ),
-            AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED => (
-                StatusCode::CONFLICT,
-                "The mail server no longer accepts the saved sign-in. Reconnect the inbox in \
-                 Settings, Email.",
-            ),
-            _ => return ApiError::from(error),
-        };
-        ApiError::new(status, error.code, message)
-    })?;
+    let view =
+        manager
+            .view(id, message)
+            .await
+            .map_err(|error| match error.code.reader_response() {
+                Some((status, message)) => ApiError::new(status, error.code.as_str(), message),
+                None => ApiError::from(error),
+            })?;
     Ok(Json(view))
 }
 async fn account(
@@ -411,7 +367,7 @@ async fn oauth_start(
                 || a.config.address.eq_ignore_ascii_case(&request.address))
     });
     if accounts.len() >= store::MAX_ACCOUNTS as usize && !may_renew {
-        return Err(MailError::new("connector_limit").into());
+        return Err(MailError::new(MailErrorCode::ConnectorLimit).into());
     }
     Ok(Json(state.connectors.oauth.start(request).await?))
 }
@@ -609,7 +565,7 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> ToolRes
     };
     let accounts = match store::accounts(&state.db).await {
         Ok(accounts) => accounts,
-        Err(_) => return Err(Refusal::text("mail_unavailable")),
+        Err(_) => return Err(Refusal::text(MailErrorCode::MailUnavailable.as_str())),
     };
     let existing = accounts
         .iter()
@@ -759,7 +715,7 @@ async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value)
         Ok(value) => Ok(Done::json(value).logged(format!("native mail tool {name}"))),
         Err(store::StoreError::Db(error)) => {
             tracing::warn!(%error, "a mail trigger tool failed");
-            Err(Refusal::text("mail_unavailable"))
+            Err(Refusal::text(MailErrorCode::MailUnavailable.as_str()))
         }
         Err(store::StoreError::Forbidden) => Err(Refusal::text(
             "Only a request from the owner can change mail triggers, on an inbox you can read.",
@@ -803,7 +759,7 @@ async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Tool
         (Ok(account), Ok(permissions), Ok(readers)) => (account, permissions, readers),
         (Err(error), ..) | (_, Err(error), _) | (.., Err(error)) => {
             tracing::warn!(%error, "reading an inbox to remove failed");
-            return Err(Refusal::text("mail_unavailable"));
+            return Err(Refusal::text(MailErrorCode::MailUnavailable.as_str()));
         }
     };
     let Some(account) = account else {
@@ -927,7 +883,7 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
     let result = tool_call(state, grant, name, args).await;
     match result {
         Ok(value) => Ok(Done::json(value).logged("Email tool completed.")),
-        Err(error) if error.code == AUTHENTICATION_FAILED => {
+        Err(error) if error.code == MailErrorCode::MailAuthenticationFailed => {
             let error = error.detail(
                 "the server rejected the inbox's saved password. For an iCloud inbox, call \
                  mail_connect with provider icloud and its address so the owner enters a new \
@@ -935,7 +891,7 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
             );
             Err(Refusal::text(error.to_string()))
         }
-        Err(error) if error.code == REAUTHENTICATION_REQUIRED => {
+        Err(error) if error.code == MailErrorCode::OauthReauthenticationRequired => {
             let error = error.detail(
                 "the inbox's sign-in expired. Call mail_connect with its provider and address \
                  so the owner signs in again.",
@@ -955,14 +911,14 @@ async fn tool_call(
     let manager = &state.connectors;
     if name == "mail_accounts" {
         if !args.is_null() && args.as_object().is_none_or(|object| !object.is_empty()) {
-            return Err(MailError::new("invalid_mail_request"));
+            return Err(MailError::new(MailErrorCode::InvalidMailRequest));
         }
         let (accounts, source) = tokio::join!(
             store::bot_accounts(&state.db, grant.bot_id),
             store::event_account(&state.db, grant.turn_id)
         );
-        let accounts = accounts.map_err(|_| MailError::new("mail_unavailable"))?;
-        let source = source.map_err(|_| MailError::new("mail_unavailable"))?;
+        let accounts = accounts.map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
+        let source = source.map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
         let visible = accounts.into_iter().filter_map(|(account,p)| {
             (p.read && source.is_none_or(|id| id == account.id)).then(|| json!({"id":account.id,"address":account.config.address,"provider":account.config.provider,"state":account.state,"health":account.health,"permissions":p}))
         }).collect::<Vec<_>>();
@@ -970,20 +926,20 @@ async fn tool_call(
     }
     let source = store::event_account(&state.db, grant.turn_id)
         .await
-        .map_err(|_| MailError::new("mail_unavailable"))?;
+        .map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
     let in_scope = |account_id: Uuid| source.is_none_or(|id| id == account_id);
     if name == "mail_action_status" {
         let request: StatusRequest = serde_json::from_value(args.clone())
-            .map_err(|_| MailError::new("invalid_mail_request"))?;
+            .map_err(|_| MailError::new(MailErrorCode::InvalidMailRequest))?;
         if !in_scope(request.account_id) {
-            return Err(MailError::new("mail_forbidden"));
+            return Err(MailError::new(MailErrorCode::MailForbidden));
         }
         if store::permissions(&state.db, request.account_id, grant.bot_id)
             .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?
             .is_none_or(|p| !p.read)
         {
-            return Err(MailError::new("mail_forbidden"));
+            return Err(MailError::new(MailErrorCode::MailForbidden));
         }
         return store::ACTIONS
             .receipt(
@@ -994,23 +950,23 @@ async fn tool_call(
             )
             .await
             .map_err(store::StoreError::from)?
-            .ok_or_else(|| MailError::new("mail_action_not_found"));
+            .ok_or_else(|| MailError::new(MailErrorCode::MailActionNotFound));
     }
     let request: ActionRequest = serde_json::from_value(args.clone()).map_err(|_| {
         if saves_mailbox_draft(&args["command"]) {
-            MailError::new("mail_drafts_need_a_card").detail(
+            MailError::new(MailErrorCode::MailDraftsNeedACard).detail(
                 "mail_action saves no drafts. Call draft_email with account_id and reply_to so \
                  the owner reviews it in a card.",
             )
         } else {
-            MailError::new("invalid_mail_request")
+            MailError::new(MailErrorCode::InvalidMailRequest)
         }
     })?;
     if !in_scope(request.account_id) {
-        return Err(MailError::new("mail_forbidden"));
+        return Err(MailError::new(MailErrorCode::MailForbidden));
     }
     if source.is_none() && request.command.sends() {
-        return Err(MailError::new("mail_send_needs_approved_draft"));
+        return Err(MailError::new(MailErrorCode::MailSendNeedsApprovedDraft));
     }
     if matches!(
         request.command,
@@ -1019,7 +975,7 @@ async fn tool_call(
             | MailCommand::Locate { .. }
             | MailCommand::View { .. }
     ) {
-        return Err(MailError::new("invalid_mail_request"));
+        return Err(MailError::new(MailErrorCode::InvalidMailRequest));
     }
     manager
         .execute(

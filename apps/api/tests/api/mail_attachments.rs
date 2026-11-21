@@ -123,10 +123,10 @@ impl MailTransport for Inbox {
         )
     }
     async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
-        Err(MailError::new("message_not_found"))
+        Err(MailError::new(MailErrorCode::MessageNotFound))
     }
     async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
-        Err(MailError::new("mail_transport_failed"))
+        Err(MailError::new(MailErrorCode::MailTransportFailed))
     }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
         Ok(Scan {

@@ -18,7 +18,7 @@ use crate::app::outgoing::{
 };
 use crate::connectors::{
     store,
-    types::{MailCommand, MailError},
+    types::{AccountState, MailCommand, MailError},
 };
 use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
 use crate::grants::{Grant, Tool};
@@ -399,7 +399,9 @@ async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<
         account.map_err(unavailable)?,
         permissions.map_err(unavailable)?,
     ) {
-        (Some(account), Some(p)) if account.state == "active" && p.read && p.write && p.send => {
+        (Some(account), Some(p))
+            if account.state == AccountState::Active && p.read && p.write && p.send =>
+        {
             Ok(Some(account.config.address))
         }
         _ => Err(forbidden()),

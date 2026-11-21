@@ -60,14 +60,14 @@ pub async fn authorize_in(
     {
         return Err(StoreError::Forbidden);
     }
-    let account: Option<(String, i64)> = sqlx::query_as(
+    let account: Option<(AccountState, i64)> = sqlx::query_as(
         "SELECT state, generation FROM connector_accounts WHERE id = ?1 AND state <> 'removed'",
     )
     .bind(account_id)
     .fetch_optional(&mut *conn)
     .await?;
     let (state, current) = account.ok_or(StoreError::NotFound)?;
-    if state != "active" {
+    if state != AccountState::Active {
         return Err(StoreError::Inactive);
     }
     if current != generation {

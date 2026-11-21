@@ -8,8 +8,8 @@ use else_api::connector_core::actions::{Outcome, Start};
 use else_api::connectors::delivery;
 use else_api::connectors::store::{self, StoreError};
 use else_api::connectors::types::{
-    Arrival, Credential, Cursor, Draft, Endpoint, MailCommand, MailConfig, MessageRef, Permissions,
-    Provider, Scan,
+    AccountState, Arrival, Credential, Cursor, Draft, Endpoint, MailCommand, MailConfig,
+    MessageRef, Permissions, Provider, Scan,
 };
 use else_api::credentials::SecretKey;
 use else_api::providers::Registry;
@@ -811,7 +811,7 @@ async fn scans_are_fenced_bounded_and_quiet_at_first() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((paused.state.as_str(), paused.generation), ("paused", 2));
+    assert_eq!((paused.state, paused.generation), (AccountState::Paused, 2));
     let resting = Cursor {
         uid_validity: 8,
         last_uid: 3,
@@ -1139,8 +1139,8 @@ async fn a_restored_database_stays_passive_until_resumed() {
     drop(conn);
     let restored = store::account(&db.pool, account).await.unwrap().unwrap();
     assert_eq!(
-        (restored.state.as_str(), restored.generation),
-        ("paused", generation + 1)
+        (restored.state, restored.generation),
+        (AccountState::Paused, generation + 1)
     );
     assert_eq!(store::cursor(&db.pool, account).await.unwrap(), None);
     assert_eq!(deliveries(&db, bot).await, vec![(11, "cancelled".into())]);

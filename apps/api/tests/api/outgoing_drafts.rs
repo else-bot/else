@@ -69,25 +69,25 @@ impl MailTransport for FakeMail {
         let flag = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::SeqCst);
         if let MailCommand::FindSent { .. } = command {
             if flag(&self.search_fails) {
-                return Err(MailError::new("mail_timeout"));
+                return Err(MailError::new(MailErrorCode::MailTimeout));
             }
             return Ok(json!({ "found": flag(&self.in_sent), "folder": "Sent" }));
         }
         if flag(&self.connection_lost) {
-            return Err(MailError::new("connection_lost"));
+            return Err(MailError::new(MailErrorCode::MailTransportFailed));
         }
         if let Some(phase) = *self.fail_at.lock().unwrap() {
-            return Err(MailError::new("mail_transport_failed")
+            return Err(MailError::new(MailErrorCode::MailTransportFailed)
                 .cause("the mail server closed the connection")
                 .at(phase));
         }
         Ok(json!({ "sent": true }))
     }
     async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
-        Err(MailError::new("message_not_found"))
+        Err(MailError::new(MailErrorCode::MessageNotFound))
     }
     async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
-        Err(MailError::new("mail_transport_failed"))
+        Err(MailError::new(MailErrorCode::MailTransportFailed))
     }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
         Ok(Scan {

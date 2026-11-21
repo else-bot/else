@@ -166,7 +166,7 @@ pub(super) fn reply(
     to.retain(|a| seen.insert(a.to_ascii_lowercase()));
     cc.retain(|a| seen.insert(a.to_ascii_lowercase()));
     if to.is_empty() {
-        return Err(MailError::new("mail_reply_has_no_recipient"));
+        return Err(MailError::new(MailErrorCode::MailReplyHasNoRecipient));
     }
     let subject = parsed.subject().unwrap_or_default();
     Ok((
@@ -221,7 +221,7 @@ fn safe_message_id(value: &str) -> bool {
 
 pub(super) fn smtp_address(address: &str) -> Result<SmtpMailbox<'static>, MailError> {
     let Some((local, domain)) = address.rsplit_once('@') else {
-        return Err(MailError::new("invalid_email_address"));
+        return Err(MailError::new(MailErrorCode::InvalidEmailAddress));
     };
     if local.is_empty()
         || local.len() > 64
@@ -234,7 +234,7 @@ pub(super) fn smtp_address(address: &str) -> Result<SmtpMailbox<'static>, MailEr
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
     {
-        return Err(MailError::new("invalid_email_address"));
+        return Err(MailError::new(MailErrorCode::InvalidEmailAddress));
     }
     Ok(SmtpMailbox {
         local_part: SmtpLocalPart(Cow::Owned(local.into())),
@@ -267,7 +267,7 @@ fn build(
         || draft.subject.contains(['\r', '\n'])
         || draft.body.len() > MESSAGE_LIMIT / 2
     {
-        return Err(MailError::new("invalid_email_message"));
+        return Err(MailError::new(MailErrorCode::InvalidEmailMessage));
     }
     for recipient in draft.to.iter().chain(&draft.cc).chain(&draft.bcc) {
         smtp_address(recipient)?;
@@ -285,18 +285,18 @@ fn build(
     }
     let mut attachment_bytes = 0;
     if draft.attachments.len() > 10 {
-        return Err(MailError::new("mail_attachments_too_large"));
+        return Err(MailError::new(MailErrorCode::MailAttachmentsTooLarge));
     }
     for attachment in &draft.attachments {
         if attachment.data_base64.len() > crate::connectors::types::MAX_ATTACHMENT_BASE64 {
-            return Err(MailError::new("mail_attachments_too_large"));
+            return Err(MailError::new(MailErrorCode::MailAttachmentsTooLarge));
         }
         let bytes = STANDARD
             .decode(&attachment.data_base64)
-            .map_err(|_| MailError::new("invalid_mail_attachment"))?;
+            .map_err(|_| MailError::new(MailErrorCode::InvalidMailAttachment))?;
         attachment_bytes += bytes.len();
         if attachment_bytes > crate::connectors::types::MAX_ATTACHMENT_TOTAL {
-            return Err(MailError::new("mail_attachments_too_large"));
+            return Err(MailError::new(MailErrorCode::MailAttachmentsTooLarge));
         }
         builder = builder.attachment(
             attachment.media_type.clone(),
@@ -317,7 +317,7 @@ fn build(
     }
     let message = builder.write_to_vec().map_err(failure)?;
     if message.len() > MESSAGE_LIMIT {
-        return Err(MailError::new("mail_message_too_large"));
+        return Err(MailError::new(MailErrorCode::MailMessageTooLarge));
     }
     Ok(message)
 }
@@ -325,7 +325,7 @@ fn build(
 pub(super) fn forward_source(raw: &[u8]) -> Result<Vec<u8>, MailError> {
     let parsed = MessageParser::default()
         .parse(raw)
-        .ok_or_else(|| MailError::new("invalid_email_message"))?;
+        .ok_or_else(|| MailError::new(MailErrorCode::InvalidEmailMessage))?;
     let mut output = Vec::with_capacity(raw.len());
     let mut offset = 0;
     for header in parsed.headers().iter().filter(|h| {

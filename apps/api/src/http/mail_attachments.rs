@@ -50,7 +50,7 @@ pub(super) async fn readable(
     grant: &Grant,
     account_id: Uuid,
 ) -> Result<(), MailError> {
-    let unavailable = |_| MailError::new("mail_unavailable");
+    let unavailable = |_| MailError::new(MailErrorCode::MailUnavailable);
     let (source, permissions) = tokio::join!(
         store::event_account(&state.db, grant.turn_id),
         store::permissions(&state.db, account_id, grant.bot_id)
@@ -60,7 +60,7 @@ pub(super) async fn readable(
         .is_some_and(|id| id != account_id)
         || permissions.map_err(unavailable)?.is_none_or(|p| !p.read)
     {
-        return Err(MailError::new("mail_forbidden"));
+        return Err(MailError::new(MailErrorCode::MailForbidden));
     }
     Ok(())
 }
@@ -149,14 +149,15 @@ fn file_json(file: &MailFile) -> Value {
 /// the ones that can be read, then extract and keep their text.
 pub async fn open(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Ok(request) = serde_json::from_value::<Request<MailCommand>>(args.clone()) else {
-        return mail_error(MailError::new("invalid_mail_request"));
+        return mail_error(MailError::new(MailErrorCode::InvalidMailRequest));
     };
     let MailCommand::OpenAttachments { message, .. } = &request.command else {
-        return mail_error(MailError::new("invalid_mail_request"));
+        return mail_error(MailError::new(MailErrorCode::InvalidMailRequest));
     };
     if request.action_id.is_some() {
         return mail_error(
-            MailError::new("invalid_mail_request").detail("open_attachments takes no action_id"),
+            MailError::new(MailErrorCode::InvalidMailRequest)
+                .detail("open_attachments takes no action_id"),
         );
     }
     let manager = &state.connectors;
@@ -180,7 +181,7 @@ pub async fn open(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         .as_array()
         .and_then(|files| files.iter().map(listed).collect::<Option<Vec<_>>>())
     else {
-        return mail_error(MailError::new("mail_transport_failed"));
+        return mail_error(MailError::new(MailErrorCode::MailTransportFailed));
     };
     let id = |part| text_id(grant.bot_id, request.account_id, message, part);
     let mut results = Vec::new();
@@ -197,7 +198,7 @@ pub async fn open(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
             Ok(None) => asking.push(item),
             Err(error) => {
                 tracing::warn!(%error, "reading an opened mail attachment failed");
-                return mail_error(MailError::new("mail_unavailable"));
+                return mail_error(MailError::new(MailErrorCode::MailUnavailable));
             }
         }
     }
@@ -210,7 +211,7 @@ pub async fn open(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
             Err(_) => None,
         };
         let Some(address) = address else {
-            return mail_error(MailError::new("mail_unavailable"));
+            return mail_error(MailError::new(MailErrorCode::MailUnavailable));
         };
         let spec = Spec::mail_attachments(MailAttachments {
             account_id: request.account_id,
@@ -274,7 +275,7 @@ async fn extract(state: &AppState, bot_id: Uuid, item: &Listed, attachment_id: U
         Ok(_) => opened(file, text.as_bytes()),
         Err(error) => {
             tracing::warn!(%error, "saving an opened mail attachment failed");
-            json!({"file":file_json(file),"status":"unavailable","error":"mail_unavailable"})
+            json!({"file":file_json(file),"status":"unavailable","error":MailErrorCode::MailUnavailable.as_str()})
         }
     }
 }
@@ -282,10 +283,10 @@ async fn extract(state: &AppState, bot_id: Uuid, item: &Listed, attachment_id: U
 /// `attachment_search` and `attachment_page` over a file `open` saved.
 pub async fn query(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Ok(request) = serde_json::from_value::<Request<Query>>(args.clone()) else {
-        return mail_error(MailError::new("invalid_mail_request"));
+        return mail_error(MailError::new(MailErrorCode::InvalidMailRequest));
     };
     if request.action_id.is_some() {
-        return mail_error(MailError::new("invalid_mail_request"));
+        return mail_error(MailError::new(MailErrorCode::InvalidMailRequest));
     }
     if let Err(error) = readable(state, grant, request.account_id).await {
         return mail_error(error);
@@ -298,13 +299,13 @@ pub async fn query(state: &AppState, grant: &Grant, args: &Value) -> ToolResult 
     let text = match crate::db::attachments::read(&state.db, grant.bot_id, attachment_id).await {
         Ok(Some((file, text))) if file.media_type == TEXT_TYPE => text,
         Ok(_) => {
-            return mail_error(MailError::new("attachment_not_opened").detail(
+            return mail_error(MailError::new(MailErrorCode::AttachmentNotOpened).detail(
                 "open the part with open_attachments first; only an opened part is searchable",
             ));
         }
         Err(error) => {
             tracing::warn!(%error, "reading an opened mail attachment failed");
-            return mail_error(MailError::new("mail_unavailable"));
+            return mail_error(MailError::new(MailErrorCode::MailUnavailable));
         }
     };
     let document = Document::decode(&String::from_utf8_lossy(&text));
@@ -314,7 +315,7 @@ pub async fn query(state: &AppState, grant: &Grant, args: &Value) -> ToolResult 
             if query.trim().is_empty() || query.len() > 1024 || !(1..=MAX_MATCHES).contains(&limit)
             {
                 return mail_error(
-                    MailError::new("invalid_mail_command")
+                    MailError::new(MailErrorCode::InvalidMailCommand)
                         .detail("query must be 1 to 1024 bytes and limit 1 to 50"),
                 );
             }
@@ -324,7 +325,7 @@ pub async fn query(state: &AppState, grant: &Grant, args: &Value) -> ToolResult 
             Some(value) => value,
             None => {
                 return mail_error(
-                    MailError::new("attachment_page_not_found")
+                    MailError::new(MailErrorCode::AttachmentPageNotFound)
                         .detail("pages count from 1 to the file's pages"),
                 );
             }
