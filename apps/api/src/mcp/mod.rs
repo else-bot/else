@@ -530,12 +530,12 @@ pub struct Replaced {
 
 /// A package's actor state. Every bot's operations on one package, upstream
 /// calls included, run one at a time in its mailbox, because they share one
-/// connection and one sign-in. A slow server, up to the 60 s request
-/// timeout, delays only its own package.
+/// connection and one sign-in. A slow server delays only its own package.
 enum Slot {
     Live(Box<Live>),
-    /// Removed. An operation queued before the removal finds this and
-    /// reports the package missing, even after the id is installed again.
+    /// Removed. An operation that looked up this slot before the removal
+    /// finds this and reports the package missing, even after the id is
+    /// installed again under a new slot.
     Retired,
 }
 
@@ -602,7 +602,6 @@ impl Admit {
     }
 }
 
-/// What a session operation reads before it opens the session.
 trait Needs: Send + 'static {
     type Ready: Send + 'static;
     fn prepare(
@@ -611,7 +610,6 @@ trait Needs: Send + 'static {
     ) -> impl Future<Output = Result<Self::Ready, Error>> + Send;
 }
 
-/// The package must still be installed.
 struct Installed;
 
 impl Needs for Installed {
@@ -641,8 +639,6 @@ struct Entry {
 }
 
 impl Entry {
-    /// Run `f` on the installed package under `admit`, or report it missing
-    /// once it was removed.
     async fn live<R: Send + 'static>(
         &self,
         shared: Arc<Shared>,
@@ -796,8 +792,6 @@ impl Library {
         self.slot(id).await
     }
 
-    /// Run `f` on the package's shared session, opened if needed, after
-    /// taking `admit` and reading what `N` needs.
     async fn with_session<N: Needs, R: Send + 'static>(
         &self,
         id: &PackageId,

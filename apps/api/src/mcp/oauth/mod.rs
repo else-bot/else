@@ -138,6 +138,7 @@ impl Session {
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
+        self.close_unless_opened_with(config).await;
         if !transport::METHODS.contains(&method.as_str()) || !params.is_object() {
             return Err(Error::Invalid(
                 "Use a supported MCP method with object params.",
@@ -251,7 +252,10 @@ impl Session {
         ))
     }
 
-    async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
+    /// Close a connection opened with other values as soon as the new ones
+    /// are known, even if the operation then fails, so it cannot keep
+    /// streaming with a replaced secret.
+    async fn close_unless_opened_with(&mut self, config: &Transport) {
         if self
             .connection
             .as_ref()
@@ -259,6 +263,9 @@ impl Session {
         {
             self.close().await;
         }
+    }
+
+    async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
         if self.connection.is_none() {
             let mut sent = config.clone();
             if let State::Authorized(credential) = &self.state
@@ -293,6 +300,7 @@ impl Session {
         config: &Transport,
         redirect_uri: String,
     ) -> Result<McpAuthorization, Error> {
+        self.close_unless_opened_with(config).await;
         self.store.require_key()?;
         let redirect = reqwest::Url::parse(&redirect_uri).ok().filter(|url| {
             url.scheme() == "http"

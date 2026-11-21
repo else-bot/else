@@ -173,7 +173,7 @@ async fn a_removed_package_refuses_requests() {
 }
 
 #[tokio::test]
-async fn work_queued_before_a_removal_does_not_reach_a_reinstall() {
+async fn a_slot_looked_up_before_a_removal_does_not_reach_a_reinstall() {
     let temp = tempfile::tempdir().unwrap();
     let library = Library::new(temp.path().join("mcp"), Arc::default());
     let id = input("again").id;
@@ -181,13 +181,13 @@ async fn work_queued_before_a_removal_does_not_reach_a_reinstall() {
         .install(input("again"), "Maple".into())
         .await
         .unwrap();
-    let queued = library.installed_slot(&id).await.unwrap();
+    let stale = library.installed_slot(&id).await.unwrap();
     library.remove(&id).await.unwrap();
     library
         .install(input("again"), "Scout".into())
         .await
         .unwrap();
-    let ran = queued
+    let ran = stale
         .live(library.shared.clone(), Admit::Turn, |live, _| {
             Box::pin(live.package())
         })
@@ -275,12 +275,9 @@ async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
     assert!(matches!(list().await, Err(Error::Paused)));
 }
 
-#[tokio::test]
-async fn disconnect_closes_the_shared_stdio_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let library = Library::new(dir.path().join("mcp"), Arc::default());
-    let mut package = input("stdio-counter");
-    package.config = Transport::Stdio {
+/// A stdio MCP whose tools/list description counts calls since it started.
+fn counter() -> Transport {
+    Transport::Stdio {
         command: "python3".into(),
         args: vec!["-u".into(), "-c".into(), r#"
 import json, sys
@@ -299,7 +296,56 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 "#.into()],
         env: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn new_connection_values_close_the_old_connection_even_when_the_call_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::new(dir.path().join("mcp"), Arc::default());
+    let mut package = input("stdio-rotated");
+    package.config = counter();
+    let id = package.id.clone();
+    library.install(package, "installer".into()).await.unwrap();
+    library
+        .request(&id, "tools/list".into(), serde_json::json!({}))
+        .await
+        .unwrap();
+    let Transport::Stdio { command, args, .. } = counter() else {
+        unreachable!()
     };
+    let rotated = Transport::Stdio {
+        command,
+        args,
+        env: BTreeMap::from([("TOKEN".into(), "rotated".into())]),
+    };
+    let failed = library
+        .with_session(&id, Admit::Turn, Installed, move |session, ()| {
+            Box::pin(async move {
+                session
+                    .request(&rotated, "unsupported".into(), serde_json::json!({}))
+                    .await
+            })
+        })
+        .await;
+    assert!(matches!(failed, Err(Error::Invalid(_))));
+    assert_eq!(
+        library
+            .connection_status(&id)
+            .await
+            .unwrap()
+            .status
+            .as_str(),
+        "disconnected"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_closes_the_shared_stdio_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::new(dir.path().join("mcp"), Arc::default());
+    let mut package = input("stdio-counter");
+    package.config = counter();
     let id = package.id.clone();
     library.install(package, "installer".into()).await.unwrap();
     for expected in ["1", "2"] {
