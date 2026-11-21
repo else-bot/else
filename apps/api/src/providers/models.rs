@@ -1,7 +1,8 @@
 //! Each CLI's own model list. The refresher asks every available CLI at
 //! startup and then hourly, keeps the last answer in a cache file so a
 //! failed ask after a restart still shows it, and falls back to the
-//! definition's bundled list only when the CLI never answered.
+//! definition's bundled list only when the CLI never answered. Each hour it
+//! also checks again whether an unavailable CLI can run now.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use super::Registry;
 use super::definitions::Definition;
 use else_wire::settings::{Catalog, ModelInfo};
 
-use crate::app::providers::Profile;
+use crate::app::providers::{Profile, Provider};
 
 /// How often every CLI is asked again, which also picks up a CLI upgrade.
 pub const INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -290,7 +291,7 @@ fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<ModelInfo
 
 /// The last list each CLI gave, by provider ID.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Cache {
+struct Saved {
     #[serde(flatten)]
     providers: std::collections::BTreeMap<String, Cached>,
 }
@@ -301,7 +302,7 @@ struct Cached {
     models: Vec<Listed>,
 }
 
-fn read_cache(path: &Path) -> Cache {
+fn read_cache(path: &Path) -> Saved {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -310,6 +311,38 @@ fn read_cache(path: &Path) -> Cache {
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CACHE_FILE)
+}
+
+/// The cache file's only writer, so refreshes that overlap never drop
+/// each other's answers.
+#[derive(Clone)]
+pub struct Cache(crate::actor::Actor<PathBuf>);
+
+impl Cache {
+    pub fn new(path: PathBuf) -> Self {
+        Self(crate::actor::Actor::new(path))
+    }
+
+    async fn save(&self, answers: Vec<(String, Cached)>) {
+        if answers.is_empty() {
+            return;
+        }
+        self.0
+            .call(move |path| {
+                let mut saved = read_cache(path);
+                saved.providers.extend(answers);
+                let (Some(dir), Some(name)) =
+                    (path.parent(), path.file_name().and_then(|n| n.to_str()))
+                else {
+                    return;
+                };
+                let bytes = serde_json::to_vec_pretty(&saved).expect("the cache serializes");
+                if let Err(error) = super::cli::files::replace_private(dir, name, &bytes) {
+                    tracing::warn!(%error, "could not save the model cache");
+                }
+            })
+            .await;
+    }
 }
 
 /// Show each CLI's cached list until its first refresh answers.
@@ -326,11 +359,10 @@ pub fn restore(registry: &Registry, cache: &Path) {
     }
 }
 
-/// Ask every available CLI for its models, concurrently, and save the
+/// Ask each available CLI for its models, concurrently, and save the
 /// answers. A failed ask keeps the models shown and the cached entry.
-pub async fn refresh(registry: &Registry, cache: &Path) {
-    let asks = registry
-        .all()
+pub async fn refresh(providers: &[Arc<dyn Provider>], cache: &Cache) {
+    let asks = providers
         .iter()
         .filter(|p| p.models().is_some() && p.availability() == super::Availability::Available)
         .map(|provider| async move {
@@ -346,7 +378,7 @@ pub async fn refresh(registry: &Registry, cache: &Path) {
             (provider, listed)
         });
     let answers = futures_util::future::join_all(asks).await;
-    let mut saved = read_cache(cache);
+    let mut saved = Vec::new();
     let now = Utc::now();
     for (provider, listed) in answers {
         let Some(models) = provider.models() else {
@@ -357,41 +389,49 @@ pub async fn refresh(registry: &Registry, cache: &Path) {
             Ok(listed)
         });
         match adopted {
-            Ok(listed) => {
-                saved.providers.insert(
-                    provider.id().to_owned(),
-                    Cached {
-                        listed_at: now,
-                        models: listed,
-                    },
-                );
-            }
+            Ok(listed) => saved.push((
+                provider.id().to_owned(),
+                Cached {
+                    listed_at: now,
+                    models: listed,
+                },
+            )),
             Err(error) => {
                 tracing::warn!(provider = provider.id(), %error, "could not refresh models");
                 models.failed(error);
             }
         }
     }
-    let (Some(dir), Some(name)) = (cache.parent(), cache.file_name().and_then(|n| n.to_str()))
-    else {
-        return;
-    };
-    let bytes = serde_json::to_vec_pretty(&saved).expect("the cache serializes");
-    if let Err(error) = super::cli::files::replace_private(dir, name, &bytes) {
-        tracing::warn!(%error, "could not save the model cache");
-    }
+    cache.save(saved).await;
 }
 
-/// Refresh now and then every [`INTERVAL`] until `stop`.
-pub async fn run(registry: Registry, cache: PathBuf, stop: CancellationToken) {
+/// Check every unavailable CLI again, concurrently.
+async fn recheck_unavailable(registry: &Registry) {
+    futures_util::future::join_all(
+        registry
+            .all()
+            .iter()
+            .filter(|p| p.availability() != super::Availability::Available)
+            .map(|p| p.reprobe()),
+    )
+    .await;
+}
+
+/// Refresh now, then every [`INTERVAL`] recheck unavailable CLIs and
+/// refresh again, until `stop`.
+pub async fn run(registry: Registry, cache: Cache, stop: CancellationToken) {
     loop {
         tokio::select! {
             () = stop.cancelled() => return,
-            () = refresh(&registry, &cache) => {}
+            () = refresh(registry.all(), &cache) => {}
         }
         tokio::select! {
             () = stop.cancelled() => return,
             () = tokio::time::sleep(INTERVAL) => {}
+        }
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = recheck_unavailable(&registry) => {}
         }
     }
 }

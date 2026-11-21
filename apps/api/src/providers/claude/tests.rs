@@ -828,11 +828,10 @@ async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
     let (claude, received) = fake_claude(dir.path()).await;
     let base = specialist_turn(None);
     let profile = base.profile.clone().unwrap();
-    let fingerprint = claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &base);
+    let fingerprint = claude.fingerprint(&claude.ready().unwrap(), &profile, &base);
     let native = Uuid::new_v4().to_string();
     let dirs = claude
-        .ready
-        .as_ref()
+        .ready()
         .unwrap()
         .host
         .bot_dirs(base.bot_id, ID)
@@ -1116,8 +1115,8 @@ fn a_connector_event_never_resumes_a_session_with_host_tools() {
     let event = turn_from(Origin::ConnectorEvent);
     let profile = owner.profile.clone().unwrap();
     assert_ne!(
-        claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &owner),
-        claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &event)
+        claude.fingerprint(&claude.ready().unwrap(), &profile, &owner),
+        claude.fingerprint(&claude.ready().unwrap(), &profile, &event)
     );
 }
 
@@ -1144,7 +1143,7 @@ pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
             if !tools {
                 claude.tool_url = None;
             }
-            claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, input)
+            claude.fingerprint(&claude.ready().unwrap(), &profile, input)
         },
     )
 }
@@ -1191,5 +1190,55 @@ fn initialize_lists_models_by_their_exact_ids() {
     assert_eq!(
         models.current().ids(),
         ["claude-opus-5-5", "claude-fable-5-2"]
+    );
+}
+
+/// Rechecks made while a probe runs wait for it and share its answer; the
+/// next recheck probes again.
+#[tokio::test(flavor = "current_thread")]
+async fn rechecks_during_a_probe_share_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let probes = std::sync::Arc::new(AtomicUsize::new(0));
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let probe: turn::Probe<Login> = {
+        let (probes, gate) = (probes.clone(), gate.clone());
+        Box::new(move || {
+            let (probes, gate) = (probes.clone(), gate.clone());
+            Box::pin(async move {
+                let n = probes.fetch_add(1, Ordering::SeqCst) + 1;
+                let _open = gate.acquire().await.unwrap();
+                Err(format!("signed out ({n})"))
+            })
+        })
+    };
+    let claude = std::sync::Arc::new(Claude::probed(ClaudeCode, probe).await);
+    assert_eq!(probes.load(Ordering::SeqCst), 1, "probed at startup");
+
+    let held = gate.clone().acquire_owned().await.unwrap();
+    let rechecks: Vec<_> = (0..3)
+        .map(|_| {
+            let claude = claude.clone();
+            tokio::spawn(async move { claude.reprobe().await })
+        })
+        .collect();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    drop(held);
+    for recheck in rechecks {
+        assert_eq!(
+            recheck.await.unwrap(),
+            Availability::Unavailable("signed out (2)".into())
+        );
+    }
+    assert_eq!(
+        probes.load(Ordering::SeqCst),
+        2,
+        "three rechecks, one probe"
+    );
+
+    assert_eq!(
+        claude.reprobe().await,
+        Availability::Unavailable("signed out (3)".into())
     );
 }

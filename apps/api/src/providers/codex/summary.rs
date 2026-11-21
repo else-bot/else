@@ -44,7 +44,7 @@ impl Codex {
         deadline: Duration,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let ready = self.ready()?;
         let host = &ready.host;
         self.models.validate(profile)?;
         let dirs = host
@@ -168,7 +168,7 @@ impl crate::memory_worker::Summarizer for Codex {
     }
 
     fn available(&self) -> bool {
-        self.ready.is_ok()
+        self.ready().is_ok()
     }
 
     async fn summarize(

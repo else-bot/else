@@ -8,8 +8,12 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -34,6 +38,10 @@ pub struct Ready<L> {
     pub version: String,
     pub login: L,
 }
+
+/// Runs a CLI's readiness checks: where it is, that it runs, and its
+/// login. Called at startup and again on [`Provider::reprobe`].
+pub type Probe<L> = Box<dyn Fn() -> BoxFuture<'static, Result<Ready<L>, String>> + Send + Sync>;
 
 /// The CLI's version, which also proves that it runs. `product` names it
 /// in the error, such as "Claude Code".
@@ -241,7 +249,13 @@ pub trait Stream: Adapter {
 pub struct Cli<A: Adapter> {
     pub(in crate::providers) adapter: A,
     pub(in crate::providers) models: Models,
-    pub(in crate::providers) ready: Result<Ready<A::Login>, String>,
+    /// A turn keeps the readiness it started with when a probe replaces it.
+    ready: watch::Sender<Result<Arc<Ready<A::Login>>, String>>,
+    probe: Option<Probe<A::Login>>,
+    /// Held while a probe runs.
+    probing: tokio::sync::Mutex<()>,
+    /// Probes that finished, so a recheck that waited on one shares it.
+    probes: AtomicU64,
     pub(in crate::providers) tool_url: Option<String>,
 }
 
@@ -250,8 +264,20 @@ impl<A: Adapter> Cli<A> {
         Self {
             adapter,
             models: Models::new(A::DEFINITION),
-            ready,
+            ready: watch::Sender::new(ready.map(Arc::new)),
+            probe: None,
+            probing: tokio::sync::Mutex::new(()),
+            probes: AtomicU64::new(0),
             tool_url: None,
+        }
+    }
+
+    /// Run `probe` now, and again on each [`Provider::reprobe`].
+    pub async fn probed(adapter: A, probe: Probe<A::Login>) -> Self {
+        let ready = probe().await;
+        Self {
+            probe: Some(probe),
+            ..Self::new(adapter, ready)
         }
     }
 
@@ -261,8 +287,8 @@ impl<A: Adapter> Cli<A> {
         self
     }
 
-    pub(in crate::providers) fn ready(&self) -> Result<&Ready<A::Login>, String> {
-        self.ready.as_ref().map_err(Clone::clone)
+    pub(in crate::providers) fn ready(&self) -> Result<Arc<Ready<A::Login>>, String> {
+        self.ready.borrow().clone()
     }
 
     /// The session fingerprint, with the adapter's `policy` in order.
@@ -451,20 +477,31 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     fn project_dir(&self, bot_id: Uuid) -> Option<PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
+        self.ready().ok().map(|r| r.host.project_path(bot_id))
     }
 
     fn availability(&self) -> Availability {
         match self.ready() {
             Ok(ready) => self
                 .adapter
-                .unavailable(ready)
+                .unavailable(&ready)
                 .map_or(Availability::Available, Availability::Unavailable),
             Err(reason) => Availability::Unavailable(reason),
         }
+    }
+
+    async fn reprobe(&self) -> Availability {
+        if let Some(probe) = &self.probe {
+            let seen = self.probes.load(Ordering::Acquire);
+            let _probing = self.probing.lock().await;
+            if self.probes.load(Ordering::Acquire) == seen {
+                let ready = probe().await;
+                self.ready
+                    .send_modify(|current| *current = ready.map(Arc::new));
+                self.probes.fetch_add(1, Ordering::Release);
+            }
+        }
+        self.availability()
     }
 
     fn uses_profile(&self) -> bool {
@@ -480,7 +517,8 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        self.adapter.list_models(self.ready()?).await
+        let ready = self.ready()?;
+        self.adapter.list_models(&ready).await
     }
 
     async fn checkpoint(
@@ -497,7 +535,7 @@ impl<A: Adapter> Provider for Cli<A> {
             Ok(ready) => ready,
             Err(reason) => return unavailable(reason),
         };
-        if let Some(reason) = self.adapter.unavailable(ready) {
+        if let Some(reason) = self.adapter.unavailable(&ready) {
             return unavailable(reason);
         }
         let Some(profile) = &input.profile else {
@@ -510,7 +548,7 @@ impl<A: Adapter> Provider for Cli<A> {
             return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
         self.adapter
-            .run(self, ready, profile, &input, sink, stop)
+            .run(self, &ready, profile, &input, sink, stop)
             .await
     }
 }

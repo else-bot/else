@@ -728,6 +728,11 @@ pub trait Provider: Send + Sync {
         None
     }
     fn availability(&self) -> Availability;
+    /// Check readiness again, such as after the owner logs in on the host.
+    /// A call made while a check runs waits for it and shares its answer.
+    async fn reprobe(&self) -> Availability {
+        self.availability()
+    }
     /// Whether accepted turns snapshot a saved profile for this provider.
     fn uses_profile(&self) -> bool;
     /// Reject a profile the adapter cannot apply exactly. No substitution.

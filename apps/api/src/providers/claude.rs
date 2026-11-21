@@ -85,17 +85,25 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    let (host, bin) = (wiring.host.clone(), wiring.config.claude_bin.clone());
+    let probe: turn::Probe<Login> = Box::new(move || {
+        let (host, bin) = (host.clone(), bin.clone());
+        Box::pin(async move {
+            let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+            let home = std::env::var("HOME").ok();
+            ready(
+                Some(host),
+                super::executable(bin.as_deref(), "claude").await,
+                claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+                claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+            )
+            .await
+        })
+    });
     Box::pin(async move {
-        let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-        let home = std::env::var("HOME").ok();
-        let ready = ready(
-            Some(wiring.host.clone()),
-            super::executable(wiring.config.claude_bin.as_deref(), "claude").await,
-            claude_home::host_config(config_dir.as_deref(), home.as_deref()),
-            claude_home::host_account(config_dir.as_deref(), home.as_deref()),
-        )
-        .await;
-        let claude = Claude::new(ClaudeCode, ready).with_tools(wiring.tool_url.clone());
+        let claude = Claude::probed(ClaudeCode, probe)
+            .await
+            .with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(claude),
             summarizer: None,
@@ -125,10 +133,15 @@ impl Claude {
         config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Self {
-        Self::new(
+        Self::probed(
             ClaudeCode,
-            ready(host, Ok(program.map(Into::into)), config, account).await,
+            Box::new(move || {
+                let (host, program) = (host.clone(), program.clone());
+                let (config, account) = (config.clone(), account.clone());
+                Box::pin(ready(host, Ok(program.map(Into::into)), config, account))
+            }),
         )
+        .await
     }
 }
 
@@ -388,7 +401,7 @@ impl Adapter for ClaudeCode {
         let profile = request.profile.ok_or("no saved Claude execution profile")?;
         cli.models.validate(&profile)?;
         let text =
-            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
+            checkpoint_once(&ready, request.bot_id, &profile, &request.prompt, cancel).await?;
         super::bounded_checkpoint(text, request.max_bytes)
     }
 }

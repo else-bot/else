@@ -233,7 +233,11 @@ async fn accept_send(
                     "Unknown provider.",
                 ))
             })?;
-            if let Availability::Unavailable(reason) = provider.availability() {
+            // The owner may have fixed the CLI since it was last checked,
+            // such as by logging in again on the host.
+            if provider.availability() != Availability::Available
+                && let Availability::Unavailable(reason) = provider.reprobe().await
+            {
                 return Err(with_id(ApiError::unavailable(
                     "provider_unavailable",
                     reason,

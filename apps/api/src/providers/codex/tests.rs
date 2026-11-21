@@ -25,7 +25,7 @@ impl Codex {
     }
 
     fn fingerprint_of(&self, profile: &Profile, input: &TurnInput, account: &str) -> String {
-        self.fingerprint(self.ready.as_ref().unwrap(), profile, input, account)
+        self.fingerprint(&self.ready().unwrap(), profile, input, account)
     }
 }
 
@@ -139,7 +139,7 @@ async fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
 #[tokio::test]
 async fn profile_validation_refuses_delegating_effort() {
     let codex = Codex::detect(None, None, None).await;
-    assert!(codex.ready.is_err());
+    assert!(codex.ready().is_err());
     let ok = Profile {
         model: "gpt-6.1-sol".into(),
         reasoning_effort: "medium".into(),
@@ -982,7 +982,7 @@ async fn any_running_logged_in_version_is_available() {
         matches!(availability, Availability::Available),
         "{availability:?}"
     );
-    assert_eq!(codex.ready.as_ref().unwrap().version, "codex-cli 9.0.0");
+    assert_eq!(codex.ready().unwrap().version, "codex-cli 9.0.0");
     for (script, logged_in) in [
         ("exit 1", true),
         ("true", true),
@@ -1063,7 +1063,7 @@ for line in sys.stdin:
         sink.sessions.lock().unwrap().is_empty(),
         "nothing was delivered"
     );
-    let host = &codex.ready.as_ref().unwrap().host;
+    let host = &codex.ready().unwrap().host;
     assert!(host.live_processes(turn_id).is_empty());
 }
 
