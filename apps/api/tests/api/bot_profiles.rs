@@ -41,6 +41,7 @@ async fn bots_use_their_own_model_or_the_defaults() {
         )
         .await;
     assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    assert_eq!(set.body, json!({ "defaults": choice("low", "default") }));
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     assert_eq!(caps.body["defaults"], choice("low", "default"));
     let codex = caps.body["providers"]
@@ -70,6 +71,17 @@ async fn bots_use_their_own_model_or_the_defaults() {
         )
         .await;
     assert_eq!(unknown.body["error"]["code"], "unknown_provider");
+    assert_eq!(unknown.body["error"].get("request_id"), Some(&json!(null)));
+    assert_eq!(unknown.body["error"]["retryable"], false);
+    let extra = app
+        .owner(
+            "PUT",
+            "/v1/settings/defaults",
+            Some(json!({ "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "low", "service_tier": "default", "own": true })),
+        )
+        .await;
+    assert_eq!(extra.status, StatusCode::BAD_REQUEST);
+    assert_eq!(extra.body["error"]["code"], "invalid_body");
 
     let own = app
         .owner(
@@ -105,11 +117,13 @@ async fn bots_use_their_own_model_or_the_defaults() {
         .owner("GET", &format!("/v1/bots/{own}/profile"), None)
         .await;
     assert_eq!(shown.body["profile"]["own"], true);
+    assert_eq!(shown.body["profile"]["revision"], 1);
     assert_eq!(shown.body["profile"]["reasoning_effort"], "high");
     let shown = app
         .owner("GET", &format!("/v1/bots/{plain}/profile"), None)
         .await;
     assert_eq!(shown.body["profile"]["own"], false);
+    assert!(shown.body["profile"].get("revision").is_none());
     assert_eq!(shown.body["profile"]["reasoning_effort"], "low");
 
     let turn = send(&app, &own).await;

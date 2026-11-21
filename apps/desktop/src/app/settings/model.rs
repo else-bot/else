@@ -2,12 +2,12 @@ mod editor;
 
 pub(in crate::app) use editor::ModelDialog;
 
-use crate::api::{BotProfile, Capabilities, ModelInfo, ProfileChoice};
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::profile_picker::{ProfilePicker, effort_label, model_label};
+use crate::profile_picker::{ProfilePicker, effort_label};
+use else_wire::settings::{BotProfile, Capabilities, ModelInfo, ProfileChoice, model_label};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _, Size,
@@ -220,7 +220,7 @@ impl ElseApp {
             .as_ref()?
             .providers
             .iter()
-            .find(|provider| provider.id == choice.provider_id)?
+            .find(|provider| provider.state.id == choice.provider_id)?
             .catalog
             .model(&choice.model)
     }
@@ -298,11 +298,11 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self
-            .caps
-            .as_ref()
-            .and_then(|caps| caps.providers.iter().find(|p| p.id == target.provider_id))
-        else {
+        let Some(provider) = self.caps.as_ref().and_then(|caps| {
+            caps.providers
+                .iter()
+                .find(|p| p.state.id == target.provider_id)
+        }) else {
             return;
         };
         let Some(choice) = crate::profile_picker::catalog_choice(provider, Some(&target)) else {
@@ -355,8 +355,8 @@ impl ElseApp {
     pub(super) fn model_available(&self, choice: &ProfileChoice) -> bool {
         self.caps.as_ref().is_none_or(|caps| {
             caps.providers.iter().any(|provider| {
-                provider.id == choice.provider_id
-                    && provider.cli_available
+                provider.state.id == choice.provider_id
+                    && provider.state.cli_available
                     && provider.catalog.applies(choice)
             })
         })
@@ -366,7 +366,7 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::ModelState;
-    use crate::api::{BotProfile, ProfileChoice};
+    use else_wire::settings::{BotProfile, ProfileChoice};
     use uuid::Uuid;
 
     fn profile(model: &str) -> Option<BotProfile> {
@@ -378,6 +378,7 @@ mod tests {
                 service_tier: "priority".into(),
             },
             own: true,
+            revision: Some(1),
         })
     }
 

@@ -1,3 +1,4 @@
+use else_wire::settings::{BotProfile as WireBotProfile, ProfileChoice};
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -11,6 +12,22 @@ pub struct BotProfile {
     pub provider_id: String,
     pub profile: Profile,
     pub revision: i64,
+}
+
+impl From<&BotProfile> for ProfileChoice {
+    fn from(record: &BotProfile) -> Self {
+        record.profile.choice(&record.provider_id)
+    }
+}
+
+impl From<&BotProfile> for WireBotProfile {
+    fn from(record: &BotProfile) -> Self {
+        Self {
+            choice: record.into(),
+            own: true,
+            revision: Some(record.revision),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

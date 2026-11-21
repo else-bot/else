@@ -1,10 +1,10 @@
 use super::delete_dialog::DeleteTarget;
 use super::request::Request;
 use super::{Connection, ElseApp};
-use crate::api::Capabilities;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::profile_picker::ProfilePicker;
 use else_wire::bots::Bot;
+use else_wire::settings::Capabilities;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};

@@ -4,8 +4,9 @@
 
 use std::io::Cursor;
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use else_wire::settings::{LetterStyle, Stored};
+use serde::Deserialize;
+use serde::de::{EnumAccess, Error, VariantAccess, Visitor};
 use sha2::{Digest, Sha256};
 
 /// The side of a picture, as desktops store it.
@@ -15,37 +16,59 @@ pub const MAX_PICTURE_BYTES: usize = 128 * 1024;
 const MAX_LETTERS: usize = 2;
 const MAX_EMOJI_BYTES: usize = 32;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LetterStyle {
-    Gradient,
-    Monogram,
-}
-
-/// An icon as the owner chose it. A picture's PNG travels beside it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A requested icon. The server computes the digest from the supplied PNG.
+#[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Look {
     /// Each desktop draws its own default for the server.
     Default {},
     /// `None` fields follow the server's name.
     Letters {
+        #[serde(deserialize_with = "letter_style")]
         style: LetterStyle,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         letters: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         hue: Option<u16>,
     },
     Pattern {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         hue: Option<u16>,
     },
     Emoji {
         emoji: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         hue: Option<u16>,
     },
     Picture {},
+}
+
+fn letter_style<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<LetterStyle, D::Error> {
+    struct Input;
+
+    const STYLES: &[&str] = &["gradient", "monogram"];
+
+    impl<'de> Visitor<'de> for Input {
+        type Value = LetterStyle;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("enum LetterStyle")
+        }
+
+        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+            let (text, value) = data.variant::<String>()?;
+            let style = LetterStyle::from(text.clone());
+            if style == LetterStyle::Unknown {
+                return Err(A::Error::unknown_variant(&text, STYLES));
+            }
+            value.unit_variant()?;
+            Ok(style)
+        }
+    }
+
+    deserializer.deserialize_enum("LetterStyle", STYLES, Input)
 }
 
 /// A checked icon, ready to store.
@@ -53,7 +76,7 @@ pub enum Look {
 pub struct ServerIcon {
     /// What capabilities advertise: the look, and a picture's SHA-256 as
     /// `digest` so desktops fetch the PNG only when it changes.
-    pub advertised: Value,
+    pub advertised: Stored,
     pub picture: Option<Vec<u8>>,
 }
 
@@ -90,10 +113,23 @@ impl ServerIcon {
             }
             _ => {}
         }
-        let mut advertised = serde_json::to_value(&look).expect("icon serializes");
-        if let Some(png) = &picture {
-            advertised["digest"] = Value::String(digest(png));
-        }
+        let advertised = match look {
+            Look::Default {} => Stored::Default {},
+            Look::Letters {
+                style,
+                letters,
+                hue,
+            } => Stored::Letters {
+                style,
+                letters,
+                hue,
+            },
+            Look::Pattern { hue } => Stored::Pattern { hue },
+            Look::Emoji { emoji, hue } => Stored::Emoji { emoji, hue },
+            Look::Picture {} => Stored::Picture {
+                digest: picture.as_deref().map(digest),
+            },
+        };
         Ok(Self {
             advertised,
             picture,

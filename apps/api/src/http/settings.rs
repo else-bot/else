@@ -8,6 +8,10 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, put};
 use axum::{Json, Router};
 use base64::Engine as _;
+use else_wire::settings::{
+    BotProfileEnvelope, DefaultsEnvelope, IconOnly, ProfileChoice, ProviderProfile, ServerEnvelope,
+    ServerInfo, Shared, SharedIconBody,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -15,7 +19,7 @@ use super::error::{ApiError, ApiJson, ApiPath};
 use super::{AppState, Routes};
 use crate::app::providers::Availability;
 use crate::app::server_icon::{Look, MAX_PICTURE_BYTES, ServerIcon};
-use crate::db::profiles::{self, ProfileError, ProfilePatch, ProfileRecord};
+use crate::db::profiles::{self, ProfileError, ProfilePatch};
 
 /// Largest icon body: a picture in base64 plus its JSON envelope.
 pub const MAX_ICON_BODY_BYTES: usize = MAX_PICTURE_BYTES.div_ceil(3) * 4 + 4096;
@@ -43,17 +47,17 @@ pub fn routes() -> Routes {
     }
 }
 
-/// A provider and a complete profile for it, as the owner's pickers send.
+/// The owner's profile request rejects unknown keys before it reaches an adapter.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileChoice {
+#[serde(deny_unknown_fields, expecting = "struct ProfileChoice")]
+pub struct ProfileRequest {
     pub provider_id: String,
     pub model: String,
     pub reasoning_effort: String,
     pub service_tier: String,
 }
 
-impl ProfileChoice {
+impl ProfileRequest {
     pub fn profile(&self) -> crate::app::providers::Profile {
         crate::app::providers::Profile {
             model: self.model.clone(),
@@ -65,7 +69,10 @@ impl ProfileChoice {
 
 /// Check a choice with the provider's own adapter: it must exist, take a
 /// profile, and apply this one exactly. Returns the provider's ID.
-pub fn validate_choice(state: &AppState, choice: &ProfileChoice) -> Result<&'static str, ApiError> {
+pub fn validate_choice(
+    state: &AppState,
+    choice: &ProfileRequest,
+) -> Result<&'static str, ApiError> {
     let provider = state
         .registry
         .get(&choice.provider_id)
@@ -77,18 +84,9 @@ pub fn validate_choice(state: &AppState, choice: &ProfileChoice) -> Result<&'sta
     Ok(provider.id())
 }
 
-pub fn choice_json(provider_id: &str, profile: &crate::app::providers::Profile) -> Value {
-    json!({
-        "provider_id": provider_id,
-        "model": profile.model,
-        "reasoning_effort": profile.reasoning_effort,
-        "service_tier": profile.service_tier,
-    })
-}
-
 /// The defaults new bots start with: the installation's default provider
 /// (else the first available one that takes a profile) and that provider's saved profile.
-pub async fn defaults(state: &AppState) -> Result<Option<Value>, ApiError> {
+pub async fn defaults(state: &AppState) -> Result<Option<ProfileChoice>, ApiError> {
     let registry = &state.registry;
     let mut conn = state.db.acquire().await?;
     let chosen = crate::db::bot_profiles::default_provider(&mut conn)
@@ -104,23 +102,26 @@ pub async fn defaults(state: &AppState) -> Result<Option<Value>, ApiError> {
     };
     Ok(profiles::get(&state.db, provider_id)
         .await?
-        .map(|record| choice_json(provider_id, &record.profile())))
+        .as_ref()
+        .map(ProfileChoice::from))
 }
 
 async fn show_defaults(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({ "defaults": defaults(&state).await? })))
+    Ok(Json(json!(DefaultsEnvelope {
+        defaults: defaults(&state).await?
+    })))
 }
 
 async fn set_defaults(
     State(state): State<Arc<AppState>>,
-    ApiJson(body): ApiJson<ProfileChoice>,
+    ApiJson(body): ApiJson<ProfileRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let provider_id = validate_choice(&state, &body)?;
     let profile = body.profile();
     save_defaults(&state, provider_id, &profile).await?;
-    Ok(Json(
-        json!({ "defaults": choice_json(provider_id, &profile) }),
-    ))
+    Ok(Json(json!(DefaultsEnvelope {
+        defaults: Some(profile.choice(provider_id)),
+    })))
 }
 
 /// Make `provider_id` the default provider with this (validated) profile.
@@ -160,17 +161,6 @@ fn profile_error(err: ProfileError) -> ApiError {
     }
 }
 
-fn profile_json(record: &ProfileRecord) -> Value {
-    json!({
-        "provider_id": record.provider_id,
-        "model": record.model,
-        "reasoning_effort": record.reasoning_effort,
-        "service_tier": record.service_tier,
-        "revision": record.revision,
-        "updated_at": record.updated_at,
-    })
-}
-
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(provider_id): ApiPath<String>,
@@ -178,7 +168,9 @@ async fn show(
     let record = profiles::get(&state.db, &provider_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "profile": profile_json(&record) })))
+    Ok(Json(json!(BotProfileEnvelope {
+        profile: ProviderProfile::from(&record)
+    })))
 }
 
 #[derive(Deserialize)]
@@ -236,7 +228,9 @@ async fn update(
             _ => ApiError::not_found(),
         })?;
         if let Some(record) = created {
-            return Ok(Json(json!({ "profile": profile_json(&record) })));
+            return Ok(Json(json!(BotProfileEnvelope {
+                profile: ProviderProfile::from(&record)
+            })));
         }
     }
     let patch = ProfilePatch {
@@ -262,7 +256,9 @@ async fn update(
         ),
         ProfileError::Db(err) => err.into(),
     })?;
-    Ok(Json(json!({ "profile": profile_json(&record) })))
+    Ok(Json(json!(BotProfileEnvelope {
+        profile: ProviderProfile::from(&record)
+    })))
 }
 
 #[derive(Deserialize)]
@@ -288,7 +284,12 @@ async fn name_server(
     }
     let kept =
         crate::db::installation::set_server_name(&state.db, name, body.only_if_unnamed).await?;
-    Ok(Json(json!({ "server": { "name": kept } })))
+    Ok(Json(json!(ServerEnvelope {
+        server: ServerInfo {
+            name: kept,
+            icon: Shared::Unsupported
+        }
+    })))
 }
 
 #[derive(Deserialize)]
@@ -318,7 +319,9 @@ async fn set_server_icon(
         .map_err(|reason| ApiError::bad_request("invalid_input", reason))?;
     let kept =
         crate::db::installation::set_server_icon(&state.db, &icon, body.only_if_unset).await?;
-    Ok(Json(json!({ "server": { "icon": kept } })))
+    Ok(Json(json!(ServerEnvelope {
+        server: IconOnly { icon: kept }
+    })))
 }
 
 async fn show_server_icon(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
@@ -328,5 +331,8 @@ async fn show_server_icon(State(state): State<Arc<AppState>>) -> Result<Json<Val
     let picture = picture
         .flatten()
         .map(|png| base64::engine::general_purpose::STANDARD.encode(png));
-    Ok(Json(json!({ "icon": icon, "picture": picture })))
+    Ok(Json(json!(SharedIconBody {
+        icon: icon.unwrap_or(Shared::Unset),
+        picture
+    })))
 }

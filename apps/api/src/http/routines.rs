@@ -112,7 +112,7 @@ struct OwnerPatch {
     enabled: Option<bool>,
     /// A complete choice, or `null` to inherit the bot's model again.
     #[serde(default, deserialize_with = "present")]
-    model: Option<Option<super::settings::ProfileChoice>>,
+    model: Option<Option<super::settings::ProfileRequest>>,
     /// Forget the routine's failed runs.
     #[serde(default)]
     dismiss_failures: bool,

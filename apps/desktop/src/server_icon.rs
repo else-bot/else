@@ -12,6 +12,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use else_wire::settings::{LetterStyle, Shared, Stored};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -37,13 +38,6 @@ pub(crate) const EMOJI: [&str; 32] = [
     "🚀", "🛰️", "🏠", "🧪", "🔬", "🍓", "🐙", "🦊", "🐝", "🌊", "🔥", "⚡", "🌙", "⭐", "🍀", "🌵",
     "🎯", "🎛️", "🧠", "🤖", "💼", "📈", "🛠️", "🧰", "🗄️", "🖥️", "💻", "🎮", "🎨", "🏔️", "🌐", "🔒",
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum LetterStyle {
-    Gradient,
-    Monogram,
-}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) enum ServerIcon {
@@ -76,36 +70,8 @@ pub(crate) fn letters(raw: &str) -> Option<String> {
     valid.then(|| trimmed.to_owned())
 }
 
-/// An icon as the cache and the server write it. Only the server fills a
-/// picture's `digest`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Stored {
-    Default {},
-    Letters {
-        style: LetterStyle,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        letters: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hue: Option<u16>,
-    },
-    Pattern {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hue: Option<u16>,
-    },
-    Emoji {
-        emoji: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hue: Option<u16>,
-    },
-    Picture {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        digest: Option<String>,
-    },
-}
-
-impl Stored {
-    pub(crate) fn of(icon: &ServerIcon) -> Self {
+impl From<&ServerIcon> for Stored {
+    fn from(icon: &ServerIcon) -> Self {
         match icon.clone() {
             ServerIcon::Default => Self::Default {},
             ServerIcon::Letters {
@@ -122,36 +88,39 @@ impl Stored {
             ServerIcon::Picture(_) => Self::Picture { digest: None },
         }
     }
+}
 
-    /// The icon this entry describes, or `None` when it is invalid or its
-    /// picture is gone.
-    fn icon(self, picture: impl FnOnce() -> Option<Arc<Image>>) -> Option<ServerIcon> {
-        let hue_ok = |hue: Option<u16>| hue.is_none_or(|hue| hue < 360);
-        match self {
-            Self::Letters {
+/// The icon this entry describes, or `None` when it is invalid or its
+/// picture is gone.
+fn cached_icon(stored: Stored, picture: impl FnOnce() -> Option<Arc<Image>>) -> Option<ServerIcon> {
+    let hue_ok = |hue: Option<u16>| hue.is_none_or(|hue| hue < 360);
+    match stored {
+        Stored::Letters {
+            style,
+            letters: chosen,
+            hue,
+        } if style != LetterStyle::Unknown
+            && hue_ok(hue)
+            && chosen.as_deref().is_none_or(|l| letters(l).is_some()) =>
+        {
+            Some(ServerIcon::Letters {
                 style,
                 letters: chosen,
                 hue,
-            } if hue_ok(hue) && chosen.as_deref().is_none_or(|l| letters(l).is_some()) => {
-                Some(ServerIcon::Letters {
-                    style,
-                    letters: chosen,
-                    hue,
-                })
-            }
-            Self::Pattern { hue } if hue_ok(hue) => Some(ServerIcon::Pattern { hue }),
-            Self::Emoji { emoji, hue }
-                if hue_ok(hue)
-                    && !emoji.is_empty()
-                    && emoji.len() <= MAX_EMOJI_BYTES
-                    && !emoji.chars().any(char::is_control) =>
-            {
-                Some(ServerIcon::Emoji { emoji, hue })
-            }
-            Self::Default {} => Some(ServerIcon::Default),
-            Self::Picture { .. } => picture().map(ServerIcon::Picture),
-            _ => None,
+            })
         }
+        Stored::Pattern { hue } if hue_ok(hue) => Some(ServerIcon::Pattern { hue }),
+        Stored::Emoji { emoji, hue }
+            if hue_ok(hue)
+                && !emoji.is_empty()
+                && emoji.len() <= MAX_EMOJI_BYTES
+                && !emoji.chars().any(char::is_control) =>
+        {
+            Some(ServerIcon::Emoji { emoji, hue })
+        }
+        Stored::Default {} => Some(ServerIcon::Default),
+        Stored::Picture { .. } => picture().map(ServerIcon::Picture),
+        _ => None,
     }
 }
 
@@ -204,9 +173,8 @@ impl Icons {
             .into_iter()
             .filter_map(|(id, value)| {
                 let picture = store.server_picture_path(id);
-                let icon = serde_json::from_value::<Stored>(value)
-                    .ok()?
-                    .icon(|| read_picture(&picture))?;
+                let stored = serde_json::from_value::<Stored>(value).ok()?;
+                let icon = cached_icon(stored, || read_picture(&picture))?;
                 Some((id, icon))
             })
             .collect();
@@ -258,7 +226,7 @@ impl Icons {
         let stored: BTreeMap<ServerId, Stored> = chosen
             .iter()
             .filter(|(_, icon)| **icon != ServerIcon::Default)
-            .map(|(id, icon)| (*id, Stored::of(icon)))
+            .map(|(id, icon)| (*id, Stored::from(icon)))
             .collect();
         let json = serde_json::to_vec_pretty(&stored).expect("icons serialize");
         replace_private(&store.server_icons_path(), &[&json[..], b"\n"].concat())
@@ -317,17 +285,6 @@ pub(crate) fn digest(png: &[u8]) -> String {
         .collect()
 }
 
-/// The icon a server keeps for every desktop.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Shared {
-    /// The server is too old to keep one, or could not read it.
-    #[default]
-    Unsupported,
-    /// Nobody chose one yet.
-    Unset,
-    Set(Stored),
-}
-
 /// What a desktop does with the icon a saved server reports.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Sync {
@@ -355,8 +312,8 @@ impl Sync {
             }
             (Stored::Picture { digest: Some(want) }, _) => Self::Fetch(want.clone()),
             (Stored::Picture { digest: None }, _) => Self::Keep,
-            (stored, cached) if Stored::of(cached) == *stored => Self::Keep,
-            (stored, _) => stored.clone().icon(|| None).map_or(Self::Keep, Self::Adopt),
+            (stored, cached) if Stored::from(cached) == *stored => Self::Keep,
+            (stored, _) => cached_icon(stored.clone(), || None).map_or(Self::Keep, Self::Adopt),
         }
     }
 }
@@ -454,7 +411,7 @@ pub(crate) fn render(
             .into_any_element(),
         ServerIcon::Default
         | ServerIcon::Letters {
-            style: LetterStyle::Gradient,
+            style: LetterStyle::Gradient | LetterStyle::Unknown,
             ..
         } => {
             let (text, hue) = match icon {

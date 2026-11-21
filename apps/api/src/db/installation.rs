@@ -4,6 +4,7 @@
 //! missing provider profiles. Ordinary startup only reads this state: it never
 //! seeds bots, recreates a deleted default, or overwrites saved settings.
 
+use else_wire::settings::Shared;
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
@@ -251,24 +252,31 @@ pub async fn set_server_name(
     .map(Option::flatten)
 }
 
-/// The icon capabilities advertise, or `None` when never chosen.
-pub async fn server_icon(pool: &SqlitePool) -> Result<Option<serde_json::Value>, sqlx::Error> {
+/// The icon capabilities advertise.
+pub async fn server_icon(pool: &SqlitePool) -> Result<Shared, sqlx::Error> {
     let text: Option<String> = sqlx::query_scalar("SELECT server_icon FROM installation")
         .fetch_optional(pool)
         .await?
         .flatten();
-    Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    Ok(text
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .map_or(Shared::Unset, Shared::from_persisted))
 }
 
 /// The advertised icon with its picture, read together.
 pub async fn server_icon_with_picture(
     pool: &SqlitePool,
-) -> Result<Option<(serde_json::Value, Option<Vec<u8>>)>, sqlx::Error> {
+) -> Result<Option<(Shared, Option<Vec<u8>>)>, sqlx::Error> {
     let row: Option<(Option<String>, Option<Vec<u8>>)> =
         sqlx::query_as("SELECT server_icon, server_picture FROM installation")
             .fetch_optional(pool)
             .await?;
-    Ok(row.and_then(|(text, picture)| Some((serde_json::from_str(&text?).ok()?, picture))))
+    Ok(row.and_then(|(text, picture)| {
+        Some((
+            Shared::from_persisted(serde_json::from_str(&text?).ok()?),
+            picture,
+        ))
+    }))
 }
 
 /// Give this server its icon for every desktop, or only when nobody chose
@@ -277,20 +285,22 @@ pub async fn set_server_icon(
     pool: &SqlitePool,
     icon: &crate::app::server_icon::ServerIcon,
     only_if_unset: bool,
-) -> Result<Option<serde_json::Value>, sqlx::Error> {
+) -> Result<Shared, sqlx::Error> {
     let kept: Option<String> = sqlx::query_scalar(
         "UPDATE installation SET
              server_icon = CASE WHEN ?3 AND server_icon IS NOT NULL THEN server_icon ELSE ?1 END,
              server_picture = CASE WHEN ?3 AND server_icon IS NOT NULL THEN server_picture ELSE ?2 END
          RETURNING server_icon",
     )
-    .bind(icon.advertised.to_string())
+    .bind(serde_json::json!(icon.advertised).to_string())
     .bind(icon.picture.as_deref())
     .bind(only_if_unset)
     .fetch_optional(pool)
     .await?
     .flatten();
-    Ok(kept.and_then(|text| serde_json::from_str(&text).ok()))
+    Ok(kept
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .map_or(Shared::Unset, Shared::from_persisted))
 }
 
 /// Record the owner's time zone; writes only when it changed.

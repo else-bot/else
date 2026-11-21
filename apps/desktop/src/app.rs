@@ -57,6 +57,7 @@ use settings::model::ModelDialog;
 use transcript::RowKey;
 
 use else_wire::bots::Phase;
+use else_wire::settings::Capabilities;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -66,13 +67,10 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{Capabilities, Client, ClientError, Live, LiveCommand, LiveEvent, Sent};
-
-use else_wire::bots::Bot;
-
-use else_wire::bots::BotList;
-
+use crate::api::{Client, ClientError, Live, LiveCommand, LiveEvent, Sent};
 use crate::model::Reaction;
+use else_wire::bots::Bot;
+use else_wire::bots::BotList;
 use else_wire::bots::Category;
 
 actions!(

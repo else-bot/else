@@ -6,11 +6,13 @@
 //! HTTPS and WSS share one TLS configuration that verifies certificates
 //! with the platform's trust store.
 
-use else_wire::bots::Avatar;
-
 use std::sync::Arc;
 use std::time::Duration;
 
+use else_wire::settings::{
+    BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, Onboarded, ProfileChoice,
+    ServerEnvelope, Shared, SharedIconBody, Stored,
+};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -23,7 +25,6 @@ pub use backups::*;
 mod computers;
 pub use computers::*;
 mod usage;
-pub use usage::*;
 mod vault;
 pub use vault::*;
 mod skills;
@@ -36,8 +37,6 @@ mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
 pub mod socials;
-use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
 pub use desktop::{
@@ -48,6 +47,10 @@ use else_wire::bots::{
     Bot, BotEnvelope, BotList, Category, CategoryEnvelope, CategoryList, ReplyPosition,
 };
 use serde_json::json;
+
+use crate::config::{Origin, OwnerToken};
+use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
+use else_wire::bots::Avatar;
 
 pub struct SendRequest {
     pub request_id: Uuid,
@@ -79,205 +82,6 @@ pub struct CreateBotRequest {
     pub avatar: Option<Avatar>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderInfo {
-    pub id: String,
-    pub label: String,
-    /// Whether the provider's CLI runs on the API's host (older APIs do
-    /// not say: assume it does).
-    #[serde(default = "yes")]
-    pub cli_available: bool,
-    #[serde(default)]
-    pub cli_unavailable_reason: Option<String>,
-    /// The exact models, efforts, and tiers it applies; empty for a
-    /// provider without models (it is not offered in the pickers).
-    #[serde(default)]
-    pub catalog: Catalog,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// The models a provider applies, each with its own efforts and tiers.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(from = "WireCatalog")]
-pub struct Catalog {
-    /// Featured models first, then older ones.
-    pub models: Vec<ModelInfo>,
-    /// When the server's CLI listed these; `None` for the bundled list.
-    pub listed_at: Option<String>,
-    /// Why the server's latest ask failed.
-    pub refresh_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub label: String,
-    pub efforts: Vec<String>,
-    pub tiers: Vec<String>,
-    #[serde(default)]
-    pub featured: bool,
-    /// The newest model of the same family, when this one is older.
-    #[serde(default)]
-    pub upgrade: Option<String>,
-}
-
-impl Catalog {
-    pub fn model(&self, id: &str) -> Option<&ModelInfo> {
-        self.models.iter().find(|model| model.id == id)
-    }
-
-    /// Whether the provider applies `choice` exactly.
-    pub fn applies(&self, choice: &ProfileChoice) -> bool {
-        self.model(&choice.model).is_some_and(|model| {
-            model.efforts.contains(&choice.reasoning_effort)
-                && model.tiers.contains(&choice.service_tier)
-        })
-    }
-}
-
-/// The catalog as sent. APIs before per-model details send only the flat
-/// lists, which apply to every model; empty featured models feature all.
-#[derive(Deserialize)]
-struct WireCatalog {
-    #[serde(default)]
-    models: Vec<String>,
-    #[serde(default)]
-    featured_models: Vec<String>,
-    #[serde(default)]
-    efforts: Vec<String>,
-    #[serde(default)]
-    tiers: Vec<String>,
-    #[serde(default)]
-    details: Vec<ModelInfo>,
-    #[serde(default)]
-    listed_at: Option<String>,
-    #[serde(default)]
-    refresh_error: Option<String>,
-}
-
-impl From<WireCatalog> for Catalog {
-    fn from(wire: WireCatalog) -> Self {
-        let models = if wire.details.is_empty() {
-            let featured =
-                |id: &String| wire.featured_models.is_empty() || wire.featured_models.contains(id);
-            let (first, rest): (Vec<_>, Vec<_>) = wire.models.into_iter().partition(featured);
-            first
-                .into_iter()
-                .map(|id| (id, true))
-                .chain(rest.into_iter().map(|id| (id, false)))
-                .map(|(id, featured)| ModelInfo {
-                    label: crate::profile_picker::model_label(&id),
-                    id,
-                    efforts: wire.efforts.clone(),
-                    tiers: wire.tiers.clone(),
-                    featured,
-                    upgrade: None,
-                })
-                .collect()
-        } else {
-            wire.details
-        };
-        Self {
-            models,
-            listed_at: wire.listed_at,
-            refresh_error: wire.refresh_error,
-        }
-    }
-}
-
-/// A provider and an exact profile for it, as the API takes and reports.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub struct ProfileChoice {
-    pub provider_id: String,
-    pub model: String,
-    pub reasoning_effort: String,
-    pub service_tier: String,
-}
-
-/// The profile a bot's next messages use: its own (`own`), else the
-/// defaults it follows.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct BotProfile {
-    #[serde(flatten)]
-    pub choice: ProfileChoice,
-    pub own: bool,
-}
-
-#[derive(Deserialize)]
-struct BotProfileEnvelope<P> {
-    profile: P,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Limits {
-    pub max_text_bytes: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Capabilities {
-    #[serde(default)]
-    pub api_version: Option<String>,
-    pub providers: Vec<ProviderInfo>,
-    pub limits: Limits,
-    /// What new bots start with.
-    #[serde(default)]
-    pub defaults: Option<ProfileChoice>,
-    /// The welcome screen is still to be completed.
-    #[serde(default)]
-    pub onboarding_required: bool,
-    #[serde(default)]
-    pub bot_avatar_on_create: bool,
-    /// The server settles only the ask a message names; older servers
-    /// refuse the field, so the app sends it only when this is set.
-    #[serde(default)]
-    pub answers_notice: bool,
-    /// Absent from servers that do not keep a name.
-    #[serde(default)]
-    pub server: Option<ServerInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ServerInfo {
-    /// The owner's name for the server, shared by every desktop; `None`
-    /// until someone names it.
-    pub name: Option<String>,
-    #[serde(default, deserialize_with = "shared_icon")]
-    pub icon: crate::server_icon::Shared,
-}
-
-/// `null` is an icon nobody chose; one this desktop cannot read counts as
-/// unsupported, so it keeps its own.
-fn shared_icon<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<crate::server_icon::Shared, D::Error> {
-    use crate::server_icon::Shared;
-    Ok(
-        match Option::<serde_json::Value>::deserialize(deserializer)? {
-            None => Shared::Unset,
-            Some(value) => serde_json::from_value(value).map_or(Shared::Unsupported, Shared::Set),
-        },
-    )
-}
-
-#[derive(Deserialize)]
-struct SharedIconBody {
-    icon: Option<crate::server_icon::Stored>,
-    picture: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ServerEnvelope {
-    server: ServerInfo,
-}
-
-#[derive(Deserialize)]
-struct Onboarded {
-    main_bot_id: Uuid,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ReadCommand {
@@ -302,19 +106,6 @@ pub struct Latest {
 pub struct Sent {
     pub item: Item,
     pub turn: Turn,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ErrorBody {
-    error: ErrorDetail,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ErrorDetail {
-    code: String,
-    message: String,
-    #[serde(default)]
-    retryable: bool,
 }
 
 /// Errors shown to the owner. None of them contain the token.
@@ -534,7 +325,7 @@ impl Client {
             _ => None,
         };
         let body = json!({
-            "icon": crate::server_icon::Stored::of(&icon),
+            "icon": Stored::from(&icon),
             "picture": picture,
             "only_if_unset": only_if_unset,
         });
@@ -554,7 +345,7 @@ impl Client {
             .await?;
         let current = matches!(
             body.icon,
-            Some(crate::server_icon::Stored::Picture { digest: Some(d) }) if d == digest
+            Shared::Set(Stored::Picture { digest: Some(d) }) if d == digest
         );
         let png = body
             .picture
@@ -1468,7 +1259,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn server_icons_are_unsupported_unset_or_set_and_travel_as_the_server_expects() {
-        use crate::server_icon::{ServerIcon, Shared, Stored};
+        use crate::server_icon::ServerIcon;
+        use else_wire::settings::ServerInfo;
         let icon =
             |server: serde_json::Value| serde_json::from_value::<ServerInfo>(server).unwrap().icon;
         assert_eq!(

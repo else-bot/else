@@ -14,6 +14,7 @@ use else_wire::questions::{QuestionKind, QuestionStatus};
 use else_wire::routines::{PausedReason, RunStatus, SkipReason};
 use else_wire::rules::RuleAuthor;
 use else_wire::secrets::SecretRequestStatus;
+use else_wire::settings::ProfileChoice;
 use else_wire::turns::TurnStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -927,7 +928,7 @@ pub struct Routine {
     pub active_hours: Option<ActiveHours>,
     pub enabled: bool,
     #[serde(default)]
-    pub model: Option<crate::api::ProfileChoice>,
+    pub model: Option<ProfileChoice>,
     #[serde(default)]
     pub requested_model: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,

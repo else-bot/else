@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use else_wire::bots::Avatar;
 use else_wire::bots::AvatarColor;
+use else_wire::usage::{BotUsage, UsageSourceKind};
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -41,8 +42,8 @@ pub(crate) fn share(value: f64) -> String {
     }
 }
 
-pub(crate) fn sources(bot: &crate::api::BotUsage) -> Vec<(crate::api::UsageSourceKind, f64)> {
-    let mut groups: Vec<(crate::api::UsageSourceKind, f64)> = Vec::new();
+pub(crate) fn sources(bot: &BotUsage) -> Vec<(UsageSourceKind, f64)> {
+    let mut groups: Vec<(UsageSourceKind, f64)> = Vec::new();
     for source in &bot.sources {
         if let Some((_, amount)) = groups.iter_mut().find(|(kind, _)| *kind == source.source) {
             *amount += source.share;
@@ -55,7 +56,7 @@ pub(crate) fn sources(bot: &crate::api::BotUsage) -> Vec<(crate::api::UsageSourc
 }
 
 /// "Chat 44% · Routines 33% · Asked by other bots 22%", largest first.
-pub(crate) fn source_summary(bot: &crate::api::BotUsage) -> String {
+pub(crate) fn source_summary(bot: &BotUsage) -> String {
     sources(bot)
         .iter()
         .map(|(kind, amount)| format!("{} {}", kind.label(), share(*amount)))
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn usage_sources_combine_repeated_kinds_from_older_servers() {
-        use crate::api::{BotUsage, UsageSource, UsageSourceKind};
+        use else_wire::usage::{BotUsage, UsageSource, UsageSourceKind};
         let bot = BotUsage {
             bot_id: uuid::Uuid::nil(),
             name: "Tech Manager".into(),

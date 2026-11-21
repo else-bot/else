@@ -7,11 +7,11 @@ mod table;
 use super::loaded::Loaded;
 use super::pane::PaneEvent;
 use super::*;
-use crate::api::UsageReport;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use crate::usage_ui::{color, local_time};
 use else_wire::bots::Avatar;
 use else_wire::bots::Bot;
+use else_wire::usage::UsageReport;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::h_flex;
@@ -38,7 +38,7 @@ pub(super) struct View {
     app: Entity<ElseApp>,
     state: Loaded<UsageReport>,
     provider: Option<String>,
-    window_minutes: Option<u64>,
+    window_minutes: Option<i64>,
     show_more: bool,
     expanded: Option<Uuid>,
     _poll: Task<()>,

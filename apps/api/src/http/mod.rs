@@ -52,6 +52,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router, middleware};
+use else_wire::settings::{Capabilities, Limits, ProviderInfo, ProviderState, ServerInfo, Shared};
 use serde_json::json;
 use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
@@ -335,37 +336,32 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .registry
         .all()
         .iter()
-        .map(|provider| {
-            let mut view = provider_view(provider.as_ref(), configured.as_deref(), false);
-            view["catalog"] = json!(provider.catalog().as_ref());
-            view
+        .map(|provider| ProviderInfo {
+            state: provider_view(provider.as_ref(), configured.as_deref(), false),
+            catalog: provider.catalog().as_ref().clone(),
         })
         .collect();
-    let default_id = providers
+    let default_provider_id = providers
         .iter()
-        .find(|view| view["available"] == true)
-        .map(|view| view["id"].clone());
-    let defaults = defaults.ok().flatten();
-    let onboarding_required = onboarding_required.unwrap_or(false);
-    let mut server = json!({ "name": server_name.ok().flatten() });
-    // Left out when unreadable, so desktops keep theirs rather than offer
-    // their own to a server that may already have one.
-    if let Ok(icon) = server_icon {
-        server["icon"] = json!(icon);
-    }
-    Json(json!({
-        "api_version": "v1",
-        "bot_avatar_on_create": true,
-        "answers_notice": true,
-        "server_instance_id": state.server_instance_id,
-        "server": server,
-        "default_provider_id": default_id,
-        "defaults": defaults,
-        "onboarding_required": onboarding_required,
-        "providers": providers,
-        "limits": {
-            "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,
-            "max_bot_name_chars": crate::app::bots::MAX_NAME_CHARS,
+        .find(|view| view.state.available)
+        .map(|view| view.state.id.clone());
+    Json(json!(Capabilities {
+        api_version: Some("v1".into()),
+        bot_avatar_on_create: true,
+        answers_notice: true,
+        server_instance_id: Some(state.server_instance_id),
+        server: Some(ServerInfo {
+            name: server_name.ok().flatten(),
+            // Leave it out when unreadable so desktops keep their current icon.
+            icon: server_icon.unwrap_or(Shared::Unsupported),
+        }),
+        default_provider_id,
+        defaults: defaults.ok().flatten(),
+        onboarding_required: onboarding_required.unwrap_or(false),
+        providers,
+        limits: Limits {
+            max_text_bytes: crate::app::messages::MAX_TEXT_BYTES,
+            max_bot_name_chars: crate::app::bots::MAX_NAME_CHARS,
         },
     }))
 }
@@ -415,7 +411,7 @@ fn provider_view(
     provider: &dyn crate::app::providers::Provider,
     configured: Option<&[String]>,
     has_own_models: bool,
-) -> serde_json::Value {
+) -> ProviderState {
     let has_profile = configured.map(|ids| ids.iter().any(|id| id == provider.id()));
     let cli = provider.availability();
     let reason = match &cli {
@@ -432,19 +428,19 @@ fn provider_view(
         }
         Availability::Available => None,
     };
-    json!({
-        "id": provider.id(),
-        "label": provider.label(),
-        "available": reason.is_none(),
-        "unavailable_reason": reason,
-        "cli_available": cli == Availability::Available,
-        "cli_unavailable_reason": match cli {
+    ProviderState {
+        id: provider.id().to_owned(),
+        label: provider.label().to_owned(),
+        available: reason.is_none(),
+        unavailable_reason: reason,
+        cli_available: cli == Availability::Available,
+        cli_unavailable_reason: match cli {
             Availability::Unavailable(reason) => Some(reason),
             Availability::Available => None,
         },
-        "requires_profile": provider.uses_profile(),
-        "profile_configured": has_profile,
-    })
+        requires_profile: provider.uses_profile(),
+        profile_configured: has_profile,
+    }
 }
 
 /// What a bot reports when else.bot itself seems broken: the version and
@@ -474,8 +470,11 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
                 .as_ref()
                 .and_then(|rows| rows.iter().find(|row| row.0 == id));
             let (bots, routines) = row.map_or((0, 0), |row| (row.2, row.3));
-            let mut view =
-                provider_view(provider.as_ref(), defaults.as_deref(), bots + routines > 0);
+            let mut view = json!(provider_view(
+                provider.as_ref(),
+                defaults.as_deref(),
+                bots + routines > 0
+            ));
             if saved.is_some() {
                 view["bots_with_own_model"] = json!(bots);
                 view["routines_with_own_model"] = json!(routines);

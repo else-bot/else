@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use else_wire::settings::{ProfileChoice, ProviderProfile};
 use sqlx::SqlitePool;
 
 use crate::app::providers::Profile;
@@ -19,6 +20,27 @@ impl ProfileRecord {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             service_tier: self.service_tier.clone(),
+        }
+    }
+}
+
+impl From<&ProfileRecord> for ProfileChoice {
+    fn from(record: &ProfileRecord) -> Self {
+        Self {
+            provider_id: record.provider_id.clone(),
+            model: record.model.clone(),
+            reasoning_effort: record.reasoning_effort.clone(),
+            service_tier: record.service_tier.clone(),
+        }
+    }
+}
+
+impl From<&ProfileRecord> for ProviderProfile {
+    fn from(record: &ProfileRecord) -> Self {
+        Self {
+            choice: record.into(),
+            revision: record.revision,
+            updated_at: record.updated_at,
         }
     }
 }

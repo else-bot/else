@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use else_wire::settings::Capabilities;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -69,21 +70,21 @@ impl Preferences {
     /// The (provider, model) pairs listed since the owner last opened a
     /// model picker, marking every listed model seen. A provider seen for
     /// the first time has none, so a new install shows no badges.
-    pub fn see_models(&mut self, caps: &crate::api::Capabilities) -> HashSet<(String, String)> {
+    pub fn see_models(&mut self, caps: &Capabilities) -> HashSet<(String, String)> {
         let mut new = HashSet::new();
         for provider in &caps.providers {
             let listed = provider.catalog.models.iter().map(|model| model.id.clone());
-            match self.models_seen.get_mut(&provider.id) {
+            match self.models_seen.get_mut(&provider.state.id) {
                 Some(seen) => {
                     for model in listed {
                         if seen.insert(model.clone()) {
-                            new.insert((provider.id.clone(), model));
+                            new.insert((provider.state.id.clone(), model));
                         }
                     }
                 }
                 None => {
                     self.models_seen
-                        .insert(provider.id.clone(), listed.collect());
+                        .insert(provider.state.id.clone(), listed.collect());
                 }
             }
         }
@@ -165,7 +166,7 @@ mod tests {
 
     #[test]
     fn models_listed_since_the_last_picker_are_new_once() {
-        let caps = |models: &[&str]| -> crate::api::Capabilities {
+        let caps = |models: &[&str]| -> Capabilities {
             serde_json::from_value(serde_json::json!({
                 "providers": [{ "id": "claude", "label": "Claude",
                     "catalog": { "models": models, "efforts": ["low"] } }],

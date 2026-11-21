@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::Registry;
 use super::definitions::Definition;
-use crate::app::providers::{Catalog, Model, Profile};
+use else_wire::settings::{Catalog, ModelInfo};
+
+use crate::app::providers::Profile;
 
 /// How often every CLI is asked again, which also picks up a CLI upgrade.
 pub const INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -197,7 +199,7 @@ pub fn label(id: &str) -> String {
 /// newest of each family first, in the CLI's order, then the older ones,
 /// newest first per family. A model left with no effort or tier the
 /// adapter applies, or one that is not pinned, is dropped.
-fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<Model> {
+fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<ModelInfo> {
     let keep = |offered: Option<Vec<String>>, allowed: &[&str]| -> Vec<String> {
         match offered {
             Some(offered) => allowed
@@ -208,7 +210,7 @@ fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<Model> {
             None => allowed.iter().map(|value| (*value).to_owned()).collect(),
         }
     };
-    let mut entries: Vec<(Name, Model)> = Vec::new();
+    let mut entries: Vec<(Name, ModelInfo)> = Vec::new();
     for listed in listed {
         if !(definition.pinned)(&listed.id) || entries.iter().any(|(_, m)| m.id == listed.id) {
             continue;
@@ -220,7 +222,7 @@ fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<Model> {
         }
         entries.push((
             Name::parse(&listed.id),
-            Model {
+            ModelInfo {
                 label: label(&listed.id),
                 id: listed.id,
                 efforts,
@@ -260,7 +262,7 @@ fn catalog_models(definition: &Definition, listed: Vec<Listed>) -> Vec<Model> {
                 .map(|(_, model)| model.id.clone())
         })
         .collect();
-    let mut ordered: Vec<(usize, (Name, Model))> = entries
+    let mut ordered: Vec<(usize, (Name, ModelInfo))> = entries
         .into_iter()
         .zip(upgrades)
         .enumerate()
@@ -398,7 +400,7 @@ pub async fn run(registry: Registry, cache: PathBuf, stop: CancellationToken) {
 mod tests {
     use super::*;
 
-    fn ids(models: &[Model]) -> Vec<&str> {
+    fn ids(models: &[ModelInfo]) -> Vec<&str> {
         models.iter().map(|m| m.id.as_str()).collect()
     }
 

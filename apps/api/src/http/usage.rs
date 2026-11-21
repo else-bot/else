@@ -10,13 +10,15 @@ use chrono::Utc;
 
 use super::error::ApiError;
 use super::{AppState, Routes};
-use crate::app::usage::{self, Report};
+use else_wire::usage::UsageReport;
+
+use crate::app::usage;
 
 pub fn routes() -> Routes {
     Routes::open(Router::new().route("/usage", get(report)))
 }
 
-async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Report>, ApiError> {
+async fn report(State(state): State<Arc<AppState>>) -> Result<Json<UsageReport>, ApiError> {
     let now = Utc::now();
     let (turns, readings) = tokio::try_join!(
         crate::db::usage::turns(&state.db, now),

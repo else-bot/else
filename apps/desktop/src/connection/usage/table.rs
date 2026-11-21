@@ -1,8 +1,8 @@
 use super::{Palette, View};
-use crate::api::{BotUsage, ProviderUsage, UsageWindow};
 use crate::avatar::bot_avatar;
 use crate::controls::{hugging_segment, segment_track};
 use crate::usage_ui::{initial, percent, share, share_bar, source_summary};
+use else_wire::usage::{BotUsage, ProviderUsage, UsageWindow};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 
@@ -219,7 +219,7 @@ fn folded(bots: &[&BotUsage]) -> (usize, f64) {
 #[cfg(test)]
 mod tests {
     use super::folded;
-    use crate::api::BotUsage;
+    use else_wire::usage::BotUsage;
 
     #[test]
     fn usage_folds_only_bots_under_one_percent() {

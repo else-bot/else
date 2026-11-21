@@ -5,6 +5,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
+use else_wire::settings::{BotProfile, BotProfileEnvelope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -112,7 +113,7 @@ struct CreateBot {
     name: String,
     /// The bot's own provider and model; without one it uses the defaults.
     #[serde(default)]
-    profile: Option<super::settings::ProfileChoice>,
+    profile: Option<super::settings::ProfileRequest>,
     #[serde(default)]
     category_id: Option<Uuid>,
     #[serde(default)]
@@ -252,29 +253,28 @@ async fn show_profile(
         .await?
         .filter(|bot| bot.status == BotStatus::Active)
         .ok_or_else(ApiError::not_found)?;
-    if let Some(own) = crate::db::bot_profiles::get(&state.db, bot_id).await? {
-        let mut profile = super::settings::choice_json(&own.provider_id, &own.profile);
-        profile["own"] = json!(true);
-        profile["revision"] = json!(own.revision);
-        return Ok(Json(json!({ "profile": profile })));
-    }
-    let mut defaults = super::settings::defaults(&state).await?;
-    if let Some(profile) = defaults.as_mut() {
-        profile["own"] = json!(false);
-    }
-    Ok(Json(json!({ "profile": defaults })))
+    let profile = match crate::db::bot_profiles::get(&state.db, bot_id).await? {
+        Some(own) => Some(BotProfile::from(&own)),
+        None => super::settings::defaults(&state)
+            .await?
+            .map(|choice| BotProfile {
+                choice,
+                own: false,
+                revision: None,
+            }),
+    };
+    Ok(Json(json!(BotProfileEnvelope { profile })))
 }
 
 async fn set_profile(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-    ApiJson(body): ApiJson<super::settings::ProfileChoice>,
+    ApiJson(body): ApiJson<super::settings::ProfileRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let provider_id = super::settings::validate_choice(&state, &body)?;
     let saved =
         crate::db::bot_profiles::put(&state.db, bot_id, provider_id, &body.profile()).await?;
-    let mut profile = super::settings::choice_json(&saved.provider_id, &saved.profile);
-    profile["own"] = json!(true);
-    profile["revision"] = json!(saved.revision);
-    Ok(Json(json!({ "profile": profile })))
+    Ok(Json(json!(BotProfileEnvelope {
+        profile: BotProfile::from(&saved),
+    })))
 }

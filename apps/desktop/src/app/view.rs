@@ -75,8 +75,8 @@ impl ElseApp {
     pub(crate) fn provider_label(&self, id: &str) -> String {
         self.caps
             .as_ref()
-            .and_then(|caps| caps.providers.iter().find(|p| p.id == id))
-            .map(|p| p.label.clone())
+            .and_then(|caps| caps.providers.iter().find(|p| p.state.id == id))
+            .map(|p| p.state.label.clone())
             .unwrap_or_else(|| id.to_owned())
     }
 

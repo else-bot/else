@@ -4,7 +4,8 @@
 //! server.
 
 use super::*;
-use crate::server_icon::{self, ServerIcon, Shared, Stored, Sync};
+use crate::server_icon::{self, ServerIcon, Sync};
+use else_wire::settings::{Shared, Stored};
 use std::time::Instant;
 
 pub(super) struct IconWrite {
