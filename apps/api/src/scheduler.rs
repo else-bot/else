@@ -11,13 +11,15 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::app::providers::{FailureCode, Stop, TurnOutcome};
+use crate::app::providers::{FailureCode, Provider, Stop, TurnInput, TurnOutcome};
 use crate::db::turn_sink::{FLUSH_INTERVAL, SqliteSink};
 use crate::db::turns;
-use crate::grants::{Grants, Tool};
+use crate::grants::{Grants, Tool, policy};
+use crate::providers::Registry;
+
+pub(crate) mod pump;
 
 const TOOL_GRANT_TTL: Duration = Duration::from_secs(40 * 60);
-use crate::providers::Registry;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const FINISH_ATTEMPTS: u32 = 20;
@@ -25,7 +27,8 @@ const FINISH_ATTEMPTS: u32 = 20;
 pub struct Scheduler {
     pool: SqlitePool,
     registry: Registry,
-    wake: Notify,
+    claim: Notify,
+    pump: Notify,
     running: Actor<HashMap<Uuid, Stop>>,
     cancel_grace: Duration,
     tasks: TaskTracker,
@@ -85,7 +88,8 @@ impl Scheduler {
         Arc::new(Self {
             pool,
             registry,
-            wake: Notify::new(),
+            claim: Notify::new(),
+            pump: Notify::new(),
             running: Actor::default(),
             cancel_grace,
             grants,
@@ -153,7 +157,8 @@ impl Scheduler {
 
     /// Hint that new work may be eligible. Rows remain authoritative.
     pub fn wake(&self) {
-        self.wake.notify_one();
+        self.claim.notify_one();
+        self.pump.notify_one();
     }
 
     /// Request interruption of a turn running in this process.
@@ -197,18 +202,10 @@ impl Scheduler {
     }
 
     /// Run until `shutdown` fires, then interrupt running turns and wait up
-    /// to `grace` for them to record outcomes.
+    /// to `grace` for them to record outcomes. Claiming and the feature
+    /// pumps run in separate loops, so a slow pump never delays a claim.
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken, grace: Duration) {
-        loop {
-            if let Err(err) = self.dispatch().await {
-                tracing::warn!(error = %err, "scheduler scan failed");
-            }
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(SCAN_INTERVAL) => {}
-            }
-        }
+        tokio::join!(self.claim_loop(&shutdown), self.pump_loop(&shutdown));
         self.running
             .call(|running| {
                 for stop in running.values() {
@@ -221,7 +218,39 @@ impl Scheduler {
             .await
             .is_err()
         {
-            tracing::warn!("turns still running at shutdown; restart will reconcile them");
+            tracing::warn!(
+                "turns or check launches still running at shutdown; restart will reconcile them"
+            );
+        }
+    }
+
+    async fn claim_loop(self: &Arc<Self>, shutdown: &CancellationToken) {
+        loop {
+            if let Err(err) = self.dispatch().await {
+                tracing::warn!(error = %err, "scheduler scan failed");
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = self.claim.notified() => {}
+                _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+            }
+        }
+    }
+
+    /// Advance the features' state machines once per tick, then wake the
+    /// claim loop for the turns they queued.
+    async fn pump_loop(&self, shutdown: &CancellationToken) {
+        loop {
+            if let Some(admission) = self.gate.enter() {
+                let launch = |check| self.launch_check(&admission, check);
+                pump::all(&self.tick(&launch)).await;
+                self.claim.notify_one();
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = self.pump.notified() => {}
+                _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+            }
         }
     }
 
@@ -237,7 +266,8 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        if let Some(_admission) = self.gate.enter() {
+        if let Some(admission) = self.gate.enter() {
+            let launch = |check| self.launch_check(&admission, check);
             match turns::settle_deferred(&self.pool).await {
                 Ok((0, _)) => {}
                 Ok((_, woken)) => {
@@ -248,92 +278,7 @@ impl Scheduler {
                 }
                 Err(err) => tracing::warn!(error = %err, "settling deferred messages failed"),
             }
-            let now = chrono::Utc::now();
-            if let Err(err) = crate::db::routines::review_ended(
-                &self.pool,
-                &self.registry,
-                now,
-                crate::db::routines::REVIEW_BATCH,
-            )
-            .await
-            {
-                tracing::warn!(error = %err, "reviewing ended routine runs failed");
-            }
-            if let Err(err) = crate::db::routines::settle_checks(
-                &self.pool,
-                &self.registry,
-                crate::db::routines::SETTLE_BATCH,
-            )
-            .await
-            {
-                tracing::warn!(error = %err, "settling routine checks failed");
-            }
-            if let Err(err) =
-                crate::db::watchers::settle_checks(&self.pool, now, crate::db::watchers::BATCH)
-                    .await
-            {
-                tracing::warn!(error = %err, "settling watcher checks failed");
-            }
-            let computers = self.computers.as_ref();
-            match crate::db::watchers::admit_due(
-                &self.pool,
-                computers.map(Arc::as_ref),
-                now,
-                crate::db::watchers::BATCH,
-            )
-            .await
-            {
-                Ok(checks) => {
-                    for check in checks {
-                        self.launch_check(check);
-                    }
-                }
-                Err(err) => tracing::warn!(error = %err, "admitting due watchers failed"),
-            }
-            if let Err(err) = crate::db::watchers::deliver_wakes(
-                &self.pool,
-                &self.registry,
-                now,
-                crate::db::watchers::BATCH,
-            )
-            .await
-            {
-                tracing::warn!(error = %err, "queueing watcher wakes failed");
-            }
-            let (admitted, woken, mail, social) = tokio::join!(
-                crate::db::routines::admit_due(
-                    &self.pool,
-                    &self.registry,
-                    computers.map(Arc::as_ref),
-                    now,
-                    crate::db::routines::ADMIT_BATCH,
-                ),
-                crate::db::webhooks::admit_requested(
-                    &self.pool,
-                    &self.registry,
-                    now,
-                    crate::db::webhooks::ADMIT_BATCH,
-                ),
-                crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32),
-                crate::socials::delivery::admit_pending(&self.pool, &self.registry, 32)
-            );
-            match admitted {
-                Ok(admitted) => {
-                    for check in admitted.checks {
-                        self.launch_check(check);
-                    }
-                }
-                Err(err) => tracing::warn!(error = %err, "admitting due routines failed"),
-            }
-            if let Err(err) = woken {
-                tracing::warn!(error = %err, "admitting webhook wakes failed");
-            }
-            if let Err(err) = social {
-                tracing::warn!(error=%err,"admitting social deliveries failed");
-            }
-            if let Err(err) = mail {
-                tracing::warn!(error = %err, "admitting email deliveries failed");
-            }
+            pump::before_claim(&self.tick(&launch)).await;
         }
         loop {
             let Some(_admission) = self.gate.enter() else {
@@ -343,19 +288,12 @@ impl Scheduler {
                 break;
             };
             let background = self.background.clone().try_acquire_owned().ok();
-            let claimed = turns::claim_next(&self.pool, &live, background.is_some()).await;
-            let (turn_id, background) = match claimed {
-                Ok(Some(claimed)) => {
-                    live.push(claimed.id);
-                    (claimed.id, background.filter(|_| claimed.background))
-                }
-                Ok(None) => {
-                    break;
-                }
-                Err(err) => {
-                    return Err(err);
-                }
+            let Some(claimed) = turns::claim_next(&self.pool, &live, background.is_some()).await?
+            else {
+                break;
             };
+            live.push(claimed.id);
+            let (turn_id, background) = (claimed.id, background.filter(|_| claimed.background));
             let stop = Stop::new(CancellationToken::new());
             let this = self.clone();
             self.running
@@ -377,11 +315,26 @@ impl Scheduler {
         Ok(())
     }
 
-    fn launch_check(&self, check: crate::db::routines::Check) {
+    fn tick<'a>(&'a self, launch: &'a (dyn Fn(pump::Check) + Send + Sync)) -> pump::Tick<'a> {
+        pump::Tick {
+            pool: &self.pool,
+            registry: &self.registry,
+            computers: self.computers.as_deref(),
+            now: chrono::Utc::now(),
+            launch,
+        }
+    }
+
+    /// Launch a reserved check under a share of the pass's admission, so a
+    /// backup waits until the check holds its computer.
+    fn launch_check(&self, admission: &crate::maintenance::Admission, check: pump::Check) {
+        // Checks are reserved only when computers exist.
         let Some(computers) = self.computers.clone() else {
             return;
         };
-        tokio::spawn(async move {
+        let admission = admission.share();
+        self.tasks.spawn(async move {
+            let _admission = admission;
             if let Err(err) = computers
                 .launch_check(check.bot_id, check.job_id, &check.command, &check.secrets)
                 .await
@@ -392,81 +345,96 @@ impl Scheduler {
     }
 
     async fn execute(&self, turn_id: Uuid, stop: Stop) {
-        let cancel = stop.token().clone();
-        let loaded = async {
-            let input = turns::input(&self.pool, turn_id).await?;
-            let provider_id: String =
-                sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = ?1")
-                    .bind(turn_id)
-                    .fetch_one(&self.pool)
-                    .await?;
-            Ok::<_, sqlx::Error>((input, provider_id))
-        }
-        .await;
-        let (mut input, provider_id) = match loaded {
-            Ok(loaded) => loaded,
-            Err(err) => {
+        let (sink, provider_id, outcome) = match self.prepare(turn_id, stop.token()).await {
+            Ok(Prepared {
+                input,
+                provider_id,
+                provider,
+            }) => {
+                let project = input
+                    .delegation
+                    .host_tools()
+                    .then(|| provider.project_dir(input.bot_id))
+                    .flatten();
+                let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id, project);
+                let outcome = self.run_provider(provider, input, &sink, stop).await;
+                (sink, provider_id, outcome)
+            }
+            Err(PrepareError::ProviderMissing { input, provider_id }) => {
+                let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id, None);
+                let outcome = TurnOutcome::Failed {
+                    code: FailureCode::ProviderUnavailable,
+                    message: "The provider for this message is no longer configured.".into(),
+                };
+                (sink, provider_id, outcome)
+            }
+            Err(PrepareError::Load(err)) => {
                 tracing::error!(turn = %turn_id, error = %err, "loading turn failed");
-                let mut delay = Duration::from_millis(100);
-                for _ in 0..FINISH_ATTEMPTS {
-                    let message = "The message could not be prepared. Send it again.";
-                    if turns::fail_unstarted(&self.pool, turn_id, message)
-                        .await
-                        .is_ok()
-                    {
-                        return;
-                    }
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(5));
+                let message = "The message could not be prepared. Send it again.";
+                if let Err(err) = with_backoff(turn_id, "failing an unprepared turn", || {
+                    turns::fail_unstarted(&self.pool, turn_id, message)
+                })
+                .await
+                {
+                    tracing::error!(
+                        turn = %turn_id, error = %err,
+                        "failing an unprepared turn failed; startup reconciliation will settle it"
+                    );
                 }
                 return;
             }
         };
-        let memory_scope = match input.delegation.delegated_by {
-            Some(_) if input.delegation.delegated_task() => {
-                let upstream = match self.pool.acquire().await {
-                    Ok(mut conn) => crate::db::delegations::chain(&mut conn, turn_id)
-                        .await
-                        .map(|chain| chain.upstream),
-                    Err(err) => Err(err),
-                };
-                let scope = match upstream {
-                    Ok(upstream) => delegated_scope(&self.pool, &upstream, input.bot_id).await,
-                    Err(err) => Err(err),
-                };
-                match scope {
-                    Ok(scope) => Some(scope),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "loading a delegated memory scope failed");
-                        Some(vec![input.bot_id])
-                    }
-                }
-            }
-            _ if input.delegation.delegated_task()
-                || matches!(
-                    input.delegation.origin,
-                    crate::app::providers::Origin::ConnectorEvent
-                        | crate::app::providers::Origin::SocialEvent
-                ) =>
-            {
-                Some(vec![input.bot_id])
-            }
-            _ => None,
+        tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");
+        if let Err(err) =
+            with_backoff(turn_id, "recording turn outcome", || sink.finish(&outcome)).await
+        {
+            tracing::error!(
+                turn = %turn_id, error = %err,
+                "recording turn outcome failed; startup reconciliation will settle it"
+            );
+        }
+    }
+
+    /// Load the turn, then issue its task grant and fill in what its grant
+    /// lets it see. A missing provider fails before any grant is issued.
+    async fn prepare(
+        &self,
+        turn_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<Prepared, PrepareError> {
+        let mut input = turns::input(&self.pool, turn_id).await?;
+        let provider_id: String = sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = ?1")
+            .bind(turn_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let Some(provider) = self.registry.get(&provider_id).cloned() else {
+            return Err(PrepareError::ProviderMissing {
+                input: Box::new(input),
+                provider_id,
+            });
         };
+        let access = policy::for_turn(&input.delegation);
+        let memory_scope =
+            policy::memory_scope(&self.pool, turn_id, input.bot_id, access.memory).await;
+        let lists_mcp = access.tools.contains(&Tool::Mcp);
         input.tool_grant = Some(
             self.grants
                 .issue_scoped(
                     input.bot_id,
                     input.conversation_id,
                     turn_id,
-                    turn_tools(&input.delegation),
+                    access.tools,
                     memory_scope,
                     TOOL_GRANT_TTL,
                 )
                 .await,
         );
-        if turn_tools(&input.delegation).contains(&Tool::Mcp) {
-            match crate::mcp::installed(self.mcp_root.clone()).await {
+        if lists_mcp {
+            let (mcps, skills) = tokio::join!(
+                crate::mcp::installed(self.mcp_root.clone()),
+                crate::db::skills::visible(&self.pool, input.bot_id),
+            );
+            match mcps {
                 Ok(summaries) => {
                     input.mcps = Some(
                         summaries
@@ -483,281 +451,116 @@ impl Scheduler {
                     tracing::warn!(turn = %turn_id, error = %err, "listing shared MCPs failed");
                 }
             }
-        }
-        if turn_tools(&input.delegation).contains(&Tool::Mcp) {
-            match crate::db::skills::visible(&self.pool, input.bot_id).await {
+            match skills {
                 Ok(skills) => input.skills = Some(skills),
                 Err(err) => {
                     tracing::warn!(turn = %turn_id, error = %err, "listing skills failed");
                 }
             }
         }
-        if self.registry.get(&provider_id).is_some() {
-            match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, &cancel)
-                .await
-            {
-                Ok(handoff) => input.handoff = handoff,
-                Err(err) => {
-                    tracing::warn!(turn = %turn_id, error = %err, "preparing a handoff failed");
-                }
+        match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, cancel)
+            .await
+        {
+            Ok(handoff) => input.handoff = handoff,
+            Err(err) => {
+                tracing::warn!(turn = %turn_id, error = %err, "preparing a handoff failed");
             }
         }
-        let project = input
-            .delegation
-            .host_tools()
-            .then(|| self.registry.get(&provider_id)?.project_dir(input.bot_id))
-            .flatten();
-        let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id, project);
-        let outcome = match self.registry.get(&provider_id) {
-            None => TurnOutcome::Failed {
-                code: FailureCode::ProviderUnavailable,
-                message: "The provider for this message is no longer configured.".into(),
-            },
-            Some(provider) => {
-                let provider = provider.clone();
-                let done = CancellationToken::new();
-                let run = async {
-                    let escalation = async {
-                        cancel.cancelled().await;
-                        tokio::time::sleep(self.cancel_grace).await;
-                    };
-                    let attempt = provider.run(input, &sink, stop.clone());
-                    tokio::pin!(attempt);
-                    let outcome = tokio::select! {
-                        outcome = &mut attempt => outcome,
-                        () = escalation => {
-                            tracing::warn!(turn = %turn_id, "provider did not stop in time; escalating");
-                            stop.escalate();
-                            attempt.await
-                        }
-                    };
-                    done.cancel();
-                    outcome
-                };
-                let flusher = async {
-                    loop {
-                        tokio::select! {
-                            _ = done.cancelled() => break,
-                            _ = tokio::time::sleep(FLUSH_INTERVAL) => {}
-                            _ = sink.flush_wanted() => {}
-                        }
-                        if sink.flush().await.is_err() {
-                            cancel.cancel();
-                        }
-                    }
-                };
-                tokio::join!(run, flusher).0
-            }
-        };
-        tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");
-        let mut delay = Duration::from_millis(100);
-        for attempt in 1..=FINISH_ATTEMPTS {
-            match sink.finish(&outcome).await {
-                Ok(()) => break,
-                Err(err) if attempt < FINISH_ATTEMPTS => {
-                    tracing::warn!(turn = %turn_id, attempt, error = %err, "recording turn outcome failed; retrying");
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(5));
-                }
-                Err(err) => tracing::error!(
-                    turn = %turn_id, error = %err,
-                    "recording turn outcome failed; startup reconciliation will settle it"
-                ),
-            }
-        }
-    }
-}
-
-fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool> {
-    if delegation.origin == crate::app::providers::Origin::SocialEvent {
-        return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
-    }
-    if delegation.email_task() {
-        return vec![Tool::ReadHistory];
-    }
-    if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
-        return vec![
-            Tool::ReadHistory,
-            Tool::ReadMemory,
-            Tool::Mail,
-            Tool::DraftEmail,
-            Tool::Delegate,
-        ];
-    }
-    let mut tools = vec![
-        Tool::ReadHistory,
-        Tool::ReadMemory,
-        Tool::Computer,
-        Tool::Mcp,
-        Tool::AskPermission,
-        Tool::Diagnose,
-    ];
-    if delegation.acts_for_owner() {
-        tools.extend([
-            Tool::Mail,
-            Tool::Social,
-            Tool::RequestSecret,
-            Tool::AskOwner,
-            Tool::DraftEmail,
-        ]);
-    }
-    if delegation.can_delegate() {
-        tools.push(Tool::Delegate);
-    }
-    if delegation.can_create_bot {
-        tools.push(Tool::CreateBot);
-    }
-    if delegation.origin == crate::app::providers::Origin::OwnerRequest {
-        tools.extend([Tool::EditBot, Tool::ManageMcp]);
-    }
-    if delegation.can_manage_routines() {
-        tools.push(Tool::Routines);
-    }
-    if delegation.can_edit_rules() {
-        tools.push(Tool::Rules);
-    }
-    tools
-}
-
-/// The bots a delegated task may read: its own, plus those both the
-/// delegating bot and its own bot may read.
-/// The memory a task of `target` may read: its own, plus each bot it may
-/// read that every bot above it in the chain (`upstream`) may read too, so
-/// handing work down a chain never widens what the request can see.
-pub async fn delegated_scope(
-    pool: &sqlx::SqlitePool,
-    upstream: &[Uuid],
-    target: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    let mut scope = vec![target];
-    scope.extend(
-        crate::db::memory::readable_bots(pool, target)
-            .await?
-            .into_iter()
-            .map(|(id, _)| id)
-            .filter(|id| *id != target),
-    );
-    for bot in upstream {
-        let reads: Vec<Uuid> = crate::db::memory::readable_bots(pool, *bot)
-            .await?
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        scope.retain(|id| *id == target || reads.contains(id));
-    }
-    Ok(scope)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::providers::{DelegationContext, Origin};
-
-    fn task(origin: Origin) -> Vec<Tool> {
-        turn_tools(&DelegationContext {
-            origin,
-            task_depth: 1,
-            ..DelegationContext::default()
+        Ok(Prepared {
+            input,
+            provider_id,
+            provider,
         })
     }
 
-    #[test]
-    fn a_task_delegated_for_an_owner_request_can_ask_the_owner() {
-        let tools = task(Origin::OwnerRequest);
-        for tool in [
-            Tool::Social,
-            Tool::Mail,
-            Tool::RequestSecret,
-            Tool::AskOwner,
-        ] {
-            assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
-        }
-        assert!(
-            tools.contains(&Tool::Delegate),
-            "a task may hand work on once"
-        );
-        assert!(!tools.contains(&Tool::CreateBot));
-        let leaf = turn_tools(&DelegationContext {
-            origin: Origin::OwnerRequest,
-            task_depth: crate::db::delegations::MAX_DEPTH,
-            ..DelegationContext::default()
-        });
-        assert!(
-            !leaf.contains(&Tool::Delegate),
-            "a task at the depth limit cannot"
-        );
+    /// Run the provider, flushing its output as it streams, and escalate a
+    /// stop it does not honor within the cancel grace.
+    async fn run_provider(
+        &self,
+        provider: Arc<dyn Provider>,
+        input: TurnInput,
+        sink: &SqliteSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        let turn_id = input.turn_id;
+        let cancel = stop.token().clone();
+        let done = CancellationToken::new();
+        let run = async {
+            let escalation = async {
+                cancel.cancelled().await;
+                tokio::time::sleep(self.cancel_grace).await;
+            };
+            let attempt = provider.run(input, sink, stop.clone());
+            tokio::pin!(attempt);
+            let outcome = tokio::select! {
+                outcome = &mut attempt => outcome,
+                () = escalation => {
+                    tracing::warn!(turn = %turn_id, "provider did not stop in time; escalating");
+                    stop.escalate();
+                    attempt.await
+                }
+            };
+            done.cancel();
+            outcome
+        };
+        let flusher = async {
+            loop {
+                tokio::select! {
+                    _ = done.cancelled() => break,
+                    _ = tokio::time::sleep(FLUSH_INTERVAL) => {}
+                    _ = sink.flush_wanted() => {}
+                }
+                if sink.flush().await.is_err() {
+                    cancel.cancel();
+                }
+            }
+        };
+        tokio::join!(run, flusher).0
     }
+}
 
-    #[test]
-    fn only_a_turn_answering_the_owner_directly_can_edit_rules() {
-        let direct = turn_tools(&DelegationContext {
-            origin: Origin::OwnerRequest,
-            ..DelegationContext::default()
-        });
-        assert!(direct.contains(&Tool::Rules));
-        for origin in [
-            Origin::OwnerRequest,
-            Origin::RoutineRun,
-            Origin::SocialEvent,
-            Origin::ConnectorEvent,
-            Origin::Other,
-        ] {
-            assert!(!task(origin).contains(&Tool::Rules), "delegated {origin:?}");
-            let own = turn_tools(&DelegationContext {
-                origin,
-                ..DelegationContext::default()
-            });
-            assert_eq!(
-                own.contains(&Tool::Rules),
-                origin == Origin::OwnerRequest,
-                "{origin:?}"
-            );
-        }
+/// A turn ready to run: loaded, granted, and its provider found.
+struct Prepared {
+    input: TurnInput,
+    provider_id: String,
+    provider: Arc<dyn Provider>,
+}
+
+enum PrepareError {
+    /// The turn could not be loaded; it fails unstarted.
+    Load(sqlx::Error),
+    /// Its provider is no longer configured; it fails as unavailable.
+    ProviderMissing {
+        input: Box<TurnInput>,
+        provider_id: String,
+    },
+}
+
+impl From<sqlx::Error> for PrepareError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Load(err)
     }
+}
 
-    #[test]
-    fn inbound_social_and_mail_events_cannot_read_installation_status() {
-        assert!(task(Origin::OwnerRequest).contains(&Tool::Diagnose));
-        assert!(task(Origin::RoutineRun).contains(&Tool::Diagnose));
-        for origin in [Origin::SocialEvent, Origin::ConnectorEvent] {
-            assert!(!task(origin).contains(&Tool::Diagnose), "{origin:?}");
+/// Run `op` up to [`FINISH_ATTEMPTS`] times, backing off from 100 ms to 5 s
+/// between tries, and return its last error.
+async fn with_backoff<E: std::fmt::Display, F: Future<Output = Result<(), E>>>(
+    turn_id: Uuid,
+    what: &str,
+    mut op: impl FnMut() -> F,
+) -> Result<(), E> {
+    let mut delay = Duration::from_millis(100);
+    let mut attempt = 1;
+    loop {
+        match op().await {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt < FINISH_ATTEMPTS => {
+                tracing::warn!(turn = %turn_id, attempt, error = %err, "{what} failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
         }
-    }
-
-    #[test]
-    fn a_mail_event_drafts_email_for_the_owner_but_cannot_ask_them() {
-        let event = turn_tools(&DelegationContext {
-            origin: Origin::ConnectorEvent,
-            ..DelegationContext::default()
-        });
-        assert!(event.contains(&Tool::DraftEmail));
-        assert!(!event.contains(&Tool::AskOwner));
-        assert!(
-            !turn_tools(&DelegationContext {
-                origin: Origin::SocialEvent,
-                ..DelegationContext::default()
-            })
-            .contains(&Tool::DraftEmail)
-        );
-        assert!(task(Origin::OwnerRequest).contains(&Tool::DraftEmail));
-        assert!(task(Origin::RoutineRun).contains(&Tool::DraftEmail));
-        assert!(!task(Origin::Other).contains(&Tool::DraftEmail));
-    }
-
-    #[test]
-    fn a_task_delegated_by_a_routine_run_asks_the_owner_like_the_run() {
-        let tools = task(Origin::RoutineRun);
-        for tool in [
-            Tool::Social,
-            Tool::Mail,
-            Tool::RequestSecret,
-            Tool::AskOwner,
-        ] {
-            assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
-        }
-        for tool in [Tool::Routines, Tool::Rules, Tool::EditBot] {
-            assert!(!tools.contains(&tool), "{tool:?} granted in {tools:?}");
-        }
-        assert!(!task(Origin::Other).contains(&Tool::AskOwner));
     }
 }

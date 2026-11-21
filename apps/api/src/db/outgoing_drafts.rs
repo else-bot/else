@@ -31,8 +31,8 @@ use crate::app::outgoing::send::{self, Approved, FileChanged};
 use crate::app::outgoing::{
     self, ApprovalSource, Channels, Content, Delivery, DraftKind, Edits, Outcome, Status,
 };
-use crate::app::questions::GrantReach;
 use crate::db::in_ids;
+use crate::grants::policy::GrantReach;
 
 /// Drafts per owner request (turn).
 pub const MAX_PER_TURN: i64 = 8;

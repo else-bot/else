@@ -7,9 +7,10 @@
 use super::file_reference;
 use crate::app::providers::TurnInput;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
-    GrantReach, Kind, PermissionTarget, Status,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY, Kind,
+    PermissionTarget, Status,
 };
+use crate::grants::policy::GrantReach;
 
 /// Recorded child outcomes and the owner's answers to secret requests and
 /// questions, given to a continuation as data.

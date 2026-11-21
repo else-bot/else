@@ -49,10 +49,11 @@ pub use uses::{RanAction, Use, UseOutcome, ran_before, ran_in_task, record_use, 
 use crate::app::providers::Origin;
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, Answer, Choice,
-    DESTRUCTIVE_SCOPE, GrantReach, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing,
-    Status, approval_choices, says_always_allow,
+    DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status,
+    approval_choices, says_always_allow,
 };
 use crate::db::in_ids;
+use crate::grants::policy::GrantReach;
 
 /// A question as shown to the owner and recorded in events.
 #[derive(Debug, Clone, PartialEq, Serialize)]

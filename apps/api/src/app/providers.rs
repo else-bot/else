@@ -279,12 +279,6 @@ pub struct InstalledMcp {
     pub description: String,
 }
 
-impl TurnInput {
-    pub fn grant_reach(&self) -> super::questions::GrantReach {
-        super::questions::GrantReach::of(self.delegation.origin, !self.delegation.delegated_task())
-    }
-}
-
 /// The saved task a turn runs instead of an owner message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedRun {
@@ -431,20 +425,6 @@ pub enum Origin {
     Other,
 }
 
-impl Origin {
-    /// Whether a turn `depth` delegations below its request may hand work
-    /// to another bot. An email turn may pass mail on as the owner's
-    /// standing instructions say, but its task may not hand it further; a
-    /// social event may not delegate at all.
-    pub fn delegates_at(self, depth: u8) -> bool {
-        match self {
-            Origin::SocialEvent => false,
-            Origin::ConnectorEvent => depth == 0,
-            _ => depth < crate::db::delegations::MAX_DEPTH,
-        }
-    }
-}
-
 /// What an attempt knows about delegation, all derived by the server.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DelegationContext {
@@ -489,61 +469,6 @@ pub struct DelegationInProgress {
     pub target_bot_id: Uuid,
     pub target_name: String,
     pub task: String,
-}
-
-impl DelegationContext {
-    /// A task another bot delegated to this turn.
-    pub fn delegated_task(&self) -> bool {
-        self.task_depth > 0
-    }
-
-    /// Whether this turn may hand work to another bot. See
-    /// [`Origin::delegates_at`].
-    pub fn can_delegate(&self) -> bool {
-        self.origin.delegates_at(self.task_depth)
-    }
-
-    /// A task an email turn handed on. Its task text came from email and its
-    /// reply goes back to a turn that can send mail, so it gets no memory,
-    /// mail, computer records or tools beyond its own history. Its bot's
-    /// rules still apply to it.
-    pub fn email_task(&self) -> bool {
-        self.origin == Origin::ConnectorEvent && self.delegated_task()
-    }
-
-    /// Work done for the owner: the bot's own conversation, or a task another
-    /// bot delegated for an owner request, a routine run, or a webhook wake,
-    /// which may ask the owner itself. It may use mail and social tools and
-    /// show the owner cards, which a task shows in its own bot's chat.
-    pub fn acts_for_owner(&self) -> bool {
-        !self.delegated_task()
-            || matches!(
-                self.origin,
-                Origin::OwnerRequest | Origin::RoutineRun | Origin::WebhookWake
-            )
-    }
-
-    /// A bot manages its own routines for work rooted in an owner message,
-    /// or for a task delegated with the owner's answer on a card; never for
-    /// a routine run or another task one delegated.
-    pub fn can_manage_routines(&self) -> bool {
-        self.origin == Origin::OwnerRequest || self.owner_answer.is_some()
-    }
-
-    /// A bot edits its rules while answering the owner directly in its own
-    /// conversation, or in a task delegated with the owner's answer on a
-    /// card; never for a routine, event, or other delegated task.
-    pub fn can_edit_rules(&self) -> bool {
-        (self.origin == Origin::OwnerRequest && !self.delegated_task())
-            || self.owner_answer.is_some()
-    }
-
-    /// The provider's own host shell, file, and web tools. Never for work an
-    /// incoming connector event started: its content is untrusted, so it
-    /// gets only the tools its task grant names.
-    pub fn host_tools(&self) -> bool {
-        !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
-    }
 }
 
 /// Bounded saved memory at one view revision.

@@ -30,6 +30,7 @@ use crate::app::watchers::{
 use crate::computers::ComputerManager;
 use crate::computers::jobs::{JobStatus, MAX_JOBS, SECRETS_UNREADABLE};
 use crate::providers::Registry;
+use crate::scheduler::pump::Tick;
 
 /// Due watchers admitted, checks settled, and wakes queued per scan.
 pub const BATCH: i64 = 8;
@@ -280,9 +281,25 @@ async fn end(
     .await
 }
 
+/// Advance watchers one tick: settle finished checks, admit due checks,
+/// launching each reserved check at once, then queue the wakes of
+/// watchers that ended.
+pub async fn pump(tick: &Tick<'_>) {
+    if let Err(err) = settle_checks(tick.pool, tick.now, BATCH).await {
+        tracing::warn!(error = %err, "settling watcher checks failed");
+    }
+    if let Err(err) = admit_due(tick.pool, tick.computers, tick.now, BATCH, tick.launch).await {
+        tracing::warn!(error = %err, "admitting due watchers failed");
+    }
+    if let Err(err) = deliver_wakes(tick.pool, tick.registry, tick.now, BATCH).await {
+        tracing::warn!(error = %err, "queueing watcher wakes failed");
+    }
+}
+
 /// End every watcher whose deadline passed as expired, then reserve a
-/// check job for each due watcher of an active bot, up to `limit`. Returns
-/// the checks to launch. A check leaves one of the bot's job slots free for
+/// check job for each due watcher of an active bot, up to `limit`, and
+/// `launch` each as soon as it is reserved, since its window starts then.
+/// A check leaves one of the bot's job slots free for
 /// its turns and routines, and waits [`RETRY`] for one; without computers
 /// it waits for its next interval. The caller holds a maintenance
 /// admission.
@@ -291,7 +308,8 @@ pub async fn admit_due(
     computers: Option<&ComputerManager>,
     now: DateTime<Utc>,
     limit: i64,
-) -> Result<Vec<Check>, sqlx::Error> {
+    launch: &(dyn Fn(Check) + Send + Sync),
+) -> Result<(), sqlx::Error> {
     let overdue: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM watchers WHERE status IN ('waiting', 'checking') AND watch_until <= ?1",
     )
@@ -311,13 +329,12 @@ pub async fn admit_due(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    let mut checks = Vec::new();
     for id in due {
         if let Some(check) = admit(pool, computers, id, now).await? {
-            checks.push(check);
+            launch(check);
         }
     }
-    Ok(checks)
+    Ok(())
 }
 
 async fn expire(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {

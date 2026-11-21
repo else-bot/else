@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::types::MessageRef;
 use crate::connector_core::inbound::{self, EventId, Source};
 use crate::providers::Registry;
+use crate::scheduler::pump::Tick;
 
 pub struct Mail;
 
@@ -60,6 +61,13 @@ impl Source for Mail {
             ));
         }
         text
+    }
+}
+
+/// Queue the turns of bots with pending mail.
+pub async fn pump(tick: &Tick<'_>) {
+    if let Err(err) = admit_pending(tick.pool, tick.registry, 32).await {
+        tracing::warn!(error = %err, "admitting email deliveries failed");
     }
 }
 
