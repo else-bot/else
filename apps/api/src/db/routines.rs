@@ -1019,8 +1019,8 @@ pub async fn run_of(
     )
 }
 
-/// Ended routine runs reviewed per scheduler scan.
-pub const REVIEW_BATCH: i64 = 8;
+/// Ended routine runs read per query of [`review_ended`].
+const REVIEW_BATCH: i64 = 8;
 
 /// SQL condition on `turns t`: an earlier turn of its conversation ran a
 /// routine that ended and is not reviewed yet. The review writes the
@@ -1034,36 +1034,51 @@ pub(crate) fn behind_unreviewed_run() -> String {
     )
 }
 
-/// Handle up to `limit` routine runs whose turns have ended, per
+/// Handle every routine run whose turn has ended, per
 /// [`routine_failures::react`]: forget failures after a success, switch a
 /// paused routine back on after the owner's retry succeeds, retry a
 /// transient failure once, or count the failure and tell the owner in the
 /// failed turn, pausing the routine when retrying cannot help or its runs
 /// keep failing. Each run is reviewed once, in one transaction with all it
-/// causes, whichever path ended its turn. Returns how many retries were
-/// queued. The caller holds a maintenance admission.
+/// causes, whichever path ended its turn. All of them are handled in one
+/// pass, so their retries queue before the pass's watcher wakes. A run
+/// whose review fails is logged and left for the next pass, and the others
+/// still go ahead, since each holds back its conversation's next turn
+/// ([`behind_unreviewed_run`]). Returns how many retries were queued. The
+/// caller holds a maintenance admission.
 pub async fn review_ended(
     pool: &SqlitePool,
     registry: &Registry,
     now: DateTime<Utc>,
-    limit: i64,
 ) -> Result<usize, sqlx::Error> {
-    let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT rr.id FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
-         WHERE NOT rr.reviewed AND rr.turn_id IS NOT NULL
-           AND t.status IN {ENDED_STATUSES}
-         ORDER BY rr.due_at, rr.id LIMIT ?1"
-    )))
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let mut tried: Vec<Uuid> = Vec::new();
     let mut retried = 0;
-    for id in ended {
-        if review(pool, registry, id, now).await? {
-            retried += 1;
+    loop {
+        let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT rr.id FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+             WHERE NOT rr.reviewed AND rr.turn_id IS NOT NULL
+               AND t.status IN {ENDED_STATUSES} AND NOT {}
+             ORDER BY rr.due_at, rr.id LIMIT ?2",
+            crate::db::in_ids("rr.id", "?1")
+        )))
+        .bind(Json(&tried))
+        .bind(REVIEW_BATCH)
+        .fetch_all(pool)
+        .await?;
+        if ended.is_empty() {
+            return Ok(retried);
+        }
+        for id in ended {
+            tried.push(id);
+            match review(pool, registry, id, now).await {
+                Ok(true) => retried += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(run = %id, error = %err, "reviewing an ended routine run failed");
+                }
+            }
         }
     }
-    Ok(retried)
 }
 
 #[derive(sqlx::FromRow)]
@@ -1345,7 +1360,7 @@ async fn review(
 /// until its earlier runs are reviewed ([`behind_unreviewed_run`]), so it
 /// reads their failure notices.
 pub async fn pump_review(tick: &Tick<'_>) {
-    if let Err(err) = review_ended(tick.pool, tick.registry, tick.now, REVIEW_BATCH).await {
+    if let Err(err) = review_ended(tick.pool, tick.registry, tick.now).await {
         tracing::warn!(error = %err, "reviewing ended routine runs failed");
     }
 }

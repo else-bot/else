@@ -187,7 +187,9 @@ impl Scheduler {
 
     /// Run until `shutdown` fires, then interrupt running turns and wait up
     /// to `grace` for them to record outcomes. Claiming and the feature
-    /// pumps run in separate loops, so a slow pump never delays a claim.
+    /// pumps run in separate loops, so a slow pump delays only the turns
+    /// that wait on it, such as one behind a routine run it has not
+    /// reviewed yet.
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken, grace: Duration) {
         tokio::join!(self.claim_loop(&shutdown), self.pump_loop(&shutdown));
         self.running

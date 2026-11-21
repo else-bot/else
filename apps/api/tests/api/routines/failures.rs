@@ -515,38 +515,53 @@ async fn a_successful_run_forgets_earlier_failures() {
     assert_eq!(runs(&h.app, &id).await.len(), 1);
 }
 
-/// Seed a run of a new routine **Tickets** in `bot`'s owner conversation
-/// whose turn failed with `code` and is not reviewed yet. Returns the
-/// run's turn.
-async fn unreviewed_failed_run(conn: &mut sqlx::SqliteConnection, bot: Uuid, code: &str) -> Uuid {
+/// Seed a run of a new routine `name` due at `due_at` in `bot`'s owner
+/// conversation, not reviewed yet. Its turn failed with `failure`, or
+/// completed without one. Returns the run's turn.
+async fn unreviewed_run(
+    conn: &mut sqlx::SqliteConnection,
+    bot: Uuid,
+    name: &str,
+    due_at: &str,
+    failure: Option<&str>,
+) -> Uuid {
+    let status = match failure {
+        Some(_) => TurnStatus::Failed,
+        None => TurnStatus::Completed,
+    };
     let turn = common::seed::turn(bot)
         .message(ItemKind::Routine, "Update the tickets.")
-        .status(TurnStatus::Failed)
+        .status(status)
         .insert(&mut *conn)
         .await;
-    sqlx::query("UPDATE turns SET error_code = ?2, error_message = 'It failed.' WHERE id = ?1")
-        .bind(turn)
-        .bind(code)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
+    if let Some(code) = failure {
+        sqlx::query("UPDATE turns SET error_code = ?2, error_message = 'It failed.' WHERE id = ?1")
+            .bind(turn)
+            .bind(code)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
     let routine = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
              created_turn_id, created_name, request_hash)
-         SELECT ?1, bot_id, conversation_id, 'Tickets', 'Update the tickets.', '0 * * * *', 'UTC',
-             id, 'Tickets', zeroblob(32) FROM turns WHERE id = ?2",
+         SELECT ?1, bot_id, conversation_id, ?3, 'Update the tickets.', '0 * * * *', 'UTC',
+             id, ?3, zeroblob(32) FROM turns WHERE id = ?2",
     )
     .bind(routine)
     .bind(turn)
+    .bind(name)
     .execute(&mut *conn)
     .await
     .unwrap();
     sqlx::query(
         "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
-         VALUES (randomblob(16), ?1, '2026-01-01T09:00:00.000+00:00', 'Tickets', ?2)",
+         VALUES (randomblob(16), ?1, ?2, ?3, ?4)",
     )
     .bind(routine)
+    .bind(due_at)
+    .bind(name)
     .bind(turn)
     .execute(&mut *conn)
     .await
@@ -554,16 +569,20 @@ async fn unreviewed_failed_run(conn: &mut sqlx::SqliteConnection, bot: Uuid, cod
     turn
 }
 
+const DUE: &str = "2026-01-01T10:00:00.000+00:00";
+
 #[tokio::test]
 async fn the_next_turn_waits_for_the_failure_notice_of_an_ended_run() {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let pool = &db.pool;
     let bot = common::seed::bot(pool, "Scout").await;
-    unreviewed_failed_run(
+    unreviewed_run(
         &mut pool.acquire().await.unwrap(),
         bot.id,
-        "policy_violation",
+        "Tickets",
+        DUE,
+        Some("policy_violation"),
     )
     .await;
     let next = common::seed::turn(bot.id)
@@ -578,11 +597,16 @@ async fn the_next_turn_waits_for_the_failure_notice_of_an_ended_run() {
     };
 
     assert_eq!(claim().await, None, "the run ended but is not reviewed");
+    assert!(
+        !else_api::db::turns::lifecycle::claim(&mut pool.acquire().await.unwrap(), next, bot.id)
+            .await
+            .unwrap(),
+        "the claim itself refuses it"
+    );
     else_api::db::routines::review_ended(
         pool,
         &else_api::providers::Registry::new(vec![]),
         Utc::now(),
-        else_api::db::routines::REVIEW_BATCH,
     )
     .await
     .unwrap();
@@ -612,7 +636,12 @@ async fn a_routine_retry_takes_the_last_queue_slot_before_a_watcher_wake() {
         .unwrap()
         .unwrap();
     let mut tx = app.db.pool.begin().await.unwrap();
-    let run = unreviewed_failed_run(&mut tx, bot, "provider_failed").await;
+    // More ended runs than one review query reads come first.
+    for n in 0..9 {
+        let due = format!("2026-01-01T09:00:0{n}.000+00:00");
+        unreviewed_run(&mut tx, bot, &format!("Digest {n}"), &due, None).await;
+    }
+    let run = unreviewed_run(&mut tx, bot, "Tickets", DUE, Some("provider_failed")).await;
     for _ in 0..3 {
         common::seed::turn(bot)
             .message(ItemKind::User, "Queued.")
