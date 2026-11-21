@@ -159,6 +159,20 @@ async fn nonexistent_probes_and_removed_packages_do_not_exhaust_actors() {
 }
 
 #[tokio::test]
+async fn a_removed_package_refuses_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let id = input("removed").id;
+    library
+        .install(input("removed"), "Maple".into())
+        .await
+        .unwrap();
+    library.remove(&id).await.unwrap();
+    let request = library.request(&id, "tools/list".into(), serde_json::json!({}));
+    assert!(matches!(request.await, Err(Error::NotFound)));
+}
+
+#[tokio::test]
 async fn discovery_ignores_stray_directories_and_can_remove_a_damaged_config() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
