@@ -472,17 +472,23 @@ pub async fn authorize(
     write: bool,
     send: bool,
 ) -> Result<Access, Error> {
+    // One snapshot, so a Stop cannot land between the turn and chat checks.
+    let mut tx = sqlx::Acquire::begin(&mut *conn).await?;
+    if !crate::db::turns::asking_caller(&mut tx, turn)
+        .await?
+        .is_some_and(|caller| caller.bot_id == bot)
+    {
+        return Err(Error::Forbidden);
+    }
     let kind: Option<crate::db::turns::ItemKind> = sqlx::query_scalar(
-        "SELECT i.kind FROM social_connections c JOIN turns t ON t.id=?4 JOIN bots b ON b.id=t.bot_id
+        "SELECT i.kind FROM social_connections c JOIN turns t ON t.id=?3
          JOIN items i ON i.id=t.owner_item_id
-         WHERE c.id=?1 AND c.state='active' AND c.generation=?2 AND t.bot_id=?3
-           AND t.status IN ('sending','running') AND b.status='active' AND NOT b.cancel_pending",
+         WHERE c.id=?1 AND c.state='active' AND c.generation=?2",
     )
     .bind(c.id)
     .bind(c.generation)
-    .bind(bot)
     .bind(turn)
-    .fetch_optional(&mut *conn)
+    .fetch_optional(&mut *tx)
     .await?;
     let access = match kind.ok_or(Error::Forbidden)? {
         crate::db::turns::ItemKind::Connector => {
@@ -493,7 +499,7 @@ pub async fn authorize(
             .bind(turn)
             .bind(c.id)
             .bind(bot)
-            .fetch_all(&mut *conn)
+            .fetch_all(&mut *tx)
             .await?;
             if chats.is_empty() {
                 return Err(Error::Forbidden);
@@ -505,6 +511,7 @@ pub async fn authorize(
     if (write || send) && !access.mutates() || destination.is_some_and(|d| !access.allows(d)) {
         return Err(Error::Forbidden);
     }
+    tx.commit().await?;
     Ok(access)
 }
 /// The social action table's own column.

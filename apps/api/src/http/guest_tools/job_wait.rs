@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::{fit, job_json};
 use crate::grants::Grant;
 use crate::http::AppState;
+use crate::http::waits::{Next, waited};
 
 /// The attempt is read before the guest is probed, so a slow probe cannot
 /// park a later attempt.
@@ -17,7 +18,7 @@ pub(super) async fn wait_job(
     computers: &crate::computers::ComputerManager,
     id: Uuid,
 ) -> ToolResult {
-    use crate::db::computer_job_waits::{self as waits, CreateError, Created};
+    use crate::db::computer_job_waits::{self as waits, CreateError};
     let refused = |error: CreateError| -> ToolResult {
         let code = match error {
             CreateError::AttemptParked => "ATTEMPT_PARKED",
@@ -48,54 +49,43 @@ pub(super) async fn wait_job(
         Ok(None) => return refused(CreateError::NoSuchJob),
         Err(err) => return Err(err.into()),
     }
-    let owner = caller.owner_conversation;
-    let (status, wait_id, next) =
-        match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
-            Ok(Created::Waiting(wait_id)) if owner => (
-                "waiting",
-                wait_id,
-                "Tell the owner briefly what the job does and end this attempt now. Do not poll or \
-             call more tools; else.bot continues this request when the job ends.",
-            ),
-            Ok(Created::Waiting(wait_id)) => (
-                "waiting",
-                wait_id,
-                "End this attempt now without a reply. Do not poll or call more tools; else.bot \
-             continues this task when the job ends.",
-            ),
-            Ok(Created::Carried(wait_id)) if owner => (
-                "already_waiting",
-                wait_id,
-                "This request already waits on this job; no new wait was added. Answer the owner \
-             briefly and end this attempt now. Do not poll or call more tools; else.bot \
-             continues this request when the job ends.",
-            ),
-            Ok(Created::Carried(wait_id)) => (
-                "already_waiting",
-                wait_id,
-                "This task already waits on this job; no new wait was added. End this attempt now \
-             without a reply. Do not poll or call more tools; else.bot continues this task \
-             when the job ends.",
-            ),
-            Ok(Created::Ended) => {
-                return match computers.job(grant.bot_id, id).await {
-                    Ok(Some(job)) => ended(job).await,
-                    Ok(None) => refused(CreateError::NoSuchJob),
-                    Err(err) => Err(err.into()),
-                };
-            }
-            Err(error) => return refused(error),
-        };
-    let parked = status == "waiting";
-    if parked {
-        state.grants.park(grant.turn_id).await;
-    }
-    Ok(Done::json(json!({
-        "status": status,
-        "parked": parked,
-        "job_id": id,
-        "wait_id": wait_id,
-        "next": next,
-    }))
-    .logged(format!("computer_job wait {id}: {status} {wait_id}")))
+    let created = match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
+        Ok(Some(created)) => created,
+        Ok(None) => {
+            return match computers.job(grant.bot_id, id).await {
+                Ok(Some(job)) => ended(job).await,
+                Ok(None) => refused(CreateError::NoSuchJob),
+                Err(err) => Err(err.into()),
+            };
+        }
+        Err(error) => return refused(error),
+    };
+    let mut value = waited(
+        state,
+        grant.turn_id,
+        created,
+        caller.owner_conversation,
+        &NEXT,
+    )
+    .await;
+    value["job_id"] = json!(id);
+    let log = format!(
+        "computer_job wait {id}: {} {}",
+        created.status(),
+        created.id()
+    );
+    Ok(Done::json(value).logged(log))
 }
+
+const NEXT: Next = Next {
+    waiting_owner: "Tell the owner briefly what the job does and end this attempt now. Do not poll \
+                    or call more tools; else.bot continues this request when the job ends.",
+    waiting_task: "End this attempt now without a reply. Do not poll or call more tools; else.bot \
+                   continues this task when the job ends.",
+    carried_owner: "This request already waits on this job; no new wait was added. Answer the \
+                    owner briefly and end this attempt now. Do not poll or call more tools; \
+                    else.bot continues this request when the job ends.",
+    carried_task: "This task already waits on this job; no new wait was added. End this attempt \
+                   now without a reply. Do not poll or call more tools; else.bot continues this \
+                   task when the job ends.",
+};

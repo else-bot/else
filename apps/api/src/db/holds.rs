@@ -54,6 +54,37 @@ impl Hold {
     }
 }
 
+/// What a wait tool's create did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Created {
+    /// This attempt waits and is parked.
+    Waiting(Uuid),
+    /// A pending wait from an earlier attempt of the turn already waits on
+    /// the same thing; the turn keeps it after this attempt ends. This
+    /// attempt holds nothing, so it is not parked.
+    Carried(Uuid),
+}
+
+impl Created {
+    pub fn id(self) -> Uuid {
+        match self {
+            Self::Waiting(id) | Self::Carried(id) => id,
+        }
+    }
+
+    pub fn parked(self) -> bool {
+        matches!(self, Self::Waiting(_))
+    }
+
+    /// The `status` the tool result reports.
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Waiting(_) => "waiting",
+            Self::Carried(_) => "already_waiting",
+        }
+    }
+}
+
 /// The settled holds an attempt's request carries for the first time, by
 /// kind. Holds no empty list.
 #[derive(Default)]

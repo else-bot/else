@@ -404,7 +404,7 @@ struct Creation<'a> {
 async fn authorize(
     conn: &mut sqlx::SqliteConnection,
     turn_id: Uuid,
-) -> Result<super::turns::AskingCaller, BotError> {
+) -> Result<super::turns::Caller, BotError> {
     let caller = super::turns::asking_caller(conn, turn_id)
         .await?
         .ok_or(Refusal::NotRunning)?;

@@ -37,20 +37,13 @@ pub async fn authorize_in(
     turn_id: Uuid,
     command: &MailCommand,
 ) -> Result<(), StoreError> {
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
-        .bind(turn_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    let Some(owner) = owner else {
-        return Err(StoreError::NotRunning);
-    };
-    if owner != bot_id {
+    let turn = crate::db::turns::caller(conn, turn_id)
+        .await?
+        .ok_or(StoreError::NotRunning)?;
+    if turn.bot_id != bot_id {
         return Err(StoreError::Forbidden);
     }
-    if crate::db::turns::asking_caller(conn, turn_id)
-        .await?
-        .is_none()
-    {
+    if !turn.running {
         return Err(StoreError::NotRunning);
     }
     // The grant comes first, so a bot without access learns nothing about

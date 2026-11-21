@@ -19,6 +19,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
+use super::holds::Created;
 use crate::computers::jobs::JobStatus;
 use crate::db::in_ids;
 
@@ -33,18 +34,6 @@ pub enum Status {
     Cancelled,
     /// The owner stopped it; delivered like an outcome.
     Stopped,
-}
-
-/// What [`create`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Created {
-    Waiting(Uuid),
-    /// A pending wait from an earlier attempt of the turn already watches
-    /// the job; the turn keeps it after this attempt ends. This attempt
-    /// holds nothing, so it is not parked.
-    Carried(Uuid),
-    /// The job had already ended, so nothing waits.
-    Ended,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -69,13 +58,13 @@ impl From<sqlx::Error> for CreateError {
 /// Park `attempt` of `turn_id` on its bot's job `job_id`. A retry of the
 /// same wait in this attempt returns its id, a pending wait on the job from
 /// an earlier attempt returns [`Created::Carried`], and a job that already
-/// ended returns [`Created::Ended`].
+/// ended returns `None`, since nothing waits.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
     attempt: i32,
     job_id: Uuid,
-) -> Result<Created, CreateError> {
+) -> Result<Option<Created>, CreateError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = super::turns::asking_caller(&mut tx, turn_id)
         .await?
@@ -90,7 +79,7 @@ pub async fn create(
     .fetch_optional(&mut *tx)
     .await?;
     if job.ok_or(CreateError::NoSuchJob)?.is_ended() {
-        return Ok(Created::Ended);
+        return Ok(None);
     }
     let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT id, job_id FROM computer_job_waits WHERE turn_id = ?1 AND attempt = ?2",
@@ -101,7 +90,7 @@ pub async fn create(
     .await?;
     if let Some((id, waited)) = existing {
         return if waited == job_id {
-            Ok(Created::Waiting(id))
+            Ok(Some(Created::Waiting(id)))
         } else {
             Err(CreateError::AttemptParked)
         };
@@ -118,7 +107,7 @@ pub async fn create(
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(id) = carried {
-        return Ok(Created::Carried(id));
+        return Ok(Some(Created::Carried(id)));
     }
     let id = Uuid::new_v4();
     sqlx::query(
@@ -134,7 +123,7 @@ pub async fn create(
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
     tx.commit().await?;
-    Ok(Created::Waiting(id))
+    Ok(Some(Created::Waiting(id)))
 }
 
 /// Publish each turn whose wait on `job_id` the job's end just settled, in

@@ -16,6 +16,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::holds::Created;
 use super::{events, in_ids};
 
 pub use crate::app::providers::McpWaitOutcome as Outcome;
@@ -88,16 +89,6 @@ pub enum Check {
     },
 }
 
-/// What [`create`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Created {
-    Waiting(Uuid),
-    /// A pending wait from an earlier attempt of the turn already checks
-    /// the same status; the turn keeps it after this attempt ends. This
-    /// attempt holds nothing, so it is not parked.
-    Carried(Uuid),
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CreateError {
     #[error("this attempt already waits or asked; end it and wait for the result")]
@@ -121,10 +112,7 @@ pub fn bounded(text: &str) -> String {
 
 /// The running attempt of `turn_id` that may wait, read before any remote
 /// call so a slow call cannot park a later attempt.
-pub async fn caller(
-    pool: &SqlitePool,
-    turn_id: Uuid,
-) -> Result<super::turns::AskingCaller, CreateError> {
+pub async fn caller(pool: &SqlitePool, turn_id: Uuid) -> Result<super::turns::Caller, CreateError> {
     super::turns::running_caller(pool, turn_id)
         .await?
         .ok_or(CreateError::NotRunning)

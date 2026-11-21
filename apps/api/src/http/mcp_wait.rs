@@ -16,8 +16,9 @@ use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
 use crate::app::questions::{ApprovalKind, Effect};
-use crate::db::mcp_waits::{self, Check, CreateError, Created, Due, Spec};
+use crate::db::mcp_waits::{self, Check, CreateError, Due, Spec};
 use crate::grants::Grant;
+use crate::http::waits::{Next, waited};
 use crate::mcp::{Error, Library, PackageId};
 
 pub const NAME: &str = "mcp_wait";
@@ -333,51 +334,37 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         }
         Some(Check::Running(result)) => result,
     };
-    let owner = caller.owner_conversation;
-    let (status, wait_id, next) =
+    let created =
         match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
-            Ok(Created::Waiting(wait_id)) if owner => (
-                "waiting",
-                wait_id,
-                "Tell the owner briefly what you are waiting for and end this attempt now. Do not \
-             poll or call more tools; else.bot checks the job and continues this request with \
-             its result.",
-            ),
-            Ok(Created::Waiting(wait_id)) => (
-                "waiting",
-                wait_id,
-                "End this attempt now without a reply. Do not poll or call more tools; else.bot \
-             checks the job and continues this task with its result. The delegating bot keeps \
-             waiting and receives your reply only when the task ends.",
-            ),
-            Ok(Created::Carried(wait_id)) if owner => (
-                "already_waiting",
-                wait_id,
-                "This request already waits on this job; no new wait was added. Answer the owner \
-             briefly and end this attempt now. Do not poll or call more tools; else.bot checks \
-             the job and continues this request with its result.",
-            ),
-            Ok(Created::Carried(wait_id)) => (
-                "already_waiting",
-                wait_id,
-                "This task already waits on this job; no new wait was added. End this attempt now \
-             without a reply. Do not poll or call more tools; else.bot checks the job and \
-             continues this task with its result.",
-            ),
+            Ok(created) => created,
             Err(error) => return refused(error, &log),
         };
-    let parked = status == "waiting";
-    if parked {
-        state.grants.park(grant.turn_id).await;
-    }
-    Ok(Done::json(json!({
-        "status": status,
-        "parked": parked,
-        "wait_id": wait_id,
-        "next": next,
-    }))
-    .logged(format!("{log} {status} {wait_id}{note}")))
+    let value = waited(
+        state,
+        grant.turn_id,
+        created,
+        caller.owner_conversation,
+        &NEXT,
+    )
+    .await;
+    let log = format!("{log} {} {}{note}", created.status(), created.id());
+    Ok(Done::json(value).logged(log))
 }
+
+const NEXT: Next = Next {
+    waiting_owner: "Tell the owner briefly what you are waiting for and end this attempt now. Do \
+                    not poll or call more tools; else.bot checks the job and continues this \
+                    request with its result.",
+    waiting_task: "End this attempt now without a reply. Do not poll or call more tools; else.bot \
+                   checks the job and continues this task with its result. The delegating bot \
+                   keeps waiting and receives your reply only when the task ends.",
+    carried_owner: "This request already waits on this job; no new wait was added. Answer the \
+                    owner briefly and end this attempt now. Do not poll or call more tools; \
+                    else.bot checks the job and continues this request with its result.",
+    carried_task: "This task already waits on this job; no new wait was added. End this attempt \
+                   now without a reply. Do not poll or call more tools; else.bot checks the job \
+                   and continues this task with its result.",
+};
 
 fn refused(error: CreateError, log: &str) -> ToolResult {
     let code = match error {

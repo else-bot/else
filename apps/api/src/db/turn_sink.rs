@@ -519,19 +519,26 @@ impl SinkState {
                 Ok(())
             }
             Err(Fenced) => {
-                let Ok(mut tx) = self.pool.begin_with("BEGIN IMMEDIATE").await else {
-                    return Err(Fenced);
-                };
-                let cancelling: Result<bool, sqlx::Error> = sqlx::query_scalar(
-                    "SELECT t.status = 'cancelling' AND b.status = 'active'
-                     FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
-                )
-                .bind(self.turn_id)
-                .fetch_one(&mut *tx)
-                .await;
-                if !matches!(cancelling, Ok(true)) {
-                    return Err(Fenced);
+                let cancelling = async {
+                    let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                    let cancelling: bool = sqlx::query_scalar(
+                        "SELECT t.status = 'cancelling' AND b.status = 'active'
+                         FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
+                    )
+                    .bind(self.turn_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    Ok::<_, sqlx::Error>((tx, cancelling))
                 }
+                .await;
+                let mut tx = match cancelling {
+                    Ok((tx, true)) => tx,
+                    Ok((_, false)) => return Err(Fenced),
+                    Err(err) => {
+                        tracing::warn!(turn = %self.turn_id, error = %err, "checking whether a fenced turn is cancelling failed");
+                        return Err(Fenced);
+                    }
+                };
                 self.fenced = false;
                 let accepted = async {
                     if self.delivers_cut {
