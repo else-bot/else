@@ -3,7 +3,6 @@ use super::request::Request;
 use crate::api::CreateBotRequest;
 use crate::avatar::{AvatarLook, AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
-use crate::preferences::PendingCreate;
 use crate::profile_picker::ProfilePicker;
 use else_wire::bots::Avatar;
 use else_wire::bots::AvatarColor;
@@ -332,12 +331,25 @@ impl ElseApp {
                 .is_some_and(|caps| caps.bot_avatar_on_create)
                 .then_some(form.avatar),
         };
+        let payload = form.request.unconfirmed_op().cloned().unwrap_or(fresh);
+        if let Err(err) = self.save_pending_create(payload.clone()) {
+            let error = format!("Couldn't save the request before sending it. {err}");
+            holder.update(cx, |h, cx| {
+                h.form.request = match h.form.request.unconfirmed_op().cloned() {
+                    Some(op) => Request::Unconfirmed { op, error },
+                    None => Request::Failed(error),
+                };
+                cx.notify();
+            });
+            window.refresh();
+            return;
+        }
         let sent = holder.update(cx, |h, cx| {
             let sent = h.form.request.retry().or_else(|| {
                 h.form
                     .request
-                    .begin(fresh.clone())
-                    .map(|attempt| (attempt, fresh))
+                    .begin(payload.clone())
+                    .map(|attempt| (attempt, payload))
             });
             if let Some(profile) = &h.form.profile {
                 profile.update(cx, |picker, cx| picker.set_disabled(true, cx));
@@ -349,15 +361,17 @@ impl ElseApp {
             return;
         };
         let request_id = payload.request_id;
-        self.set_pending_create(Some(payload.clone()));
+        self.create_attempt = Some(attempt);
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.create_bot(payload).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
-                if result.is_ok() || settled {
-                    let still = holder.read(cx).form.request.unconfirmed_op().cloned();
-                    app.settle_pending_create(request_id, still.filter(|_| result.is_err()));
+                let rejected = settled
+                    && app.create_attempt == Some(attempt)
+                    && !holder.read(cx).form.request.unconfirmed();
+                if result.is_ok() || rejected {
+                    app.clear_pending_create(request_id);
                 }
                 if let Err(err) = &result {
                     app.unauthorized(err, window, cx);
@@ -367,18 +381,19 @@ impl ElseApp {
                 }
                 match result {
                     Ok(bot) => {
-                        if app.create.as_ref() == Some(&holder) {
+                        let closing = app.create.as_ref() == Some(&holder);
+                        if closing {
                             app.create = None;
                             window.close_dialog(cx);
                         }
                         let listed = app.bots.iter().any(|b| b.id == bot.id);
                         if !listed {
                             app.bots.push(bot.clone());
-                        }
-                        app.select(Some(bot.id), window, cx);
-                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                        if !listed {
                             app.refresh_now(window, cx);
+                        }
+                        if closing || !listed {
+                            app.select(Some(bot.id), window, cx);
+                            app.composer.read(cx).focus_handle(cx).focus(window, cx);
                         }
                     }
                     Err(_) => {
@@ -403,32 +418,44 @@ impl ElseApp {
     /// The create sent to this server whose outcome is not yet known.
     fn pending_create(&self) -> Option<CreateBotRequest> {
         self.preferences
-            .pending_create
-            .as_ref()
-            .filter(|pending| pending.origin == self.client.origin().as_str())
-            .map(|pending| pending.request.clone())
+            .pending_creates
+            .get(self.client.origin().as_str())
+            .cloned()
     }
 
-    /// Saved now rather than debounced: a changed owner key replaces this
-    /// session, and the next one reads the request back from disk.
-    fn set_pending_create(&mut self, request: Option<CreateBotRequest>) {
-        let pending = request.map(|request| PendingCreate {
-            origin: self.client.origin().as_str().to_owned(),
-            request,
-        });
-        if self.preferences.pending_create != pending {
-            self.preferences.pending_create = pending;
+    /// Saved before sending, rather than debounced: a changed owner key
+    /// replaces this session, and the next one reads the request back from
+    /// disk. On failure nothing is kept, and nothing may be sent.
+    fn save_pending_create(&mut self, request: CreateBotRequest) -> Result<(), String> {
+        let origin = self.client.origin().as_str().to_owned();
+        let previous = self
+            .preferences
+            .pending_creates
+            .insert(origin.clone(), request);
+        self.preferences.save().inspect_err(|_| match previous {
+            Some(previous) => {
+                self.preferences.pending_creates.insert(origin, previous);
+            }
+            None => {
+                self.preferences.pending_creates.remove(&origin);
+            }
+        })
+    }
+
+    /// Drops the pending create once its outcome is known. A later
+    /// create's record is left alone.
+    fn clear_pending_create(&mut self, request_id: Uuid) {
+        let origin = self.client.origin().as_str();
+        if self
+            .preferences
+            .pending_creates
+            .get(origin)
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            self.preferences.pending_creates.remove(origin);
             if let Err(err) = self.preferences.save() {
                 eprintln!("{err}");
             }
-        }
-    }
-
-    /// Settles the pending create sent as `sent`, keeping `still` when its
-    /// outcome remains unknown. A later create's record is left alone.
-    fn settle_pending_create(&mut self, sent: Uuid, still: Option<CreateBotRequest>) {
-        if self.pending_create().map(|request| request.request_id) == Some(sent) {
-            self.set_pending_create(still);
         }
     }
 }

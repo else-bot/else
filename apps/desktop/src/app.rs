@@ -384,6 +384,9 @@ pub struct ElseApp {
     deleting: HashSet<Uuid>,
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
+    /// The latest Create bot attempt. Only its failure may drop the pending
+    /// create, so a stale attempt from a closed dialog cannot.
+    create_attempt: Option<Uuid>,
     welcome: Option<Welcome>,
     category_form: Option<Entity<CategoryFormHolder>>,
     model_dialog: Option<Entity<ModelDialog>>,
@@ -494,6 +497,7 @@ impl ElseApp {
             deleting: HashSet::new(),
             notice: None,
             create: None,
+            create_attempt: None,
             welcome: None,
             category_form: None,
             model_dialog: None,
