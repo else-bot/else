@@ -1,3 +1,7 @@
+mod state;
+
+pub(super) use state::{ServerPage, Settings};
+
 use super::view::{missing_local, notice};
 use super::*;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
@@ -21,12 +25,6 @@ pub(super) enum SettingsSection {
     Computers,
     Backups,
     Updates,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Presentation {
-    Onboarding,
-    Settings(SettingsSection),
 }
 
 impl Shell {
@@ -73,15 +71,14 @@ impl Shell {
                 }
             },
         );
-        self.settings.email = Some((view, subscription));
+        if let Some(settings) = self.front.settings_mut() {
+            settings.email = Some((view, subscription));
+        }
         cx.notify();
     }
 
     pub(super) fn settings_section(&self) -> Option<SettingsSection> {
-        match self.setup.as_ref()?.presentation {
-            Presentation::Onboarding => None,
-            Presentation::Settings(section) => Some(section),
-        }
+        self.front.settings().map(|settings| settings.section)
     }
 
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -91,23 +88,12 @@ impl Shell {
         if self.settings_section().is_some() {
             self.cancel(window, cx);
         }
-        self.server_editor = None;
-        self.server_update_target = None;
         let Some(active) = &self.active else { return };
-        let profile = active.profile.clone();
-        let local = self
-            .launch
-            .local
-            .as_ref()
-            .is_ok_and(|local| local.origin() == &profile.origin);
         active
             .app
             .update(cx, |app, cx| app.set_hidden(true, window, cx));
-        self.open_setup(None, window, cx);
-        if !local {
-            self.open_remote(Some(&profile), window, cx);
-        }
-        self.setup.as_mut().unwrap().presentation = Presentation::Settings(SettingsSection::Server);
+        let settings = Settings::new(cx);
+        self.set_front(Front::Settings(Box::new(settings)), window, cx);
         self.refresh_servers(window, cx);
         self.settings_focus.focus(window, cx);
         let shell = cx.weak_entity();
@@ -116,9 +102,9 @@ impl Shell {
         window.open_dialog(cx, move |dialog, window, cx| {
             if first.replace(false)
                 && let Some(shell) = shell.upgrade()
-                && let Some(setup) = &shell.read(cx).setup
+                && let Some(settings) = shell.read(cx).front.settings()
             {
-                let focus = setup.navigation_focus[0].clone();
+                let focus = settings.navigation_focus[0].clone();
                 focus.focus(window, cx);
             }
             let shell = shell.clone();
@@ -152,13 +138,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.pane().section() != Some(section) {
-            let pane = self.new_pane(section, window, cx);
-            self.settings.show(pane, window, cx);
-        }
-        if let Some(setup) = &mut self.setup {
-            setup.presentation = Presentation::Settings(section);
-            setup.navigation_focus[match section {
+        let Some(current) = self
+            .front
+            .settings()
+            .map(|settings| settings.pane().section())
+        else {
+            return;
+        };
+        let pane = (current != Some(section)).then(|| self.new_pane(section, window, cx));
+        if let Some(settings) = self.front.settings_mut() {
+            if let Some(pane) = pane {
+                settings.show(pane, window, cx);
+            }
+            settings.section = section;
+            if section == SettingsSection::Updates
+                && matches!(settings.servers, ServerPage::Update(_))
+            {
+                settings.servers = ServerPage::List;
+            }
+            settings.navigation_focus[match section {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
                 SettingsSection::Socials => 2,
@@ -173,17 +171,21 @@ impl Shell {
             .focus(window, cx);
             cx.notify();
         }
-        if section == SettingsSection::Backups && self.settings.backups.is_none() {
+        let (backups, email) = self
+            .front
+            .settings()
+            .map(|settings| (settings.backups.is_some(), settings.email.is_some()))
+            .unwrap_or_default();
+        if section == SettingsSection::Backups && !backups {
             self.open_backups(window, cx);
         }
-        if section == SettingsSection::Email && self.settings.email.is_none() {
+        if section == SettingsSection::Email && !email {
             self.open_email(None, window, cx);
         }
         if section == SettingsSection::Server {
             self.refresh_servers(window, cx);
         }
         if section == SettingsSection::Updates {
-            self.server_update_target = None;
             self.updates.refresh();
         }
     }
@@ -196,18 +198,19 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.settings.pane() {
+        let Some(settings) = self.front.settings_mut() else {
+            return;
+        };
+        match settings.pane() {
             pane::Pane::Skills(skills) => skills
                 .view
                 .update(cx, |view, cx| view.set_connected(connected, window, cx)),
-            pane::Pane::Vault(_) if !connected => {
-                self.settings.show(pane::Pane::None, window, cx);
-            }
-            pane::Pane::None
-                if connected && self.settings_section() == Some(SettingsSection::Vault) =>
-            {
+            pane::Pane::Vault(_) if !connected => settings.show(pane::Pane::None, window, cx),
+            pane::Pane::None if connected && settings.section == SettingsSection::Vault => {
                 let pane = self.new_pane(SettingsSection::Vault, window, cx);
-                self.settings.show(pane, window, cx);
+                if let Some(settings) = self.front.settings_mut() {
+                    settings.show(pane, window, cx);
+                }
             }
             _ => {}
         }
@@ -215,12 +218,10 @@ impl Shell {
 
     fn render_app_settings(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(setup) = &self.setup else {
+        let Some(settings) = self.front.settings() else {
             return div().into_any_element();
         };
-        let Some(section) = self.settings_section() else {
-            return div().into_any_element();
-        };
+        let section = settings.section;
         let nav_item = |id, label, icon, target, focus: &FocusHandle| {
             Button::new(id)
                 .focus_ring(false)
@@ -266,14 +267,14 @@ impl Shell {
                 "Servers",
                 IconName::Server,
                 SettingsSection::Server,
-                &setup.navigation_focus[0],
+                &settings.navigation_focus[0],
             ))
             .child(nav_item(
                 "settings-updates",
                 "App updates",
                 IconName::Download,
                 SettingsSection::Updates,
-                &setup.navigation_focus[7],
+                &settings.navigation_focus[7],
             ))
             .child(
                 crate::appearance::section_label("This server", cx)
@@ -287,63 +288,63 @@ impl Shell {
                 "Email",
                 IconName::Mail,
                 SettingsSection::Email,
-                &setup.navigation_focus[1],
+                &settings.navigation_focus[1],
             ))
             .child(nav_item(
                 "settings-socials",
                 "Socials",
                 IconName::MessageSquare,
                 SettingsSection::Socials,
-                &setup.navigation_focus[2],
+                &settings.navigation_focus[2],
             ))
             .child(nav_item(
                 "settings-mcp",
                 "MCP",
                 IconName::Plug,
                 SettingsSection::Mcp,
-                &setup.navigation_focus[3],
+                &settings.navigation_focus[3],
             ))
             .child(nav_item(
                 "settings-skills",
                 "Skills",
                 IconName::FileText,
                 SettingsSection::Skills,
-                &setup.navigation_focus[4],
+                &settings.navigation_focus[4],
             ))
             .child(nav_item(
                 "settings-vault",
                 "Vault",
                 IconName::Lock,
                 SettingsSection::Vault,
-                &setup.navigation_focus[9],
+                &settings.navigation_focus[9],
             ))
             .child(nav_item(
                 "settings-usage",
                 "Usage",
                 IconName::Gauge,
                 SettingsSection::Usage,
-                &setup.navigation_focus[5],
+                &settings.navigation_focus[5],
             ))
             .child(nav_item(
                 "settings-computers",
                 "Computers",
                 IconName::Monitor,
                 SettingsSection::Computers,
-                &setup.navigation_focus[8],
+                &settings.navigation_focus[8],
             ))
             .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[6],
+                &settings.navigation_focus[6],
             ));
         let body = match section {
-            SettingsSection::Server => self.render_server_settings(setup, window, cx),
+            SettingsSection::Server => self.render_server_settings(&settings.servers, window, cx),
             SettingsSection::Email => div()
-                .children(self.settings.email.as_ref().map(|(view, _)| view.clone()))
+                .children(settings.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
-            SettingsSection::Vault if self.settings.pane().section().is_none() => div()
+            SettingsSection::Vault if settings.pane().section().is_none() => div()
                 .child("Reconnect to the server to open the Vault.")
                 .into_any_element(),
             SettingsSection::Socials
@@ -351,8 +352,8 @@ impl Shell {
             | SettingsSection::Skills
             | SettingsSection::Vault
             | SettingsSection::Usage
-            | SettingsSection::Computers => self.settings.pane().element(),
-            SettingsSection::Backups => match &self.settings.backups {
+            | SettingsSection::Computers => settings.pane().element(),
+            SettingsSection::Backups => match &settings.backups {
                 Some(pane) => pane.view.clone().into_any_element(),
                 None => div()
                     .p_8()
@@ -385,7 +386,7 @@ impl Shell {
         };
         v_flex()
             .id("app-settings")
-            .track_focus(&setup.focus)
+            .track_focus(&settings.focus)
             .on_modifiers_changed(cx.listener(|shell, event: &ModifiersChangedEvent, _, cx| {
                 shell.modifiers_changed(event.modifiers, cx)
             }))
@@ -474,36 +475,39 @@ impl Shell {
 
     fn render_server_settings(
         &self,
-        setup: &Setup,
+        page: &ServerPage,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.server_update_target.is_some() {
-            return v_flex()
-                .gap_4()
-                .child(
-                    h_flex().child(
-                        Button::new("server-update-back")
-                            .control(Tier::Ghost, Scale::Compact, false, cx)
-                            .label("Back to servers")
-                            .icon(IconName::ChevronLeft)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.close_server_update(window, cx)
-                            })),
-                    ),
-                )
-                .child(self.render_updates(cx))
-                .into_any_element();
-        }
-        if self.server_editor.is_none() {
-            return self.render_server_list(cx);
-        }
-        self.render_connection_editor(setup, window, cx)
+        let (setup, editing) = match page {
+            ServerPage::List => return self.render_server_list(cx),
+            ServerPage::Add(form) => (form, false),
+            ServerPage::Edit { form, .. } => (form, true),
+            ServerPage::Update(_) => {
+                return v_flex()
+                    .gap_4()
+                    .child(
+                        h_flex().child(
+                            Button::new("server-update-back")
+                                .control(Tier::Ghost, Scale::Compact, false, cx)
+                                .label("Back to servers")
+                                .icon(IconName::ChevronLeft)
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.close_server_update(window, cx)
+                                })),
+                        ),
+                    )
+                    .child(self.render_updates(cx))
+                    .into_any_element();
+            }
+        };
+        self.render_connection_editor(setup, editing, window, cx)
     }
 
     fn render_connection_editor(
         &self,
-        setup: &Setup,
+        setup: &ConnectForm,
+        editing: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -559,8 +563,8 @@ impl Shell {
                     .toggled(matches!(setup.page, Page::Welcome))
                     .on_click(cx.listener(|shell, _, window, cx| {
                         if shell
-                            .setup
-                            .as_ref()
+                            .front
+                            .form()
                             .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
                         {
                             shell.back_to_welcome(window, cx);
@@ -579,8 +583,8 @@ impl Shell {
                 .toggled(matches!(setup.page, Page::Remote(_)))
                 .on_click(cx.listener(|shell, _, window, cx| {
                     if shell
-                        .setup
-                        .as_ref()
+                        .front
+                        .form()
                         .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
                     {
                         let profile = shell.active.as_ref().map(|active| active.profile.clone());
@@ -601,11 +605,7 @@ impl Shell {
                 ),
             )
             .child(div().pt_4().child(section_heading(
-                if matches!(self.server_editor, Some(servers::Editor::Edit(_))) {
-                    "Edit server"
-                } else {
-                    "Add server"
-                },
+                if editing { "Edit server" } else { "Add server" },
                 "Test the connection before saving it.",
                 cx,
             )))

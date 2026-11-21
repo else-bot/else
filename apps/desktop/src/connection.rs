@@ -24,7 +24,7 @@ mod view;
 pub(crate) use switcher::bind_keys;
 pub(crate) use view::brand_mark;
 
-use settings::Presentation;
+use settings::{ServerPage, Settings, SettingsSection};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -187,16 +187,88 @@ enum Page {
     Remote(RemoteForm),
 }
 
-struct Setup {
+/// The form that connects to a server: onboarding's local or remote
+/// choice, and the settings editor that adds or edits one.
+struct ConnectForm {
     id: Uuid,
-    presentation: Presentation,
     page: Page,
     draft: Draft,
     name: Entity<InputState>,
     error: Option<String>,
+    /// Where focus returns when the form goes back to its first page.
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 10],
     _attempt: Option<Task<()>>,
+}
+
+impl ConnectForm {
+    fn new(
+        error: Option<String>,
+        focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            page: Page::Welcome,
+            draft: Draft::new(),
+            name: cx.new(|cx| InputState::new(window, cx).placeholder("Server name")),
+            error,
+            focus,
+            _attempt: None,
+        }
+    }
+
+    /// Outdates the attempt in flight, so its reply never lands.
+    fn edited(&mut self) {
+        self.draft.edited();
+        self._attempt = None;
+    }
+
+    fn typed_name(&self, cx: &App) -> Option<String> {
+        Some(self.name.read(cx).value().trim().to_owned()).filter(|name| !name.is_empty())
+    }
+}
+
+/// What the window shows in front of the server sessions.
+enum Front {
+    /// No usable server yet: the full-window setup.
+    Onboarding(Box<ConnectForm>),
+    /// The active server's chat.
+    Session,
+    /// The settings sheet over the active server's chat.
+    Settings(Box<Settings>),
+}
+
+impl Front {
+    fn form(&self) -> Option<&ConnectForm> {
+        match self {
+            Self::Onboarding(form) => Some(form),
+            Self::Settings(settings) => settings.servers.form(),
+            Self::Session => None,
+        }
+    }
+
+    fn form_mut(&mut self) -> Option<&mut ConnectForm> {
+        match self {
+            Self::Onboarding(form) => Some(form),
+            Self::Settings(settings) => settings.servers.form_mut(),
+            Self::Session => None,
+        }
+    }
+
+    fn settings(&self) -> Option<&Settings> {
+        match self {
+            Self::Settings(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    fn settings_mut(&mut self) -> Option<&mut Settings> {
+        match self {
+            Self::Settings(settings) => Some(settings),
+            _ => None,
+        }
+    }
 }
 
 pub struct Shell {
@@ -207,7 +279,6 @@ pub struct Shell {
     registry: ServerRegistry,
     inactive: HashMap<Uuid, Active>,
     servers: servers::Connections,
-    server_editor: Option<servers::Editor>,
     rail: server_rail::Rail,
     hold: server_keys::Hold,
     _server_keys: [Subscription; 3],
@@ -220,15 +291,11 @@ pub struct Shell {
     icon_writes: servers::Writes<shared_icons::IconWrite>,
     /// Servers whose picture is downloading.
     icon_fetches: HashSet<Uuid>,
-    /// The name the server editor opened with.
-    editor_name: String,
     server_updates: updates::View,
     remote_updates: HashMap<Uuid, updates::View>,
-    server_update_target: Option<Uuid>,
-    setup: Option<Setup>,
+    front: Front,
     settings_focus: FocusHandle,
     updates: updates::View,
-    settings: pane::Settings,
     switcher: Option<switcher::Switcher>,
     recall: switcher::Recall,
 }
@@ -305,7 +372,6 @@ impl Shell {
             registry,
             inactive: HashMap::new(),
             servers,
-            server_editor: None,
             rail,
             hold: server_keys::Hold::Idle,
             _server_keys: server_keys,
@@ -318,12 +384,9 @@ impl Shell {
             names: Default::default(),
             icon_writes: Default::default(),
             icon_fetches: HashSet::new(),
-            editor_name: String::new(),
-            server_update_target: None,
-            setup: None,
+            front: Front::Session,
             settings_focus,
             updates,
-            settings: pane::Settings::default(),
             switcher: None,
             recall,
         };
@@ -367,18 +430,17 @@ impl Shell {
     fn open_setup(&mut self, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.setup = Some(Setup {
-            id: Uuid::new_v4(),
-            presentation: Presentation::Onboarding,
-            page: Page::Welcome,
-            draft: Draft::new(),
-            name: cx.new(|cx| InputState::new(window, cx).placeholder("Server name")),
-            error,
-            focus,
-            navigation_focus: std::array::from_fn(|_| cx.focus_handle()),
-            _attempt: None,
-        });
+        let form = ConnectForm::new(error, focus, window, cx);
+        self.set_front(Front::Onboarding(Box::new(form)), window, cx);
         cx.notify();
+    }
+
+    /// Replaces what the window shows. Leaving settings closes its panes,
+    /// so the ones holding typed secrets wipe them.
+    fn set_front(&mut self, front: Front, window: &mut Window, cx: &mut App) {
+        if let Front::Settings(mut settings) = std::mem::replace(&mut self.front, front) {
+            settings.clear(window, cx);
+        }
     }
 
     fn activate(
@@ -396,7 +458,9 @@ impl Shell {
             .active
             .as_ref()
             .map(|active| active.app.read(cx).panel_widths());
-        self.settings.clear(window, cx);
+        if let Some(settings) = self.front.settings_mut() {
+            settings.clear(window, cx);
+        }
         if let Some(mut previous) = self.active.take() {
             previous.last_focus = window
                 .focused(cx)
@@ -485,7 +549,9 @@ impl Shell {
                     shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
                 }
                 shell.connection_changed(app.read(cx).connected(), window, cx);
-                if let pane::Pane::Socials(socials) = shell.settings.pane() {
+                if let Some(pane::Pane::Socials(socials)) =
+                    shell.front.settings().map(Settings::pane)
+                {
                     let available = app.read(cx).social_network_available();
                     socials.update(cx, |view, cx| view.set_available(available, window, cx));
                 }
@@ -571,7 +637,7 @@ impl Shell {
         }
         cx.activate(true);
         window.activate_window();
-        if self.setup.is_some() {
+        if !matches!(self.front, Front::Session) {
             if self.settings_section().is_some() {
                 window.close_dialog(cx);
             }
@@ -585,9 +651,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(setup) = self.setup.as_mut() else {
+        if self.front.form().is_none() {
             return;
-        };
+        }
         let (origin, token) = remote_values(profile, self.launch.remote_seed.as_ref());
         let credential_origin = Origin::parse(&origin).ok();
         let origin = cx.new(|cx| {
@@ -608,9 +674,8 @@ impl Shell {
                         cx: &mut Context<Self>| {
             match event {
                 InputEvent::Change => {
-                    if let Some(setup) = shell.setup.as_mut() {
-                        setup.draft.edited();
-                        setup._attempt = None;
+                    if let Some(form) = shell.front.form_mut() {
+                        form.edited();
                         cx.notify();
                     }
                 }
@@ -631,9 +696,11 @@ impl Shell {
             cx.subscribe_in(&token, window, on_input),
         ];
         origin.read(cx).focus_handle(cx).focus(window, cx);
-        setup.draft.edited();
-        setup._attempt = None;
-        setup.page = Page::Remote(RemoteForm {
+        let Some(form) = self.front.form_mut() else {
+            return;
+        };
+        form.edited();
+        form.page = Page::Remote(RemoteForm {
             origin,
             token,
             _subscriptions: subscriptions,
@@ -642,13 +709,12 @@ impl Shell {
     }
 
     fn back_to_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(setup) = self.setup.as_mut() else {
+        let Some(form) = self.front.form_mut() else {
             return;
         };
-        setup.draft.edited();
-        setup._attempt = None;
-        setup.page = Page::Welcome;
-        setup.focus.focus(window, cx);
+        form.edited();
+        form.page = Page::Welcome;
+        form.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -656,7 +722,7 @@ impl Shell {
         let Ok(local) = &self.launch.local else {
             return;
         };
-        let Some(setup) = self.setup.as_mut() else {
+        let Some(setup) = self.front.form_mut() else {
             return;
         };
         if setup.draft.busy().is_some() {
@@ -708,7 +774,12 @@ impl Shell {
     }
 
     fn connect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(setup) = self.setup.as_mut() else {
+        let editing = self
+            .front
+            .settings()
+            .and_then(|settings| settings.servers.editing());
+        let onboarding = matches!(self.front, Front::Onboarding(_));
+        let Some(setup) = self.front.form_mut() else {
             return;
         };
         let Page::Remote(form) = &setup.page else {
@@ -720,17 +791,11 @@ impl Shell {
         setup.error = None;
         let (origin, token) = (form.origin.read(cx).value(), form.token.read(cx).value());
         let token = if token.trim().is_empty() {
-            match self.server_editor {
-                Some(servers::Editor::Edit(id)) => self
-                    .registry
-                    .find(id)
-                    .filter(|saved| {
-                        Origin::parse(&origin).ok().as_ref() == Some(&saved.profile.origin)
-                    })
-                    .map(|saved| saved.profile.token.expose().to_owned())
-                    .unwrap_or_else(|| token.to_string()),
-                _ => token.to_string(),
-            }
+            editing
+                .and_then(|id| self.registry.find(id))
+                .filter(|saved| Origin::parse(&origin).ok().as_ref() == Some(&saved.profile.origin))
+                .map(|saved| saved.profile.token.expose().to_owned())
+                .unwrap_or_else(|| token.to_string())
         } else {
             token.to_string()
         };
@@ -746,7 +811,7 @@ impl Shell {
                 return;
             }
         };
-        if self.server_editor.is_none()
+        if onboarding
             && self
                 .active
                 .as_ref()
@@ -768,9 +833,9 @@ impl Shell {
     }
 
     fn progress(&mut self, setup_id: Uuid, revision: u64, phase: Phase, cx: &mut Context<Self>) {
-        if let Some(setup) = self.setup.as_mut()
-            && setup.id == setup_id
-            && setup.draft.progress(revision, phase)
+        if let Some(form) = self.front.form_mut()
+            && form.id == setup_id
+            && form.draft.progress(revision, phase)
         {
             cx.notify();
         }
@@ -784,88 +849,138 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(setup) = self.setup.as_mut() else {
+        let Some(form) = self.front.form_mut() else {
             return;
         };
-        if setup.id != setup_id || !setup.draft.accepts(revision) {
+        if form.id != setup_id || !form.draft.accepts(revision) {
             return;
         }
-        let verified = setup.draft.finish(revision, outcome);
-        setup._attempt = None;
+        let verified = form.draft.finish(revision, outcome);
+        form._attempt = None;
+        let name = form.typed_name(cx);
         if let Ok(local) = &self.launch.local
-            && matches!(setup.page, Page::Welcome)
+            && matches!(form.page, Page::Welcome)
         {
             self.key = Some(LocalServer::key_state(&local.key()));
         }
         cx.notify();
-        let Some(Verified { profile, client }) = verified else {
+        let Some(verified) = verified else {
             return;
         };
-        let editing = match self.server_editor {
-            Some(servers::Editor::Edit(id)) => Some(id),
-            _ => None,
-        };
-        let name = self
-            .setup
-            .as_ref()
-            .map(|setup| setup.name.read(cx).value().trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .filter(|s| self.server_editor.is_none() || *s != self.editor_name);
-        if matches!(self.server_editor, Some(servers::Editor::Add))
-            && self
-                .registry
-                .servers
-                .iter()
-                .any(|saved| saved.profile.origin == profile.origin)
+        match &self.front {
+            Front::Onboarding(_) => self.finish_onboarding(verified, name, window, cx),
+            Front::Settings(settings) => match &settings.servers {
+                ServerPage::Add(_) => self.finish_add(verified, name, window, cx),
+                ServerPage::Edit { id, opened, .. } => {
+                    let name = name.filter(|name| name != opened);
+                    self.finish_edit(*id, verified, name, window, cx)
+                }
+                ServerPage::List | ServerPage::Update(_) => {}
+            },
+            Front::Session => {}
+        }
+        cx.notify();
+    }
+
+    /// The first server, or the saved one checked again on launch, opens.
+    fn finish_onboarding(
+        &mut self,
+        Verified { profile, client }: Verified,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.save_verified(&profile, name, None, false, window, cx) {
+            Ok(_) => self.adopt(profile, client, false, window, cx),
+            Err(error) => self.refuse(error),
+        }
+    }
+
+    /// A new server is saved beside the active one.
+    fn finish_add(
+        &mut self,
+        Verified { profile, client }: Verified,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .registry
+            .servers
+            .iter()
+            .any(|saved| saved.profile.origin == profile.origin)
         {
-            self.setup.as_mut().unwrap().error = Some(
+            self.refuse(
                 "This server address is already saved. Edit its existing connection instead."
                     .into(),
             );
             return;
         }
+        match self.save_verified(&profile, name, None, true, window, cx) {
+            Ok(true) => self.adopt(profile, client, true, window, cx),
+            Ok(false) => self.show_server_list(),
+            Err(error) => self.refuse(error),
+        }
+    }
+
+    /// A saved server's new name, address or token is saved; the active
+    /// server reconnects with it.
+    fn finish_edit(
+        &mut self,
+        id: Uuid,
+        Verified { profile, client }: Verified,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.save_verified(&profile, name, Some(id), true, window, cx) {
+            Ok(true) => self.adopt(profile, client, true, window, cx),
+            Ok(false) => self.show_server_list(),
+            Err(error) => self.refuse(error),
+        }
+    }
+
+    /// Saves a checked connection to disk before anything uses it, and
+    /// returns whether it becomes the active server. A server with unsent
+    /// drafts keeps its address and token.
+    fn save_verified(
+        &mut self,
+        profile: &Profile,
+        name: Option<String>,
+        editing: Option<Uuid>,
+        settings_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
         let typed = name.is_some();
         let before = editing
             .and_then(|id| self.registry.find(id))
             .map(|saved| saved.name.clone());
         let mut registry = self.registry.clone();
-        let id = match registry.upsert(profile.clone(), name, editing) {
-            Ok(id) => id,
-            Err(err) => {
-                self.setup.as_mut().unwrap().error = Some(err);
-                return;
-            }
-        };
+        let id = registry.upsert(profile.clone(), name, editing)?;
         let previous = self
             .active
             .as_ref()
             .filter(|session| session.id == id)
             .or_else(|| self.inactive.get(&id));
         if previous.is_some_and(|session| {
-            session.profile != profile && session.app.read(cx).has_unsaved_work(cx)
+            session.profile != *profile && session.app.read(cx).has_unsaved_work(cx)
         }) {
-            self.setup.as_mut().unwrap().error = Some("This server has unsent drafts or pending messages. Finish them before changing its address or owner token. You can still rename it.".into());
-            return;
+            return Err("This server has unsent drafts or pending messages. Finish them before changing its address or owner token. You can still rename it.".into());
         }
-        let settings_open = self.settings_section().is_some();
         let activate = !settings_open || self.active.as_ref().is_some_and(|active| active.id == id);
         if activate {
             registry.selected = Some(id);
         }
-        if let Err(err) = self
-            .launch
+        self.launch
             .store
             .as_ref()
             .map_err(Clone::clone)
-            .and_then(|store| store.save(&registry))
-        {
-            self.setup.as_mut().unwrap().error = Some(err);
-            return;
-        }
+            .and_then(|store| store.save(&registry))?;
         if self
             .inactive
             .get(&id)
-            .is_some_and(|session| session.profile != profile)
+            .is_some_and(|session| session.profile != *profile)
             && let Some(retired) = self.inactive.remove(&id)
         {
             retired
@@ -888,35 +1003,45 @@ impl Shell {
             );
         }
         self.refresh_servers(window, cx);
-        self.server_editor = None;
-        if activate {
-            if settings_open {
-                window.close_dialog(cx);
-            }
-            self.setup = None;
-            self.activate(profile, client, window, cx);
-            if settings_open {
-                self.open_settings(window, cx);
-            }
-        } else {
-            if let Some(setup) = &mut self.setup {
-                setup.page = Page::Welcome;
-            }
+        Ok(activate)
+    }
+
+    /// Makes a saved connection the active server, reopening settings
+    /// over it when they were open.
+    fn adopt(
+        &mut self,
+        profile: Profile,
+        client: Arc<Client>,
+        settings_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if settings_open {
+            window.close_dialog(cx);
         }
-        cx.notify();
+        self.set_front(Front::Session, window, cx);
+        self.activate(profile, client, window, cx);
+        if settings_open {
+            self.open_settings(window, cx);
+        }
+    }
+
+    fn refuse(&mut self, error: String) {
+        if let Some(form) = self.front.form_mut() {
+            form.error = Some(error);
+        }
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.show(pane::Pane::None, window, cx);
+        if let Some(settings) = self.front.settings_mut() {
+            settings.show(pane::Pane::None, window, cx);
+        }
         if let Some(active) = &self.active {
+            let app = active.app.clone();
             self.updates.dismiss();
             self.server_updates.dismiss();
-            self.server_editor = None;
-            self.settings.clear(window, cx);
-            self.setup = None;
-            active
-                .app
-                .update(cx, |app, cx| app.set_hidden(false, window, cx));
+            self.set_front(Front::Session, window, cx);
+            app.update(cx, |app, cx| app.set_hidden(false, window, cx));
             cx.notify();
         }
     }
@@ -970,7 +1095,7 @@ impl Render for Shell {
                         return;
                     }
                     shell.open_settings(window, cx);
-                    shell.select_settings(settings::SettingsSection::Skills, window, cx);
+                    shell.select_settings(SettingsSection::Skills, window, cx);
                 }))
                 .on_action(cx.listener(|shell, _: &OpenUsageSettings, window, cx| {
                     if window.has_active_dialog(cx) {
@@ -981,7 +1106,7 @@ impl Render for Shell {
                         .as_ref()
                         .and_then(|active| active.app.read(cx).selected_bot_id());
                     shell.open_settings(window, cx);
-                    shell.select_settings(settings::SettingsSection::Usage, window, cx);
+                    shell.select_settings(SettingsSection::Usage, window, cx);
                     shell.focus_usage(bot, cx);
                 }))
                 .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
@@ -994,9 +1119,7 @@ impl Render for Shell {
                 .size_full()
                 .bg(theme.background)
                 .text_color(theme.foreground);
-        if let Some(setup) = &self.setup
-            && setup.presentation == Presentation::Onboarding
-        {
+        if let Front::Onboarding(setup) = &self.front {
             let wide = window.viewport_size().width >= px(STORY_MIN_WIDTH);
             let start_on_enter = matches!(setup.page, Page::Welcome) && self.launch.local.is_ok();
             // macOS still needs a title bar to drag the window by.

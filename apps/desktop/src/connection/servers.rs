@@ -637,46 +637,51 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.server_update_target = None;
         if self.settings_section().is_none() && self.active.is_some() {
             self.open_settings(window, cx);
         }
-        let profile = match editor {
-            Editor::Edit(id) => self.registry.find(id).map(|s| s.profile.clone()),
-            _ => None,
+        let saved = match editor {
+            Editor::Edit(id) => self.registry.find(id).cloned(),
+            Editor::Add => None,
         };
-        if self.setup.is_none() {
-            self.open_setup(None, window, cx);
+        let Some(settings) = self.front.settings() else {
+            return;
+        };
+        let form = ConnectForm::new(None, settings.focus.clone(), window, cx);
+        let name = saved.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        form.name
+            .update(cx, |field, cx| field.set_value(name.clone(), window, cx));
+        let page = match editor {
+            Editor::Add => ServerPage::Add(form),
+            Editor::Edit(id) => ServerPage::Edit {
+                id,
+                opened: name,
+                form,
+            },
+        };
+        if let Some(settings) = self.front.settings_mut() {
+            settings.servers = page;
         }
-        self.server_editor = Some(editor);
-        self.select_settings(settings::SettingsSection::Server, window, cx);
-        let name = match editor {
-            Editor::Edit(id) => self
-                .registry
-                .find(id)
-                .map(|s| s.name.clone())
-                .unwrap_or_default(),
-            Editor::Add => String::new(),
-        };
-        self.editor_name = name.clone();
-        self.setup
-            .as_ref()
-            .unwrap()
-            .name
-            .update(cx, |field, cx| field.set_value(name, window, cx));
-        self.open_remote(profile.as_ref(), window, cx);
+        self.select_settings(SettingsSection::Server, window, cx);
+        self.open_remote(saved.as_ref().map(|s| &s.profile), window, cx);
         cx.notify();
     }
 
-    pub(super) fn close_server_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_editor = None;
-        if let Some(setup) = &mut self.setup {
-            setup._attempt = None;
-            setup.draft.edited();
-            setup.error = None;
-            setup.page = Page::Welcome;
-            setup.focus.focus(window, cx);
+    /// Back to the server list, dropping an open editor and its attempt.
+    pub(super) fn show_server_list(&mut self) {
+        if let Some(settings) = self.front.settings_mut() {
+            settings.servers = ServerPage::List;
         }
+    }
+
+    pub(super) fn close_server_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(settings) = self.front.settings_mut() else {
+            return;
+        };
+        if settings.servers.form().is_some() {
+            settings.servers = ServerPage::List;
+        }
+        settings.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -686,7 +691,10 @@ impl Shell {
             cx.notify();
             return;
         }
-        let dirty = self.settings.has_unsaved_work(cx) || self.server_editor.is_some();
+        let dirty = self
+            .front
+            .settings()
+            .is_some_and(|settings| settings.has_unsaved_work(cx));
         if dirty {
             let shell = cx.weak_entity();
             window.open_dialog(cx, move |dialog, _, cx| {
@@ -726,9 +734,8 @@ impl Shell {
     /// Shows the server at once, from its live session when it has one,
     /// and checks its connection behind it.
     fn switch_server(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(setup) = &mut self.setup {
-            setup._attempt = None;
-            setup.draft.edited();
+        if let Some(form) = self.front.form_mut() {
+            form.edited();
         }
         let Some(saved) = self.registry.find(id).cloned() else {
             return;
@@ -759,8 +766,7 @@ impl Shell {
         self._prefetch = None;
         let from = self.active.as_ref().map(|active| active.id);
         let section = self.settings_section();
-        self.server_editor = None;
-        self.server_update_target = None;
+        self.show_server_list();
         self.activate(saved.profile.clone(), client, window, cx);
         let Some(active) = self.active.as_ref().filter(|active| active.id == id) else {
             return;
@@ -770,11 +776,6 @@ impl Shell {
             active
                 .app
                 .update(cx, |app, cx| app.set_hidden(true, window, cx));
-            if let Some(setup) = &mut self.setup {
-                setup.page = Page::Welcome;
-                setup.draft.edited();
-                setup._attempt = None;
-            }
             self.select_settings(section, window, cx);
         }
         if let Some(arrival) = self.arrival.take()
@@ -1038,7 +1039,9 @@ impl Shell {
             cx.notify();
             return;
         }
-        self.server_update_target = Some(id);
+        if let Some(settings) = self.front.settings_mut() {
+            settings.servers = ServerPage::Update(id);
+        }
         self.remote_updates
             .get(&id)
             .unwrap_or(&self.server_updates)
@@ -1047,8 +1050,20 @@ impl Shell {
     }
 
     pub(super) fn close_server_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.server_update_target = None;
+        if let Some(settings) = self.front.settings_mut()
+            && matches!(settings.servers, ServerPage::Update(_))
+        {
+            settings.servers = ServerPage::List;
+        }
         cx.notify();
+    }
+
+    /// The saved server whose update card shows instead of the list.
+    pub(super) fn server_update_target(&self) -> Option<Uuid> {
+        match self.front.settings()?.servers {
+            ServerPage::Update(id) => Some(id),
+            _ => None,
+        }
     }
 }
 

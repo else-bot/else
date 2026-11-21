@@ -9,7 +9,7 @@ use gpui_kit::component::{Icon, Theme, h_flex};
 impl Shell {
     pub(super) fn render_setup(
         &self,
-        setup: &Setup,
+        setup: &ConnectForm,
         wide: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -44,7 +44,7 @@ impl Shell {
 
     pub(super) fn render_welcome(
         &self,
-        setup: &Setup,
+        setup: &ConnectForm,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -233,7 +233,7 @@ impl Shell {
 
     pub(super) fn render_remote(
         &self,
-        setup: &Setup,
+        setup: &ConnectForm,
         form: &RemoteForm,
         theme: &Theme,
         cx: &mut Context<Self>,

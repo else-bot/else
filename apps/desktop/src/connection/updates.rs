@@ -258,13 +258,13 @@ impl Shell {
     pub(super) fn update_action(&mut self, action: Action, cx: &mut Context<Self>) {
         if matches!(action, Action::Install)
             && !self
-                .server_update_target
+                .server_update_target()
                 .is_some_and(|id| self.remote_updates.contains_key(&id))
             && (self.updates.busy() || self.server_updates.busy())
         {
             return;
         }
-        let target = self.server_update_target;
+        let target = self.server_update_target();
         let view = match target.and_then(|id| self.remote_updates.get_mut(&id)) {
             Some(view) => view,
             None if target.is_some() => &mut self.server_updates,
@@ -296,18 +296,18 @@ impl Shell {
 
     fn update_view(&self) -> &View {
         match self
-            .server_update_target
+            .server_update_target()
             .and_then(|id| self.remote_updates.get(&id))
         {
             Some(view) => view,
-            None if self.server_update_target.is_some() => &self.server_updates,
+            None if self.server_update_target().is_some() => &self.server_updates,
             None => &self.updates,
         }
     }
 
     pub(super) fn render_updates(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let server = self.server_update_target;
+        let server = self.server_update_target();
         let view = self.update_view();
         let snapshot = &view.snapshot;
         let output_visible = view.output_visible();
@@ -604,7 +604,7 @@ impl Shell {
         theme: &Theme,
     ) -> Option<(&'static str, String, IconName, Hsla)> {
         let snapshot = &view.snapshot;
-        let waiting = self.server_update_target.is_some()
+        let waiting = self.server_update_target().is_some()
             && snapshot.unavailable.is_none()
             && matches!(snapshot.check, UpdateCheck::Available { .. })
             && matches!(
@@ -650,7 +650,7 @@ impl Shell {
 
     fn render_update_actions(&self, cx: &Context<Self>) -> AnyElement {
         let view = self.update_view();
-        let server = self.server_update_target.is_some();
+        let server = self.server_update_target().is_some();
         let snapshot = &view.snapshot;
         let primary = match &snapshot.operation {
             Operation::Preparing

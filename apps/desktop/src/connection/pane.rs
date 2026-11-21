@@ -67,7 +67,7 @@ impl Shell {
 
 /// The settings pane that is open besides the two kept warm. Panes that
 /// hold typed secrets wipe them in [`Pane::close`], which runs whenever a
-/// pane is replaced through [`Settings::show`].
+/// pane is replaced through [`super::Settings::show`].
 #[derive(Default)]
 pub(super) enum Pane {
     #[default]
@@ -93,7 +93,7 @@ impl Pane {
         })
     }
 
-    fn close(self, window: &mut Window, cx: &mut App) {
+    pub(super) fn close(self, window: &mut Window, cx: &mut App) {
         match self {
             Self::Skills(pane) => pane.view.update(cx, |view, cx| view.clear_keys(window, cx)),
             Self::Vault(view) => view.update(cx, |view, cx| view.close(window, cx)),
@@ -102,7 +102,7 @@ impl Pane {
         }
     }
 
-    fn has_unsaved_work(&self, cx: &App) -> bool {
+    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
         match self {
             Self::Mcp(pane) => pane.view.read(cx).has_unsaved_work(),
             Self::Skills(pane) => pane.view.read(cx).has_unsaved_work(cx),
@@ -123,47 +123,6 @@ impl Pane {
             Self::Vault(view) => div().child(view.clone()).into_any_element(),
             Self::Socials(view) => div().child(view.clone()).into_any_element(),
         }
-    }
-}
-
-/// The server's settings panes: the open one, and Backups and Email,
-/// which stay warm while other sections show.
-#[derive(Default)]
-pub(super) struct Settings {
-    /// Private, so a pane can only leave through [`Settings::show`].
-    pane: Pane,
-    pub backups: Option<Mounted<backups::View>>,
-    pub email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
-}
-
-impl Settings {
-    pub(super) fn pane(&self) -> &Pane {
-        &self.pane
-    }
-
-    /// Replaces the open pane. Every pane leaves through here, so its
-    /// secrets are wiped before it drops.
-    pub(super) fn show(&mut self, pane: Pane, window: &mut Window, cx: &mut App) {
-        std::mem::replace(&mut self.pane, pane).close(window, cx);
-    }
-
-    /// Drops every pane, the warm ones too.
-    pub(super) fn clear(&mut self, window: &mut Window, cx: &mut App) {
-        self.show(Pane::None, window, cx);
-        self.backups = None;
-        self.email = None;
-    }
-
-    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
-        self.pane.has_unsaved_work(cx)
-            || self
-                .backups
-                .as_ref()
-                .is_some_and(|pane| pane.view.read(cx).has_unsaved_work(cx))
-            || self
-                .email
-                .as_ref()
-                .is_some_and(|(view, _)| view.read(cx).has_unsaved_work(cx))
     }
 }
 
@@ -231,7 +190,9 @@ impl Shell {
             return;
         }
         let pane = self.new_pane(section, window, cx);
-        self.settings.show(pane, window, cx);
+        if let Some(settings) = self.front.settings_mut() {
+            settings.show(pane, window, cx);
+        }
         cx.notify();
     }
 }

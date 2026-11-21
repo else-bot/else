@@ -47,7 +47,7 @@ impl EventEmitter<PaneEvent> for View {}
 
 impl Shell {
     pub(super) fn focus_usage(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
-        if let super::pane::Pane::Usage(pane) = self.settings.pane() {
+        if let Some(super::pane::Pane::Usage(pane)) = self.front.settings().map(Settings::pane) {
             pane.view.update(cx, |view, cx| view.focus(bot, cx));
         }
     }

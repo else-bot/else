@@ -81,8 +81,10 @@ impl Shell {
         let Some(active) = &self.active else { return };
         let client = active.client.clone();
         let view = cx.new(|cx| View::new(client, window, cx));
-        self.settings.backups =
-            Some(self.mount(view, super::settings::SettingsSection::Backups, window, cx));
+        let pane = self.mount(view, super::settings::SettingsSection::Backups, window, cx);
+        if let Some(settings) = self.front.settings_mut() {
+            settings.backups = Some(pane);
+        }
         cx.notify();
     }
 }
