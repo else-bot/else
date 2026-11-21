@@ -190,6 +190,8 @@ impl ElseApp {
                 let _ = entity.update(cx, |app, cx| {
                     if app.width != Some(width) {
                         app.width = Some(width);
+                        // A notify while drawing reaches no observer.
+                        app.sync_panel_inputs(cx);
                         cx.notify();
                     }
                 });
@@ -202,7 +204,10 @@ impl ElseApp {
 
     /// The bot details panel's laid-out width, as `render_settings` sizes it.
     pub(super) fn details_panel_width(&self, window: &Window) -> f32 {
-        let viewport = self.width(window);
+        self.details_panel_width_in(self.width(window))
+    }
+
+    pub(super) fn details_panel_width_in(&self, viewport: f32) -> f32 {
         self.preferences
             .details_width
             .min((viewport - 360.).max(280.))

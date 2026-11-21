@@ -39,6 +39,8 @@ use watchers::WatcherStop;
 pub(super) struct BotPanel {
     bot: Uuid,
     client: Arc<Client>,
+    /// For a rejected owner token, which outlives the panel's bot.
+    app: WeakEntity<ElseApp>,
     inputs: PanelInputs,
     details: Details,
     /// The bot's `metadata_revision` when its profile was last loaded: a
@@ -56,8 +58,7 @@ pub(super) struct BotPanel {
     /// opened on, so a new reason starts folded.
     expanded_routine_problems: HashMap<Uuid, String>,
     watcher_clock: Option<Task<()>>,
-    /// The width the panel was last laid out at, or will be at when it
-    /// opens.
+    /// The panel's width inside its border.
     width: f32,
 }
 
@@ -73,12 +74,12 @@ pub(super) struct PanelInputs {
     /// The tab on screen, while the panel shows this bot.
     pub(super) shown: Option<DetailsTab>,
     pub(super) computer: Option<Entity<ComputerView>>,
+    /// The panel's width inside its border, once the window was laid out.
+    pub(super) width: Option<f32>,
 }
 
 /// What the panel asks of the window.
 pub(super) enum PanelEvent {
-    /// The server rejected the owner token.
-    Unauthorized,
     /// A change response, for the bot's conversation.
     RoutineSaved(Box<Routine>),
     ChangeModel,
@@ -88,6 +89,12 @@ pub(super) enum PanelEvent {
 }
 
 impl EventEmitter<PanelEvent> for BotPanel {}
+
+/// Hands a rejected owner token to the window, even after the panel that
+/// sent the request is gone.
+fn report_unauthorized(app: &WeakEntity<ElseApp>, err: &ClientError, cx: &mut AsyncWindowContext) {
+    let _ = app.update_in(cx, |app, window, cx| app.unauthorized(err, window, cx));
+}
 
 /// A bot's panel and its event subscription.
 pub(super) struct PanelSlot {
@@ -176,6 +183,7 @@ impl BotPanel {
     fn new(
         bot: &Bot,
         client: Arc<Client>,
+        app: WeakEntity<ElseApp>,
         inputs: PanelInputs,
         width: f32,
         window: &mut Window,
@@ -184,7 +192,8 @@ impl BotPanel {
         let mut panel = Self {
             bot: bot.id,
             client,
-            inputs,
+            app,
+            inputs: PanelInputs::default(),
             details: Details::new(bot, window, cx),
             revision: bot.metadata_revision,
             model: ModelState::Loading(Uuid::nil()),
@@ -198,6 +207,7 @@ impl BotPanel {
             width,
         };
         panel.load_profile(window, cx);
+        panel.set_inputs(inputs, cx);
         panel
     }
 
@@ -205,6 +215,9 @@ impl BotPanel {
         if let Some(automations) = &inputs.automations {
             self.sync_watchers(&automations.watchers);
             self.sync_triggers(automations);
+        }
+        if let Some(width) = inputs.width {
+            self.width = width;
         }
         self.inputs = inputs;
         self.sync_watcher_clock(cx);
@@ -223,8 +236,7 @@ impl BotPanel {
     }
 
     /// Opening the panel reads the profile again, unless a read is running.
-    fn reopened(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.width = width;
+    fn reopened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.model.pending() {
             self.load_profile(window, cx);
         }
@@ -244,32 +256,6 @@ impl BotPanel {
 
     pub(super) fn rules(&self) -> &RulesSummary {
         &self.inputs.rules
-    }
-
-    /// Reports a rejected owner token to the window.
-    fn unauthorized(&self, err: &ClientError, cx: &mut Context<Self>) {
-        if matches!(err, ClientError::Unauthorized) {
-            cx.emit(PanelEvent::Unauthorized);
-        }
-    }
-
-    /// An invisible layer that records the panel's laid-out width.
-    fn measure_width(cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity().downgrade();
-        canvas(
-            move |bounds, _, cx| {
-                let width = f32::from(bounds.size.width);
-                let _ = entity.update(cx, |panel, cx| {
-                    if panel.width != width {
-                        panel.width = width;
-                        cx.notify();
-                    }
-                });
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
     }
 }
 
@@ -301,20 +287,14 @@ impl Render for BotPanel {
         }
         // Both tabs open on the bot itself: its avatar and name, where both
         // are edited, so the Computer tab is anchored the same way.
-        v_flex()
-            .size_full()
-            .relative()
-            .child(Self::measure_width(cx))
-            .child(self.render_identity(cx))
-            .child(
-                // Rows dissolve under the tabs and the footer instead of
-                // being sliced at the rule.
-                div().flex_1().min_h_0().child(crate::panel_kit::faded(
-                    body,
-                    theme.sidebar,
-                    px(0.),
-                )),
-            )
+        v_flex().size_full().child(self.render_identity(cx)).child(
+            // Rows dissolve under the tabs and the footer instead of
+            // being sliced at the rule.
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(crate::panel_kit::faded(body, theme.sidebar, px(0.))),
+        )
     }
 }
 
@@ -336,8 +316,7 @@ impl ElseApp {
         self.details.toggle();
         if self.details.open() {
             if let Some(panel) = self.selected.and_then(|id| self.panel(id)).cloned() {
-                let width = self.details_body_width(window);
-                panel.update(cx, |panel, cx| panel.reopened(width, window, cx));
+                panel.update(cx, |panel, cx| panel.reopened(window, cx));
             }
         } else {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -374,8 +353,9 @@ impl ElseApp {
         }
         let client = self.client.clone();
         let inputs = self.panel_inputs(bot.id);
-        let width = self.details_body_width(window);
-        let panel = cx.new(|cx| BotPanel::new(&bot, client, inputs, width, window, cx));
+        let width = self.details_panel_width(window) - 1.;
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| BotPanel::new(&bot, client, app, inputs, width, window, cx));
         let id = bot.id;
         let events = cx.subscribe_in(&panel, window, move |app, _, event, window, cx| {
             app.on_panel_event(id, event, window, cx)
@@ -397,9 +377,6 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         match event {
-            PanelEvent::Unauthorized => {
-                self.unauthorized(&ClientError::Unauthorized, window, cx);
-            }
             PanelEvent::RoutineSaved(saved) => {
                 self.apply_routine(bot, (**saved).clone());
                 cx.notify();
@@ -429,9 +406,11 @@ impl ElseApp {
         self.ensure_settings(window, cx);
     }
 
-    /// The panel's width inside its 1 px border.
-    fn details_body_width(&self, window: &Window) -> f32 {
-        self.details_panel_width(window) - 1.
+    /// The panel's width inside its 1 px border, once the window was laid
+    /// out.
+    fn details_body_width(&self) -> Option<f32> {
+        self.width
+            .map(|viewport| self.details_panel_width_in(viewport) - 1.)
     }
 
     fn panel_inputs(&self, bot: Uuid) -> PanelInputs {
@@ -444,6 +423,7 @@ impl ElseApp {
             rules: self.rules_summary(bot),
             shown,
             computer: shown.and(self.details.computer().cloned()),
+            width: self.details_body_width(),
         }
     }
 
@@ -455,8 +435,9 @@ impl ElseApp {
             .map(Conversation::extras)
     }
 
-    /// Pushes what changed to each panel. Runs after every notify of the
-    /// window, so no change to what the panels read can miss them.
+    /// Pushes what changed to each panel. It runs after each notify of the
+    /// window, so a change to what the panels read must notify it; a notify
+    /// during drawing calls it directly.
     pub(super) fn sync_panel_inputs(&mut self, cx: &mut Context<Self>) {
         for (&bot, slot) in &self.panels {
             let current = &slot.panel.read(cx).inputs;
@@ -469,6 +450,7 @@ impl ElseApp {
                 && current.rules == rules
                 && current.shown == shown
                 && current.computer.as_ref() == shown.and(self.details.computer())
+                && current.width == self.details_body_width()
             {
                 continue;
             }

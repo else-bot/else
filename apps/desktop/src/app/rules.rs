@@ -1073,7 +1073,7 @@ mod tests {
             "history": history.iter().map(|(version, section, change)| json!({
                 "version": version, "section": section, "change": change,
                 "owner_words": "", "author": "bot", "restored_from": null, "diff": [],
-                "created_at": "2026-11-20T09:00:00Z", "undone_at": null,
+                "created_at": format!("2026-11-{}T09:00:00Z", 20 + version), "undone_at": null,
             })).collect::<Vec<_>>(),
         }))
         .unwrap()
@@ -1116,7 +1116,7 @@ mod tests {
                 (1, "Deploys", "added"),
             ],
         );
-        let updated = Some("2026-11-20T09:00:00Z".parse().unwrap());
+        let updated = Some("2026-11-23T09:00:00Z".parse().unwrap());
         assert_eq!(
             summarize(Some(&cache(Some(rules.clone()), None)), Some(1)),
             RulesSummary::Rules {

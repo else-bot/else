@@ -1,4 +1,4 @@
-use super::{BotPanel, automation_section};
+use super::{BotPanel, automation_section, report_unauthorized};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::panel::{alert, item_name, meta, meta_line};
 use crate::app::request::Request;
@@ -65,6 +65,7 @@ impl BotPanel {
         };
         cx.notify();
         let (client, bot) = (self.client.clone(), self.bot);
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match (source, enabled) {
                 (TriggerSource::Mail { account }, Some(wake)) => {
@@ -83,17 +84,23 @@ impl BotPanel {
                 }
                 (TriggerSource::Webhook { id }, None) => client.delete_webhook(bot, id).await,
             };
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
             let _ = this.update(cx, |panel, cx| {
-                if let Err(err) = &result {
-                    panel.unauthorized(err, cx);
-                }
                 let action = if enabled.is_some() { "save" } else { "delete" };
                 let settled = panel.triggers.get_mut(&source.key()).is_some_and(|save| {
                     save.settle_as(attempt, &result, |err| format!("Couldn't {action}. {err}"))
                 });
-                if settled && result.is_err() {
-                    cx.notify();
+                if !settled {
+                    return;
                 }
+                // A change that matched the server's value publishes no
+                // update to release the switch.
+                if let Some(automations) = panel.inputs.automations.clone() {
+                    panel.sync_triggers(&automations);
+                }
+                cx.notify();
             });
         })
         .detach();

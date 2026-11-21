@@ -6,7 +6,7 @@ use else_wire::settings::BotProfile;
 
 use else_wire::settings::Capabilities;
 
-use super::{BotPanel, PanelEvent};
+use super::{BotPanel, PanelEvent, report_unauthorized};
 use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::request::Request;
@@ -309,12 +309,13 @@ impl BotPanel {
         cx.notify();
         let client = self.client.clone();
         let bot = self.bot;
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_bot_profile(bot, choice).await;
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
             let _ = this.update(cx, |panel, cx| {
-                if let Err(err) = &result {
-                    panel.unauthorized(err, cx);
-                }
                 if !panel.model_upgrade.settle(attempt, &result) {
                     return;
                 }

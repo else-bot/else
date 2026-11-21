@@ -1,7 +1,7 @@
 mod card;
 
 use super::schedule_text::local_time;
-use super::{BotPanel, PanelEvent, automation_section};
+use super::{BotPanel, PanelEvent, automation_section, report_unauthorized};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::request::Request;
 use else_wire::routines::PausedReason;
@@ -92,12 +92,13 @@ impl BotPanel {
         };
         let request = request(attempt);
         cx.notify();
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
             let _ = this.update(cx, |panel, cx| {
-                if let Err(err) = &result {
-                    panel.unauthorized(err, cx);
-                }
                 if !panel.settle_routine_change(routine, attempt, &result, |err| {
                     if retrying {
                         retry_failure(err)
@@ -198,12 +199,13 @@ impl BotPanel {
         };
         cx.notify();
         let (client, bot) = (self.client.clone(), self.bot);
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_routine(bot, routine).await;
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
             let _ = this.update(cx, |panel, cx| {
-                if let Err(err) = &result {
-                    panel.unauthorized(err, cx);
-                }
                 let settled = panel.settle_routine_change(routine, attempt, &result, |err| {
                     format!("Couldn't delete. {err}")
                 });
