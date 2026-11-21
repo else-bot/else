@@ -27,13 +27,13 @@ use serde_json::Value;
 use super::cli::attempt::{self, Channel, Ended};
 use super::cli::session::PreparedTurn;
 use super::cli::stream::{Prompt, StreamAttempt};
-use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, Stream, ToolSet};
 use super::cursor_home::{self, Login};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, Run};
 use super::models::Listed;
 use super::prompt;
-use crate::app::providers::{Stop, TurnInput, TurnSink};
+use crate::app::providers::{Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::{Message, Tracker};
 
 pub const ID: &str = "cursor";
@@ -252,7 +252,6 @@ impl Channel for Running<'_> {
 #[async_trait]
 impl Adapter for CursorCli {
     type Login = Login;
-    type Protocol = Tracker;
 
     const DEFINITION: &'static Definition = &DEFINITION;
     const PRODUCT: &'static str = "Cursor CLI";
@@ -270,6 +269,56 @@ impl Adapter for CursorCli {
             ToolSet::None => "tools:none",
         }
     }
+
+    async fn run(
+        &self,
+        cli: &Cli<Self>,
+        ready: &Ready<Login>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        cli.stream(ready, profile, input, sink, stop).await
+    }
+
+    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
+        // Listing runs no agent, so it reads the host login where it is.
+        let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
+        if let Some(store) = &ready.login.store {
+            env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
+        }
+        let run = Run {
+            env,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&ready.program.current().await?, &["models"])
+        };
+        let printed = ready
+            .host
+            .run(&run)
+            .await
+            .map(|out| String::from_utf8_lossy(&out).into_owned())
+            .map_err(|e| e.to_string())
+            .map_err(|why| {
+                if cursor_home::refused_login(&why) {
+                    cursor_home::SIGNED_OUT.to_owned()
+                } else {
+                    format!("`cursor-agent models` failed: {why}")
+                }
+            })?;
+        match listed_models(&printed) {
+            listed if listed.is_empty() => Err(format!(
+                "`cursor-agent models` listed no models: {}",
+                printed.trim()
+            )),
+            listed => Ok(listed),
+        }
+    }
+}
+
+#[async_trait]
+impl Stream for CursorCli {
+    type Protocol = Tracker;
 
     fn policy(&self, ready: &Ready<Login>) -> Vec<String> {
         let account = ready
@@ -368,39 +417,6 @@ impl Adapter for CursorCli {
             },
         };
         attempt::drive(&mut running, protocol, turn, sink, stop, DEFINITION.label).await
-    }
-
-    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
-        // Listing runs no agent, so it reads the host login where it is.
-        let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
-        if let Some(store) = &ready.login.store {
-            env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
-        }
-        let run = Run {
-            env,
-            timeout: super::models::ASK_TIMEOUT,
-            ..Run::new(&ready.program.current().await?, &["models"])
-        };
-        let printed = ready
-            .host
-            .run(&run)
-            .await
-            .map(|out| String::from_utf8_lossy(&out).into_owned())
-            .map_err(|e| e.to_string())
-            .map_err(|why| {
-                if cursor_home::refused_login(&why) {
-                    cursor_home::SIGNED_OUT.to_owned()
-                } else {
-                    format!("`cursor-agent models` failed: {why}")
-                }
-            })?;
-        match listed_models(&printed) {
-            listed if listed.is_empty() => Err(format!(
-                "`cursor-agent models` listed no models: {}",
-                printed.trim()
-            )),
-            listed => Ok(listed),
-        }
     }
 }
 

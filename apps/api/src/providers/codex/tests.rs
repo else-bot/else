@@ -1,21 +1,26 @@
 use super::policy::Reported;
 use super::*;
-use crate::app::providers::{FailureCode, HistoryEntry, MemoryContext, SessionState};
+use crate::app::providers::{
+    Availability, FailureCode, HistoryEntry, MemoryContext, Provider, SessionState,
+};
 use crate::db::turns::ItemKind;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 impl Codex {
     fn offline(tool_url: Option<&str>) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Ok(Ready {
+        let codex = Self::new(
+            CodexServer,
+            Ok(Ready {
                 host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
                 program: PathBuf::new().into(),
-                auth: PathBuf::new(),
                 version: "codex-cli 9.0.0".into(),
+                login: PathBuf::new(),
             }),
-            tool_url: tool_url.map(str::to_owned),
+        );
+        match tool_url {
+            Some(url) => codex.with_tools(url.to_owned()),
+            None => codex,
         }
     }
 

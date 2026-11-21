@@ -52,13 +52,13 @@ use uuid::Uuid;
 use super::cli::attempt::{Channel, Ended, Event, Protocol};
 use super::cli::session::PreparedTurn;
 use super::cli::stream::{Interrupt, Prompt, StreamAttempt};
-use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, Stream, ToolSet};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::Listed;
 use super::prompt;
 use super::{attachments, claude_home};
-use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnSink};
+use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
@@ -316,7 +316,6 @@ fn interrupt_request() -> String {
 #[async_trait]
 impl Adapter for ClaudeCode {
     type Login = Login;
-    type Protocol = Tracker;
 
     const DEFINITION: &'static Definition = &DEFINITION;
     const PRODUCT: &'static str = "Claude Code";
@@ -330,6 +329,73 @@ impl Adapter for ClaudeCode {
             ToolSet::None => "tools:none",
         }
     }
+
+    async fn run(
+        &self,
+        cli: &Cli<Self>,
+        ready: &Ready<Login>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        cli.stream(ready, profile, input, sink, stop).await
+    }
+
+    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
+        let mut env = ready.login.config.env();
+        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
+        let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
+        let run = Run {
+            env,
+            input: request.into_bytes(),
+            limit: protocol::MODELS_LIMIT,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(
+                &ready.program.current().await?,
+                &[
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--setting-sources",
+                    "",
+                    "--strict-mcp-config",
+                    "--tools",
+                    "",
+                    "--no-session-persistence",
+                ],
+            )
+        };
+        ready
+            .host
+            .ask(&run, |line| protocol::listed_models(line, MODELS_REQUEST))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|listed| listed)
+            .map_err(|why| format!("Claude Code did not list its models: {why}"))
+    }
+
+    async fn checkpoint(
+        &self,
+        cli: &Claude,
+        request: CheckpointRequest,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let ready = cli.ready()?;
+        let profile = request.profile.ok_or("no saved Claude execution profile")?;
+        cli.models.validate(&profile)?;
+        let text =
+            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
+        super::bounded_checkpoint(text, request.max_bytes)
+    }
+}
+
+#[async_trait]
+impl Stream for ClaudeCode {
+    type Protocol = Tracker;
 
     fn policy(&self, ready: &Ready<Login>) -> Vec<String> {
         vec!["agents:disabled".into(), ready.login.account.clone()]
@@ -392,56 +458,6 @@ impl Adapter for ClaudeCode {
         stop: &Stop,
     ) -> Ended {
         attempt.drive(protocol, turn, sink, stop).await
-    }
-
-    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
-        let mut env = ready.login.config.env();
-        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
-        let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
-        let run = Run {
-            env,
-            input: request.into_bytes(),
-            limit: protocol::MODELS_LIMIT,
-            timeout: super::models::ASK_TIMEOUT,
-            ..Run::new(
-                &ready.program.current().await?,
-                &[
-                    "-p",
-                    "--input-format",
-                    "stream-json",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--setting-sources",
-                    "",
-                    "--strict-mcp-config",
-                    "--tools",
-                    "",
-                    "--no-session-persistence",
-                ],
-            )
-        };
-        ready
-            .host
-            .ask(&run, |line| protocol::listed_models(line, MODELS_REQUEST))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|listed| listed)
-            .map_err(|why| format!("Claude Code did not list its models: {why}"))
-    }
-
-    async fn checkpoint(
-        &self,
-        cli: &Claude,
-        request: CheckpointRequest,
-        cancel: &CancellationToken,
-    ) -> Result<String, String> {
-        let ready = cli.ready()?;
-        let profile = request.profile.ok_or("no saved Claude execution profile")?;
-        cli.models.validate(&profile)?;
-        let text =
-            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
-        super::bounded_checkpoint(text, request.max_bytes)
     }
 }
 

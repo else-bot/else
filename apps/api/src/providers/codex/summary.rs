@@ -49,7 +49,7 @@ impl Codex {
         let dirs = host
             .bot_dirs(bot_id, "codex-summary")
             .map_err(|e| e.to_string())?;
-        codex_home::prepare(&dirs, &ready.auth, None, false).map_err(|e| e.to_string())?;
+        codex_home::prepare(&dirs, &ready.login, None, false).map_err(|e| e.to_string())?;
         let mut spec = LaunchSpec {
             turn_id: uuid::Uuid::new_v4(),
             program: ready.program.current().await?,
