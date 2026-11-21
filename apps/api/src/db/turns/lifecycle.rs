@@ -188,13 +188,8 @@ pub async fn continue_waiting(
 
 /// A turn whose every pending hold is a job or a task: the owner's Stop
 /// leaves it parked on them. One that also waits on the owner ends.
-const ONLY_JOBS_AND_TASKS: &str = "(SELECT coalesce(sum(h.pending), 0) FROM turn_holds h
-         WHERE h.turn_id = turns.id)
-     = (SELECT count(*) FROM delegations d
-        WHERE d.root_turn_id = turns.id AND d.status IN ('queued', 'running'))
-       + (SELECT count(*) FROM mcp_waits w WHERE w.turn_id = turns.id AND w.status = 'pending')
-       + (SELECT count(*) FROM computer_job_waits w
-          WHERE w.turn_id = turns.id AND w.status = 'pending')";
+const ONLY_JOBS_AND_TASKS: &str = "NOT EXISTS (SELECT 1 FROM turn_holds h
+         WHERE h.turn_id = turns.id AND h.pending AND h.kind = 'owner')";
 
 /// Park `bot`'s queued turns up to `boundary` that wait only on jobs and
 /// tasks, for the owner's Stop. Returns them.

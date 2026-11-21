@@ -1094,6 +1094,23 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
         .await,
         Err(StoreError::Changed)
     ));
+    sqlx::query("UPDATE bots SET cancel_pending = 1 WHERE id = ?1")
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin(Uuid::new_v4(), archive.clone()).await,
+            Err(StoreError::NotRunning)
+        ),
+        "a bot the owner is stopping uses no more tools"
+    );
+    sqlx::query("UPDATE bots SET cancel_pending = 0 WHERE id = ?1")
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
     set_turn(&db, running, "completed").await;
     assert!(matches!(
         begin(Uuid::new_v4(), archive.clone()).await,

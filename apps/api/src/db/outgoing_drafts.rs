@@ -250,11 +250,7 @@ pub async fn for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<OutgoingDraft>> = HashMap::new();
-    for row in rows {
-        by_turn.entry(row.turn_id).or_default().push(row);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
 async fn caller(
@@ -1389,25 +1385,4 @@ pub async fn notes(
                 && matches!(row.status, Status::Approved | Status::Discarded),
         })
         .collect())
-}
-
-/// Record that `attempt` received these owner decisions.
-pub async fn mark_delivered(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    attempt: i32,
-    ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE outgoing_drafts SET delivered_attempt = ?3
-         WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND {}",
-        in_ids("id", "?2")
-    )))
-    .bind(turn_id)
-    .bind(Json(ids))
-    .bind(attempt)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }

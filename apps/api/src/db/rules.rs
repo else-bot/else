@@ -10,7 +10,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::{ConversationKind, TurnStatus};
+use super::turns::ConversationKind;
 use crate::app::providers::Origin;
 use crate::app::rules::{
     Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules, RulesUpdate,
@@ -115,19 +115,17 @@ async fn authorize_turn(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Authority, RulesError> {
-    let row: Option<(Uuid, TurnStatus, BotStatus, ConversationKind, Option<Uuid>)> =
-        sqlx::query_as(
-            "SELECT t.bot_id, t.status, b.status, c.kind, d.owner_question_id
-         FROM turns t JOIN bots b ON b.id = t.bot_id
-         JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
+    let row: Option<(Uuid, ConversationKind, Option<Uuid>)> = sqlx::query_as(
+        "SELECT t.bot_id, c.kind, d.owner_question_id
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
          LEFT JOIN delegations d ON d.child_turn_id = t.id
          WHERE t.id = ?1 AND t.conversation_id = ?2",
-        )
-        .bind(caller.turn_id)
-        .bind(caller.conversation_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    let Some((bot, status, bot_status, kind, question)) = row else {
+    )
+    .bind(caller.turn_id)
+    .bind(caller.conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((bot, kind, question)) = row else {
         return Err(RulesError::NotRunning);
     };
     if bot != caller.bot_id {
@@ -157,7 +155,10 @@ async fn authorize_turn(
         }
         _ => return Err(RulesError::NotAllowed),
     };
-    if !status.serves_tools() || !bot_status.is_active() {
+    if super::turns::asking_caller(conn, caller.turn_id)
+        .await?
+        .is_none()
+    {
         return Err(RulesError::NotRunning);
     }
     Ok(authority)

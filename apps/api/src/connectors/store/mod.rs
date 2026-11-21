@@ -28,7 +28,6 @@ use super::types::{
 use crate::connector_core::actions::{BeginError, Column, Columns, Ledger, Start, Status};
 use crate::connector_core::inbound::DeliveryStatus;
 use crate::credentials::SecretKey;
-use crate::db::turns::TurnStatus;
 
 mod accounts;
 mod actions;

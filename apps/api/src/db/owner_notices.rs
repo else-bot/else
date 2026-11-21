@@ -459,12 +459,9 @@ pub async fn for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<Notice>> = HashMap::new();
-    for row in rows {
-        let n = notice(row);
-        by_turn.entry(n.turn_id).or_default().push(n);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows.into_iter().map(notice), |row| {
+        row.turn_id
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]

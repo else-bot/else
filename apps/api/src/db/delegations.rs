@@ -40,7 +40,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::{ConversationKind, ItemKind, TurnStatus};
+use super::turns::{ConversationKind, ItemKind};
 use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
 use crate::db::bots::BotStatus;
@@ -188,11 +188,7 @@ pub async fn for_turns(
     .bind(sqlx::types::Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<Handoff>> = HashMap::new();
-    for row in rows {
-        by_turn.entry(row.turn_id).or_default().push(row);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
 /// Accept a delegation from the provider attempt of `turn_id`. The target
@@ -283,25 +279,19 @@ async fn create_in(
         .bind(parent_bot)
         .execute(&mut *conn)
         .await?;
-    let caller: Option<(Uuid, TurnStatus, i32, ConversationKind, BotStatus)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id
-         WHERE t.id = ?1",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((parent, status, attempt, kind, bot_status)) = caller else {
+    let Some(super::turns::AskingCaller {
+        bot_id: parent,
+        attempt,
+        owner_conversation,
+        ..
+    }) = super::turns::asking_caller(conn, turn_id).await?
+    else {
         return Err(DelegateError::NotRunning);
     };
-    if !status.serves_tools() || !bot_status.is_active() {
-        return Err(DelegateError::NotRunning);
-    }
     let chain = chain(conn, turn_id).await?;
     let origin = origin(conn, turn_id).await?;
     if (council && (chain.depth > 0 || origin == crate::app::providers::Origin::ConnectorEvent))
-        || (kind != ConversationKind::Owner && chain.depth == 0)
+        || (!owner_conversation && chain.depth == 0)
         || !origin.delegates_at(chain.depth)
     {
         return Err(DelegateError::NotAllowed);

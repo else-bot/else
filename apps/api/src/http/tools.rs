@@ -43,15 +43,10 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
             "This task grant does not allow that tool.",
         ));
     }
-    let live: Option<bool> = sqlx::query_scalar(
-        "SELECT b.status = 'active' AND t.status IN ('sending', 'running')
-         FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1 AND t.bot_id = ?2",
-    )
-    .bind(grant.turn_id)
-    .bind(grant.bot_id)
-    .fetch_optional(&state.db)
-    .await?;
-    if live != Some(true) {
+    let live = crate::db::turns::running_caller(&state.db, grant.turn_id)
+        .await?
+        .is_some_and(|caller| caller.bot_id == grant.bot_id);
+    if !live {
         state.grants.revoke_turn(grant.turn_id).await;
         return Err(revoked());
     }

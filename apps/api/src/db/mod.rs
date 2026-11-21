@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod delegations;
 pub mod events;
 pub mod handoffs;
+pub mod holds;
 pub mod installation;
 pub mod limit_cuts;
 pub mod mcp_waits;

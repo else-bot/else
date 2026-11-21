@@ -280,12 +280,9 @@ pub async fn for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<RequestInfo>> = HashMap::new();
-    for row in rows {
-        let request = info(row);
-        by_turn.entry(request.turn_id).or_default().push(request);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows.into_iter().map(info), |row| {
+        row.turn_id
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -443,27 +440,6 @@ pub async fn undelivered(
             stored: status == Status::Stored,
         })
         .collect())
-}
-
-/// Record that `attempt` received these answers.
-pub async fn mark_delivered(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    attempt: i32,
-    ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE secret_requests SET delivered_attempt = ?3
-         WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND {}",
-        in_ids("id", "?2")
-    )))
-    .bind(turn_id)
-    .bind(Json(ids))
-    .bind(attempt)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]

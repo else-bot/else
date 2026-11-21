@@ -695,11 +695,7 @@ pub async fn setups(
     .bind(Json(ids))
     .fetch_all(conn)
     .await?;
-    let mut map: HashMap<Uuid, Vec<Setup>> = HashMap::new();
-    for row in rows {
-        map.entry(row.turn_id).or_default().push(row);
-    }
-    Ok(map)
+    Ok(crate::db::holds::by_turn(rows, |row| row.turn_id))
 }
 pub async fn setup(pool: &SqlitePool, id: Uuid) -> Result<Setup, Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(

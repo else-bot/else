@@ -417,13 +417,12 @@ pub async fn pending_for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: std::collections::HashMap<Uuid, Vec<Pending>> = Default::default();
-    for row in rows {
+    let pending = rows.into_iter().map(|row| {
         let last_status = row
             .last_result
             .as_deref()
             .and_then(|result| shown_status(result, &row.status_pointer));
-        by_turn.entry(row.turn_id).or_default().push(Pending {
+        Pending {
             id: row.id,
             turn_id: row.turn_id,
             mcp_id: row.mcp_id,
@@ -437,9 +436,9 @@ pub async fn pending_for_turns(
                 .last_result
                 .map(|result| result[..result.floor_char_boundary(SHOWN_RESULT)].to_owned()),
             created_at: row.created_at,
-        });
-    }
-    Ok(by_turn)
+        }
+    });
+    Ok(super::holds::by_turn(pending, |wait| wait.turn_id))
 }
 
 /// The owner stops wait `id` of `bot_id`. A pending wait becomes `stopped`,
@@ -520,27 +519,6 @@ pub async fn withdraw_for_turn(
          WHERE turn_id = ?1 AND status = 'pending'",
     )
     .bind(turn_id)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
-
-/// Record that `attempt` received these results.
-pub async fn mark_delivered(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    attempt: i32,
-    ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE mcp_waits SET delivered_attempt = ?3
-         WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND {}",
-        in_ids("id", "?2")
-    )))
-    .bind(turn_id)
-    .bind(Json(ids))
-    .bind(attempt)
     .execute(&mut *conn)
     .await?;
     Ok(())
