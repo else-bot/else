@@ -245,6 +245,17 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_token_on_a_resend_keeps_the_op_unconfirmed() {
+        let mut request = Request::Idle;
+        let first = request.begin("create").unwrap();
+        assert!(request.settle(first, &Err::<(), _>(unreachable())));
+        let (resend, _) = request.retry().unwrap();
+        assert!(request.settle(resend, &Err::<(), _>(ClientError::Unauthorized)));
+        assert!(request.unconfirmed());
+        assert_eq!(request.retry().unwrap().1, "create");
+    }
+
+    #[test]
     fn only_an_unconfirmed_request_retries() {
         let mut idle = Request::<i32>::Idle;
         assert_eq!(idle.retry(), None);
