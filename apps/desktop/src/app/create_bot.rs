@@ -1,4 +1,5 @@
 use super::ElseApp;
+use super::request::Request;
 use crate::api::{Category, CreateBotRequest};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
@@ -44,19 +45,25 @@ fn category_choices(categories: &[Category]) -> Vec<CategoryChoice> {
 }
 
 struct CreateForm {
-    request_id: Uuid,
-    in_doubt: Option<CreateBotRequest>,
+    /// `Unconfirmed` keeps the request to resend unchanged, under its
+    /// request ID, so a retry cannot create a second bot.
+    request: Request<CreateBotRequest>,
     name: Entity<InputState>,
     avatar: Avatar,
     profile: Option<Entity<ProfilePicker>>,
     category: Entity<SelectState<Vec<CategoryChoice>>>,
     category_choices: Vec<CategoryChoice>,
-    error: Option<String>,
-    busy: bool,
+}
+
+impl CreateForm {
+    fn locked(&self) -> bool {
+        self.request.busy() || self.request.unconfirmed()
+    }
 }
 
 pub(super) struct CreateFormHolder {
     form: CreateForm,
+    _enter: Subscription,
 }
 
 impl ElseApp {
@@ -71,10 +78,19 @@ impl ElseApp {
         let choices = category_choices(&self.categories);
         let category =
             cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));
+        let enter =
+            cx.subscribe_in(
+                &name,
+                window,
+                |app, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => app.submit_create(window, cx),
+                    InputEvent::Change => window.refresh(),
+                    _ => {}
+                },
+            );
         let holder = cx.new(|_| CreateFormHolder {
             form: CreateForm {
-                request_id: Uuid::new_v4(),
-                in_doubt: None,
+                request: Request::Idle,
                 name: name.clone(),
                 avatar: Avatar {
                     shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
@@ -83,20 +99,10 @@ impl ElseApp {
                 profile,
                 category,
                 category_choices: choices,
-                error: None,
-                busy: false,
             },
+            _enter: enter,
         });
         self.create = Some(holder.clone());
-        self._create_enter = Some(cx.subscribe_in(
-            &name,
-            window,
-            |app, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => app.submit_create(window, cx),
-                InputEvent::Change => window.refresh(),
-                _ => {}
-            },
-        ));
         let app = cx.entity().downgrade();
         let focus_once = std::cell::Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -121,7 +127,7 @@ impl ElseApp {
             });
             let form = &holder.read(cx).form;
             let theme = cx.theme();
-            let locked = form.busy || form.in_doubt.is_some();
+            let locked = form.locked();
             let avatar_supported = app.upgrade().is_some_and(|app| {
                 app.read(cx)
                     .caps
@@ -193,13 +199,13 @@ impl ElseApp {
             if let Some(profile) = &form.profile {
                 details = details.child(profile.clone());
             }
-            if let Some(error) = &form.error {
-                details = details.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.danger)
-                        .child(error.clone()),
-                );
+            if let Some(error) = form.request.error() {
+                let error = if form.request.unconfirmed() {
+                    format!("{error} Create will retry the original request unchanged.")
+                } else {
+                    error.to_owned()
+                };
+                details = details.child(div().text_sm().text_color(theme.danger).child(error));
             }
             let columns = if stacked {
                 v_flex()
@@ -216,7 +222,7 @@ impl ElseApp {
                 )
                 .child(columns.gap_8().child(studio).child(details));
             let app_create = app.clone();
-            let busy = form.busy;
+            let busy = form.request.busy();
             let can_submit = !form.name.read(cx).value().trim().is_empty();
             let app_ok = app.clone();
             let app_close = app.clone();
@@ -273,70 +279,73 @@ impl ElseApp {
         let (client, Some(holder)) = (self.client.clone(), self.create.clone()) else {
             return;
         };
-        if holder.read(cx).form.busy || holder.read(cx).form.name.read(cx).value().trim().is_empty()
-        {
+        let form = &holder.read(cx).form;
+        if form.request.busy() || form.name.read(cx).value().trim().is_empty() {
             return;
         }
-        let payload = {
-            let form = &holder.read(cx).form;
-            form.in_doubt.clone().unwrap_or_else(|| CreateBotRequest {
-                request_id: form.request_id,
-                name: form.name.read(cx).value().to_string(),
-                profile: form.profile.as_ref().and_then(|p| p.read(cx).choice()),
-                category_id: form.category.read(cx).selected_value().copied().flatten(),
-                avatar: self
-                    .caps
-                    .as_ref()
-                    .is_some_and(|caps| caps.bot_avatar_on_create)
-                    .then_some(form.avatar),
-            })
+        let fresh = CreateBotRequest {
+            request_id: Uuid::new_v4(),
+            name: form.name.read(cx).value().to_string(),
+            profile: form.profile.as_ref().and_then(|p| p.read(cx).choice()),
+            category_id: form.category.read(cx).selected_value().copied().flatten(),
+            avatar: self
+                .caps
+                .as_ref()
+                .is_some_and(|caps| caps.bot_avatar_on_create)
+                .then_some(form.avatar),
         };
-        holder.update(cx, |h, cx| {
-            h.form.busy = true;
-            h.form.error = None;
+        let sent = holder.update(cx, |h, cx| {
+            let sent = h.form.request.retry().or_else(|| {
+                h.form
+                    .request
+                    .begin(fresh.clone())
+                    .map(|attempt| (attempt, fresh))
+            });
             if let Some(profile) = &h.form.profile {
                 profile.update(cx, |picker, cx| picker.set_disabled(true, cx));
             }
             cx.notify();
+            sent
         });
+        let Some((attempt, payload)) = sent else {
+            return;
+        };
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.create_bot(payload.clone()).await;
-            let _ = this.update_in(cx, |app, window, cx| match result {
-                Ok(bot) => {
-                    if app.create.as_ref() == Some(&holder) {
-                        app.create = None;
-                        window.close_dialog(cx);
-                    }
-                    if app.bots.iter().any(|b| b.id == bot.id) {
-                        return;
-                    }
-                    app.bots.push(bot.clone());
-                    app.select(Some(bot.id), window, cx);
-                    app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                    app.refresh_now(window, cx);
+            let result = client.create_bot(payload).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
                 }
-                Err(err) => {
-                    holder.update(cx, |h, cx| {
-                        h.form.busy = false;
-                        if err.outcome_unknown() || err.is_request_conflict() {
-                            h.form.in_doubt = Some(payload.clone());
-                            h.form.error = Some(format!(
-                                "{err} Create will retry the original request unchanged."
-                            ));
-                        } else {
-                            h.form.request_id = Uuid::new_v4();
-                            h.form.in_doubt = None;
-                            h.form.error = Some(err.to_string());
+                if !settled {
+                    return;
+                }
+                match result {
+                    Ok(bot) => {
+                        if app.create.as_ref() == Some(&holder) {
+                            app.create = None;
+                            window.close_dialog(cx);
                         }
-                        if let Some(profile) = &h.form.profile {
-                            profile.update(cx, |picker, cx| {
-                                picker.set_disabled(h.form.in_doubt.is_some(), cx);
-                            });
+                        if app.bots.iter().any(|b| b.id == bot.id) {
+                            return;
                         }
-                        cx.notify();
-                    });
-                    window.refresh();
+                        app.bots.push(bot.clone());
+                        app.select(Some(bot.id), window, cx);
+                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                        app.refresh_now(window, cx);
+                    }
+                    Err(_) => {
+                        holder.update(cx, |h, cx| {
+                            if let Some(profile) = &h.form.profile {
+                                let unconfirmed = h.form.request.unconfirmed();
+                                profile
+                                    .update(cx, |picker, cx| picker.set_disabled(unconfirmed, cx));
+                            }
+                            cx.notify();
+                        });
+                        window.refresh();
+                    }
                 }
             });
         })

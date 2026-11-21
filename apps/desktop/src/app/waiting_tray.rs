@@ -1,6 +1,5 @@
+use super::ElseApp;
 use super::task_reply::state::format_elapsed;
-use super::{Connection, ElseApp};
-use crate::api::ClientError;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{ComputerJobWait, Delegation, DelegationStatus, McpWait, Wait};
@@ -123,16 +122,13 @@ impl ElseApp {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.cancel_wait(bot, wait).await;
-            let _ = this.update_in(cx, |app, _, cx| {
+            let _ = this.update_in(cx, |app, window, cx| {
                 if let Some(view) = app.view_of(bot) {
                     view.stopping_waits.remove(&wait);
                 }
                 match result {
                     Ok(()) => {}
-                    Err(ClientError::Unauthorized) => {
-                        app.connection =
-                            Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-                    }
+                    Err(err) if app.unauthorized(&err, window, cx) => {}
                     // It ended first; the stream shows how.
                     Err(err) if err.code() == Some("wait_ended") => {}
                     Err(err) => app.notice = Some(err.to_string()),

@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use super::card_markdown::{self, CardText};
 use super::message_row::CardPlacement;
+use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
@@ -47,23 +48,17 @@ pub(super) struct FormattedContext {
     _parsed: Subscription,
 }
 
+/// The answer picked on a card, and the request that sends it. `Accepted`
+/// means the server recorded it and the stream settles the card next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
     pub(super) answer: QuestionAnswer,
-    pub(super) state: SubmitState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SubmitState {
-    Choosing,
-    Sending,
-    Recorded,
-    Failed(String),
+    pub(super) state: Request<()>,
 }
 
 impl QuestionForm {
     fn locks(&self) -> bool {
-        matches!(self.state, SubmitState::Sending | SubmitState::Recorded)
+        self.state.busy()
     }
 }
 
@@ -260,14 +255,17 @@ impl ElseApp {
         }
         let card = view.cards.question_mut(question);
         card.expanded = false;
-        card.submit = Some(QuestionForm {
+        let form = card.submit.insert(QuestionForm {
             answer: answer.clone(),
-            state: SubmitState::Sending,
+            state: Request::Idle,
         });
+        let Some(attempt) = form.state.begin(()) else {
+            return;
+        };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_question(bot, question, answer).await;
-            let _ = this.update_in(cx, |app, _window, cx| {
-                app.question_answered(bot, question, result, cx)
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.question_answered(bot, question, attempt, result, window, cx)
             });
         });
         task.detach();
@@ -278,33 +276,32 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         question: Uuid,
+        attempt: Uuid,
         result: Result<(), ClientError>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&result, Err(ClientError::Unauthorized)) {
-            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+        let settled = self
+            .view_of(bot)
+            .and_then(|view| view.cards.questions.get_mut(&question)?.submit.as_mut())
+            .is_some_and(|submit| {
+                submit.state.settle_as(attempt, &result, |err| match err {
+                    ClientError::Api { code, message, .. } if code == "routine_changed" => {
+                        message.clone()
+                    }
+                    ClientError::Api { status: 409, .. } => {
+                        "This card was already answered, skipped, or withdrawn. Nothing changed."
+                            .into()
+                    }
+                    err => err.to_string(),
+                })
+            });
+        let rejected = result
+            .as_ref()
+            .is_err_and(|err| self.unauthorized(err, window, cx));
+        if rejected || !settled {
+            return;
         }
-        let Some(view) = self.view_of(bot) else {
-            return;
-        };
-        let Some(submit) = view
-            .cards
-            .questions
-            .get_mut(&question)
-            .and_then(|card| card.submit.as_mut())
-        else {
-            return;
-        };
-        submit.state = match result {
-            Ok(()) => SubmitState::Recorded,
-            Err(ClientError::Api { code, message, .. }) if code == "routine_changed" => {
-                SubmitState::Failed(message)
-            }
-            Err(ClientError::Api { status: 409, .. }) => SubmitState::Failed(
-                "This card was already answered, skipped, or withdrawn. Nothing changed.".into(),
-            ),
-            Err(err) => SubmitState::Failed(err.to_string()),
-        };
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
@@ -370,7 +367,7 @@ impl ElseApp {
                             .cards
                             .secrets
                             .get(&id)
-                            .is_some_and(super::cards::SecretCard::locks)
+                            .is_some_and(|card| card.request.busy())
                 }
                 _ => false,
             })

@@ -3,6 +3,7 @@ use super::draft_card::{DraftForm, DraftImages};
 use super::question_card::choice::WriteIn;
 use super::question_card::connection::Form as ConnectionForm;
 use super::question_card::{Extent, FormattedContext, QuestionForm};
+use super::request::Request;
 use super::secret_card::SecretForm;
 use super::skill_card::SkillCard;
 use super::social_card::SocialCard;
@@ -44,15 +45,8 @@ pub(super) struct QuestionCard {
 #[derive(Default)]
 pub(super) struct SecretCard {
     pub(super) form: Option<SecretForm>,
-    /// The server stored the owner's answer; the request settles next.
-    pub(super) answered: bool,
-}
-
-impl SecretCard {
-    /// Whether the card no longer takes an answer.
-    pub(super) fn locks(&self) -> bool {
-        self.answered || self.form.as_ref().is_some_and(SecretForm::locks)
-    }
+    /// `Accepted` once the server stored the answer; the request settles next.
+    pub(super) request: Request<()>,
 }
 
 #[derive(Default)]

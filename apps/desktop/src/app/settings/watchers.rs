@@ -46,7 +46,7 @@ impl ElseApp {
 
     pub(in crate::app) fn sync_watcher_clock(&mut self, cx: &mut Context<Self>) {
         let visible = self.settings_shown()
-            && self.details_tab == DetailsTab::Details
+            && self.details.tab() == DetailsTab::Details
             && self
                 .selected
                 .is_some_and(|bot| !self.watchers(bot).is_empty());

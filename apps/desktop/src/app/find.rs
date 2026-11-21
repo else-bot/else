@@ -317,7 +317,7 @@ impl ElseApp {
                 .window(bot, above - 1, (GAP_PAGE, 0), (below, Some(above)))
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
-                let Some(view) = app.view.as_mut().filter(|view| view.bot_id == bot) else {
+                let Some(view) = app.view_of(bot) else {
                     return;
                 };
                 view.loading_gap = None;

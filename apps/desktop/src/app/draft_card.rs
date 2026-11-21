@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::images::{MessageImages, is_image};
 use super::message_row::{CardPlacement, short_stamp};
+use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::attachments::{MessagePart, byte_size};
@@ -54,9 +55,7 @@ pub(super) struct DraftForm {
     body: Entity<TextareaState>,
     baseline: DraftEdit,
     files: Vec<DraftFile>,
-    operation: Option<Operation>,
-    retryable: bool,
-    error: Option<String>,
+    request: Request<Operation>,
     _changes: Vec<Subscription>,
 }
 
@@ -90,11 +89,22 @@ impl DraftForm {
             body,
             baseline: draft.edit(),
             files: draft.content.attachments().to_vec(),
-            operation: None,
-            retryable: false,
-            error: None,
+            request: Request::Idle,
             _changes: subject_change.into_iter().chain([body_change]).collect(),
         }
+    }
+
+    /// Carries `old`'s request into this rebuilt form, so its result still
+    /// settles here.
+    fn keeping(mut self, old: &mut Self) -> Self {
+        self.request = std::mem::take(&mut old.request);
+        self
+    }
+
+    /// Whether the draft's controls lock: an action is in flight, accepted,
+    /// or of unknown outcome and only resendable unchanged.
+    fn locked(&self) -> bool {
+        self.request.busy() || self.request.unconfirmed()
     }
 
     fn edit(&self, cx: &App) -> DraftEdit {
@@ -143,9 +153,9 @@ impl ElseApp {
                                 && local.attachments.unwrap_or_default()
                                     == draft.content.attachment_ids().unwrap_or_default())
                         {
-                            *form = DraftForm::new(draft, window, cx);
-                        } else {
-                            form.error = Some("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.".into());
+                            *form = DraftForm::new(draft, window, cx).keeping(form);
+                        } else if !form.request.unconfirmed() {
+                            form.request.reject("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.");
                         }
                     }
                     Some(_) => {}
@@ -179,7 +189,7 @@ impl ElseApp {
         if view
             .cards
             .draft_form(draft.id)
-            .is_some_and(|form| form.operation.is_some())
+            .is_some_and(DraftForm::locked)
         {
             return None;
         }
@@ -208,30 +218,33 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_ref() else {
+        let Some(view) = self.view.as_mut() else {
             return;
         };
-        let operation = match (view.cards.draft_form(id), choice) {
-            (Some(form), _) if form.retryable => form.operation.clone(),
+        let bot = view.bot_id;
+        let sent = match (view.cards.draft_form_mut(id), choice) {
+            (Some(form), _) if form.request.unconfirmed() => form.request.retry(),
             (Some(form), Choice::Approve | Choice::ApproveAlways)
-                if form.operation.is_none() && !form.body.read(cx).value().trim().is_empty() =>
+                if !form.body.read(cx).value().trim().is_empty() =>
             {
-                Some(Operation::Approve {
+                let operation = Operation::Approve {
                     edit: form.edit(cx),
                     always: matches!(choice, Choice::ApproveAlways),
-                })
+                };
+                form.request
+                    .begin(operation.clone())
+                    .map(|attempt| (attempt, operation))
             }
-            (Some(form), Choice::Discard) if form.operation.is_none() => Some(Operation::Discard),
-            (None, Choice::Discard) => Some(Operation::Discard),
+            (Some(form), Choice::Discard) => form
+                .request
+                .begin(Operation::Discard)
+                .map(|attempt| (attempt, Operation::Discard)),
+            (None, Choice::Discard) => Some((Uuid::new_v4(), Operation::Discard)),
             _ => None,
         };
-        let Some(operation) = operation else { return };
-        let bot = view.bot_id;
-        if let Some(form) = self.view.as_mut().and_then(|v| v.cards.draft_form_mut(id)) {
-            form.operation = Some(operation.clone());
-            form.retryable = false;
-            form.error = None;
-        }
+        let Some((attempt, operation)) = sent else {
+            return;
+        };
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match operation {
@@ -241,42 +254,58 @@ impl ElseApp {
                 Operation::Discard => client.discard_draft(bot, id).await,
             };
             let _ = this.update_in(cx, |app, window, cx| {
-                app.draft_acted(bot, id, result, window, cx)
+                app.draft_acted(bot, id, Some(attempt), result, window, cx)
             });
         })
         .detach();
         self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
     }
 
+    /// Applies the result of a draft action. `attempt` is the form's
+    /// request it settles; `None` for an action the form does not track.
     fn draft_acted(
         &mut self,
         bot: Uuid,
         id: Uuid,
+        attempt: Option<Uuid>,
         result: Result<OutgoingDraft, ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&result, Err(ClientError::Unauthorized)) {
-            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-        }
-        let Some(view) = self.view_of(bot) else {
-            return;
+        let form = self
+            .view_of(bot)
+            .and_then(|view| view.cards.draft_form_mut(id));
+        let tracked = match (form, attempt) {
+            (Some(form), Some(attempt)) => Some(form.request.settle(attempt, &result)),
+            (Some(form), None) => {
+                if let Err(err) = &result
+                    && !form.locked()
+                {
+                    form.request.reject(err.to_string());
+                }
+                Some(true)
+            }
+            (None, _) => None,
         };
+        if result
+            .as_ref()
+            .is_err_and(|err| self.unauthorized(err, window, cx))
+            || tracked == Some(false)
+        {
+            return;
+        }
         match result {
             Ok(draft) => {
-                if let Some(conversation) = view.conversation.as_mut() {
+                if let Some(conversation) = self
+                    .view_of(bot)
+                    .and_then(|view| view.conversation.as_mut())
+                {
                     conversation.update_draft(draft);
                 }
                 self.sync_rows(window, cx);
             }
             Err(err) => {
-                if let Some(form) = view.cards.draft_form_mut(id) {
-                    form.retryable = err.outcome_unknown();
-                    if !form.retryable {
-                        form.operation = None;
-                    }
-                    form.error = Some(err.to_string());
-                } else {
+                if tracked.is_none() {
                     self.notice = Some(err.to_string());
                 }
                 self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
@@ -293,7 +322,7 @@ impl ElseApp {
             let result = client.stop_approving_always(bot, id).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 if let Err(err) = result {
-                    app.draft_acted(bot, id, Err(err), window, cx);
+                    app.draft_acted(bot, id, None, Err(err), window, cx);
                 }
             });
         })
@@ -308,8 +337,12 @@ impl ElseApp {
             .and_then(|c| c.outgoing_draft(id))
             .cloned();
         if let (Some(draft), Some(view)) = (draft, self.view.as_mut()) {
-            view.cards.drafts.entry(id).or_default().form =
-                Some(DraftForm::new(&draft, window, cx));
+            let card = view.cards.drafts.entry(id).or_default();
+            let fresh = DraftForm::new(&draft, window, cx);
+            card.form = Some(match card.form.as_mut() {
+                Some(old) => fresh.keeping(old),
+                None => fresh,
+            });
             self.sync_draft_cards(window, cx);
         }
         self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
@@ -612,7 +645,7 @@ impl ElseApp {
             return row.into_any_element();
         };
         let connected = self.connection == Connection::Connected;
-        let busy = form.operation.is_some() || self.draft_in_flight(id);
+        let busy = form.locked() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
         let approve_enabled = connected
             && !busy
@@ -727,11 +760,11 @@ impl ElseApp {
                         app.act_on_draft(id, Choice::Approve, window, cx)
                     })),
             );
-        if let Some(error) = &form.error {
-            card = card.child(super::action_card::failure(&theme, error.clone()));
+        if let Some(error) = form.request.error() {
+            card = card.child(super::action_card::failure(&theme, error.to_owned()));
         }
-        if form.retryable || conflict {
-            let retry = form.retryable;
+        let retry = form.request.unconfirmed();
+        if retry || conflict {
             card = card.child(
                 h_flex().justify_end().child(
                     Button::new(SharedString::from(format!("draft-recover-{id}")))

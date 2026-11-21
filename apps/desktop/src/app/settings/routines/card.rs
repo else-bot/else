@@ -1,7 +1,8 @@
 use super::super::schedule_text::{describe_cron, describe_hours, local_time};
-use super::{Banner, RoutineSave, banner, last_run, retryable};
+use super::{Banner, RoutineChange, banner, last_run, retryable};
 use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, meta_line};
+use crate::app::request::Request;
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use crate::model::Routine;
 use crate::profile_picker::effort_label;
@@ -23,15 +24,16 @@ impl ElseApp {
         &self,
         bot: Uuid,
         routine: &Routine,
-        save: Option<&RoutineSave>,
+        save: Option<&Request<RoutineChange>>,
         connected: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = routine.id;
-        let busy = save.is_some_and(RoutineSave::busy);
-        let checked = match save {
-            Some(RoutineSave::Saving { enabled, .. }) => *enabled,
+        let busy = save.is_some_and(Request::busy);
+        let pending = save.and_then(Request::pending);
+        let checked = match pending {
+            Some(RoutineChange::Enable(enabled)) => *enabled,
             _ => routine.enabled,
         };
         let passed = !checked && routine.run_at.is_some_and(|at| at <= Utc::now());
@@ -45,12 +47,12 @@ impl ElseApp {
         .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
             app.set_routine(bot, id, *enabled, window, cx)
         }));
-        let retrying = routine.retrying || matches!(save, Some(RoutineSave::Retrying { .. }));
+        let retrying = routine.retrying || matches!(pending, Some(RoutineChange::Retry));
         let dismiss = (routine.failed_runs > 0 && !retrying).then(|| {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
                 .control(Tier::Ghost, Scale::Compact, busy || !connected, cx)
                 .label("Dismiss")
-                .loading(matches!(save, Some(RoutineSave::Dismissing { .. })))
+                .loading(matches!(pending, Some(RoutineChange::DismissFailures)))
                 .accessibility_label(format!("Dismiss the failures of {}", routine.name))
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.dismiss_routine_failures(bot, id, window, cx)
@@ -119,8 +121,8 @@ impl ElseApp {
             });
         // The model is changed from the row's menu. The meta line names it
         // only when the routine overrides the bot model shown above.
-        let quiet = match save {
-            Some(RoutineSave::Quieting { quiet, .. }) => *quiet,
+        let quiet = match pending {
+            Some(RoutineChange::Quiet(quiet)) => *quiet,
             _ => routine.quiet,
         };
         let mut tokens: Vec<AnyElement> = when
@@ -310,12 +312,8 @@ impl ElseApp {
             .icon(IconName::Ellipsis)
             .accessibility_label(format!("Actions for {}", routine.name))
             .loading(matches!(
-                save,
-                Some(
-                    RoutineSave::Quieting { .. }
-                        | RoutineSave::Model { .. }
-                        | RoutineSave::Deleting { .. }
-                )
+                pending,
+                Some(RoutineChange::Quiet(_) | RoutineChange::Model | RoutineChange::Delete)
             ))
             .disabled(busy || !connected)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {

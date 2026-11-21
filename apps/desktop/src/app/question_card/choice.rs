@@ -17,9 +17,7 @@ use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
 use super::super::message_row::CardPlacement;
-use super::{
-    Connection, ElseApp, Extent, QuestionForm, RowKey, SubmitState, callout, letter, receipt,
-};
+use super::{Connection, ElseApp, Extent, QuestionForm, Request, RowKey, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer, QuestionStatus};
 
 /// The field on a pending single-choice card for an answer its options don't
@@ -133,7 +131,7 @@ impl ElseApp {
             .submit
             .get_or_insert_with(|| QuestionForm {
                 answer: QuestionAnswer::Multiple(Vec::new()),
-                state: SubmitState::Choosing,
+                state: Request::Idle,
             });
         let QuestionAnswer::Multiple(selected) = &mut form.answer else {
             return;
@@ -143,7 +141,7 @@ impl ElseApp {
         } else {
             selected.push(choice.to_owned());
         }
-        form.state = SubmitState::Choosing;
+        form.state = Request::Idle;
         self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
@@ -393,8 +391,8 @@ impl ElseApp {
                     })),
             );
         }
-        if let Some(SubmitState::Failed(error)) = form.map(|f| &f.state) {
-            body = body.child(callout(error.clone(), &theme));
+        if let Some(error) = form.and_then(|f| f.state.error()) {
+            body = body.child(callout(error.to_owned(), &theme));
         }
         body.footer(footer).into_any_element()
     }
@@ -505,7 +503,7 @@ fn settled(question: &Question, form: Option<&QuestionForm>, reply: Option<&str>
         return Settled {
             marker: "Answer sent",
             resumed: true,
-            outcome: if form.is_some_and(|f| f.state == SubmitState::Sending) {
+            outcome: if form.is_some_and(|f| matches!(f.state, Request::Sending { .. })) {
                 "Sending…".into()
             } else {
                 chose(question, form.map(|f| &f.answer))
@@ -574,7 +572,7 @@ fn divider(label: String, color: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuestionForm, Settled, SubmitState, settled};
+    use super::{QuestionForm, Request, Settled, settled};
     use crate::model::{Question, QuestionAnswer, QuestionChoice, QuestionKind, QuestionStatus};
     use uuid::Uuid;
 
@@ -664,10 +662,12 @@ mod tests {
         let pending = question(QuestionStatus::Pending, false, None);
         let mut form = QuestionForm {
             answer: QuestionAnswer::Single("a".into()),
-            state: SubmitState::Sending,
+            state: Request::Idle,
         };
+        let attempt = form.state.begin(()).unwrap();
         assert_eq!(settled(&pending, Some(&form), None).outcome, "Sending…");
-        form.state = SubmitState::Recorded;
+        form.state
+            .settle(attempt, &Ok::<_, crate::api::ClientError>(()));
         assert_eq!(
             settled(&pending, Some(&form), None).outcome,
             "You chose Plain text."

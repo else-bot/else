@@ -1,7 +1,8 @@
-use super::super::routines::{RoutineSave, current_change};
+use super::super::routines::{RoutineChange, settle_change};
 use super::ModelState;
 use crate::api::{BotProfile, ProfileChoice};
 use crate::app::panel::{muted, note};
+use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use crate::model::Routine;
@@ -12,25 +13,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq)]
-enum Save {
-    Idle,
-    Saving(Uuid),
-    Failed(String),
-}
-
-impl Save {
-    fn busy(&self) -> bool {
-        matches!(self, Self::Saving(_))
-    }
-}
-
 pub(in crate::app) struct ModelDialog {
     bot: Uuid,
     target: ModelTarget,
     saved: Option<ProfileChoice>,
     picker: Entity<ProfilePicker>,
-    save: Save,
+    save: Request<()>,
     _picker: Subscription,
 }
 
@@ -133,7 +121,7 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.settings_open {
+        if !self.details.open() {
             self.toggle_settings(window, cx);
         }
         let client = self.client.clone();
@@ -202,7 +190,7 @@ impl ElseApp {
             target,
             saved,
             picker: picker.clone(),
-            save: Save::Idle,
+            save: Request::Idle,
             _picker: observer,
         });
         self.model_dialog = Some(holder.clone());
@@ -255,10 +243,11 @@ impl ElseApp {
                     },
                     cx,
                 ))
-                .children(match &form.save {
-                    Save::Failed(err) => Some(note(format!("Couldn't apply. {err}"), true, cx)),
-                    _ => None,
-                });
+                .children(
+                    form.save
+                        .error()
+                        .map(|err| note(format!("Couldn't apply. {err}"), true, cx)),
+                );
             let app_ok = app.clone();
             let app_apply = app.clone();
             let app_close = app.clone();
@@ -312,22 +301,31 @@ impl ElseApp {
             };
             (form.bot, form.routine_id(), form.picker.clone(), change)
         };
-        let attempt = Uuid::new_v4();
-        if let Some(routine) = routine
-            && !self.begin_routine_change(bot, routine, RoutineSave::Model { attempt })
-        {
-            holder.update(cx, |form, cx| {
-                form.save = Save::Failed("This routine can't be changed right now. Reopen its model settings and try again.".into());
-                cx.notify();
-            });
-            window.refresh();
+        if holder.read(cx).save.busy() {
             return;
         }
+        let routine_attempt = match routine {
+            Some(routine) => {
+                let Some(attempt) = self.begin_routine_change(bot, routine, RoutineChange::Model)
+                else {
+                    holder.update(cx, |form, cx| {
+                        form.save.reject("This routine can't be changed right now. Reopen its model settings and try again.");
+                        cx.notify();
+                    });
+                    window.refresh();
+                    return;
+                };
+                Some((routine, attempt))
+            }
+            None => None,
+        };
         picker.update(cx, |picker, cx| picker.set_disabled(true, cx));
-        holder.update(cx, |form, cx| {
-            form.save = Save::Saving(attempt);
+        let Some(attempt) = holder.update(cx, |form, cx| {
             cx.notify();
-        });
+            form.save.begin(())
+        }) else {
+            return;
+        };
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
             let result = match change {
@@ -341,13 +339,25 @@ impl ElseApp {
                     .map(SavedModel::Bot),
             };
             let _ = this.update_in(cx, |app, window, cx| {
-                if holder.read(cx).save != Save::Saving(attempt) {
-                    return;
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
                 }
-                if let Some(routine) = routine
-                    && let Some(entry) = current_change(&mut app.settings, bot, routine, attempt)
+                if let Some((routine, routine_attempt)) = routine_attempt
+                    && settle_change(
+                        &mut app.settings,
+                        bot,
+                        routine,
+                        routine_attempt,
+                        &result,
+                        |err| format!("Couldn't save. {err}"),
+                    )
+                    && result.is_ok()
+                    && let Some(entry) = app.settings.get_mut(&bot)
                 {
                     entry.routines.remove(&routine);
+                }
+                if !holder.update(cx, |form, _| form.save.settle(attempt, &result)) {
+                    return;
                 }
                 match result {
                     Ok(saved) => {
@@ -367,20 +377,9 @@ impl ElseApp {
                         }
                         cx.notify();
                     }
-                    Err(err) => {
-                        if let Some(routine) = routine
-                            && let Some(entry) = app.settings.get_mut(&bot)
-                        {
-                            entry.routines.insert(
-                                routine,
-                                RoutineSave::Failed(format!("Couldn't save. {err}")),
-                            );
-                        }
+                    Err(_) => {
                         picker.update(cx, |picker, cx| picker.set_disabled(false, cx));
-                        holder.update(cx, |form, cx| {
-                            form.save = Save::Failed(err.to_string());
-                            cx.notify();
-                        });
+                        holder.update(cx, |_, cx| cx.notify());
                         window.refresh();
                     }
                 }

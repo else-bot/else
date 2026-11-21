@@ -796,7 +796,7 @@ fn open_routines(
     window: &mut Window,
     cx: &mut Context<ElseApp>,
 ) {
-    if !app.settings_open {
+    if !app.details.open() {
         app.toggle_settings(window, cx);
     }
 }

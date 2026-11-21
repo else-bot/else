@@ -2,47 +2,23 @@ mod card;
 
 use super::schedule_text::local_time;
 use super::{BotSettings, automation_section};
+use crate::app::request::Request;
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::model::{LastRun, PausedReason, Routine, RunStatus, SkipReason};
 use gpui_kit::*;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum RoutineSave {
-    Saving { attempt: Uuid, enabled: bool },
-    Quieting { attempt: Uuid, quiet: bool },
-    Dismissing { attempt: Uuid },
-    Retrying { attempt: Uuid },
-    Model { attempt: Uuid },
-    Deleting { attempt: Uuid },
-    Failed(String),
-}
-
-impl RoutineSave {
-    fn busy(&self) -> bool {
-        matches!(
-            self,
-            Self::Saving { .. }
-                | Self::Quieting { .. }
-                | Self::Dismissing { .. }
-                | Self::Retrying { .. }
-                | Self::Model { .. }
-                | Self::Deleting { .. }
-        )
-    }
-
-    fn attempt(&self) -> Option<Uuid> {
-        match self {
-            Self::Saving { attempt, .. }
-            | Self::Quieting { attempt, .. }
-            | Self::Dismissing { attempt }
-            | Self::Retrying { attempt }
-            | Self::Model { attempt }
-            | Self::Deleting { attempt } => Some(*attempt),
-            Self::Failed(_) => None,
-        }
-    }
+/// A change to one routine. `Enable` and `Quiet` carry the value the
+/// switch and menu show until the server answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RoutineChange {
+    Enable(bool),
+    Quiet(bool),
+    DismissFailures,
+    Retry,
+    Model,
+    Delete,
 }
 
 impl ElseApp {
@@ -54,12 +30,9 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = Uuid::new_v4();
-        let request = self
-            .client
-            .clone()
-            .set_routine_enabled(bot, routine, enabled);
-        let change = RoutineSave::Saving { attempt, enabled };
+        let client = self.client.clone();
+        let request = move |_| client.set_routine_enabled(bot, routine, enabled);
+        let change = RoutineChange::Enable(enabled);
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
@@ -71,9 +44,9 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = Uuid::new_v4();
-        let request = self.client.clone().set_routine_quiet(bot, routine, quiet);
-        let change = RoutineSave::Quieting { attempt, quiet };
+        let client = self.client.clone();
+        let request = move |_| client.set_routine_quiet(bot, routine, quiet);
+        let change = RoutineChange::Quiet(quiet);
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
@@ -84,9 +57,9 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = Uuid::new_v4();
-        let request = self.client.clone().dismiss_routine_failures(bot, routine);
-        let change = RoutineSave::Dismissing { attempt };
+        let client = self.client.clone();
+        let request = move |_| client.dismiss_routine_failures(bot, routine);
+        let change = RoutineChange::DismissFailures;
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
@@ -97,48 +70,52 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = Uuid::new_v4();
-        let request = self.client.clone().retry_routine(bot, routine, attempt);
-        let change = RoutineSave::Retrying { attempt };
+        let client = self.client.clone();
+        let request = move |attempt| client.retry_routine(bot, routine, attempt);
+        let change = RoutineChange::Retry;
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
-    fn save_routine(
+    /// Sends `change` through `request`, which gets the attempt as its
+    /// request ID.
+    fn save_routine<F>(
         &mut self,
         bot: Uuid,
         routine: Uuid,
-        change: RoutineSave,
-        request: impl std::future::Future<Output = Result<Routine, crate::api::ClientError>> + 'static,
+        change: RoutineChange,
+        request: impl FnOnce(Uuid) -> F,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(attempt) = change.attempt() else {
+    ) where
+        F: std::future::Future<Output = Result<Routine, crate::api::ClientError>> + 'static,
+    {
+        let retrying = change == RoutineChange::Retry;
+        let Some(attempt) = self.begin_routine_change(bot, routine, change) else {
             return;
         };
-        let retrying = matches!(change, RoutineSave::Retrying { .. });
-        if !self.begin_routine_change(bot, routine, change) {
-            return;
-        }
+        let request = request(attempt);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
+                }
+                if !settle_change(&mut app.settings, bot, routine, attempt, &result, |err| {
+                    if retrying {
+                        retry_failure(err)
+                    } else {
+                        format!("Couldn't save. {err}")
+                    }
+                }) {
                     return;
-                };
-                match result {
-                    Ok(saved) => {
+                }
+                if let Ok(saved) = result {
+                    // The row shows the routine as the server returned it.
+                    if let Some(entry) = app.settings.get_mut(&bot) {
                         entry.routines.remove(&routine);
-                        app.apply_routine(bot, saved);
                     }
-                    Err(err) => {
-                        let text = if retrying {
-                            retry_failure(&err)
-                        } else {
-                            format!("Couldn't save. {err}")
-                        };
-                        entry.routines.insert(routine, RoutineSave::Failed(text));
-                    }
+                    app.apply_routine(bot, saved);
                 }
                 cx.notify();
             });
@@ -155,7 +132,7 @@ impl ElseApp {
             return None;
         }
         let entry = self.settings.get(&bot)?;
-        if entry.routines.get(&routine).is_some_and(RoutineSave::busy) {
+        if entry.routines.get(&routine).is_some_and(Request::busy) {
             return None;
         }
         self.automations(bot)?
@@ -164,20 +141,21 @@ impl ElseApp {
             .find(|r| r.id == routine)
     }
 
+    /// Starts `change` unless the routine can't change now. Returns the
+    /// attempt its result must settle.
     pub(in crate::app::settings) fn begin_routine_change(
         &mut self,
         bot: Uuid,
         routine: Uuid,
-        change: RoutineSave,
-    ) -> bool {
-        if self.changeable_routine(bot, routine).is_none() {
-            return false;
-        }
-        let Some(entry) = self.settings.get_mut(&bot) else {
-            return false;
-        };
-        entry.routines.insert(routine, change);
-        true
+        change: RoutineChange,
+    ) -> Option<Uuid> {
+        self.changeable_routine(bot, routine)?;
+        self.settings
+            .get_mut(&bot)?
+            .routines
+            .entry(routine)
+            .or_default()
+            .begin(change)
     }
 
     fn open_routine_delete_dialog(
@@ -208,30 +186,25 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = Uuid::new_v4();
-        if !self.begin_routine_change(bot, routine, RoutineSave::Deleting { attempt }) {
+        let Some(attempt) = self.begin_routine_change(bot, routine, RoutineChange::Delete) else {
             return;
-        }
+        };
         cx.notify();
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_routine(bot, routine).await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
-                    return;
-                };
-                match result {
-                    Ok(()) => {
-                        app.expanded_routine_problems.remove(&routine);
-                    }
-                    Err(err) => {
-                        entry.routines.insert(
-                            routine,
-                            RoutineSave::Failed(format!("Couldn't delete. {err}")),
-                        );
-                        cx.notify();
-                    }
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
                 }
+                let settled =
+                    settle_change(&mut app.settings, bot, routine, attempt, &result, |err| {
+                        format!("Couldn't delete. {err}")
+                    });
+                if settled && result.is_ok() {
+                    app.expanded_routine_problems.remove(&routine);
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -240,7 +213,7 @@ impl ElseApp {
     pub(super) fn render_routines(
         &self,
         bot: Uuid,
-        saves: &HashMap<Uuid, RoutineSave>,
+        saves: &HashMap<Uuid, Request<RoutineChange>>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -268,7 +241,7 @@ impl ElseApp {
     pub(super) fn render_reminders(
         &self,
         bot: Uuid,
-        saves: &HashMap<Uuid, RoutineSave>,
+        saves: &HashMap<Uuid, Request<RoutineChange>>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -320,14 +293,20 @@ fn retry_failure(err: &crate::api::ClientError) -> String {
     }
 }
 
-pub(in crate::app::settings) fn current_change(
+/// Settles a routine change. Returns false when `attempt` is no longer
+/// the change in flight.
+pub(in crate::app::settings) fn settle_change<T>(
     settings: &mut HashMap<Uuid, BotSettings>,
     bot: Uuid,
     routine: Uuid,
     attempt: Uuid,
-) -> Option<&mut BotSettings> {
-    let entry = settings.get_mut(&bot)?;
-    (entry.routines.get(&routine).and_then(RoutineSave::attempt) == Some(attempt)).then_some(entry)
+    result: &Result<T, crate::api::ClientError>,
+    message: impl FnOnce(&crate::api::ClientError) -> String,
+) -> bool {
+    settings
+        .get_mut(&bot)
+        .and_then(|entry| entry.routines.get_mut(&routine))
+        .is_some_and(|save| save.settle_as(attempt, result, message))
 }
 
 /// Whether the owner may run the routine again now: it has failures the
@@ -356,9 +335,9 @@ impl Banner {
 
 /// A change that failed outranks a retry's progress: it explains why the
 /// switch or menu choice didn't hold.
-fn banner(routine: &Routine, save: Option<&RoutineSave>) -> Option<Banner> {
-    if let Some(RoutineSave::Failed(err)) = save {
-        return Some(Banner::Problem(err.clone()));
+fn banner(routine: &Routine, save: Option<&Request<RoutineChange>>) -> Option<Banner> {
+    if let Some(err) = save.and_then(Request::error) {
+        return Some(Banner::Problem(err.to_owned()));
     }
     let (text, attention) = last_run(routine)?;
     if routine.retrying {
@@ -425,7 +404,7 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
 
 #[cfg(test)]
 mod tests {
-    use super::{Banner, RoutineSave, banner, last_run, retryable};
+    use super::{Banner, Request, banner, last_run, retryable};
 
     #[test]
     fn a_failed_change_shows_over_a_retry_in_progress() {
@@ -442,7 +421,7 @@ mod tests {
             banner(&retrying, None),
             Some(Banner::Progress("Retrying: running now".to_owned()))
         );
-        let failed = RoutineSave::Failed("Couldn't save. offline".to_owned());
+        let failed = Request::Failed("Couldn't save. offline".to_owned());
         assert_eq!(
             banner(&retrying, Some(&failed)),
             Some(Banner::Problem("Couldn't save. offline".to_owned())),

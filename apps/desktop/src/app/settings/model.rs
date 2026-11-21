@@ -4,6 +4,7 @@ pub(in crate::app) use editor::ModelDialog;
 
 use crate::api::{BotProfile, Capabilities, ModelInfo, ProfileChoice};
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
+use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -80,12 +81,6 @@ impl ModelState {
             Self::Loading(_) => {}
         }
     }
-}
-
-/// A one-click switch of a bot to the newer model of its family.
-pub(in crate::app) enum ModelUpgrade {
-    Saving { bot: Uuid },
-    Failed { bot: Uuid, error: String },
 }
 
 impl ElseApp {
@@ -250,12 +245,9 @@ impl ElseApp {
             ..choice.clone()
         };
         let label = self.model_info(&target)?.label.clone();
-        let saving =
-            matches!(self.model_upgrade, Some(ModelUpgrade::Saving { bot: b }) if b == bot);
-        let error = match &self.model_upgrade {
-            Some(ModelUpgrade::Failed { bot: b, error }) if *b == bot => Some(error.clone()),
-            _ => None,
-        };
+        let upgrade = &self.settings.get(&bot)?.model_upgrade;
+        let saving = upgrade.busy();
+        let error = upgrade.error().map(str::to_owned);
         let connected = self.connection == Connection::Connected;
         Some(
             v_flex()
@@ -286,8 +278,8 @@ impl ElseApp {
                                 .label("Switch")
                                 .loading(saving)
                                 .accessibility_label(format!("Switch to {label}"))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.upgrade_model(bot, target.clone(), cx)
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.upgrade_model(bot, target.clone(), window, cx)
                                 })),
                         ),
                 )
@@ -299,7 +291,13 @@ impl ElseApp {
 
     /// Save `target`, the newer model with the bot's effort and speed where
     /// it takes them.
-    fn upgrade_model(&mut self, bot: Uuid, target: ProfileChoice, cx: &mut Context<Self>) {
+    fn upgrade_model(
+        &mut self,
+        bot: Uuid,
+        target: ProfileChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(provider) = self
             .caps
             .as_ref()
@@ -310,27 +308,31 @@ impl ElseApp {
         let Some(choice) = crate::profile_picker::catalog_choice(provider, Some(&target)) else {
             return;
         };
-        self.model_upgrade = Some(ModelUpgrade::Saving { bot });
+        let Some(attempt) = self
+            .settings
+            .get_mut(&bot)
+            .and_then(|entry| entry.model_upgrade.begin(()))
+        else {
+            return;
+        };
         cx.notify();
         let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = client.set_bot_profile(bot, choice).await;
-            let _ = this.update(cx, |app, cx| {
-                if !matches!(app.model_upgrade, Some(ModelUpgrade::Saving { bot: b }) if b == bot) {
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
+                }
+                let Some(entry) = app.settings.get_mut(&bot) else {
+                    return;
+                };
+                if !entry.model_upgrade.settle(attempt, &result) {
                     return;
                 }
-                app.model_upgrade = match result {
-                    Ok(saved) => {
-                        if let Some(entry) = app.settings.get_mut(&bot) {
-                            entry.model.saved(saved);
-                        }
-                        None
-                    }
-                    Err(err) => Some(ModelUpgrade::Failed {
-                        bot,
-                        error: err.to_string(),
-                    }),
-                };
+                if let Ok(saved) = result {
+                    entry.model.saved(saved);
+                    entry.model_upgrade = Request::Idle;
+                }
                 cx.notify();
             });
         })

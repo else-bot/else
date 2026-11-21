@@ -387,8 +387,8 @@ impl ElseApp {
             submit
                 .filter(|s| s.answer.contains(choice))
                 .and_then(|s| match s.state {
-                    SubmitState::Sending => Some("Sending…"),
-                    SubmitState::Recorded => Some("Recorded"),
+                    Request::Sending { .. } => Some("Sending…"),
+                    Request::Accepted(()) => Some("Recorded"),
                     _ => None,
                 })
         };
@@ -450,8 +450,8 @@ impl ElseApp {
                     })),
             );
         }
-        if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
-            card = card.child(callout(error.clone(), &theme));
+        if let Some(error) = submit.and_then(|s| s.state.error()) {
+            card = card.child(callout(error.to_owned(), &theme));
         }
         card.footer(footer).into_any_element()
     }

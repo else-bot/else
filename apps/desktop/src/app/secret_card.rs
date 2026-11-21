@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{SecretRequest, SecretRequestStatus};
@@ -25,15 +26,6 @@ pub(super) struct SecretForm {
     description: Entity<InputState>,
     website: Entity<InputState>,
     _fields: Subscription,
-    submitting: bool,
-    error: Option<String>,
-}
-
-impl SecretForm {
-    /// Whether the owner already sent this form and waits on the server.
-    pub(super) fn locks(&self) -> bool {
-        self.submitting
-    }
 }
 
 impl SecretForm {
@@ -60,8 +52,6 @@ impl SecretForm {
                     .placeholder("Website host, such as x.com")
             }),
             _fields: subscription,
-            submitting: false,
-            error: None,
         }
     }
 
@@ -104,17 +94,15 @@ impl ElseApp {
         let connected = self.connection == Connection::Connected;
         for request in pending {
             let card = view.cards.secrets.entry(request.id).or_default();
-            if !card.answered && card.form.is_none() {
+            if !matches!(card.request, Request::Accepted(())) && card.form.is_none() {
                 card.form = Some(SecretForm::new(&request, window, cx));
             }
         }
-        for form in view
-            .cards
-            .secrets
-            .values()
-            .filter_map(|card| card.form.as_ref())
-        {
-            let busy = form.submitting || !connected;
+        for card in view.cards.secrets.values() {
+            let Some(form) = card.form.as_ref() else {
+                continue;
+            };
+            let busy = card.request.busy() || !connected;
             form.fields.update(cx, |fields, cx| {
                 if fields.busy != busy {
                     fields.busy = busy;
@@ -148,22 +136,17 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
-        let Some(form) = view
-            .cards
-            .secrets
-            .get_mut(&request)
-            .and_then(|card| card.form.as_mut())
-        else {
+        let Some(card) = view.cards.secrets.get_mut(&request) else {
             return;
         };
-        if form.submitting {
+        let Some(form) = card.form.as_ref().filter(|_| !card.request.busy()) else {
             return;
-        }
+        };
         let env = if store {
             match form.values(cx) {
                 Ok(env) => Some(env),
                 Err(message) => {
-                    form.error = Some(message);
+                    card.request.reject(message);
                     self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
                     return;
                 }
@@ -171,16 +154,17 @@ impl ElseApp {
         } else {
             None
         };
-        form.submitting = true;
-        form.error = None;
         form.fields.update(cx, |fields, cx| {
             fields.busy = true;
             cx.notify();
         });
+        let Some(attempt) = card.request.begin(()) else {
+            return;
+        };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_secret(bot, request, env).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.secret_answered(bot, request, result, window, cx)
+                app.secret_answered(bot, request, attempt, result, window, cx)
             });
         });
         task.detach();
@@ -191,44 +175,36 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         request: Uuid,
+        attempt: Uuid,
         result: Result<(), ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&result, Err(ClientError::Unauthorized)) {
-            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-            self.clear_secret_forms(window, cx);
-            self.sync_skill_cards(window, cx);
-            self.sync_secret_cards(window, cx);
-            cx.notify();
+        let settled = self
+            .view_of(bot)
+            .and_then(|view| view.cards.secrets.get_mut(&request))
+            .is_some_and(|card| card.request.settle(attempt, &result));
+        let rejected = result
+            .as_ref()
+            .is_err_and(|err| self.unauthorized(err, window, cx));
+        if rejected || !settled {
             return;
         }
-        let Some(view) = self.view_of(bot) else {
+        let Some(card) = self
+            .view_of(bot)
+            .and_then(|view| view.cards.secrets.get_mut(&request))
+        else {
             return;
         };
-        match result {
-            Ok(()) => {
-                let card = view.cards.secrets.entry(request).or_default();
-                if let Some(mut form) = card.form.take() {
-                    form.clear(window, cx);
-                }
-                card.answered = true;
+        if result.is_ok() {
+            if let Some(mut form) = card.form.take() {
+                form.clear(window, cx);
             }
-            Err(err) => {
-                if let Some(form) = view
-                    .cards
-                    .secrets
-                    .get_mut(&request)
-                    .and_then(|card| card.form.as_mut())
-                {
-                    form.submitting = false;
-                    form.fields.update(cx, |fields, cx| {
-                        fields.busy = false;
-                        cx.notify();
-                    });
-                    form.error = Some(err.to_string());
-                }
-            }
+        } else if let Some(form) = &card.form {
+            form.fields.update(cx, |fields, cx| {
+                fields.busy = false;
+                cx.notify();
+            });
         }
         self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
     }
@@ -259,12 +235,9 @@ impl ElseApp {
                 .child(text)
         };
         let row = v_flex().w_full();
-        let form = view
-            .cards
-            .secrets
-            .get(&id)
-            .and_then(|card| card.form.as_ref());
-        let (Some(form), true) = (form, request.is_pending()) else {
+        let card_state = view.cards.secrets.get(&id);
+        let form = card_state.and_then(|card| card.form.as_ref());
+        let (Some(form), Some(card_state), true) = (form, card_state, request.is_pending()) else {
             let text = match request.status {
                 SecretRequestStatus::Stored => format!(
                     "Saved {} in the Vault. Every bot on this server can use it.",
@@ -280,7 +253,8 @@ impl ElseApp {
             };
             return row.child(note(text)).into_any_element();
         };
-        let busy = form.submitting || self.connection != Connection::Connected;
+        let sending = card_state.request.busy();
+        let busy = sending || self.connection != Connection::Connected;
         let fields = v_flex()
             .w_full()
             .gap_2()
@@ -323,8 +297,8 @@ impl ElseApp {
                 request.name
             )))
         });
-        if let Some(error) = &form.error {
-            card = card.child(super::action_card::failure(&theme, error.clone()));
+        if let Some(error) = card_state.request.error() {
+            card = card.child(super::action_card::failure(&theme, error.to_owned()));
         }
         let footer = super::action_card::footer()
             .note("Encrypted on this server. Values stay out of chat.")
@@ -360,7 +334,7 @@ impl ElseApp {
             .child(
                 Button::new(SharedString::from(format!("secret-save-{id}")))
                     .control(Tier::Primary, Scale::Compact, busy, cx)
-                    .label(if form.submitting {
+                    .label(if sending {
                         "Saving…"
                     } else {
                         "Save and continue"
@@ -370,7 +344,7 @@ impl ElseApp {
                     })),
             );
         let card = row.child(card.footer(footer)).into_any_element();
-        if form.locks() {
+        if sending {
             card
         } else {
             self.sighted(RowKey::Card(CardKey::SecretRequest(id)), card, cx)

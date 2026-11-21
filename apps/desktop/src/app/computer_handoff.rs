@@ -14,7 +14,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::{APP_CONTEXT, ElseApp, TakeOverComputer};
-use crate::api::{Bot, ClientError, HandoffAction};
+use crate::api::{Bot, HandoffAction};
 use crate::model::{ComputerHandoff, HandoffStatus};
 
 impl ElseApp {
@@ -33,13 +33,13 @@ impl ElseApp {
         if self.selected != Some(bot) {
             return;
         }
-        self.details_tab = super::computer::DetailsTab::Computer;
-        if self.settings_open {
+        self.details.select(super::computer::DetailsTab::Computer);
+        if self.details.open() {
             self.ensure_settings(window, cx);
         } else {
             self.toggle_settings(window, cx);
         }
-        if let Some(computer) = self.computer.clone() {
+        if let Some(computer) = self.details.computer().cloned() {
             computer.update(cx, |view, cx| view.take_over(window, cx));
         }
         if handoff.status == HandoffStatus::Pending {
@@ -52,7 +52,7 @@ impl ElseApp {
         let Some((bot, handoff)) = self.open_handoff() else {
             return;
         };
-        if let Some(computer) = self.computer.clone() {
+        if let Some(computer) = self.details.computer().cloned() {
             computer.update(cx, |view, cx| view.collapse(cx));
         }
         self.settle_handoff(bot, handoff.id, HandoffAction::HandBack, window, cx);
@@ -69,14 +69,10 @@ impl ElseApp {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.settle_handoff(bot, handoff, action).await;
-            let _ = this.update(cx, |app, cx| {
+            let _ = this.update_in(cx, |app, window, cx| {
                 match result {
                     Ok(()) => return,
-                    Err(ClientError::Unauthorized) => {
-                        app.connection = super::Connection::InvalidCredentials(
-                            ClientError::Unauthorized.to_string(),
-                        );
-                    }
+                    Err(err) if app.unauthorized(&err, window, cx) => {}
                     Err(err) => app.notice = Some(err.to_string()),
                 }
                 cx.notify();
