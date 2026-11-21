@@ -49,16 +49,16 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::cli::attempt::{Channel, Ended, Event, Protocol};
+use super::cli::attempt::{self, Ended};
 use super::cli::session::PreparedTurn;
 use super::cli::stream::{Interrupt, Prompt, StreamAttempt};
-use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, Stream, ToolSet};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::Listed;
 use super::prompt;
 use super::{attachments, claude_home};
-use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnSink};
+use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
@@ -316,7 +316,6 @@ fn interrupt_request() -> String {
 #[async_trait]
 impl Adapter for ClaudeCode {
     type Login = Login;
-    type Protocol = Tracker;
 
     const DEFINITION: &'static Definition = &DEFINITION;
     const PRODUCT: &'static str = "Claude Code";
@@ -330,6 +329,73 @@ impl Adapter for ClaudeCode {
             ToolSet::None => "tools:none",
         }
     }
+
+    async fn run(
+        &self,
+        cli: &Cli<Self>,
+        ready: &Ready<Login>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        cli.stream(ready, profile, input, sink, stop).await
+    }
+
+    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
+        let mut env = ready.login.config.env();
+        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
+        let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
+        let run = Run {
+            env,
+            input: request.into_bytes(),
+            limit: protocol::MODELS_LIMIT,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(
+                &ready.program.current().await?,
+                &[
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--setting-sources",
+                    "",
+                    "--strict-mcp-config",
+                    "--tools",
+                    "",
+                    "--no-session-persistence",
+                ],
+            )
+        };
+        ready
+            .host
+            .ask(&run, |line| protocol::listed_models(line, MODELS_REQUEST))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|listed| listed)
+            .map_err(|why| format!("Claude Code did not list its models: {why}"))
+    }
+
+    async fn checkpoint(
+        &self,
+        cli: &Claude,
+        request: CheckpointRequest,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let ready = cli.ready()?;
+        let profile = request.profile.ok_or("no saved Claude execution profile")?;
+        cli.models.validate(&profile)?;
+        let text =
+            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
+        super::bounded_checkpoint(text, request.max_bytes)
+    }
+}
+
+#[async_trait]
+impl Stream for ClaudeCode {
+    type Protocol = Tracker;
 
     fn policy(&self, ready: &Ready<Login>) -> Vec<String> {
         vec!["agents:disabled".into(), ready.login.account.clone()]
@@ -393,56 +459,6 @@ impl Adapter for ClaudeCode {
     ) -> Ended {
         attempt.drive(protocol, turn, sink, stop).await
     }
-
-    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
-        let mut env = ready.login.config.env();
-        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
-        let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
-        let run = Run {
-            env,
-            input: request.into_bytes(),
-            limit: protocol::MODELS_LIMIT,
-            timeout: super::models::ASK_TIMEOUT,
-            ..Run::new(
-                &ready.program.current().await?,
-                &[
-                    "-p",
-                    "--input-format",
-                    "stream-json",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--setting-sources",
-                    "",
-                    "--strict-mcp-config",
-                    "--tools",
-                    "",
-                    "--no-session-persistence",
-                ],
-            )
-        };
-        ready
-            .host
-            .ask(&run, |line| protocol::listed_models(line, MODELS_REQUEST))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|listed| listed)
-            .map_err(|why| format!("Claude Code did not list its models: {why}"))
-    }
-
-    async fn checkpoint(
-        &self,
-        cli: &Claude,
-        request: CheckpointRequest,
-        cancel: &CancellationToken,
-    ) -> Result<String, String> {
-        let ready = cli.ready()?;
-        let profile = request.profile.ok_or("no saved Claude execution profile")?;
-        cli.models.validate(&profile)?;
-        let text =
-            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
-        super::bounded_checkpoint(text, request.max_bytes)
-    }
 }
 
 async fn checkpoint_once(
@@ -487,45 +503,26 @@ async fn checkpoint_once(
     .map_err(|e| e.to_string())?;
     let uuid = Uuid::new_v4().to_string();
     let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
-    let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
-    let result = async {
+    let exchange = async {
         let line = user_message(&uuid, Value::from(prompt_text));
-        tokio::select! {
-            _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-            written = attempt.write(&line) => {
-                written.map_err(|e| e.to_string())?;
-            }
+        attempt.write(&line).await.map_err(|e| e.to_string())?;
+        let (text, info) = attempt::collect(&mut attempt, &mut tracker, DEFINITION.label).await?;
+        if !tracker.init_seen {
+            Err("Claude did not report its tool set".into())
+        } else if !info.success {
+            Err(info.message)
+        } else if text.trim().is_empty() {
+            Ok(info.message)
+        } else {
+            Ok(text)
         }
-        loop {
-            let event = tokio::select! {
-                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err("the checkpoint exceeded its deadline".to_owned());
-                }
-                event = attempt.next() => event?,
-            };
-            let Some(event) = event else {
-                return Err("Claude exited before the checkpoint finished".to_owned());
-            };
-            let events = tracker
-                .on(&event)
-                .map_err(|v| format!("{}: {}", v.code, v.message))?;
-            for event in events {
-                if let Event::Finished(info) = event {
-                    return if !tracker.init_seen {
-                        Err("Claude did not report its tool set".into())
-                    } else if !info.success {
-                        Err(info.message)
-                    } else if tracker.text.trim().is_empty() {
-                        Ok(info.message)
-                    } else {
-                        Ok(tracker.text.clone())
-                    };
-                }
-            }
+    };
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err("cancelled".to_owned()),
+        result = tokio::time::timeout(super::CHECKPOINT_DEADLINE, exchange) => {
+            result.unwrap_or_else(|_| Err("the checkpoint exceeded its deadline".to_owned()))
         }
-    }
-    .await;
+    };
     let closed = attempt.close().await;
     let text = result?;
     closed.map(|()| text)

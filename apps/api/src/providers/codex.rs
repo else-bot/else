@@ -36,16 +36,15 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use super::cli::files::GRANT_ENV;
-use super::cli::session::{self, Identity};
+use super::cli::turn::{Adapter, Cli, ToolSet};
 use super::codex_home;
 use super::codex_rpc::AppServer;
 use super::definitions::Definition;
 use super::host::{Host, LaunchSpec, Run};
-use super::models::{Listed, Models};
+use super::models::Listed;
 use super::prompt;
-use crate::app::providers::FailureCode;
 use crate::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
+    CheckpointRequest, FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 
 pub const ID: &str = "codex";
@@ -83,19 +82,14 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
             std::env::var("CODEX_HOME").ok().as_deref(),
             std::env::var("HOME").ok().as_deref(),
         );
-        let codex = std::sync::Arc::new(
-            Codex {
-                models: Models::new(&DEFINITION),
-                ready: Codex::ready(
-                    Some(wiring.host.clone()),
-                    super::executable(wiring.config.codex_bin.as_deref(), "codex").await,
-                    auth,
-                )
-                .await,
-                tool_url: None,
-            }
-            .with_tools(wiring.tool_url.clone()),
-        );
+        let ready = ready(
+            Some(wiring.host.clone()),
+            super::executable(wiring.config.codex_bin.as_deref(), "codex").await,
+            auth,
+        )
+        .await;
+        let codex =
+            std::sync::Arc::new(Codex::new(CodexServer, ready).with_tools(wiring.tool_url.clone()));
         super::Built {
             provider: codex.clone(),
             summarizer: Some(codex),
@@ -103,69 +97,55 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
     })
 }
 
-/// A CLI that runs and a host login.
-struct Ready {
-    host: Host,
-    program: super::Program,
-    auth: PathBuf,
-    version: String,
-}
+/// A CLI that runs, with the host login file.
+type Ready = super::cli::turn::Ready<PathBuf>;
 
-pub struct Codex {
-    models: Models,
-    ready: Result<Ready, String>,
-    tool_url: Option<String>,
+pub struct CodexServer;
+
+pub type Codex = Cli<CodexServer>;
+
+/// Locate the CLI and the host login and check that the CLI runs. A missing
+/// piece makes the provider unavailable with a reason instead of failing
+/// startup. The version is only session identity.
+async fn ready(
+    host: Option<Host>,
+    program: Result<Option<super::Program>, String>,
+    auth: Option<PathBuf>,
+) -> Result<Ready, String> {
+    let host = host.ok_or("Codex is not configured on this host")?;
+    let program = program?.ok_or("the codex CLI was not found on the host")?;
+    let auth = auth.ok_or("the Codex login location is unknown")?;
+    if !auth.is_file() {
+        return Err("Codex is not logged in on the host (run `codex login`)".into());
+    }
+    let version = host
+        .probe(program.path(), &["--version"], &[])
+        .await
+        .map_err(|why| {
+            format!(
+                "the codex executable does not run (`{} --version`: {why}); \
+                 set ELSE_CODEX_BIN to the native codex binary",
+                program.path().display()
+            )
+        })?;
+    Ok(Ready {
+        host,
+        program,
+        version,
+        login: auth,
+    })
 }
 
 impl Codex {
-    /// Locate the CLI and the host login and check that the CLI runs. A
-    /// missing piece makes the provider unavailable with a reason instead of
-    /// failing startup. The version is only session identity.
     pub async fn detect(
         host: Option<Host>,
         program: Option<PathBuf>,
         auth: Option<PathBuf>,
     ) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), auth).await,
-            tool_url: None,
-        }
-    }
-
-    async fn ready(
-        host: Option<Host>,
-        program: Result<Option<super::Program>, String>,
-        auth: Option<PathBuf>,
-    ) -> Result<Ready, String> {
-        let host = host.ok_or("Codex is not configured on this host")?;
-        let program = program?.ok_or("the codex CLI was not found on the host")?;
-        let auth = auth.ok_or("the Codex login location is unknown")?;
-        if !auth.is_file() {
-            return Err("Codex is not logged in on the host (run `codex login`)".into());
-        }
-        let version = host
-            .probe(program.path(), &["--version"], &[])
-            .await
-            .map_err(|why| {
-                format!(
-                    "the codex executable does not run (`{} --version`: {why}); \
-                 set ELSE_CODEX_BIN to the native codex binary",
-                    program.path().display()
-                )
-            })?;
-        Ok(Ready {
-            host,
-            program,
-            auth,
-            version,
-        })
-    }
-
-    /// Offer else.bot's tools (memory) at this MCP URL.
-    pub fn with_tools(mut self, url: String) -> Self {
-        self.tool_url = Some(url);
-        self
+        Self::new(
+            CodexServer,
+            ready(host, Ok(program.map(Into::into)), auth).await,
+        )
     }
 
     fn fingerprint(
@@ -175,21 +155,11 @@ impl Codex {
         input: &TurnInput,
         account: &str,
     ) -> String {
-        session::fingerprint(
-            input,
+        self.identify(
+            ready,
             profile,
-            &Identity {
-                prompt_version: PROMPT_VERSION,
-                version: &ready.version,
-                runtime: &ready.host.runtime(input.bot_id),
-                tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                    (true, true) => "tools:host+elsebot-v5",
-                    (true, false) => "tools:host",
-                    (false, true) => "tools:elsebot-only-v3",
-                    (false, false) => "tools:none",
-                },
-                policy: &["agents:disabled", "skills:bot-project-only-v1", account],
-            },
+            input,
+            &["agents:disabled", "skills:bot-project-only-v1", account],
         )
     }
 
@@ -214,7 +184,7 @@ impl Codex {
             .await
             .map_err(|why| unavailable(format!("Could not start Codex: {why}")))?;
         let host_tools = input.delegation.host_tools();
-        codex_home::prepare(&dirs, &ready.auth, self.tool_url.as_deref(), host_tools)
+        codex_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
             .map_err(|e| unavailable(e.to_string()))?;
         super::attachments::stage(&dirs.project, &input.files)
             .await
@@ -275,43 +245,48 @@ pub(crate) fn deferred_tools() -> String {
 }
 
 #[async_trait]
-impl Provider for Codex {
-    fn project_dir(&self, bot_id: uuid::Uuid) -> Option<std::path::PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
-    }
+impl Adapter for CodexServer {
+    type Login = PathBuf;
 
-    fn id(&self) -> &'static str {
-        ID
-    }
+    const DEFINITION: &'static Definition = &DEFINITION;
+    const PRODUCT: &'static str = "Codex";
+    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
 
-    fn label(&self) -> &'static str {
-        DEFINITION.label
-    }
-
-    fn availability(&self) -> Availability {
-        match &self.ready {
-            Ok(_) => Availability::Available,
-            Err(reason) => Availability::Unavailable(reason.clone()),
+    fn tool_tag(&self, tools: ToolSet) -> &'static str {
+        match tools {
+            ToolSet::HostAndElsebot => "tools:host+elsebot-v5",
+            ToolSet::Host => "tools:host",
+            ToolSet::Elsebot => "tools:elsebot-only-v3",
+            ToolSet::None => "tools:none",
         }
     }
 
-    fn uses_profile(&self) -> bool {
-        true
+    async fn run(
+        &self,
+        cli: &Codex,
+        ready: &Ready,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        let spec = match cli.launch(ready, input, &profile.model, &stop).await {
+            Ok(spec) => spec,
+            Err(outcome) => return outcome,
+        };
+        let mut server = match AppServer::spawn(&ready.host, &spec) {
+            Ok(server) => server,
+            Err(err) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string());
+            }
+        };
+        let ended = cli
+            .converse(ready, &mut server, input, profile, sink, &stop)
+            .await;
+        server.conclude(ended, sink).await
     }
 
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.models.validate(profile)
-    }
-
-    fn models(&self) -> Option<&Models> {
-        Some(&self.models)
-    }
-
-    async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+    async fn list_models(&self, ready: &Ready) -> Result<Vec<Listed>, String> {
         let program = ready.program.current().await?;
         let run = Run {
             limit: 16 * 1024 * 1024,
@@ -328,11 +303,12 @@ impl Provider for Codex {
 
     async fn checkpoint(
         &self,
+        cli: &Codex,
         request: CheckpointRequest,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
         let profile = request.profile.ok_or("no saved Codex execution profile")?;
-        let text = self
+        let text = cli
             .no_tools_once(
                 request.bot_id,
                 &profile,
@@ -343,38 +319,6 @@ impl Provider for Codex {
             )
             .await?;
         super::bounded_checkpoint(text, request.max_bytes)
-    }
-
-    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        let ready = match &self.ready {
-            Ok(ready) => ready,
-            Err(reason) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
-            }
-        };
-        let Some(profile) = input.profile.clone() else {
-            return TurnOutcome::failed(
-                FailureCode::ProviderMisconfigured,
-                "No execution profile was snapshotted.",
-            );
-        };
-        if let Err(reason) = self.models.validate(&profile) {
-            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
-        }
-        let spec = match self.launch(ready, &input, &profile.model, &stop).await {
-            Ok(spec) => spec,
-            Err(outcome) => return outcome,
-        };
-        let mut server = match AppServer::spawn(&ready.host, &spec) {
-            Ok(server) => server,
-            Err(err) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string());
-            }
-        };
-        let ended = self
-            .converse(ready, &mut server, &input, &profile, sink, &stop)
-            .await;
-        server.conclude(ended, sink).await
     }
 }
 

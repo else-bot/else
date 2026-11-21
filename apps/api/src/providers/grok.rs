@@ -21,12 +21,12 @@ use async_trait::async_trait;
 use super::cli::attempt::Ended;
 use super::cli::session::PreparedTurn;
 use super::cli::stream::{Prompt, StreamAttempt};
-use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, Stream, ToolSet};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, Run};
 use super::models::Listed;
 use super::{grok_home, prompt};
-use crate::app::providers::{FailureCode, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
@@ -165,7 +165,6 @@ async fn ready(
 #[async_trait]
 impl Adapter for GrokCli {
     type Login = PathBuf;
-    type Protocol = Tracker;
 
     const DEFINITION: &'static Definition = &DEFINITION;
     const PRODUCT: &'static str = "Grok CLI";
@@ -183,6 +182,37 @@ impl Adapter for GrokCli {
             ToolSet::None => "tools:none",
         }
     }
+
+    async fn run(
+        &self,
+        cli: &Cli<Self>,
+        ready: &Ready<PathBuf>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
+        cli.stream(ready, profile, input, sink, stop).await
+    }
+
+    async fn list_models(&self, ready: &Ready<PathBuf>) -> Result<Vec<Listed>, String> {
+        let run = Run {
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&ready.program.current().await?, &["models"])
+        };
+        let printed = ready
+            .host
+            .run(&run)
+            .await
+            .map_err(|why| format!("`grok models` failed: {why}"))?;
+        let printed = String::from_utf8(printed).map_err(|_| "`grok models` printed non-UTF-8")?;
+        listed_models(&printed)
+    }
+}
+
+#[async_trait]
+impl Stream for GrokCli {
+    type Protocol = Tracker;
 
     fn policy(&self, ready: &Ready<PathBuf>) -> Vec<String> {
         vec![
@@ -312,20 +342,6 @@ impl Adapter for GrokCli {
             return TurnOutcome::failed(FailureCode::ProviderUnavailable, SIGNED_OUT);
         }
         outcome
-    }
-
-    async fn list_models(&self, ready: &Ready<PathBuf>) -> Result<Vec<Listed>, String> {
-        let run = Run {
-            timeout: super::models::ASK_TIMEOUT,
-            ..Run::new(&ready.program.current().await?, &["models"])
-        };
-        let printed = ready
-            .host
-            .run(&run)
-            .await
-            .map_err(|why| format!("`grok models` failed: {why}"))?;
-        let printed = String::from_utf8(printed).map_err(|_| "`grok models` printed non-UTF-8")?;
-        listed_models(&printed)
     }
 }
 

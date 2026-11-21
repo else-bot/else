@@ -1,8 +1,10 @@
-//! The one turn every streaming CLI provider runs, and the [`Provider`]
-//! around it. An [`Adapter`] says how its CLI is launched, which sessions
-//! it can resume, and what its events mean; [`Cli`] owns the order of
-//! everything else: readiness, the profile, the session choice, the sink's
-//! lifecycle calls, attachments, the task grant, delivery, and cleanup.
+//! The [`Provider`] every CLI runs behind, and the one turn every streaming
+//! CLI runs. [`Cli`] owns readiness, the profile, the fingerprint, and the
+//! catalog; an [`Adapter`] runs the turn. A [`Stream`] adapter says how its
+//! CLI is launched, which sessions it can resume, and what its events mean,
+//! and [`Cli::stream`] owns the order of everything else: the session
+//! choice, the sink's lifecycle calls, attachments, the task grant,
+//! delivery, and cleanup.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -122,12 +124,12 @@ pub struct Launch<P> {
     pub protocol: P,
 }
 
-/// One streaming CLI: everything [`Cli`] cannot know about it.
+/// One CLI: what [`Cli`]'s [`Provider`] cannot know about it. A CLI that
+/// streams one turn's events also implements [`Stream`].
 #[async_trait]
 pub trait Adapter: Send + Sync + Sized + 'static {
     /// The adapter's readiness beyond a running CLI, such as its login.
     type Login: Send + Sync;
-    type Protocol: Protocol + Send;
 
     const DEFINITION: &'static Definition;
     /// The CLI's name in messages, such as "Claude Code".
@@ -144,6 +146,38 @@ pub trait Adapter: Send + Sync + Sized + 'static {
     /// The fingerprint's tool tag. Keep each value byte for byte, or
     /// every native session is rebuilt once.
     fn tool_tag(&self, tools: ToolSet) -> &'static str;
+
+    /// Run a turn on a ready CLI with a valid profile. A [`Stream`]
+    /// adapter calls [`Cli::stream`].
+    async fn run(
+        &self,
+        cli: &Cli<Self>,
+        ready: &Ready<Self::Login>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome;
+
+    async fn list_models(&self, ready: &Ready<Self::Login>) -> Result<Vec<Listed>, String>;
+
+    /// A no-tool checkpoint, for an adapter that can verify one.
+    async fn checkpoint(
+        &self,
+        cli: &Cli<Self>,
+        request: CheckpointRequest,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let _ = (cli, request, cancel);
+        Err("this provider cannot produce a verified no-tool checkpoint".into())
+    }
+}
+
+/// A CLI that streams one turn's events: everything [`Cli::stream`]
+/// cannot know about it.
+#[async_trait]
+pub trait Stream: Adapter {
+    type Protocol: Protocol + Send;
 
     /// The fingerprint's provider policies and host account, in order.
     fn policy(&self, ready: &Ready<Self::Login>) -> Vec<String>;
@@ -201,19 +235,6 @@ pub trait Adapter: Send + Sync + Sized + 'static {
         let _ = (ready, input, accepted);
         outcome
     }
-
-    async fn list_models(&self, ready: &Ready<Self::Login>) -> Result<Vec<Listed>, String>;
-
-    /// A no-tool checkpoint, for an adapter that can verify one.
-    async fn checkpoint(
-        &self,
-        cli: &Cli<Self>,
-        request: CheckpointRequest,
-        cancel: &CancellationToken,
-    ) -> Result<String, String> {
-        let _ = (cli, request, cancel);
-        Err("this provider cannot produce a verified no-tool checkpoint".into())
-    }
 }
 
 /// A streaming CLI provider.
@@ -244,15 +265,15 @@ impl<A: Adapter> Cli<A> {
         self.ready.as_ref().map_err(Clone::clone)
     }
 
-    pub(in crate::providers) fn fingerprint(
+    /// The session fingerprint, with the adapter's `policy` in order.
+    pub(in crate::providers) fn identify(
         &self,
         ready: &Ready<A::Login>,
         profile: &Profile,
         input: &TurnInput,
+        policy: &[&str],
     ) -> String {
         let tools = ToolSet::for_turn(input, self.tool_url.as_deref());
-        let policy = self.adapter.policy(ready);
-        let policy: Vec<&str> = policy.iter().map(String::as_str).collect();
         session::fingerprint(
             input,
             profile,
@@ -261,39 +282,44 @@ impl<A: Adapter> Cli<A> {
                 version: &ready.version,
                 runtime: &ready.host.runtime(input.bot_id),
                 tools: self.adapter.tool_tag(tools),
-                policy: &policy,
+                policy,
             },
         )
     }
+}
 
-    async fn turn(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
+impl<A: Stream> Cli<A> {
+    pub(in crate::providers) fn fingerprint(
+        &self,
+        ready: &Ready<A::Login>,
+        profile: &Profile,
+        input: &TurnInput,
+    ) -> String {
+        let policy = self.adapter.policy(ready);
+        let policy: Vec<&str> = policy.iter().map(String::as_str).collect();
+        self.identify(ready, profile, input, &policy)
+    }
+
+    /// The streaming turn, for [`Adapter::run`].
+    pub async fn stream(
+        &self,
+        ready: &Ready<A::Login>,
+        profile: &Profile,
+        input: &TurnInput,
+        sink: &dyn TurnSink,
+        stop: Stop,
+    ) -> TurnOutcome {
         let unavailable = |why: String| TurnOutcome::failed(FailureCode::ProviderUnavailable, why);
-        let ready = match self.ready() {
-            Ok(ready) => ready,
-            Err(reason) => return unavailable(reason),
-        };
-        if let Some(reason) = self.adapter.unavailable(ready) {
-            return unavailable(reason);
-        }
-        let Some(profile) = &input.profile else {
-            return TurnOutcome::failed(
-                FailureCode::ProviderMisconfigured,
-                "No execution profile was snapshotted.",
-            );
-        };
-        if let Err(reason) = self.models.validate(profile) {
-            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
-        }
         let mut dirs = match ready.host.bot_dirs(input.bot_id, A::DEFINITION.id) {
             Ok(dirs) => dirs,
             Err(err) => return unavailable(err.to_string()),
         };
-        let tools = ToolSet::for_turn(&input, self.tool_url.as_deref());
+        let tools = ToolSet::for_turn(input, self.tool_url.as_deref());
         let workspace = match self.adapter.workspace(&dirs, tools) {
             Ok(workspace) => workspace,
             Err(err) => return unavailable(err.to_string()),
         };
-        let fingerprint = self.fingerprint(ready, profile, &input);
+        let fingerprint = self.fingerprint(ready, profile, input);
         let opened = match input.session.as_ref().filter(|s| {
             s.fingerprint == fingerprint
                 && self
@@ -303,8 +329,8 @@ impl<A: Adapter> Cli<A> {
             Some(session) => Opened::Resumed(session),
             None => Opened::Fresh(Uuid::new_v4().to_string()),
         };
-        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
-        self.adapter.prepare_packet(&mut turn, &input, &dirs);
+        let mut turn = PreparedTurn::new(input, fingerprint, opened);
+        self.adapter.prepare_packet(&mut turn, input, &dirs);
         // The last moment a stop leaves nothing recorded, not even a
         // fresh session that retires the previous one.
         if stop.is_requested() {
@@ -320,7 +346,7 @@ impl<A: Adapter> Cli<A> {
             );
         }
         let start = Start {
-            input: &input,
+            input,
             profile,
             dirs: &dirs,
             workspace: &workspace,
@@ -387,7 +413,7 @@ impl<A: Adapter> Cli<A> {
         };
         let outcome = attempt.conclude(ended, sink).await;
         self.adapter
-            .concluded(ready, &input, turn.accepted(), outcome)
+            .concluded(ready, input, turn.accepted(), outcome)
     }
 }
 
@@ -466,6 +492,25 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        self.turn(input, sink, stop).await
+        let unavailable = |why: String| TurnOutcome::failed(FailureCode::ProviderUnavailable, why);
+        let ready = match self.ready() {
+            Ok(ready) => ready,
+            Err(reason) => return unavailable(reason),
+        };
+        if let Some(reason) = self.adapter.unavailable(ready) {
+            return unavailable(reason);
+        }
+        let Some(profile) = &input.profile else {
+            return TurnOutcome::failed(
+                FailureCode::ProviderMisconfigured,
+                "No execution profile was snapshotted.",
+            );
+        };
+        if let Err(reason) = self.models.validate(profile) {
+            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
+        }
+        self.adapter
+            .run(self, ready, profile, &input, sink, stop)
+            .await
     }
 }
