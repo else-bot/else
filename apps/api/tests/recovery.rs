@@ -385,7 +385,19 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
     let manager = Arc::new(api(&app, &guest, 1).await);
     let m = manager.clone();
     let waiting = tokio::spawn(async move { m.acquire(a, "test:a").await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    common::until(
+        "the computer reservation to enter creating",
+        common::poll(|| async {
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = ?1")
+                    .bind(a)
+                    .fetch_optional(&app.db.pool)
+                    .await
+                    .unwrap();
+            (state.as_deref() == Some("creating")).then_some(())
+        }),
+    )
+    .await;
     waiting.abort();
     let _ = waiting.await;
     assert_eq!(observed(&app, a).await, "creating");
@@ -393,6 +405,7 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Queued { .. }
     ));
+    // Outlast the fake's 500 ms create delay.
     tokio::time::sleep(Duration::from_millis(600)).await;
     manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, a).await, "absent");

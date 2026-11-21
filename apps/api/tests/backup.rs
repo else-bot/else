@@ -583,22 +583,23 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     .await
     .unwrap();
     let scheduled = empty.path().join("backups");
-    tokio::time::timeout(common::SETTLE, async {
-        while backup::completed_sets(&scheduled)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        backup::completed_sets(&scheduled).unwrap().len(),
-        1,
-        "a missed set runs once at startup, then waits for its interval"
-    );
+    common::until(
+        "the scheduled backup",
+        common::poll(|| {
+            let sets = backup::completed_sets(&scheduled).unwrap_or_default();
+            std::future::ready((!sets.is_empty()).then_some(()))
+        }),
+    )
+    .await;
+    common::never_polled(
+        "another backup ran before its interval",
+        Duration::from_millis(500),
+        || {
+            let completed = backup::completed_sets(&scheduled).unwrap();
+            std::future::ready((completed.len() != 1).then_some(completed))
+        },
+    )
+    .await;
     stop.cancel();
     task.await.unwrap();
 }
@@ -898,7 +899,7 @@ async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let (w, c) = (worker.clone(), cancel.clone());
     let run = tokio::spawn(async move { w.run_once_until(&c).await });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    common::until("the backup to reach sealing", async {
         loop {
             let sealing = std::fs::read_dir(&backups)
                 .unwrap()
@@ -911,12 +912,10 @@ async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
     cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(5), run)
+    let result = common::until("the cancelled backup to stop", run)
         .await
-        .unwrap()
         .unwrap();
     assert!(
         matches!(result, Err(BackupError::Interrupted)),

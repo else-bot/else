@@ -95,8 +95,7 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
-        else {
+        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
@@ -186,47 +185,52 @@ async fn finish(
     turn: Uuid,
     timeout: Duration,
 ) -> (String, Option<String>, String) {
-    let started = Instant::now();
-    loop {
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+    let mut last_status = String::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, error): (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+                    .bind(turn)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
+                let text: String = sqlx::query_scalar(
+                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
+                )
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
-        if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-            let text: String = sqlx::query_scalar(
-                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-            )
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-            eprintln!(
-                "  -> {status} {error:?}: {}",
-                text.chars().take(400).collect::<String>()
-            );
-            return (status, error, text);
+                eprintln!(
+                    "  -> {status} {error:?}: {}",
+                    text.chars().take(400).collect::<String>()
+                );
+                return (status, error, text);
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(started.elapsed() < timeout, "turn {turn} still {status}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
 }
 
 async fn wait_status(db: &sqlx::SqlitePool, turn: Uuid, wanted: &str) {
-    for _ in 0..2400 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-        if status == wanted {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("turn {turn} never became {wanted}");
+    tokio::time::timeout(
+        common::LIVE,
+        common::poll(|| async {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(db)
+                .await
+                .unwrap();
+            (status == wanted).then_some(())
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} never became {wanted}"));
 }
 
 static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -251,12 +255,12 @@ fn provider_processes() -> usize {
         .count()
 }
 
-async fn no_provider_processes(within: Duration) {
-    let started = Instant::now();
-    while provider_processes() > 0 {
-        assert!(started.elapsed() < within, "provider processes still run");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+async fn no_provider_processes() {
+    common::until(
+        "provider processes to exit",
+        common::poll(|| std::future::ready((provider_processes() == 0).then_some(()))),
+    )
+    .await;
 }
 
 fn runtime_states(home: &Path) -> Vec<(String, String)> {
@@ -873,24 +877,22 @@ async fn the_assistant_poc_works_end_to_end() {
         finish(&pool, doomed, Duration::from_secs(120)).await.0,
         "interrupted"
     );
-    let mut settled = false;
-    for _ in 0..120 {
-        let (status, jobs_live): (String, i64) = sqlx::query_as(
-            "SELECT b.status, (SELECT count(*) FROM guest_jobs j WHERE j.bot_id = b.id
-                                AND j.status IN ('starting', 'running', 'cancelling'))
-             FROM bots b WHERE b.id = ?1",
-        )
-        .bind(scratch.parse::<Uuid>().unwrap())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if status == "deleted" && jobs_live == 0 {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert!(settled, "the deletion completed with its job ended");
+    common::until(
+        "the bot deletion to complete with its job ended",
+        common::poll(|| async {
+            let (status, jobs_live): (String, i64) = sqlx::query_as(
+                "SELECT b.status, (SELECT count(*) FROM guest_jobs j WHERE j.bot_id = b.id
+                                    AND j.status IN ('starting', 'running', 'cancelling'))
+                 FROM bots b WHERE b.id = ?1",
+            )
+            .bind(scratch.parse::<Uuid>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            (status == "deleted" && jobs_live == 0).then_some(())
+        }),
+    )
+    .await;
     assert!(
         items_of(&pool, &scratch).await >= scratch_items,
         "the deleted bot's history is retained"
@@ -903,7 +905,7 @@ async fn the_assistant_poc_works_end_to_end() {
         )
         .await;
     assert!(status < 300, "{body}");
-    no_provider_processes(Duration::from_secs(30)).await;
+    no_provider_processes().await;
     let leases: i64 =
         sqlx::query_scalar("SELECT count(*) FROM computer_leases WHERE released_at IS NULL")
             .fetch_one(&pool)
@@ -1150,7 +1152,7 @@ async fn the_assistant_poc_works_end_to_end() {
     assert_eq!(status, "completed");
     assert!(text.contains("BLUEFIN"), "{text}");
     api4.stop();
-    no_provider_processes(Duration::from_secs(10)).await;
+    no_provider_processes().await;
     let secret_after = guest_sha256(&rpool, &restored_dir, &builder, "secret.txt").await;
     note(&format!("secret.txt sha256 after restore: {secret_after}"));
     assert_eq!(

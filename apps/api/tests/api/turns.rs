@@ -368,18 +368,22 @@ async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
         .await;
     assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(retry.body["turn"]["id"], first.as_str());
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let status = |turn: &str| {
         sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id = ?1")
             .bind(turn.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
     };
-    assert_eq!(status(&first).await.unwrap(), "running");
-    assert_eq!(
-        status(&second).await.unwrap(),
-        "queued",
-        "the newer message stays joined to the running reply"
-    );
+    common::never_polled(
+        "the newer message leaves the running reply after a retry",
+        Duration::from_millis(300),
+        || async {
+            let first_status = status(&first).await.unwrap();
+            let second_status = status(&second).await.unwrap();
+            (first_status != "running" || second_status != "queued")
+                .then_some((first_status, second_status))
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -396,27 +400,33 @@ async fn different_bots_run_concurrently_within_the_global_limit() {
         app.send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
             .await;
     }
-    let mut counts = (0, 0);
-    for _ in 0..120 {
-        counts = sqlx::query_as::<_, (i64, i64)>(
+    let counts = || {
+        sqlx::query_as::<_, (i64, i64)>(
             "SELECT count(*) FILTER (WHERE status = 'running'),
                     count(*) FILTER (WHERE status = 'queued') FROM turns",
         )
         .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if counts == (2, 1) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let settled = common::poll(|| async { (counts().await.unwrap() == (2, 1)).then_some(()) });
+    if tokio::time::timeout(common::SETTLE, settled).await.is_err() {
+        panic!(
+            "timed out waiting for two running turns and one queued turn: {:?}",
+            counts().await.unwrap()
+        );
     }
-    assert_eq!(counts, (2, 1));
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE status = 'queued'")
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(queued, 1);
+    common::never_polled(
+        "the queued turn leaves the queue while both slots are taken",
+        Duration::from_millis(300),
+        || async {
+            let queued: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM turns WHERE status = 'queued'")
+                    .fetch_one(&app.db.pool)
+                    .await
+                    .unwrap();
+            (queued != 1).then_some(queued)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -674,30 +684,16 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let pool = app.db.pool.clone();
-    let db = app.db.clone();
-    drop(app);
-    let id = hang_id.parse::<Uuid>().unwrap();
-    for _ in 0..200 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if status != "running" && status != "cancelling" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let db = common::until("the old app to stop", app.stop()).await;
+    let pool = &db.pool;
     sqlx::query(
         "UPDATE turns SET status = 'running', finished_at = NULL, error_code = NULL WHERE id = ?1",
     )
     .bind(hang_id.parse::<Uuid>().unwrap())
-    .execute(&pool)
+    .execute(pool)
     .await
     .unwrap();
-    let (requeued, uncertain) = else_api::db::turns::lifecycle::recover_after_restart(&pool)
+    let (requeued, uncertain) = else_api::db::turns::lifecycle::recover_after_restart(pool)
         .await
         .unwrap();
     assert_eq!((requeued, uncertain), (0, 1));

@@ -182,9 +182,7 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     assert_eq!(packet.matches("On B now.").count(), 1);
 
     say(&app, &bot, A, "Back to A once.").await;
-    let db = app.db.clone();
-    drop(app);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let db = common::until("the old app to stop", app.stop()).await;
     let b2 = Arc::new(Synthetic::named(B, "Synthetic B", Duration::from_millis(1)));
     let app = TestApp::builder()
         .db(db)
@@ -501,17 +499,18 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
     let db = app.db.clone();
     drop(app);
     let id: Uuid = turn.parse().unwrap();
-    for _ in 0..100 {
-        let s: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        if s != "sending" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::until(
+        "the old app to leave the sending turn",
+        common::poll(|| async {
+            let s: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            (s != "sending").then_some(())
+        }),
+    )
+    .await;
     sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = ?1")
         .bind(id)
         .execute(&db.pool)

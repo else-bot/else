@@ -814,12 +814,7 @@ async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
         .unwrap();
     let manager = h.app.state.connectors.clone();
     manager.changed(account.id).await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        transport.ready.notified(),
-    )
-    .await
-    .unwrap();
+    common::until("the mail watcher to be ready", transport.ready.notified()).await;
     for _ in 0..3 {
         manager
             .execute(account.id, bot, turn, None, MailCommand::Folders)
@@ -1570,10 +1565,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         let _closed = app
             .state
             .gate
-            .close(
-                Duration::from_secs(2),
-                else_api::maintenance::Pause::backup(None),
-            )
+            .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
             .await
             .unwrap()
             .unwrap();

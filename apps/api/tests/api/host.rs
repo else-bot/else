@@ -125,12 +125,14 @@ async fn a_failed_probe_says_why() {
         probe("/bin/sh", "true").await,
         Err("printed nothing".into())
     );
-    let started = std::time::Instant::now();
     assert_eq!(
-        probe("/bin/sh", "sleep 30 >/dev/null & echo provider-version").await,
+        common::until(
+            "the provider version while a background child is running",
+            probe("/bin/sh", "sleep 300 >/dev/null & echo provider-version"),
+        )
+        .await,
         Ok("provider-version".into())
     );
-    assert!(started.elapsed() < Duration::from_secs(10));
     let missing = probe("/nonexistent/grok", "true").await.unwrap_err();
     assert!(missing.starts_with("could not start ("), "{missing}");
 }
@@ -208,28 +210,67 @@ async fn termination_reaps_the_whole_process_group() {
         "sleep 300 & sleep 300 & sh -c 'sleep 300' & wait",
     );
     let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(
-        fx.host.live_processes(spec.turn_id).len() >= 4,
-        "descendants are discoverable"
-    );
+    common::until(
+        "the process group descendants to be discoverable",
+        common::poll(|| {
+            std::future::ready((fx.host.live_processes(spec.turn_id).len() >= 4).then_some(()))
+        }),
+    )
+    .await;
     process.terminate(Duration::from_secs(2)).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(fx.host.live_processes(spec.turn_id), Vec::<i32>::new());
+    common::until(
+        "the process group to be reaped",
+        common::poll(|| {
+            std::future::ready(
+                fx.host
+                    .live_processes(spec.turn_id)
+                    .is_empty()
+                    .then_some(()),
+            )
+        }),
+    )
+    .await;
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn orphans_are_swept() {
     let fx = fixture();
-    let spec = shell(&fx, Uuid::new_v4(), "sleep 300 & wait");
-    let process = Supervised::spawn(fx.host.command(&spec)).unwrap();
+    // Keep the pipe open on fd 3 because the background shell's stdin is /dev/null.
+    let spec = shell(
+        &fx,
+        Uuid::new_v4(),
+        "exec 3<&0; (printf r; read -r line <&3) & wait",
+    );
+    let mut command = fx.host.command(&spec);
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut process = Supervised::spawn(command).unwrap();
+    let _stdin = process.child.stdin.take().unwrap();
+    let mut stdout = process.child.stdout.take().unwrap();
+    let mut ready = [0];
+    common::until(
+        "the orphan child to start",
+        tokio::io::AsyncReadExt::read_exact(&mut stdout, &mut ready),
+    )
+    .await
+    .unwrap();
     std::mem::forget(process);
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!fx.host.live_processes(spec.turn_id).is_empty());
     assert!(fx.host.sweep_orphans().unwrap() >= 1);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(fx.host.live_processes(spec.turn_id).is_empty());
+    common::until(
+        "the orphan process to be swept",
+        common::poll(|| {
+            std::future::ready(
+                fx.host
+                    .live_processes(spec.turn_id)
+                    .is_empty()
+                    .then_some(()),
+            )
+        }),
+    )
+    .await;
 }
 
 async fn installed_codex() -> Option<(PathBuf, PathBuf)> {
@@ -599,7 +640,7 @@ async fn codex_offers_a_connector_event_no_native_tools() {
                 .request(
                     "model/list",
                     json!({ "includeHidden": true }),
-                    Duration::from_secs(30),
+                    common::SETTLE,
                 )
                 .await
                 .unwrap();
@@ -653,22 +694,25 @@ async fn codex_offers_a_connector_event_no_native_tools() {
 async fn launch_runs_stop_long_or_large_output() {
     let fx = fixture();
     let bot = Uuid::new_v4();
-    let run = |script: &str, timeout_ms: u64, limit: usize| {
+    let run = |script: &str, timeout: Duration, limit: usize| {
         let run = Run {
             limit,
-            timeout: Duration::from_millis(timeout_ms),
+            timeout,
             ..Run::launch(&shell(&fx, bot, script))
         };
         let host = fx.host.clone();
         async move { host.run(&run).await }
     };
-    assert_eq!(run("printf ok", 5000, 2).await.unwrap(), b"ok");
-    assert!(run("printf too-long", 5000, 2).await.is_err());
-    assert!(run("yes", 5000, 1 << 16).await.is_err());
-    assert!(run("printf ok; exit 3", 5000, 16).await.is_err());
-    let started = std::time::Instant::now();
-    assert!(run("sleep 30", 300, 16).await.is_err());
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(run("printf ok", common::SETTLE, 2).await.unwrap(), b"ok");
+    assert!(run("printf too-long", common::SETTLE, 2).await.is_err());
+    assert!(run("yes", common::SETTLE, 1 << 16).await.is_err());
+    assert!(run("printf ok; exit 3", common::SETTLE, 16).await.is_err());
+    let long_run = run("sleep 300", Duration::from_millis(300), 16);
+    assert!(
+        common::until("the host to stop the long command", long_run)
+            .await
+            .is_err()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -679,7 +723,7 @@ async fn cancelling_metadata_export_kills_descendants_after_the_leader_exits() {
     let mut spec = shell(
         &fx,
         Uuid::new_v4(),
-        "sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$CHILD_PID_FILE\"; exit 0",
+        "sleep 300 & printf '%s %s' \"$$\" \"$!\" > \"$CHILD_PID_FILE\"; exit 0",
     );
     spec.env
         .push(("CHILD_PID_FILE".into(), pid_file.to_str().unwrap().into()));
@@ -687,61 +731,55 @@ async fn cancelling_metadata_export_kills_descendants_after_the_leader_exits() {
     let exporting = tokio::spawn(async move {
         let run = Run {
             limit: 1024,
+            timeout: common::SETTLE * 3,
             ..Run::launch(&spec)
         };
         host.run(&run).await
     });
-    let (leader, child) = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(pid) = std::fs::read_to_string(&pid_file)
-                && let Ok(pids) = pid
-                    .split_whitespace()
-                    .map(str::parse::<u32>)
-                    .collect::<Result<Vec<_>, _>>()
-                && pids.len() == 2
-            {
-                break (pids[0], pids[1]);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+    let (leader, child) = common::until(
+        "the exporter to write both process IDs",
+        common::poll(|| async {
+            let text = std::fs::read_to_string(&pid_file).ok()?;
+            let pids = text
+                .split_whitespace()
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let [leader, child] = pids.as_slice() else {
+                return None;
+            };
+            Some((*leader, *child))
+        }),
+    )
+    .await;
+    common::until(
+        "the exporter leader to exit while its descendant holds stdout",
+        common::poll(|| async {
             let state = std::fs::read_to_string(format!("/proc/{leader}/stat")).unwrap();
-            if state
+            state
                 .split_once(") ")
-                .is_some_and(|(_, s)| s.starts_with('Z'))
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("exporter leader did not exit while descendant held stdout");
+                .is_some_and(|(_, state)| state.starts_with('Z'))
+                .then_some(())
+        }),
+    )
+    .await;
     let alive = std::fs::read_to_string(format!("/proc/{child}/stat")).unwrap();
     assert!(!alive.split_once(") ").unwrap().1.starts_with('Z'));
     exporting.abort();
     assert!(exporting.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+    common::until(
+        "the cancelled exporter's descendant to exit",
+        common::poll(|| async {
             match std::fs::read_to_string(format!("/proc/{child}/stat")) {
-                Err(_) => break,
-                Ok(state)
-                    if state
-                        .split_once(") ")
-                        .is_some_and(|(_, s)| s.starts_with('Z')) =>
-                {
-                    break;
-                }
-                _ => tokio::task::yield_now().await,
+                Err(_) => Some(()),
+                Ok(state) => state
+                    .split_once(") ")
+                    .is_some_and(|(_, state)| state.starts_with('Z'))
+                    .then_some(()),
             }
-        }
-    })
-    .await
-    .expect("cancelled exporter left a descendant running");
+        }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -929,12 +967,11 @@ async fn launch_secrets_stay_off_host_command_lines() {
     let mut process = Supervised::spawn(command).unwrap();
     let mut stdout = tokio::io::BufReader::new(process.child.stdout.take().unwrap());
     let mut seen = String::new();
-    tokio::time::timeout(
-        Duration::from_secs(10),
+    common::until(
+        "the provider to read the secret",
         tokio::io::AsyncBufReadExt::read_line(&mut stdout, &mut seen),
     )
     .await
-    .unwrap()
     .unwrap();
     assert!(!fx.host.live_processes(spec.turn_id).is_empty());
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -965,13 +1002,11 @@ async fn turn_cleanup_kills_stubborn_descendants_without_touching_another_turn()
     let other = shell(&fx, Uuid::new_v4(), "sleep 300");
     let mut other_process = Supervised::spawn(fx.host.command(&other)).unwrap();
     let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !ready.is_file() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::until(
+        "the stubborn descendant to be ready",
+        common::poll(|| std::future::ready(ready.is_file().then_some(()))),
+    )
+    .await;
     process.terminate(Duration::from_millis(100)).await;
     assert!(!fx.host.live_processes(spec.turn_id).is_empty());
     assert!(fx.host.sweep_turn(spec.turn_id).unwrap() > 0);
@@ -1000,22 +1035,28 @@ async fn a_dropped_finish_still_sweeps_a_detached_worker() {
         std::process::Stdio::null(),
     )
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !ready.is_file() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::until(
+        "the detached worker to be ready",
+        common::poll(|| std::future::ready(ready.is_file().then_some(()))),
+    )
+    .await;
     assert!(fx.host.live_processes(spec.turn_id).len() >= 2);
-    let abandoned =
-        tokio::time::timeout(Duration::from_millis(200), scope.finish(Finish::Exit)).await;
-    assert!(abandoned.is_err(), "the leader was still in its exit grace");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !fx.host.live_processes(spec.turn_id).is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the dropped cleanup swept the detached worker");
+    common::never(
+        "cleanup to finish while the leader is still in its exit grace",
+        Duration::from_millis(200),
+        scope.finish(Finish::Exit),
+    )
+    .await;
+    common::until(
+        "the dropped cleanup to sweep the detached worker",
+        common::poll(|| {
+            std::future::ready(
+                fx.host
+                    .live_processes(spec.turn_id)
+                    .is_empty()
+                    .then_some(()),
+            )
+        }),
+    )
+    .await;
 }

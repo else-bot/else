@@ -9,11 +9,11 @@ pub const SECRET_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 /// hang: a passing wait returns as soon as the state appears, and several
 /// suites sharing one machine can slow a step tenfold.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
-/// How long a live test waits for a real provider's turn to reach a state.
+/// [`SETTLE`] for a live test, whose turns run a real model.
 pub const LIVE: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Run `probe` every 25 ms until it returns a value. It has no deadline:
-/// bound it with [`until`] or [`never`].
+/// Run `probe` until it returns a value, sleeping 25 ms after each miss. It
+/// has no deadline: bound it with [`until`]. Use [`never_polled`] for negative checks.
 pub async fn poll<T, F: std::future::Future<Output = Option<T>>>(
     mut probe: impl FnMut() -> F,
 ) -> T {
@@ -40,10 +40,37 @@ pub async fn never<T: std::fmt::Debug>(
     window: std::time::Duration,
     event: impl std::future::Future<Output = T>,
 ) {
-    if let Ok(value) = tokio::time::timeout(window, event).await {
-        panic!("{what} within {window:?}: {value:?}");
+    // Check the window first, so an event that became ready after it ended
+    // is not reported as inside it.
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep(window) => {}
+        value = event => panic!("{what} within {window:?}: {value:?}"),
     }
 }
+
+/// Assert that `probe` returns `None` throughout `window`, including one
+/// last run that starts after the window ends. Keep the window short:
+/// every passing run waits all of it.
+pub async fn never_polled<T: std::fmt::Debug, F: std::future::Future<Output = Option<T>>>(
+    what: &str,
+    window: std::time::Duration,
+    mut probe: impl FnMut() -> F,
+) {
+    let end = tokio::time::Instant::now() + window;
+    loop {
+        let last = tokio::time::Instant::now() >= end;
+        if let Some(value) = probe().await {
+            panic!("{what} within {window:?}: {value:?}");
+        }
+        if last {
+            return;
+        }
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        tokio::time::sleep(left.min(std::time::Duration::from_millis(25))).await;
+    }
+}
+
 /// A chunked local backup set rebuilt whole in a new directory, as a remote
 /// download leaves it, for tests that read or damage its files.
 pub fn rebuilt_set(

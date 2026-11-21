@@ -724,14 +724,20 @@ async fn a_failed_stop_keeps_its_reservation_and_is_retried() {
 async fn a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    *fake.create_delay.lock().unwrap() = Duration::from_millis(400);
+    let hold = Arc::new(tokio::sync::Semaphore::new(0));
+    *fake.create_hold.lock().unwrap() = Some(hold.clone());
     let manager = Arc::new(manager(&app, &fake, config(2)).await);
     let bot = app.create_bot("Short").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(bot_id, "test:s").await.unwrap() });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    common::until(
+        "the guest runtime to start creating the computer",
+        common::poll(|| std::future::ready((!fake.specs.lock().unwrap().is_empty()).then_some(()))),
+    )
+    .await;
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
+    hold.add_permits(1);
     assert_eq!(acquiring.await.unwrap(), Acquire::BotInactive);
     assert_eq!(observed(&app, bot_id).await, "stopped");
     let leases: i64 = sqlx::query_scalar(
@@ -952,7 +958,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     let other: Uuid = app.create_bot("Other").await.parse().unwrap();
     assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
     manager.settle_offline(bot).await.unwrap();
-    first_stop(&app, &manager, &fake, bot).await;
+    wait_for_idle_stop(&app, &manager, bot).await;
     let (other_lease, _) = ready(&manager, other, "turn:other").await;
     let busy = manager.upgrade_image(bot, "img:new", None).await;
     assert!(
@@ -1042,10 +1048,16 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     assert_eq!(started, 0);
 }
 
-async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: Uuid) {
-    manager.tick(&never()).await.unwrap();
-    let _ = fake;
-    assert_eq!(observed(app, bot).await, "stopped");
+async fn wait_for_idle_stop(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
+    let cancel = never();
+    common::until(
+        &format!("idle computer {bot} to stop"),
+        common::poll(|| async {
+            manager.tick(&cancel).await.unwrap();
+            (observed(app, bot).await == "stopped").then_some(())
+        }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1394,7 +1406,11 @@ async fn startup_inspection_never_applies_a_listing_older_than_a_stop() {
         let manager = manager.clone();
         async move { manager.reconcile_startup().await }
     });
-    fake.list_entered.notified().await;
+    common::until(
+        "runtime inspection to list computers",
+        fake.list_entered.notified(),
+    )
+    .await;
     manager.owner_stop(bot).await.unwrap();
     assert_eq!(observed(&app, bot).await, "stopped");
     hold.add_permits(1);
@@ -1641,17 +1657,24 @@ async fn a_failed_owner_request_never_releases_a_later_requests_lease() {
         let manager = manager.clone();
         async move { manager.desktop(bot).await.unwrap() }
     });
-    fake.desktop_entered.notified().await;
+    common::until(
+        "the first desktop request to start",
+        fake.desktop_entered.notified(),
+    )
+    .await;
     fake.fail_desktop.store(false, SeqCst);
     let mut later = tokio::spawn({
         let manager = manager.clone();
         async move { manager.desktop(bot).await.unwrap() }
     });
     fake.desktop_resume.notify_one();
-    tokio::select! {
-        () = fake.desktop_entered.notified() => {}
-        refused = &mut later => panic!("the later request never started the desktop: {refused:?}"),
-    }
+    common::until("the later desktop request to start", async {
+        tokio::select! {
+            () = fake.desktop_entered.notified() => {}
+            refused = &mut later => panic!("the later request never started the desktop: {refused:?}"),
+        }
+    })
+    .await;
     let failed = failing.await.unwrap();
     assert!(
         matches!(failed, Err(Acquire::DesktopFailed { .. })),
@@ -1763,7 +1786,7 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
 
     let (turn, _) = ready(&manager, bot, "turn:gone").await;
     manager.release(turn).await.unwrap();
-    first_stop(&app, &manager, &fake, bot).await;
+    wait_for_idle_stop(&app, &manager, bot).await;
     sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
@@ -1883,7 +1906,7 @@ async fn upgrades_reinstall_the_bots_packages_and_report_the_ones_that_fail() {
     let path = format!("/v1/bots/{bot}/computer");
     let (turn, _) = ready(&manager, bot, "turn:gone").await;
     manager.release(turn).await.unwrap();
-    first_stop(&app, &manager, &fake, bot).await;
+    wait_for_idle_stop(&app, &manager, bot).await;
     sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
@@ -1932,14 +1955,14 @@ async fn upgrades_reinstall_the_bots_packages_and_report_the_ones_that_fail() {
 }
 
 async fn settled(app: &TestApp, path: &str) -> serde_json::Value {
-    for _ in 0..200 {
-        let body = app.owner("GET", path, None).await.body;
-        if body["upgrade"]["state"] != "running" {
-            return body;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the upgrade did not finish");
+    common::until(
+        "the computer upgrade to finish",
+        common::poll(|| async {
+            let body = app.owner("GET", path, None).await.body;
+            (body["upgrade"]["state"] != "running").then_some(body)
+        }),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1969,14 +1992,14 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
     let bot: Uuid = app.create_bot("Shutdown").await.parse().unwrap();
     let (turn, old_name) = ready(&manager, bot, "turn:gone").await;
     manager.release(turn).await.unwrap();
-    first_stop(&app, &manager, &fake, bot).await;
+    wait_for_idle_stop(&app, &manager, bot).await;
     sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
         .unwrap();
 
-    *fake.create_delay.lock().unwrap() = Duration::from_secs(30);
+    *fake.create_hold.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
     let path = format!("/v1/bots/{bot}/computer");
     assert_eq!(
         app.owner("POST", &format!("{path}/upgrade"), None)
@@ -1984,22 +2007,24 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
             .status,
         StatusCode::ACCEPTED
     );
-    let replacement = loop {
-        let name: Option<String> = sqlx::query_scalar(
+    let replacement: String = common::until(
+        "the upgrade replacement to be recorded",
+        common::poll(|| async {
+            sqlx::query_scalar(
             "SELECT to_runtime_name FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started'",
         )
         .bind(bot)
         .fetch_optional(&app.db.pool)
         .await
-        .unwrap();
-        if let Some(name) = name {
-            break name;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    tokio::time::timeout(Duration::from_secs(5), manager.stop_upgrades())
-        .await
-        .expect("stopping waits for the upgrade to be interrupted, not to finish");
+        .unwrap()
+        }),
+    )
+    .await;
+    common::until(
+        "the upgrade to be interrupted on shutdown",
+        manager.stop_upgrades(),
+    )
+    .await;
     assert!(
         matches!(
             manager.acquire(bot, "turn:after").await.unwrap(),
@@ -2014,7 +2039,7 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
         .unwrap();
     assert_eq!(image, "img:old", "the bot stays on its old computer");
 
-    *fake.create_delay.lock().unwrap() = Duration::ZERO;
+    *fake.create_hold.lock().unwrap() = None;
     fake.computers.lock().unwrap().insert(
         replacement.clone(),
         Computer {
@@ -2064,7 +2089,7 @@ async fn outdated_fleet(
         let bot: Uuid = app.create_bot(name).await.parse().unwrap();
         let (lease, _) = ready(&manager, bot, "turn:gone").await;
         manager.release(lease).await.unwrap();
-        first_stop(&app, &manager, &fake, bot).await;
+        wait_for_idle_stop(&app, &manager, bot).await;
         bots.push(bot);
     }
     app.create_bot("Never").await;
@@ -2296,10 +2321,7 @@ async fn upgrade_all_waits_for_maintenance_fails_missing_disks_and_counts_kept_c
     let closed = app
         .state
         .gate
-        .close(
-            Duration::from_secs(5),
-            else_api::maintenance::Pause::backup(None),
-        )
+        .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
         .await
         .unwrap()
         .expect("closed by this test");

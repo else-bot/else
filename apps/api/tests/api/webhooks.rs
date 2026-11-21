@@ -1,7 +1,5 @@
 use crate::common;
 
-use std::time::Duration;
-
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
@@ -41,14 +39,14 @@ async fn wakes(app: &TestApp, id: &str) -> Vec<(Uuid, DateTime<Utc>)> {
 }
 
 async fn wait_for_wakes(app: &TestApp, id: &str, count: usize) -> Vec<(Uuid, DateTime<Utc>)> {
-    for _ in 0..400 {
-        let found = wakes(app, id).await;
-        if found.len() >= count {
-            return found;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("webhook {id} never reached {count} wakes");
+    common::until(
+        &format!("webhook {id} to reach {count} wakes"),
+        common::poll(|| async {
+            let found = wakes(app, id).await;
+            (found.len() >= count).then_some(found)
+        }),
+    )
+    .await
 }
 
 async fn admit(app: &TestApp, now: DateTime<Utc>) -> usize {

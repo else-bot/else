@@ -230,8 +230,15 @@ async fn the_owner_stop_is_never_continued() {
         .await
         .unwrap();
     assert_eq!(cuts, 0);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(seen.lock().unwrap().len(), 1, "no attempt follows a stop");
+    common::never_polled(
+        "the attempt count changes after Stop",
+        Duration::from_millis(200),
+        || {
+            let count = seen.lock().unwrap().len();
+            std::future::ready((count != 1).then_some(count))
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

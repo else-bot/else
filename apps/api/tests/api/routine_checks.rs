@@ -347,13 +347,16 @@ async fn stop_work_settles_a_checking_run_before_its_check_can_report() {
     );
 
     check_ends(&s, job, "done 0\n2 new leads\n").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let row = runs(&s.h.app, s.routine).await.remove(0);
-    assert_eq!(
-        (row.skip_reason.as_deref(), row.turn_id),
-        (Some("check_cancelled"), None),
-        "a check that reports after Stop never queues its turn"
-    );
+    common::never_polled(
+        "a check that reports after Stop changes the skipped run",
+        Duration::from_secs(2),
+        || async {
+            let row = runs(&s.h.app, s.routine).await.remove(0);
+            (row.skip_reason.as_deref() != Some("check_cancelled") || row.turn_id.is_some())
+                .then_some(row)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -385,10 +388,13 @@ async fn deleting_a_routine_settles_its_checking_run_and_stops_the_check() {
 
     let turns = bot_turns(&s.h.app, &s.bot).await;
     check_ends(&s, job, "done 0\n2 new leads\n").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(
-        bot_turns(&s.h.app, &s.bot).await,
-        turns,
-        "a deleted routine's check never queues a turn"
-    );
+    common::never_polled(
+        "a deleted routine's check queues a turn",
+        Duration::from_secs(2),
+        || async {
+            let count = bot_turns(&s.h.app, &s.bot).await;
+            (count != turns).then_some(count)
+        },
+    )
+    .await;
 }

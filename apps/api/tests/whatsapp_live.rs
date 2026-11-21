@@ -4,13 +4,15 @@
 //!
 //! ELSE_WHATSAPP_LIVE=1 cargo test -p else-api --test whatsapp_live -- --ignored --nocapture
 
+mod common;
+
 use else_api::socials::{
     pairing::{Pairing, Progress},
     providers::{Native, Transport, whatsapp::Vault},
     store,
     types::*,
 };
-use std::time::Duration;
+
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -31,7 +33,7 @@ async fn pairing_shows_a_code_from_whatsapp() {
     let (progress, mut seen) = Progress::new();
     let stop = CancellationToken::new();
     let watcher = async {
-        let code = tokio::time::timeout(Duration::from_secs(60), async {
+        let code = tokio::time::timeout(common::SETTLE, async {
             loop {
                 seen.changed().await.expect("pairing ended before a code");
                 if let Pairing::Code { code, expires_in } = seen.borrow_and_update().pairing.clone()

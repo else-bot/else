@@ -184,18 +184,22 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         .await;
     let probe = reply.body["turn"]["id"].as_str().unwrap().to_owned();
     let mut most = 0;
-    for _ in 0..400 {
-        most = most.max(provider_processes());
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-            .bind(probe.parse::<Uuid>().unwrap())
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-        if !["queued", "preparing", "sending", "running"].contains(&status.as_str()) {
-            break;
+    tokio::time::timeout(common::LIVE, async {
+        loop {
+            most = most.max(provider_processes());
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(probe.parse::<Uuid>().unwrap())
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+            if !["queued", "preparing", "sending", "running"].contains(&status.as_str()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .expect("the Claude probe reached a terminal state");
     let (status, code, text): (String, Option<String>, String) = sqlx::query_as(
         "SELECT t.status, t.error_code, coalesce((SELECT group_concat(text, '') FROM items
                 WHERE turn_id = t.id AND kind = 'assistant'), '')
@@ -253,19 +257,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         )
         .await;
     let long = reply.body["turn"]["id"].as_str().unwrap().to_owned();
-    for _ in 0..400 {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
-        )
-        .bind(long.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if n > 20 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    common::steer::wait_for_text(&app, long.parse().unwrap(), 20).await;
     let stop = app
         .owner(
             "POST",
@@ -278,8 +270,11 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         .wait_live_turn(&long, &["interrupted", "completed", "failed", "uncertain"])
         .await;
     assert_eq!(status, "interrupted");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(provider_processes(), 0);
+    common::until(
+        "the Claude processes to exit",
+        common::poll(|| std::future::ready((provider_processes() == 0).then_some(()))),
+    )
+    .await;
     let (_, status, text) = ask(&app, &a, "claude", "Reply with the code word again.").await;
     assert_eq!(status, "completed");
     assert!(text.contains("ZETA-9"), "{text}");
@@ -310,8 +305,11 @@ async fn a_newer_owner_message_joins_a_running_claude_reply() {
     serve(&app, listener).await;
 
     common::steer::joins_mid_tool_and_mid_text(&app, "claude", true).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(provider_processes(), 0);
+    common::until(
+        "the Claude processes to exit",
+        common::poll(|| std::future::ready((provider_processes() == 0).then_some(()))),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

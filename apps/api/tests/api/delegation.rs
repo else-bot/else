@@ -797,7 +797,6 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let task_status = || async {
         sqlx::query_as::<_, (String, Option<String>, Option<i32>)>(
             "SELECT status, error, delivered_attempt FROM delegations WHERE id = ?1",
@@ -807,14 +806,16 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
         .await
         .unwrap()
     };
-    assert_eq!(
-        (
-            app.wait_turn(root, &["waiting"]).await,
-            task_status().await.0
-        ),
-        ("waiting".into(), "running".into()),
-        "Stop leaves the task running"
-    );
+    common::never_polled(
+        "Stop ends the delegated task",
+        Duration::from_secs(1),
+        || async {
+            let status = task_status().await.0;
+            (status != "running").then_some(status)
+        },
+    )
+    .await;
+    app.wait_turn(root, &["waiting"]).await;
 
     let cancel = app
         .owner(
@@ -1666,25 +1667,28 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
         .await
         .unwrap();
     let pool = db.pool.clone();
-    let child_end = tokio::spawn(async move {
+    let mut child_end = tokio::spawn(async move {
         sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
             .bind(child)
             .execute(&pool)
             .await
             .unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !child_end.is_finished(),
-        "settlement waits for the parent's decision"
-    );
+    common::never(
+        "the child settles before the parent decides",
+        Duration::from_millis(300),
+        &mut child_end,
+    )
+    .await;
     sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
         .bind(root)
         .execute(&mut *parent)
         .await
         .unwrap();
     parent.commit().await.unwrap();
-    child_end.await.unwrap();
+    common::until("the child to settle after the parent's decision", child_end)
+        .await
+        .unwrap();
     let (root_status, delegation_status): (String, String) = sqlx::query_as(
         "SELECT t.status, d.status FROM turns t JOIN delegations d ON d.root_turn_id = t.id
          WHERE d.id = ?1",
@@ -3138,7 +3142,7 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
     h.continued(root, &token).await;
     h.release(root).await;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + common::SETTLE;
     loop {
         let (delivered, attempt, status): (Option<i64>, i64, String) = sqlx::query_as(
             "SELECT d.delivered_attempt, t.attempt, t.status FROM delegations d, turns t
@@ -3731,21 +3735,20 @@ async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
     let work = leaf(app, "Work").await;
     let original = format!("{GATE_AFTER_OPENING} List the school forms.");
     let (task, first, token) = task_carried_to_a_follow_up(&h, &work, &original).await;
-    let deadline = tokio::time::Instant::now() + common::SETTLE;
-    let partial = loop {
-        let text: Option<String> = sqlx::query_scalar(
+    let partial = common::until(
+        "the first attempt's partial reply",
+        common::poll(|| async {
+            let text: Option<String> = sqlx::query_scalar(
             "SELECT group_concat(text, '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
         )
         .bind(first)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-        if let Some(text) = text.filter(|t| t.len() >= 14) {
-            break text;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "no partial reply");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+            text.filter(|t| t.len() >= 14)
+        }),
+    )
+    .await;
     let native: Vec<String> = sqlx::query_scalar(
         "SELECT s.native_session_id FROM provider_sessions s JOIN turns t
          ON t.conversation_id = s.conversation_id WHERE t.id = ?1",

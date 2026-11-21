@@ -2,7 +2,6 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{TestApp, TestDb};
 use else_api::app::providers::Provider;
@@ -187,11 +186,12 @@ async fn cursor_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() 
         )
         .await;
     let interrupted = sent.body["turn"]["id"].as_str().unwrap();
-    tokio::time::timeout(Duration::from_secs(120), async {
-        while !project.join("cursor-sleep-started").exists() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    tokio::time::timeout(
+        common::LIVE,
+        common::poll(|| {
+            std::future::ready(project.join("cursor-sleep-started").exists().then_some(()))
+        }),
+    )
     .await
     .expect("Cursor started the shell command");
     let stopped = app

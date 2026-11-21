@@ -58,6 +58,14 @@ async fn check_now(app: &TestApp) {
         .unwrap();
 }
 
+async fn wait_for_check(app: &TestApp, turn: Uuid, check: i64) {
+    common::until(
+        &format!("MCP check {check} for turn {turn}"),
+        common::poll(|| async { (wait_row(app, turn).await.2 >= check).then_some(()) }),
+    )
+    .await;
+}
+
 async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
     sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
         .bind(turn)
@@ -105,7 +113,7 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     assert_eq!(attempts(app, turn).await, 1);
 
     check_now(app).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_for_check(app, turn, 2).await;
     assert_eq!(wait_row(app, turn).await.0, "pending", "the job still runs");
     assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
     let shown = shown_waits(app, &main, turn).await;
@@ -173,7 +181,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
     app.wait_turn(turn, &["waiting"]).await;
     std::fs::write(&state, "unreadable").unwrap();
     check_now(app).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_for_check(app, turn, 2).await;
     let (status, _, checks) = wait_row(app, turn).await;
     assert_eq!(
         (status.as_str(), checks),
@@ -182,9 +190,9 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
     );
     assert_eq!(attempts(app, turn).await, 1);
 
-    for _ in 0..2 {
+    for check in [3, 4] {
         check_now(app).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        wait_for_check(app, turn, check).await;
     }
     app.wait_turn(turn, &["completed"]).await;
     let (status, delivered, checks) = wait_row(app, turn).await;
@@ -233,13 +241,20 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
         )
         .await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    common::never_polled(
+        "Stop settles the MCP wait",
+        Duration::from_secs(1),
+        || async {
+            let status = wait_row(app, turn).await.0;
+            (status != "pending").then_some(status)
+        },
+    )
+    .await;
     assert_eq!(
         app.wait_turn(turn, &["waiting"]).await,
         "waiting",
         "Stop ends generation only; the turn keeps waiting"
     );
-    assert_eq!(wait_row(app, turn).await.0, "pending");
     std::fs::write(&state, "result_available").unwrap();
     check_now(app).await;
     app.wait_turn(turn, &["completed"]).await;

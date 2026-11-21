@@ -29,6 +29,7 @@ struct Guest {
     killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     started: tokio::sync::Notify,
     stalled: Mutex<Vec<String>>,
+    release_stalled_kill: tokio::sync::Notify,
     fail_desktop: std::sync::atomic::AtomicBool,
 }
 
@@ -141,14 +142,14 @@ impl ComputerRuntime for Guest {
             if args.get(at + 2).is_some_and(|c| c.contains("HANG")) {
                 self.started.notify_one();
                 let killed = self.killed(name);
-                let _ = tokio::time::timeout(Duration::from_secs(20), killed.notified()).await;
+                killed.notified().await;
                 "143\n0\n0\n\n\0\n".to_owned()
             } else {
                 self.run_reply(args, input)
             }
         } else if script.contains("alive()") {
             if self.stalled.lock().unwrap().iter().any(|n| n == name) {
-                tokio::time::sleep(Duration::from_secs(12)).await;
+                self.release_stalled_kill.notified().await;
             }
             self.killed(name).notify_one();
             "stopped".into()
@@ -425,9 +426,7 @@ async fn stop_work_ends_a_running_foreground_command() {
             .await.result
         })
     };
-    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
-        .await
-        .expect("the foreground command started");
+    common::until("the foreground command to start", guest.started.notified()).await;
     manager.end_orphaned_commands().await.unwrap();
     assert!(!call.is_finished());
     let stop = app
@@ -438,19 +437,20 @@ async fn stop_work_ends_a_running_foreground_command() {
         )
         .await;
     assert!(stop.status.is_success(), "{:?}", stop.body);
-    for _ in 0..100 {
-        let live: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
-        )
-        .bind(bot.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if !live {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the running turn to stop",
+        common::poll(|| async {
+            let live: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
+            )
+            .bind(bot.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (!live).then_some(())
+        }),
+    )
+    .await;
     else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
     let receipt = |state: &'static str| {
         let pool = app.db.pool.clone();
@@ -465,10 +465,7 @@ async fn stop_work_ends_a_running_foreground_command() {
     };
     receipt("pending").await;
     manager.end_orphaned_commands().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), call)
-        .await
-        .expect("the command ended")
-        .unwrap();
+    let result = common::until("the command to end", call).await.unwrap();
     assert_eq!(result["exit_code"], 143, "{result}");
     let kill = guest
         .execs()
@@ -488,19 +485,20 @@ async fn stop_work_ends_a_running_foreground_command() {
         .await
         .unwrap();
     assert!(ended, "the run is recorded as ended");
-    for _ in 0..100 {
-        else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
-        let done: bool = sqlx::query_scalar(
-            "SELECT min(state = 'done') FROM request_receipts WHERE operation = 'cancel'",
-        )
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if done {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the cancellation receipt to settle",
+        common::poll(|| async {
+            else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
+            let done: bool = sqlx::query_scalar(
+                "SELECT min(state = 'done') FROM request_receipts WHERE operation = 'cancel'",
+            )
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            done.then_some(())
+        }),
+    )
+    .await;
     receipt("done").await;
 }
 
@@ -525,9 +523,7 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
             .await
             .result
         }));
-        tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
-            .await
-            .expect("started");
+        common::until("the foreground command to start", guest.started.notified()).await;
     }
     let slow_name = ComputerManager::runtime_name(slow.parse().unwrap());
     guest.stalled.lock().unwrap().push(slow_name);
@@ -542,32 +538,27 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
         assert!(stop.status.is_success());
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = std::time::Instant::now();
     let pass = {
         let manager = manager.clone();
         tokio::spawn(async move { manager.end_orphaned_commands().await })
     };
     let fast_call = calls.pop().unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), fast_call)
+    let result = common::until("the other bot's command to end during the stall", fast_call)
         .await
-        .expect("the other bot's command ended while one kill stalls")
         .unwrap();
     assert_eq!(result["exit_code"], 143);
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
-    );
-    tokio::time::timeout(Duration::from_secs(15), pass)
+    guest.release_stalled_kill.notify_one();
+    common::until("the orphan cleanup pass to finish", pass)
         .await
-        .expect("the pass is bounded")
         .unwrap()
         .unwrap();
     let slow_call = calls.pop().unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(30), slow_call)
-        .await
-        .expect("the stalled command ended once its kill answered")
-        .unwrap();
+    let result = common::until(
+        "the stalled command to end once its kill answers",
+        slow_call,
+    )
+    .await
+    .unwrap();
     assert_eq!(result["exit_code"], 143);
 }
 
@@ -602,41 +593,28 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     };
 
     let first = call("HANG one");
-    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
+    common::until("the foreground command to start", guest.started.notified()).await;
+    common::until("the owner stop to finish", manager.owner_stop(bot_id))
         .await
-        .expect("started");
-    let stopped_at = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(10), manager.owner_stop(bot_id))
-        .await
-        .expect("the owner stop did not wait behind the command")
         .unwrap();
-    assert!(stopped_at.elapsed() < Duration::from_secs(5));
-    let result = tokio::time::timeout(Duration::from_secs(5), first)
+    let result = common::until("the stopped command to end", first)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(result["exit_code"], 143, "{result}");
     manager.owner_resume(bot_id).await.unwrap();
 
     let before = kills();
     let second = call("HANG two");
-    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
-        .await
-        .expect("started");
+    common::until("the foreground command to start", guest.started.notified()).await;
     second.abort();
-    let started = std::time::Instant::now();
-    while kills() == before {
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the dropped request's command was not ended"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the dropped request's command to be killed",
+        common::poll(|| std::future::ready((kills() != before).then_some(()))),
+    )
+    .await;
 
     let third = call("HANG three");
-    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
-        .await
-        .expect("started");
+    common::until("the foreground command to start", guest.started.notified()).await;
     let queued = call("echo should-not-run");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let stop = app
@@ -647,26 +625,24 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         )
         .await;
     assert!(stop.status.is_success());
-    for _ in 0..100 {
-        let live: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
-        )
-        .bind(bot_id)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if !live {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::until(
+        "the running turn to stop",
+        common::poll(|| async {
+            let live: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
+            )
+            .bind(bot_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (!live).then_some(())
+        }),
+    )
+    .await;
     manager.end_orphaned_commands().await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(5), third)
+    let _ = common::until("the running command to end", third).await;
+    let refused = common::until("the queued command to be refused", queued)
         .await
-        .unwrap();
-    let refused = tokio::time::timeout(Duration::from_secs(5), queued)
-        .await
-        .unwrap()
         .unwrap();
     assert!(
         refused.as_str().unwrap_or_default().contains("STOPPED"),

@@ -229,11 +229,12 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
         .await;
     let interrupted = sent.body["turn"]["id"].as_str().unwrap();
     app.wait_live_turn(interrupted, &["running"]).await;
-    tokio::time::timeout(Duration::from_secs(90), async {
-        while !project.join("grok-sleep-started").exists() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    tokio::time::timeout(
+        common::LIVE,
+        common::poll(|| {
+            std::future::ready(project.join("grok-sleep-started").exists().then_some(()))
+        }),
+    )
     .await
     .expect("Grok started the actual shell command");
     let stopped = app

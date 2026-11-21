@@ -89,8 +89,7 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
-        else {
+        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
@@ -182,32 +181,37 @@ impl Drop for Cleanup {
 
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
-    loop {
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+    let mut last_status = String::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, error): (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
+                    .bind(turn)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
+                let text: String = sqlx::query_scalar(
+                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
+                )
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
-        if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-            let text: String = sqlx::query_scalar(
-                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-            )
-            .bind(turn)
-            .fetch_one(db)
-            .await
-            .unwrap();
-            note(&format!(
-                "  -> {status} {error:?} after {:?}: {}",
-                started.elapsed(),
-                text.chars().take(600).collect::<String>()
-            ));
-            return (status, text);
+                note(&format!(
+                    "  -> {status} {error:?} after {:?}: {}",
+                    started.elapsed(),
+                    text.chars().take(600).collect::<String>()
+                ));
+                return (status, text);
+            }
+            last_status = status;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(started.elapsed() < timeout, "turn {turn} still {status}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
 }
 
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {

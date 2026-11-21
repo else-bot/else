@@ -12,7 +12,7 @@ use else_api::{
     },
 };
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -105,7 +105,7 @@ async fn observed(
     rx: &mut mpsc::Receiver<Observed>,
     operation: &str,
 ) -> Arc<twilight_http::Client> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    common::until(operation, async {
         loop {
             let next = rx.recv().await.unwrap();
             if next.operation == operation {
@@ -115,7 +115,6 @@ async fn observed(
         }
     })
     .await
-    .unwrap()
 }
 
 #[tokio::test]
@@ -177,7 +176,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
     let running = tokio::spawn(manager.clone().run(stop.clone()));
 
     manager.discover(c.id).await.unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(2), async {
+    let first = common::until("discovery and listener sessions", async {
         let mut discovery = None;
         let mut listener = None;
         loop {
@@ -193,8 +192,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
             }
         }
     })
-    .await
-    .unwrap();
+    .await;
     manager
         .execute(
             c.id,
@@ -243,8 +241,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
         "old credential session must be released before replacement discovery"
     );
     stop.cancel();
-    tokio::time::timeout(Duration::from_secs(2), running)
+    common::until("the session manager to stop", running)
         .await
-        .unwrap()
         .unwrap();
 }

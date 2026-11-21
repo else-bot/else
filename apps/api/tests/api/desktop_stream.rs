@@ -446,53 +446,51 @@ impl Setup {
     }
 
     async fn wait_log(&self, line: &str) {
-        for _ in 0..200 {
-            if self.log.lines().iter().any(|l| l == line) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        let logged = common::poll(|| {
+            std::future::ready(self.log.lines().iter().any(|l| l == line).then_some(()))
+        });
+        if tokio::time::timeout(common::SETTLE, logged).await.is_err() {
+            panic!("never logged {line:?}: {:?}", self.log.lines());
         }
-        panic!("never logged {line:?}: {:?}", self.log.lines());
     }
 
     /// Until the guest has logged a close for every connection it opened.
     async fn wait_closed(&self) {
-        for _ in 0..200 {
+        let closed = common::poll(|| {
             let lines = self.log.lines();
             let count = |suffix: &str| lines.iter().filter(|l| l.ends_with(suffix)).count();
-            if count(" open") == count(" closed") {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            std::future::ready((count(" open") == count(" closed")).then_some(()))
+        });
+        if tokio::time::timeout(common::SETTLE, closed).await.is_err() {
+            panic!("connections left open: {:?}", self.log.lines());
         }
-        panic!("connections left open: {:?}", self.log.lines());
     }
 }
 
 async fn next_json(socket: &mut Socket) -> Value {
-    loop {
-        match tokio::time::timeout(Duration::from_secs(10), socket.next())
-            .await
-            .expect("a message in time")
-        {
-            Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
-            Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {}
-            other => panic!("stream ended: {other:?}"),
+    common::until("a JSON message", async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+                Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {}
+                other => panic!("stream ended: {other:?}"),
+            }
         }
-    }
+    })
+    .await
 }
 
 async fn next_frame(socket: &mut Socket) -> Vec<u8> {
-    loop {
-        match tokio::time::timeout(Duration::from_secs(10), socket.next())
-            .await
-            .expect("a frame in time")
-        {
-            Some(Ok(Message::Binary(png))) => return png.to_vec(),
-            Some(Ok(_)) => {}
-            other => panic!("stream ended: {other:?}"),
+    common::until("a binary frame", async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Binary(png))) => return png.to_vec(),
+                Some(Ok(_)) => {}
+                other => panic!("stream ended: {other:?}"),
+            }
         }
-    }
+    })
+    .await
 }
 
 async fn send(socket: &mut Socket, body: Value) {
@@ -506,15 +504,14 @@ async fn ends_with(socket: &mut Socket, code: &str) {
     let message = next_json(socket).await;
     assert_eq!(message["type"], "error", "{message}");
     assert_eq!(message["code"], code, "{message}");
-    loop {
-        match tokio::time::timeout(Duration::from_secs(10), socket.next())
-            .await
-            .expect("closed in time")
-        {
-            Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-            Some(Ok(_)) => {}
+    common::until("the desktop stream to close", async {
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
         }
-    }
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -597,12 +594,11 @@ async fn watching_sends_frames_and_no_input_reaches_the_desktop() {
     assert_eq!(s.live_viewer_leases().await, 1);
     drop(socket);
     s.wait_log("watch closed").await;
-    for _ in 0..100 {
-        if s.live_viewer_leases().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::until(
+        "the viewer lease to end with the stream",
+        common::poll(|| async { (s.live_viewer_leases().await == 0).then_some(()) }),
+    )
+    .await;
     assert_eq!(
         s.live_viewer_leases().await,
         0,
@@ -775,12 +771,15 @@ async fn an_older_image_takes_only_latin1_clipboard_text() {
 async fn a_native_cursor_is_named_only_while_controlling() {
     let s = setup(false, Duration::from_secs(300)).await;
     let mut socket = s.open("mode=control&cursor=native").await;
-    let cursor = loop {
-        let message = next_json(&mut socket).await;
-        if message["type"] == "cursor" {
-            break message;
+    let cursor = common::until("a cursor message", async {
+        loop {
+            let message = next_json(&mut socket).await;
+            if message["type"] == "cursor" {
+                return message;
+            }
         }
-    };
+    })
+    .await;
     assert_eq!(cursor, json!({"type":"cursor","style":"default"}));
     s.wait_log("watch cursor shapes true").await;
     send(&mut socket, json!({"type":"mode","mode":"watch"})).await;
@@ -792,21 +791,20 @@ async fn a_native_cursor_is_named_only_while_controlling() {
     );
 
     let mut painted = s.open("mode=control").await;
-    loop {
-        if next_json(&mut painted).await == json!({"type":"mode","mode":"control"}) {
-            break;
-        }
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let asked = s.log.lines();
-    assert_eq!(
-        asked
-            .iter()
-            .filter(|l| *l == "watch cursor shapes true")
-            .count(),
-        1,
-        "a stream without cursor=native never asks for shapes: {asked:?}"
-    );
+    wait_mode(&mut painted, "control").await;
+    common::never_polled(
+        "another request for cursor shapes",
+        Duration::from_millis(200),
+        || {
+            let lines = s.log.lines();
+            let requests = lines
+                .iter()
+                .filter(|l| *l == "watch cursor shapes true")
+                .count();
+            std::future::ready((requests != 1).then_some(lines))
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -888,9 +886,11 @@ async fn stopping_the_api_releases_held_input_and_refuses_new_streams() {
     assert_eq!(s.leases("desktop-control:%").await, 1);
     assert_eq!(s.live_viewer_leases().await, 1);
 
-    tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
-        .await
-        .expect("streams stop promptly");
+    common::until(
+        "the desktop streams to stop",
+        s.app.state.stop_desktop_streams(),
+    )
+    .await;
     assert_eq!(
         s.leases("desktop-control:%").await,
         0,
@@ -919,12 +919,15 @@ async fn stopping_the_api_releases_held_input_and_refuses_new_streams() {
         s.connect("mode=control", Some(TOKEN)).await.err(),
         Some(503)
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        s.log.lines().len(),
-        opened,
-        "nothing reaches the desktop after the drain"
-    );
+    common::never_polled(
+        "activity reaches the desktop after the drain",
+        Duration::from_millis(200),
+        || {
+            let lines = s.log.lines();
+            std::future::ready((lines.len() != opened).then_some(lines))
+        },
+    )
+    .await;
     assert_eq!(s.leases("desktop-%").await, 0, "no lease after the drain");
 }
 
@@ -936,36 +939,31 @@ async fn stopping_the_api_abandons_a_stream_waiting_for_boot() {
     s.manager.owner_resume(bot_id).await.unwrap();
     s.runtime.hang_exec.store(true, Ordering::SeqCst);
     let mut socket = s.open("mode=control&wake=true").await;
-    for _ in 0..200 {
-        if s.runtime
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.starts_with("Setup"))
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        s.runtime
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.starts_with("Setup")),
-        "the stream waits for the boot"
-    );
+    common::until(
+        "the stream to start a boot",
+        common::poll(|| {
+            let setup = s
+                .runtime
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("Setup"));
+            std::future::ready(setup.then_some(()))
+        }),
+    )
+    .await;
     assert_eq!(
         s.leases("desktop-stream:%").await,
         1,
         "the boot granted a lease"
     );
 
-    tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
-        .await
-        .expect("a pending boot does not hold the API open");
+    common::until(
+        "the API to stop the stream during boot",
+        s.app.state.stop_desktop_streams(),
+    )
+    .await;
     ends_with(&mut socket, "server_stopping").await;
     assert_eq!(s.leases("desktop-%").await, 0);
     assert!(s.log.lines().is_empty(), "{:?}", s.log.lines());
@@ -973,8 +971,16 @@ async fn stopping_the_api_abandons_a_stream_waiting_for_boot() {
 
 const LEASE_TICK: Duration = Duration::from_millis(1500);
 
+async fn wait_mode(socket: &mut Socket, mode: &str) {
+    let expected = json!({"type":"mode","mode":mode});
+    common::until(&format!("desktop stream mode {mode}"), async {
+        while next_json(socket).await != expected {}
+    })
+    .await;
+}
+
 async fn hold_key(s: &Setup, socket: &mut Socket) {
-    while next_json(socket).await != json!({"type":"mode","mode":"control"}) {}
+    wait_mode(socket, "control").await;
     send(socket, json!({"type":"key","key":0xff53,"down":true})).await;
     s.wait_log("control key 65363 1").await;
 }
@@ -1012,12 +1018,21 @@ async fn stopping_the_api_releases_input_a_non_reading_client_holds() {
         tokio::spawn(
             async move { while sink.send(Message::Text("not json".into())).await.is_ok() {} },
         );
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    assert!(!key_released(&s));
+    common::never_polled(
+        "the held key is released before shutdown",
+        Duration::from_secs(8),
+        || std::future::ready(key_released(&s).then_some(())),
+    )
+    .await;
 
-    let drained = tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
-        .await
-        .is_ok();
+    // Shutdown must beat the 32 s writer flush limit (WRITE_LIMIT + CLOSE_LIMIT).
+    const DRAIN_BEFORE_WRITER_TIMEOUT: Duration = Duration::from_secs(5);
+    let drained = tokio::time::timeout(
+        DRAIN_BEFORE_WRITER_TIMEOUT,
+        s.app.state.stop_desktop_streams(),
+    )
+    .await
+    .is_ok();
     flood.abort();
     drop(unread);
     assert!(
@@ -1035,35 +1050,32 @@ async fn stopping_the_api_releases_input_before_waiting_on_a_busy_database() {
     hold_key(&s, &mut socket).await;
     let pool = &s.app.db.pool;
     let mut held = Vec::new();
-    while let Ok(Ok(connection)) =
-        tokio::time::timeout(Duration::from_millis(200), pool.acquire()).await
-    {
+    // Take every free connection: the pool is exhausted once one acquire
+    // waits this long, since the app's own loops keep the rest.
+    const POOL_QUIET_WINDOW: Duration = Duration::from_millis(200);
+    while let Ok(Ok(connection)) = tokio::time::timeout(POOL_QUIET_WINDOW, pool.acquire()).await {
         held.push(connection);
     }
     assert!(!held.is_empty());
     tokio::time::sleep(LEASE_TICK).await;
 
     let mut drain = Box::pin(s.app.state.stop_desktop_streams());
-    for _ in 0..150 {
-        if key_released(&s) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        key_released(&s),
-        "no database wait precedes the input release"
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut drain)
-            .await
-            .is_err(),
-        "leases are still released, once the database answers"
-    );
+    // Input release must beat the pool's 30 s acquire timeout.
+    const RELEASE_BEFORE_POOL_TIMEOUT: Duration = Duration::from_secs(3);
+    tokio::time::timeout(
+        RELEASE_BEFORE_POOL_TIMEOUT,
+        common::poll(|| std::future::ready(key_released(&s).then_some(()))),
+    )
+    .await
+    .expect("no database wait precedes the input release");
+    common::never(
+        "stream shutdown finishes while the database is blocked",
+        Duration::from_millis(200),
+        &mut drain,
+    )
+    .await;
     drop(held);
-    tokio::time::timeout(Duration::from_secs(5), drain)
-        .await
-        .expect("streams finish once the database answers");
+    common::until("streams to finish once the database answers", drain).await;
     assert_eq!(s.leases("desktop-%").await, 0);
     ends_with(&mut socket, "server_stopping").await;
 }
@@ -1073,7 +1085,7 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
     let s = setup(false, Duration::from_secs(300)).await;
     let bot_id: Uuid = s.bot.parse().unwrap();
     let mut socket = s.open("mode=watch").await;
-    while next_json(&mut socket).await != json!({"type":"mode","mode":"watch"}) {}
+    wait_mode(&mut socket, "watch").await;
     let mut writer = s.app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("UPDATE bots SET name = name WHERE id = ?1")
         .bind(bot_id)
@@ -1084,16 +1096,14 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut drain = Box::pin(s.app.state.stop_desktop_streams());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), &mut drain)
-            .await
-            .is_err(),
-        "an abandoned control lease is looked up behind the writer"
-    );
+    common::never(
+        "stream shutdown finishes while the writer blocks the lease lookup",
+        Duration::from_millis(300),
+        &mut drain,
+    )
+    .await;
     writer.commit().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), drain)
-        .await
-        .expect("the abandoned admission is cleaned up");
+    common::until("the abandoned admission to be cleaned up", drain).await;
     assert_eq!(
         s.leases("desktop-%").await,
         0,

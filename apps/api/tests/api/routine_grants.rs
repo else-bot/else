@@ -1,7 +1,5 @@
 use crate::common;
 
-use std::time::Duration;
-
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
@@ -49,20 +47,21 @@ pub(super) async fn create(
 }
 
 pub(super) async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
-    for _ in 0..400 {
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+    common::until(
+        "terminal routine runs to be reviewed",
+        common::poll(|| async {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                             WHERE NOT rr.reviewed
                               AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
-        )
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-        if !pending {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+            )
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            (!pending).then_some(())
+        }),
+    )
+    .await;
     routines::admit_due(&app.db.pool, &app.state.registry, None, now, 8)
         .await
         .unwrap();

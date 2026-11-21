@@ -272,8 +272,15 @@ async fn a_watcher_checks_until_found_then_wakes_its_bot_once() {
     assert!(snapshot_watchers(&s).await.is_empty());
 
     s.h.app.scheduler.wake();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(bot_turns(&s).await, turns + 1, "woken once");
+    common::never_polled(
+        "a finished watcher wakes the bot again",
+        Duration::from_secs(1),
+        || async {
+            let count = bot_turns(&s).await;
+            (count != turns + 1).then_some(count)
+        },
+    )
+    .await;
 
     let (_, woken) = s.h.started(wake).await;
     let again = tool(
@@ -453,12 +460,15 @@ async fn the_owners_stop_wakes_the_bot_and_the_bots_own_stop_does_not() {
     assert_eq!(dropped.result["status"], "ended");
     assert_eq!(dropped.result["outcome"], "stopped");
     s.h.app.scheduler.wake();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(
-        bot_turns(&s).await,
-        turns,
-        "the bot's own stop wakes nothing"
-    );
+    common::never_polled(
+        "the bot's own stop wakes it",
+        Duration::from_secs(1),
+        || async {
+            let count = bot_turns(&s).await;
+            (count != turns).then_some(count)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

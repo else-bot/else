@@ -3,7 +3,6 @@ use crate::common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Duration;
 
 use else_api::config::DatabaseUrl;
 use else_api::runtime_lock::{MANIFEST, Manifest};
@@ -121,13 +120,12 @@ impl Served {
     }
 
     async fn manifest(&self) -> Manifest {
-        for _ in 0..400 {
-            if let Ok(bytes) = std::fs::read(self.data.join(MANIFEST)) {
-                return serde_json::from_slice(&bytes).unwrap();
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("no listener manifest in {}", self.data.display());
+        let bytes = common::until(
+            &format!("the listener manifest in {}", self.data.display()),
+            common::poll(|| std::future::ready(std::fs::read(self.data.join(MANIFEST)).ok())),
+        )
+        .await;
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     fn token(&self) -> String {
@@ -218,15 +216,15 @@ async fn port_zero_instances_publish_their_bound_listener_and_callback() {
         .unwrap();
     assert_eq!(sent.status(), 202);
     let callback = format!("url = \"{}/tools/v1/mcp\"", ma.url);
-    let mut configs = Vec::new();
-    for _ in 0..400 {
-        configs.clear();
-        find_files(&a.data, "config.toml", &mut configs);
-        if !configs.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let configs = common::until(
+        "the provider config",
+        common::poll(|| {
+            let mut configs = Vec::new();
+            find_files(&a.data, "config.toml", &mut configs);
+            std::future::ready((!configs.is_empty()).then_some(configs))
+        }),
+    )
+    .await;
     assert_eq!(configs.len(), 1, "{configs:?}");
     let text = std::fs::read_to_string(&configs[0]).unwrap();
     assert!(text.contains(&callback), "{callback} not in {text}");

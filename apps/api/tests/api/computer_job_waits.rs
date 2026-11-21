@@ -116,15 +116,16 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
     assert!(waiting["since"].is_string(), "{waiting}");
 
     manager.job(bot.parse().unwrap(), job).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(
-        (
-            attempts(app, turn).await,
-            wait_row(app, turn).await.0.as_str()
-        ),
-        (1, "pending"),
-        "a job that still runs keeps the request parked"
-    );
+    common::never_polled(
+        "the request leaves its wait while the job still runs",
+        Duration::from_secs(2),
+        || async {
+            let attempt = attempts(app, turn).await;
+            let status = wait_row(app, turn).await.0;
+            (attempt != 1 || status != "pending").then_some((attempt, status))
+        },
+    )
+    .await;
 
     guest.report("done 3\nTimeoutError: page.goto exceeded 30000 ms\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
@@ -331,14 +332,11 @@ async fn joined(app: &TestApp, bot: &str, into: Uuid, text: &str, attempt: i32) 
     let sent = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], into.to_string());
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    while attempts(app, into).await < attempt {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the message continues the reply"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::until(
+        &format!("the message to continue the reply as attempt {attempt}"),
+        common::poll(|| async { (attempts(app, into).await >= attempt).then_some(()) }),
+    )
+    .await;
     sent.body["turn"]["id"].as_str().unwrap().parse().unwrap()
 }
 
@@ -404,12 +402,15 @@ async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks()
         .cancel_job(bot.parse().unwrap(), crawl)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(
-        attempts(app, turn).await,
-        2,
-        "a pending question still blocks"
-    );
+    common::never_polled(
+        "the turn continues while a question is pending",
+        Duration::from_secs(1),
+        || async {
+            let attempt = attempts(app, turn).await;
+            (attempt != 2).then_some(attempt)
+        },
+    )
+    .await;
     assert_eq!(waits(app, turn).await, vec![(1, "settled".into(), None)]);
     assert_eq!(turn_status(app, next).await, "queued");
 

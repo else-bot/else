@@ -1048,18 +1048,19 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     assert_eq!(listed[0]["last_run"]["turn_id"], run.to_string().as_str());
     assert_eq!(listed[0]["next_run_at"], next_run_at);
     assert_eq!(listed[0]["enabled"], true);
-    for _ in 0..200 {
-        let reviewed: bool =
-            sqlx::query_scalar("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
-                .bind(run)
-                .fetch_one(&h.app.db.pool)
-                .await
-                .unwrap();
-        if reviewed {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    common::until(
+        "the completed routine run to be reviewed",
+        common::poll(|| async {
+            let reviewed: bool =
+                sqlx::query_scalar("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
+                    .bind(run)
+                    .fetch_one(&h.app.db.pool)
+                    .await
+                    .unwrap();
+            reviewed.then_some(())
+        }),
+    )
+    .await;
 
     assert_eq!(
         set_enabled(&h.app, &main, &id, false).await.status,
@@ -1291,17 +1292,17 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
 }
 
 async fn wait_routine(app: &TestApp, bot: &str, done: impl Fn(&Value) -> bool) -> Value {
-    for _ in 0..400 {
+    let settled = common::poll(|| async {
         let listed = owner_routines(app, bot).await;
-        if done(&listed[0]) {
-            return listed[0].clone();
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        done(&listed[0]).then(|| listed[0].clone())
+    });
+    match tokio::time::timeout(common::SETTLE, settled).await {
+        Ok(routine) => routine,
+        Err(_) => panic!(
+            "routine never reached the state: {}",
+            owner_routines(app, bot).await[0]
+        ),
     }
-    panic!(
-        "routine never reached the state: {}",
-        owner_routines(app, bot).await[0]
-    );
 }
 
 async fn replies(app: &TestApp, turn: Uuid) -> Vec<String> {
@@ -1862,7 +1863,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         )
         .await;
     assert!(stop.status.is_success());
-    for _ in 0..200 {
+    common::until("turns, cancellation, and routine review to settle", common::poll(|| async {
         let busy: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
              OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)
@@ -1871,11 +1872,8 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         .fetch_one(&h.app.db.pool)
         .await
         .unwrap();
-        if !busy {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+        (!busy).then_some(())
+    })).await;
 
     let late = due + chrono::Duration::days(10) + chrono::Duration::minutes(7);
     assert_eq!(fire(&h.app, late).await, 1);
@@ -1914,18 +1912,15 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
         .unwrap();
     }
     assert_eq!(fire(&h.app, due).await, 2);
-    let first = loop {
-        let running: Option<Uuid> = sqlx::query_scalar(
+    let first: Uuid = common::until("a routine turn to run", common::poll(|| async {
+        sqlx::query_scalar(
             "SELECT id FROM turns WHERE status = 'running' AND id IN (SELECT turn_id FROM routine_runs)",
         )
         .fetch_optional(&h.app.db.pool)
         .await
-        .unwrap();
-        if let Some(turn) = running {
-            break turn;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+        .unwrap()
+    }))
+    .await;
 
     let owner = h.send(&main, "[synthetic] are you there?").await;
     assert_eq!(
@@ -2118,10 +2113,7 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .app
         .state
         .gate
-        .close(
-            Duration::from_secs(10),
-            else_api::maintenance::Pause::backup(None),
-        )
+        .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
         .await
         .unwrap()
         .unwrap();
@@ -2131,19 +2123,21 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .await
         .unwrap();
     h.app.scheduler.wake();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(
-        runs(&h.app, &id).await.len(),
-        1,
-        "nothing admitted during maintenance"
-    );
+    common::never_polled(
+        "the scheduler admits a run during maintenance",
+        Duration::from_millis(1500),
+        || async {
+            let count = runs(&h.app, &id).await.len();
+            (count != 1).then_some(count)
+        },
+    )
+    .await;
     drop(closed);
-    for _ in 0..200 {
-        if runs(&h.app, &id).await.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    common::until(
+        "the second run after maintenance",
+        common::poll(|| async { (runs(&h.app, &id).await.len() == 2).then_some(()) }),
+    )
+    .await;
     let after = runs(&h.app, &id).await;
     assert_eq!(after.len(), 2, "admitted once the gate opened");
     let second = after
@@ -2585,29 +2579,32 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
     assert_eq!(run.len(), 1);
     let turn = run[0].0.unwrap().to_string();
     h.app.wait_turn(&turn, &["completed"]).await;
-    for _ in 0..400 {
-        let listed = owner_routines(&h.app, &main).await;
-        if listed.iter().all(|r| r["id"] != id.as_str()) {
-            assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
-            let snapshot = h
-                .app
-                .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
-                .await
-                .body;
-            let ran = snapshot["turns"]
-                .as_array()
-                .unwrap()
+    let listed = common::until(
+        "the completed reminder to disappear from the list",
+        common::poll(|| async {
+            let listed = owner_routines(&h.app, &main).await;
+            listed
                 .iter()
-                .find(|t| t["id"] == turn.as_str())
-                .unwrap();
-            assert_eq!(ran["routine"]["name"], "Scout check");
-            assert_eq!(
-                ran["routine"]["reminder"], true,
-                "its run still shows as a reminder's"
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the reminder stayed listed after its run completed");
+                .all(|r| r["id"] != id.as_str())
+                .then_some(listed)
+        }),
+    )
+    .await;
+    assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    let ran = snapshot["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.as_str())
+        .unwrap();
+    assert_eq!(ran["routine"]["name"], "Scout check");
+    assert_eq!(
+        ran["routine"]["reminder"], true,
+        "its run still shows as a reminder's"
+    );
 }
