@@ -6,6 +6,7 @@ use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::collections::HashMap;
 
 use super::ElseApp;
+use super::settings::{BotPanel, PanelEvent};
 use else_wire::rules::{
     DiffLine, DiffOp, RuleAuthor, RuleChange, RulesFile, RulesUpdate, RulesVersion,
 };
@@ -43,6 +44,52 @@ pub(super) struct RulesDialog {
 }
 
 pub(super) type RulesState = HashMap<Uuid, RulesCache>;
+
+/// What the Rules section of Bot details shows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) enum RulesSummary {
+    /// Not loaded yet, with why the last load failed.
+    #[default]
+    Loading,
+    Failed(String),
+    /// Every rule was removed; the history stays.
+    OnlyHistory,
+    Empty,
+    Rules {
+        count: usize,
+        /// Rules changed since the owner last looked.
+        fresh: usize,
+        updated: Option<chrono::DateTime<chrono::Utc>>,
+    },
+}
+
+/// The Rules section's summary of `cache`, counting the rules changed
+/// after version `seen`; a bot never looked at has none.
+fn summarize(cache: Option<&RulesCache>, seen: Option<i64>) -> RulesSummary {
+    let Some(file) = cache.and_then(|cache| cache.file.as_ref()) else {
+        return match cache.and_then(|cache| cache.problem.clone()) {
+            Some(problem) => RulesSummary::Failed(problem),
+            None => RulesSummary::Loading,
+        };
+    };
+    if file.sections.is_empty() {
+        return if file.history.is_empty() {
+            RulesSummary::Empty
+        } else {
+            RulesSummary::OnlyHistory
+        };
+    }
+    let changed = file.changed_since(seen.unwrap_or(file.version));
+    RulesSummary::Rules {
+        count: file.sections.len(),
+        fresh: file
+            .sections
+            .iter()
+            .filter(|section| changed.contains(&section.title.to_lowercase()))
+            .count(),
+        updated: file.history.first().map(|latest| latest.created_at),
+    }
+}
 
 /// A click handler for dialog content, which renders outside the app's
 /// own context.
@@ -420,6 +467,13 @@ impl ElseApp {
         cx.notify();
     }
 
+    pub(super) fn rules_summary(&self, bot: Uuid) -> RulesSummary {
+        summarize(
+            self.rules.get(&bot),
+            self.preferences.rules_seen.get(&bot).copied(),
+        )
+    }
+
     pub(super) fn render_rules_update(
         &self,
         item: Uuid,
@@ -496,130 +550,6 @@ impl ElseApp {
             ));
         let _ = stamp;
         line.into_any_element()
-    }
-
-    pub(super) fn render_rules_section(&self, bot: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let cache = self.rules.get(&bot);
-        let file = cache.and_then(|cache| cache.file.as_ref());
-        let only_history =
-            file.is_some_and(|file| file.sections.is_empty() && !file.history.is_empty());
-        let open = Button::new("rules-open")
-            .control(Tier::Secondary, Scale::Standard, file.is_none(), cx)
-            .label("Open")
-            .accessibility_label("Open rules")
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
-            }));
-        let heading = h_flex()
-            .w_full()
-            .pb(super::panel::ROW_GAP)
-            .items_center()
-            .child(crate::appearance::section_label("Rules", cx).flex_1())
-            .when(only_history, |row| row.child(open));
-        let body = super::panel::section_frame(cx).child(heading);
-        let muted = |text: String| {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let Some(file) = file else {
-            let text = cache
-                .and_then(|cache| cache.problem.clone())
-                .unwrap_or_else(|| "Loading…".to_owned());
-            return body.child(muted(text)).into_any_element();
-        };
-        if file.sections.is_empty() && !file.history.is_empty() {
-            return body
-                .child(muted(
-                    "No rules right now. Open shows the history of earlier rules, and you can \
-                     restore any version from there."
-                        .to_owned(),
-                ))
-                .into_any_element();
-        }
-        if file.sections.is_empty() {
-            return body
-                .child(muted(
-                    "No rules yet. Tell the bot what to do whenever something happens, for \
-                     example \"when a new issue arrives, start a T3 Code thread with `fix issue \
-                     ABC-1`\". It saves the rule here and follows it word for word."
-                        .to_owned(),
-                ))
-                .into_any_element();
-        }
-        let seen = self
-            .preferences
-            .rules_seen
-            .get(&bot)
-            .copied()
-            .unwrap_or(file.version);
-        let changed = file.changed_since(seen);
-        let fresh = file
-            .sections
-            .iter()
-            .filter(|section| changed.contains(&section.title.to_lowercase()))
-            .count();
-        let count = file.sections.len();
-        let title = if count == 1 {
-            "1 rule".to_owned()
-        } else {
-            format!("{count} rules")
-        };
-        let detail = match (fresh, file.history.first()) {
-            (0, Some(latest)) => format!("Updated {}", when(latest.created_at)),
-            (0, None) => "Followed word for word".to_owned(),
-            (1, _) => "1 changed since you looked".to_owned(),
-            (n, _) => format!("{n} changed since you looked"),
-        };
-        let card = Button::new("rules-summary")
-            .ghost()
-            .focus_ring(false)
-            .cursor_pointer()
-            .with_size(Size::Size(px(16.)))
-            .mx(px(-8.))
-            .my(px(-8.))
-            .px_2()
-            .py_2()
-            .accessibility_label("Open rules")
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
-            }))
-            .child(
-                // The same anatomy as the Model row above it: a name over
-                // one meta line, and a chevron.
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .items_start()
-                            .text_left()
-                            .child(super::panel::item_name(title))
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .text_size(px(12.5))
-                                    .line_height(px(18.))
-                                    .text_color(theme.muted_foreground)
-                                    .when(fresh > 0, |row| row.child(dot(cx)))
-                                    .child(div().truncate().child(detail)),
-                            ),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size_4()
-                            .text_color(theme.muted_foreground),
-                    ),
-            );
-        body.child(card).into_any_element()
     }
 
     fn render_rules_dialog(
@@ -1013,5 +943,204 @@ impl ElseApp {
             .child(list)
             .child(detail)
             .into_any_element()
+    }
+}
+
+impl BotPanel {
+    pub(super) fn render_rules_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let summary = self.rules();
+        let open = Button::new("rules-open")
+            .control(Tier::Secondary, Scale::Standard, false, cx)
+            .label("Open")
+            .accessibility_label("Open rules")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(PanelEvent::OpenRules)));
+        let heading = h_flex()
+            .w_full()
+            .pb(super::panel::ROW_GAP)
+            .items_center()
+            .child(crate::appearance::section_label("Rules", cx).flex_1())
+            .when(*summary == RulesSummary::OnlyHistory, |row| row.child(open));
+        let body = super::panel::section_frame(cx).child(heading);
+        let muted = |text: String| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let (count, fresh, updated) = match summary {
+            RulesSummary::Loading => {
+                return body.child(muted("Loading…".to_owned())).into_any_element();
+            }
+            RulesSummary::Failed(problem) => {
+                return body.child(muted(problem.clone())).into_any_element();
+            }
+            RulesSummary::OnlyHistory => {
+                return body
+                    .child(muted(
+                        "No rules right now. Open shows the history of earlier rules, and you \
+                         can restore any version from there."
+                            .to_owned(),
+                    ))
+                    .into_any_element();
+            }
+            RulesSummary::Empty => {
+                return body
+                    .child(muted(
+                        "No rules yet. Tell the bot what to do whenever something happens, for \
+                         example \"when a new issue arrives, start a T3 Code thread with `fix \
+                         issue ABC-1`\". It saves the rule here and follows it word for word."
+                            .to_owned(),
+                    ))
+                    .into_any_element();
+            }
+            RulesSummary::Rules {
+                count,
+                fresh,
+                updated,
+            } => (*count, *fresh, *updated),
+        };
+        let title = if count == 1 {
+            "1 rule".to_owned()
+        } else {
+            format!("{count} rules")
+        };
+        let detail = match (fresh, updated) {
+            (0, Some(at)) => format!("Updated {}", when(at)),
+            (0, None) => "Followed word for word".to_owned(),
+            (1, _) => "1 changed since you looked".to_owned(),
+            (n, _) => format!("{n} changed since you looked"),
+        };
+        let card = Button::new("rules-summary")
+            .ghost()
+            .focus_ring(false)
+            .cursor_pointer()
+            .with_size(Size::Size(px(16.)))
+            .mx(px(-8.))
+            .my(px(-8.))
+            .px_2()
+            .py_2()
+            .accessibility_label("Open rules")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(PanelEvent::OpenRules)))
+            .child(
+                // The same anatomy as the Model row above it: a name over
+                // one meta line, and a chevron.
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .items_start()
+                            .text_left()
+                            .child(super::panel::item_name(title))
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.))
+                                    .text_color(theme.muted_foreground)
+                                    .when(fresh > 0, |row| row.child(dot(cx)))
+                                    .child(div().truncate().child(detail)),
+                            ),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .size_4()
+                            .text_color(theme.muted_foreground),
+                    ),
+            );
+        body.child(card).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RulesCache, RulesSummary, summarize};
+    use else_wire::rules::RulesFile;
+    use serde_json::json;
+
+    fn file(sections: &[&str], history: &[(i64, &str, &str)]) -> RulesFile {
+        serde_json::from_value(json!({
+            "version": history.first().map_or(1, |(version, _, _)| *version),
+            "markdown": "",
+            "sections": sections.iter().map(|title| json!({ "title": title, "body": "b" })).collect::<Vec<_>>(),
+            "history": history.iter().map(|(version, section, change)| json!({
+                "version": version, "section": section, "change": change,
+                "owner_words": "", "author": "bot", "restored_from": null, "diff": [],
+                "created_at": format!("2026-11-{}T09:00:00Z", 20 + version), "undone_at": null,
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    fn cache(file: Option<RulesFile>, problem: Option<&str>) -> RulesCache {
+        RulesCache {
+            file,
+            problem: problem.map(str::to_owned),
+            ..RulesCache::default()
+        }
+    }
+
+    #[test]
+    fn the_rules_section_counts_rules_changed_since_the_owner_looked() {
+        assert_eq!(summarize(None, None), RulesSummary::Loading);
+        assert_eq!(
+            summarize(
+                Some(&cache(None, Some("Could not load rules: offline"))),
+                None
+            ),
+            RulesSummary::Failed("Could not load rules: offline".into())
+        );
+        assert_eq!(
+            summarize(Some(&cache(Some(file(&[], &[])), None)), None),
+            RulesSummary::Empty
+        );
+        assert_eq!(
+            summarize(
+                Some(&cache(Some(file(&[], &[(2, "Mail", "removed")])), None)),
+                None
+            ),
+            RulesSummary::OnlyHistory
+        );
+        let rules = file(
+            &["Mail", "Deploys"],
+            &[
+                (3, "Deploys", "changed"),
+                (2, "Mail", "added"),
+                (1, "Deploys", "added"),
+            ],
+        );
+        let updated = Some("2026-11-23T09:00:00Z".parse().unwrap());
+        assert_eq!(
+            summarize(Some(&cache(Some(rules.clone()), None)), Some(1)),
+            RulesSummary::Rules {
+                count: 2,
+                fresh: 2,
+                updated
+            }
+        );
+        assert_eq!(
+            summarize(Some(&cache(Some(rules.clone()), None)), Some(2)),
+            RulesSummary::Rules {
+                count: 2,
+                fresh: 1,
+                updated
+            }
+        );
+        assert_eq!(
+            summarize(Some(&cache(Some(rules), None)), None),
+            RulesSummary::Rules {
+                count: 2,
+                fresh: 0,
+                updated
+            },
+            "a bot never looked at has nothing new"
+        );
     }
 }

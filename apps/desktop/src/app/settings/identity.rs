@@ -1,3 +1,4 @@
+use super::BotPanel;
 use crate::app::ElseApp;
 use crate::app::panel::{hairline, note};
 use crate::avatar::{AvatarPicker, bot_avatar};
@@ -133,21 +134,18 @@ pub(super) struct Details {
 }
 
 impl Details {
-    pub(super) fn new(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Self {
+    pub(super) fn new(bot: &Bot, window: &mut Window, cx: &mut Context<BotPanel>) -> Self {
         let values = Metadata::of(bot);
-        let id = bot.id;
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Name")
                 .default_value(values.name.clone())
         });
         Self {
-            _edits: cx.subscribe(&name, move |app, _, event: &InputEvent, cx| match event {
-                InputEvent::PressEnter { .. } | InputEvent::Blur => app.commit_name(id, cx),
+            _edits: cx.subscribe(&name, |panel, _, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => panel.commit_name(cx),
                 InputEvent::Change => {
-                    if let Some(details) = app.settings.get_mut(&id).map(|s| &mut s.details) {
-                        details.problem = None;
-                    }
+                    panel.details.problem = None;
                     cx.notify();
                 }
                 InputEvent::Focus => {}
@@ -179,13 +177,15 @@ impl ElseApp {
         if !self.details.open() {
             self.toggle_settings(window, cx);
         }
-        self.edit_name(id, window, cx);
+        if let Some(panel) = self.panel(id).cloned() {
+            panel.update(cx, |panel, cx| panel.edit_name(window, cx));
+        }
     }
+}
 
-    fn edit_name(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) else {
-            return;
-        };
+impl BotPanel {
+    fn edit_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let details = &mut self.details;
         if !details.editing {
             details.editing = true;
             details.problem = None;
@@ -201,10 +201,8 @@ impl ElseApp {
         cx.notify();
     }
 
-    fn commit_name(&mut self, bot: Uuid, cx: &mut Context<Self>) {
-        let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) else {
-            return;
-        };
+    fn commit_name(&mut self, cx: &mut Context<Self>) {
+        let details = &mut self.details;
         if !details.editing {
             return;
         }
@@ -213,43 +211,34 @@ impl ElseApp {
                 details.editing = false;
                 details.problem = None;
                 details.sync.desired.name = name;
-                self.flush_details(bot, cx);
+                self.flush_details(cx);
             }
             Err(problem) => details.problem = Some(problem),
         }
         cx.notify();
     }
 
-    fn pick_avatar(&mut self, bot: Uuid, avatar: Avatar, cx: &mut Context<Self>) {
-        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
-            details.sync.desired.avatar = avatar;
-            self.flush_details(bot, cx);
-            cx.notify();
-        }
+    fn pick_avatar(&mut self, avatar: Avatar, cx: &mut Context<Self>) {
+        self.details.sync.desired.avatar = avatar;
+        self.flush_details(cx);
+        cx.notify();
     }
 
-    fn set_picking(&mut self, bot: Uuid, open: bool, cx: &mut Context<Self>) {
-        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
-            details.picking = open;
-            cx.notify();
-        }
+    fn set_picking(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.details.picking = open;
+        cx.notify();
     }
 
-    fn flush_details(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+    fn flush_details(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let Some(change) = self
-            .settings
-            .get_mut(&bot)
-            .and_then(|s| s.details.sync.begin())
-        else {
+        let bot = self.bot;
+        let Some(change) = self.details.sync.begin() else {
             return;
         };
         cx.spawn(async move |this, cx| {
             let result = client.update_bot(bot, change.name, change.avatar).await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(details) = app.settings.get_mut(&bot).map(|s| &mut s.details) else {
-                    return;
-                };
+            let _ = this.update(cx, |panel, cx| {
+                let details = &mut panel.details;
                 details.sync.finish(
                     result
                         .as_ref()
@@ -257,7 +246,7 @@ impl ElseApp {
                         .map_err(ToString::to_string),
                 );
                 if details.sync.error.is_none() {
-                    app.flush_details(bot, cx);
+                    panel.flush_details(cx);
                 }
                 cx.notify();
             });
@@ -268,18 +257,14 @@ impl ElseApp {
     /// The panel's compact identity header: a 32 px avatar that opens the
     /// picker and the bot's 15 px name, which turns into a field when
     /// clicked. A full-width rule closes it like every section below.
-    pub(super) fn render_identity(
-        &self,
-        bot: Uuid,
-        details: &Details,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_identity(&self, cx: &mut Context<Self>) -> AnyElement {
+        let details = &self.details;
         let theme = cx.theme().clone();
         let name = if details.editing {
             div()
                 .id("bot-name-editor")
                 .w_full()
-                .on_mouse_down_out(cx.listener(move |app, _, _, cx| app.commit_name(bot, cx)))
+                .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.commit_name(cx)))
                 .child(
                     text_field(Input::new(&details.name), cx)
                         .text_left()
@@ -321,7 +306,7 @@ impl ElseApp {
                                 .text_color(theme.muted_foreground),
                         ),
                 )
-                .on_click(cx.listener(move |app, _, window, cx| app.edit_name(bot, window, cx)))
+                .on_click(cx.listener(|panel, _, window, cx| panel.edit_name(window, cx)))
                 .into_any_element()
         };
         let problem = details
@@ -337,7 +322,7 @@ impl ElseApp {
                     Button::new("retry-details")
                         .control(Tier::Secondary, Scale::Compact, false, cx)
                         .label("Retry")
-                        .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
+                        .on_click(cx.listener(|panel, _, _, cx| panel.flush_details(cx))),
                 )
         });
         h_flex()
@@ -349,7 +334,7 @@ impl ElseApp {
             .items_center()
             .border_b_1()
             .border_color(hairline(cx))
-            .child(self.render_avatar_editor(bot, details, cx))
+            .child(self.render_avatar_editor(cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -362,12 +347,9 @@ impl ElseApp {
             .into_any_element()
     }
 
-    fn render_avatar_editor(
-        &self,
-        bot: Uuid,
-        details: &Details,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_avatar_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let details = &self.details;
+        let bot = self.bot;
         let theme = cx.theme().clone();
         let editing = if details.picking {
             "Close avatar picker"
@@ -412,29 +394,24 @@ impl ElseApp {
                     ))
                     .child(badge),
             );
-        let app = cx.entity().downgrade();
-        let toggle = app.clone();
+        let panel = cx.entity().downgrade();
+        let toggle = panel.clone();
         // The header sits at the top of the panel, so the picker opens down.
         Popover::new("avatar-picker")
             .anchor(Anchor::TopLeft)
             .open(details.picking)
             .on_open_change(move |open, _, cx| {
-                let _ = toggle.update(cx, |app, cx| app.set_picking(bot, *open, cx));
+                let _ = toggle.update(cx, |panel, cx| panel.set_picking(*open, cx));
             })
             .trigger(hero)
             .content(move |_, _, cx| {
-                let current = app
+                let current = panel
                     .upgrade()
-                    .and_then(|app| {
-                        let app = app.read(cx);
-                        app.settings
-                            .get(&bot)
-                            .map(|s| s.details.sync.desired.avatar)
-                    })
+                    .map(|panel| panel.read(cx).details.sync.desired.avatar)
                     .unwrap_or_default();
-                let app = app.clone();
+                let panel = panel.clone();
                 AvatarPicker::new(current, move |avatar, _, cx| {
-                    let _ = app.update(cx, |app, cx| app.pick_avatar(bot, avatar, cx));
+                    let _ = panel.update(cx, |panel, cx| panel.pick_avatar(avatar, cx));
                 })
                 .into_any_element()
             })

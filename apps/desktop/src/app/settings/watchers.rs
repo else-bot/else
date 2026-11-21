@@ -1,8 +1,7 @@
-use super::BotSettings;
+use super::BotPanel;
+use crate::app::computer::DetailsTab;
 use crate::app::panel::{alert, item_name, list_rows, meta, meta_line, section};
-use crate::app::{Connection, ElseApp, computer::DetailsTab};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::Conversation;
 use chrono::{DateTime, Utc};
 use else_wire::routines::{Watcher, WatcherStatus};
 use gpui_kit::component::button::Button;
@@ -32,25 +31,22 @@ fn stop_result(result: Result<(), crate::api::ClientError>) -> Option<WatcherSto
     }
 }
 
-impl BotSettings {
+impl BotPanel {
     pub(super) fn sync_watchers(&mut self, watchers: &[Watcher]) {
         let active = |id| watchers.iter().any(|watcher| watcher.id == id);
         self.watcher_stops.retain(|id, _| active(*id));
         self.open_watcher_log = self.open_watcher_log.filter(|id| active(*id));
     }
-}
 
-impl ElseApp {
-    fn watchers(&self, bot: Uuid) -> &[Watcher] {
-        self.automations(bot).map_or(&[], Conversation::watchers)
+    fn watchers(&self) -> &[Watcher] {
+        self.automations()
+            .map_or(&[], |automations| &automations.watchers)
     }
 
-    pub(in crate::app) fn sync_watcher_clock(&mut self, cx: &mut Context<Self>) {
-        let visible = self.settings_shown()
-            && self.details.tab() == DetailsTab::Details
-            && self
-                .selected
-                .is_some_and(|bot| !self.watchers(bot).is_empty());
+    /// Ticks while the Details tab shows watchers, so their check times
+    /// stay current.
+    pub(super) fn sync_watcher_clock(&mut self, cx: &mut Context<Self>) {
+        let visible = self.inputs.shown == Some(DetailsTab::Details) && !self.watchers().is_empty();
         if !visible {
             self.watcher_clock = None;
         } else if self.watcher_clock.is_none() {
@@ -67,38 +63,25 @@ impl ElseApp {
         }
     }
 
-    fn stop_watcher(
-        &mut self,
-        bot: Uuid,
-        watcher: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.connection != Connection::Connected
-            || !self.watchers(bot).iter().any(|active| active.id == watcher)
-        {
+    fn stop_watcher(&mut self, watcher: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.connected() || !self.watchers().iter().any(|active| active.id == watcher) {
             return;
         }
-        let Some(entry) = self.settings.get_mut(&bot) else {
-            return;
-        };
         if matches!(
-            entry.watcher_stops.get(&watcher),
+            self.watcher_stops.get(&watcher),
             Some(WatcherStop::Stopping)
         ) {
             return;
         }
-        entry.watcher_stops.insert(watcher, WatcherStop::Stopping);
+        self.watcher_stops.insert(watcher, WatcherStop::Stopping);
         cx.notify();
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         cx.spawn_in(window, async move |this, cx| {
             let Some(state) = stop_result(client.stop_watcher(bot, watcher).await) else {
                 return;
             };
-            let _ = this.update(cx, |app, cx| {
-                if let Some(entry) = app.settings.get_mut(&bot)
-                    && let Some(stop) = entry.watcher_stops.get_mut(&watcher)
-                {
+            let _ = this.update(cx, |panel, cx| {
+                if let Some(stop) = panel.watcher_stops.get_mut(&watcher) {
                     *stop = state;
                     cx.notify();
                 }
@@ -107,23 +90,18 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn render_watchers(
-        &self,
-        bot: Uuid,
-        entry: &BotSettings,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let watchers = self.watchers(bot);
+    pub(super) fn render_watchers(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let watchers = self.watchers();
         if watchers.is_empty() {
             return None;
         }
         let now = Utc::now();
-        let connected = self.connection == Connection::Connected;
+        let connected = self.connected();
         let rows = watchers
             .iter()
             .map(|watcher| {
                 let id = watcher.id;
-                let stop = entry.watcher_stops.get(&id);
+                let stop = self.watcher_stops.get(&id);
                 let stopping = matches!(stop, Some(WatcherStop::Stopping));
                 let error = match stop {
                     Some(WatcherStop::Failed(message) | WatcherStop::Unconfirmed(message)) => {
@@ -131,20 +109,19 @@ impl ElseApp {
                     }
                     _ => None,
                 };
-                let stop =
-                    Button::new(SharedString::from(format!("watcher-stop-{id}")))
-                        .control(Tier::Ghost, Scale::Compact, stopping || !connected, cx)
-                        .label(if stopping { "Stopping…" } else { "Stop" })
-                        .loading(stopping)
-                        .accessibility_label(format!(
-                            "{} watching {}",
-                            if stopping { "Stopping" } else { "Stop" },
-                            watcher.purpose
-                        ))
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.stop_watcher(bot, id, window, cx)
-                        }));
-                let open = entry.open_watcher_log == Some(id);
+                let stop = Button::new(SharedString::from(format!("watcher-stop-{id}")))
+                    .control(Tier::Ghost, Scale::Compact, stopping || !connected, cx)
+                    .label(if stopping { "Stopping…" } else { "Stop" })
+                    .loading(stopping)
+                    .accessibility_label(format!(
+                        "{} watching {}",
+                        if stopping { "Stopping" } else { "Stop" },
+                        watcher.purpose
+                    ))
+                    .on_click(
+                        cx.listener(move |panel, _, window, cx| panel.stop_watcher(id, window, cx)),
+                    );
+                let open = self.open_watcher_log == Some(id);
                 let log = watcher.last_output.as_ref().filter(|text| !text.is_empty());
                 let log_button = log.map(|_| {
                     Button::new(SharedString::from(format!("watcher-log-{id}")))
@@ -156,12 +133,10 @@ impl ElseApp {
                             if open { "Hide" } else { "View" },
                             watcher.purpose
                         ))
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            if let Some(entry) = app.settings.get_mut(&bot) {
-                                entry.open_watcher_log =
-                                    (entry.open_watcher_log != Some(id)).then_some(id);
-                                cx.notify();
-                            }
+                        .on_click(cx.listener(move |panel, _, _, cx| {
+                            panel.open_watcher_log =
+                                (panel.open_watcher_log != Some(id)).then_some(id);
+                            cx.notify();
                         }))
                 });
                 let local = chrono::Local::now();

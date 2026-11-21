@@ -290,7 +290,9 @@ impl ElseApp {
                 .label("Retry")
                 .accessibility_label(format!("Retry {} now", routine.name))
                 .on_click(cx.listener(move |app, event, window, cx| {
-                    app.retry_routine(bot, id, window, cx);
+                    if let Some(panel) = app.panel(bot).cloned() {
+                        panel.update(cx, |panel, cx| panel.retry_routine(id, window, cx));
+                    }
                     open_routines(app, event, window, cx);
                 }))
         })

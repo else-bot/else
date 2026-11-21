@@ -1,15 +1,14 @@
 mod card;
 
 use super::schedule_text::local_time;
-use super::{BotSettings, automation_section};
+use super::{BotPanel, PanelEvent, automation_section, report_unauthorized};
+use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::request::Request;
-use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use else_wire::routines::PausedReason;
 use else_wire::routines::RunStatus;
 use else_wire::routines::SkipReason;
 use else_wire::routines::{LastRun, Routine};
 use gpui_kit::*;
-use std::collections::HashMap;
 use uuid::Uuid;
 
 /// A change to one routine. `Enable` and `Quiet` carry the value the
@@ -24,66 +23,61 @@ pub(super) enum RoutineChange {
     Delete,
 }
 
-impl ElseApp {
+impl BotPanel {
     fn set_routine(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         let request = move |_| client.set_routine_enabled(bot, routine, enabled);
         let change = RoutineChange::Enable(enabled);
-        self.save_routine(bot, routine, change, request, window, cx);
+        self.save_routine(routine, change, request, window, cx);
     }
 
     fn set_routine_quiet(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         quiet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         let request = move |_| client.set_routine_quiet(bot, routine, quiet);
         let change = RoutineChange::Quiet(quiet);
-        self.save_routine(bot, routine, change, request, window, cx);
+        self.save_routine(routine, change, request, window, cx);
     }
 
     fn dismiss_routine_failures(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         let request = move |_| client.dismiss_routine_failures(bot, routine);
         let change = RoutineChange::DismissFailures;
-        self.save_routine(bot, routine, change, request, window, cx);
+        self.save_routine(routine, change, request, window, cx);
     }
 
     pub(in crate::app) fn retry_routine(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
         let request = move |attempt| client.retry_routine(bot, routine, attempt);
         let change = RoutineChange::Retry;
-        self.save_routine(bot, routine, change, request, window, cx);
+        self.save_routine(routine, change, request, window, cx);
     }
 
     /// Sends `change` through `request`, which gets the attempt as its
     /// request ID.
     fn save_routine<F>(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         change: RoutineChange,
         request: impl FnOnce(Uuid) -> F,
@@ -93,18 +87,19 @@ impl ElseApp {
         F: std::future::Future<Output = Result<Routine, crate::api::ClientError>> + 'static,
     {
         let retrying = change == RoutineChange::Retry;
-        let Some(attempt) = self.begin_routine_change(bot, routine, change) else {
+        let Some(attempt) = self.begin_routine_change(routine, change) else {
             return;
         };
         let request = request(attempt);
         cx.notify();
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
-                }
-                if !settle_change(&mut app.settings, bot, routine, attempt, &result, |err| {
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
+            let _ = this.update(cx, |panel, cx| {
+                if !panel.settle_routine_change(routine, attempt, &result, |err| {
                     if retrying {
                         retry_failure(err)
                     } else {
@@ -115,10 +110,8 @@ impl ElseApp {
                 }
                 if let Ok(saved) = result {
                     // The row shows the routine as the server returned it.
-                    if let Some(entry) = app.settings.get_mut(&bot) {
-                        entry.routines.remove(&routine);
-                    }
-                    app.apply_routine(bot, saved);
+                    panel.routines.remove(&routine);
+                    cx.emit(PanelEvent::RoutineSaved(Box::new(saved)));
                 }
                 cx.notify();
             });
@@ -126,20 +119,16 @@ impl ElseApp {
         .detach();
     }
 
-    pub(in crate::app::settings) fn changeable_routine(
-        &self,
-        bot: Uuid,
-        routine: Uuid,
-    ) -> Option<&Routine> {
-        if self.connection != Connection::Connected {
+    pub(in crate::app::settings) fn changeable_routine(&self, routine: Uuid) -> Option<&Routine> {
+        if !self.connected() {
             return None;
         }
-        let entry = self.settings.get(&bot)?;
-        if entry.routines.get(&routine).is_some_and(Request::busy) {
+        if self.routines.get(&routine).is_some_and(Request::busy) {
             return None;
         }
-        self.automations(bot)?
-            .routines()
+        self.automations()?
+            .routines
+            .as_deref()?
             .iter()
             .find(|r| r.id == routine)
     }
@@ -148,64 +137,80 @@ impl ElseApp {
     /// attempt its result must settle.
     pub(in crate::app::settings) fn begin_routine_change(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         change: RoutineChange,
     ) -> Option<Uuid> {
-        self.changeable_routine(bot, routine)?;
-        self.settings
-            .get_mut(&bot)?
-            .routines
-            .entry(routine)
-            .or_default()
-            .begin(change)
+        self.changeable_routine(routine)?;
+        self.routines.entry(routine).or_default().begin(change)
+    }
+
+    /// Settles a routine change. Returns false when `attempt` is no longer
+    /// the change in flight.
+    fn settle_routine_change<T>(
+        &mut self,
+        routine: Uuid,
+        attempt: Uuid,
+        result: &Result<T, crate::api::ClientError>,
+        message: impl FnOnce(&crate::api::ClientError) -> String,
+    ) -> bool {
+        self.routines
+            .get_mut(&routine)
+            .is_some_and(|save| save.settle_as(attempt, result, message))
+    }
+
+    /// Settles a change the model dialog sent; a saved routine shows as
+    /// the server returned it.
+    pub(in crate::app::settings) fn finish_routine_change<T>(
+        &mut self,
+        routine: Uuid,
+        attempt: Uuid,
+        result: &Result<T, crate::api::ClientError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settle_routine_change(routine, attempt, result, |err| {
+            format!("Couldn't save. {err}")
+        }) && result.is_ok()
+        {
+            self.routines.remove(&routine);
+        }
+        cx.notify();
     }
 
     fn open_routine_delete_dialog(
         &mut self,
-        bot: Uuid,
         routine: Uuid,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self
-            .changeable_routine(bot, routine)
-            .map(|r| match r.run_at {
-                Some(_) => DeleteTarget::Reminder(r.name.clone()),
-                None => DeleteTarget::Routine(r.name.clone()),
-            })
-        else {
+        let Some(target) = self.changeable_routine(routine).map(|r| match r.run_at {
+            Some(_) => DeleteTarget::Reminder(r.name.clone()),
+            None => DeleteTarget::Routine(r.name.clone()),
+        }) else {
             return;
         };
-        self.open_delete_confirmation(target, window, cx, move |app, window, cx| {
-            app.delete_routine(bot, routine, window, cx);
+        open_delete_confirmation(target, window, cx, move |panel, window, cx| {
+            panel.delete_routine(routine, window, cx);
         });
     }
 
-    fn delete_routine(
-        &mut self,
-        bot: Uuid,
-        routine: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(attempt) = self.begin_routine_change(bot, routine, RoutineChange::Delete) else {
+    fn delete_routine(&mut self, routine: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attempt) = self.begin_routine_change(routine, RoutineChange::Delete) else {
             return;
         };
         cx.notify();
-        let client = self.client.clone();
+        let (client, bot) = (self.client.clone(), self.bot);
+        let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_routine(bot, routine).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
-                }
-                let settled =
-                    settle_change(&mut app.settings, bot, routine, attempt, &result, |err| {
-                        format!("Couldn't delete. {err}")
-                    });
+            if let Err(err) = &result {
+                report_unauthorized(&app, err, cx);
+            }
+            let _ = this.update(cx, |panel, cx| {
+                let settled = panel.settle_routine_change(routine, attempt, &result, |err| {
+                    format!("Couldn't delete. {err}")
+                });
                 if settled && result.is_ok() {
-                    app.expanded_routine_problems.remove(&routine);
+                    panel.expanded_routine_problems.remove(&routine);
                 }
                 cx.notify();
             });
@@ -213,21 +218,23 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn render_routines(
-        &self,
-        bot: Uuid,
-        saves: &HashMap<Uuid, Request<RoutineChange>>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = self.automations(bot).map(|conversation| {
-            let connected = self.connection == Connection::Connected;
-            conversation
-                .routines()
+    pub(super) fn render_routines(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.automations().map(|automations| {
+            let connected = self.connected();
+            automations
+                .routines
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
                 .filter(|routine| routine.run_at.is_none())
                 .map(|routine| {
-                    self.render_routine(bot, routine, saves.get(&routine.id), connected, window, cx)
+                    self.render_routine(
+                        routine,
+                        self.routines.get(&routine.id),
+                        connected,
+                        window,
+                        cx,
+                    )
                 })
                 .collect()
         });
@@ -241,28 +248,23 @@ impl ElseApp {
         )
     }
 
-    pub(super) fn render_reminders(
-        &self,
-        bot: Uuid,
-        saves: &HashMap<Uuid, Request<RoutineChange>>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = self.automations(bot).map(|conversation| {
-            let mut reminders: Vec<&Routine> = conversation
-                .routines()
+    pub(super) fn render_reminders(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.automations().map(|automations| {
+            let mut reminders: Vec<&Routine> = automations
+                .routines
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
                 .filter(|routine| routine.run_at.is_some())
                 .collect();
             reminders.sort_by_key(|reminder| (reminder.run_at, reminder.id));
-            let connected = self.connection == Connection::Connected;
+            let connected = self.connected();
             reminders
                 .into_iter()
                 .map(|reminder| {
                     self.render_routine(
-                        bot,
                         reminder,
-                        saves.get(&reminder.id),
+                        self.routines.get(&reminder.id),
                         connected,
                         window,
                         cx,
@@ -294,22 +296,6 @@ fn retry_failure(err: &crate::api::ClientError) -> String {
         }
         _ => format!("Couldn't retry. {err}"),
     }
-}
-
-/// Settles a routine change. Returns false when `attempt` is no longer
-/// the change in flight.
-pub(in crate::app::settings) fn settle_change<T>(
-    settings: &mut HashMap<Uuid, BotSettings>,
-    bot: Uuid,
-    routine: Uuid,
-    attempt: Uuid,
-    result: &Result<T, crate::api::ClientError>,
-    message: impl FnOnce(&crate::api::ClientError) -> String,
-) -> bool {
-    settings
-        .get_mut(&bot)
-        .and_then(|entry| entry.routines.get_mut(&routine))
-        .is_some_and(|save| save.settle_as(attempt, result, message))
 }
 
 /// Whether the owner may run the routine again now: it has failures the

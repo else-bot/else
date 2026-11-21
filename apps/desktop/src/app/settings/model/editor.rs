@@ -1,5 +1,4 @@
-use super::super::routines::{RoutineChange, settle_change};
-use super::ModelState;
+use super::super::routines::RoutineChange;
 use crate::app::panel::{muted, note};
 use crate::app::request::Request;
 use crate::app::{Connection, ElseApp};
@@ -101,13 +100,16 @@ impl ModelDialog {
 }
 
 impl ElseApp {
-    pub(super) fn open_model_dialog(
+    pub(in crate::app::settings) fn open_model_dialog(
         &mut self,
         bot: Uuid,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(saved) = self.settings.get(&bot).and_then(|s| s.model.shown()) else {
+        let Some(saved) = self
+            .panel(bot)
+            .and_then(|panel| panel.read(cx).shown_profile())
+        else {
             return;
         };
         let saved = saved.as_ref().map(|p| p.choice.clone());
@@ -136,8 +138,8 @@ impl ElseApp {
                 if app.selected != Some(bot) {
                     return;
                 }
-                if let (Ok(saved), Some(entry)) = (saved, app.settings.get_mut(&bot)) {
-                    entry.model = ModelState::Ready(saved);
+                if let (Ok(saved), Some(panel)) = (saved, app.panel(bot).cloned()) {
+                    panel.update(cx, |panel, cx| panel.set_profile(saved, cx));
                 }
                 app.open_model_dialog(bot, window, cx);
             });
@@ -152,7 +154,11 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(routine) = self.changeable_routine(bot, routine) else {
+        let Some(routine) = self
+            .panel(bot)
+            .and_then(|panel| panel.read(cx).changeable_routine(routine))
+            .cloned()
+        else {
             return;
         };
         let target = ModelTarget::Routine {
@@ -176,13 +182,13 @@ impl ElseApp {
         let Some(caps) = self.caps.clone() else {
             return;
         };
-        let initial = saved.as_ref().or_else(|| {
-            self.settings
-                .get(&bot)
-                .and_then(|s| s.model.shown()?.as_ref())
-                .map(|profile| &profile.choice)
+        let initial = saved.clone().or_else(|| {
+            self.panel(bot)?
+                .read(cx)
+                .shown_profile()?
+                .as_ref()
+                .map(|profile| profile.choice.clone())
         });
-        let initial = initial.cloned();
         let picker = self.profile_picker(&caps, initial.as_ref(), cx);
         let picker = cx.new(|_| picker);
         let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
@@ -305,10 +311,15 @@ impl ElseApp {
         if holder.read(cx).save.busy() {
             return;
         }
+        let Some(panel) = self.panel(bot).cloned() else {
+            return;
+        };
         let routine_attempt = match routine {
             Some(routine) => {
-                let Some(attempt) = self.begin_routine_change(bot, routine, RoutineChange::Model)
-                else {
+                let Some(attempt) = panel.update(cx, |panel, cx| {
+                    cx.notify();
+                    panel.begin_routine_change(routine, RoutineChange::Model)
+                }) else {
                     holder.update(cx, |form, cx| {
                         form.save.reject("This routine can't be changed right now. Reopen its model settings and try again.");
                         cx.notify();
@@ -343,19 +354,10 @@ impl ElseApp {
                 if let Err(err) = &result {
                     app.unauthorized(err, window, cx);
                 }
-                if let Some((routine, routine_attempt)) = routine_attempt
-                    && settle_change(
-                        &mut app.settings,
-                        bot,
-                        routine,
-                        routine_attempt,
-                        &result,
-                        |err| format!("Couldn't save. {err}"),
-                    )
-                    && result.is_ok()
-                    && let Some(entry) = app.settings.get_mut(&bot)
-                {
-                    entry.routines.remove(&routine);
+                if let Some((routine, routine_attempt)) = routine_attempt {
+                    panel.update(cx, |panel, cx| {
+                        panel.finish_routine_change(routine, routine_attempt, &result, cx)
+                    });
                 }
                 if !holder.update(cx, |form, _| form.save.settle(attempt, &result)) {
                     return;
@@ -364,9 +366,7 @@ impl ElseApp {
                     Ok(saved) => {
                         match saved {
                             SavedModel::Bot(saved) => {
-                                if let Some(entry) = app.settings.get_mut(&bot) {
-                                    entry.model.saved(saved);
-                                }
+                                panel.update(cx, |panel, cx| panel.saved_profile(saved, cx));
                             }
                             SavedModel::Routine(saved) => {
                                 app.apply_routine(bot, *saved);

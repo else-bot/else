@@ -319,6 +319,8 @@ impl ElseApp {
             self.ensure_settings(window, cx);
             self.check_reading(window, cx);
         }
+        // Releases the computer view the details panel was showing.
+        cx.notify();
     }
 
     /// A notification was opened: show its bot if it belongs to this
