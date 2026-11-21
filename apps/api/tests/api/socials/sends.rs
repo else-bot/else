@@ -125,9 +125,11 @@ async fn incoming_delivery_is_deduplicated_and_telegram_history_pages_numericall
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
     assert_eq!(
-        else_api::socials::delivery::admit_pending(&db.pool, &registry, 1)
-            .await
-            .unwrap(),
+        else_api::connector_core::inbound::admit_pending::<else_api::socials::delivery::Social>(
+            &db.pool, &registry, 1
+        )
+        .await
+        .unwrap(),
         1
     );
     let turn: Uuid = sqlx::query_scalar(
@@ -513,4 +515,21 @@ async fn a_send_its_worker_admitted_before_the_caller_gave_up_settles_by_its_rec
     .await
     .expect("the admitted send settles the draft as sent");
     assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_social_call_after_shutdown_reports_the_connection_inactive() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "shutdown").await;
+    let manager = Arc::new(Manager::new(
+        db.pool.clone(),
+        Arc::new(key()),
+        db.scheduler(),
+        Arc::new(Fake::default()),
+    ));
+    let stop = CancellationToken::new();
+    stop.cancel();
+    manager.clone().run(stop).await;
+    let refused = manager.discover(c.id).await;
+    assert!(matches!(refused, Err(Error::Inactive)), "{refused:?}");
 }

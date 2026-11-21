@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use common::{TestDb, seed};
 use else_api::connector_core::actions::{Outcome, Start};
+use else_api::connector_core::inbound;
 use else_api::connectors::delivery;
 use else_api::connectors::store::{self, StoreError};
 use else_api::connectors::types::{
@@ -130,7 +131,7 @@ async fn unavailable_providers_do_not_starve_other_mail_when_admission_is_limite
         Arc::new(Synthetic::new(Duration::from_millis(5))),
     ]);
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry, 1)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry, 1)
             .await
             .unwrap(),
         1
@@ -612,7 +613,7 @@ async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mai
         .unwrap()
     );
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0,
@@ -635,7 +636,7 @@ async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mai
         .unwrap()
     );
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         1
@@ -828,14 +829,14 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
 
     record(10, 13).await;
     assert_eq!(
-        delivery::admit_pending(&db.pool, &Registry::new(vec![]), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &Registry::new(vec![]), 8)
             .await
             .unwrap(),
         0,
         "no provider"
     );
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         1
@@ -861,14 +862,14 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
 
     record(13, 14).await;
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0,
         "waits for the unfinished turn"
     );
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0,
@@ -886,7 +887,7 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
         );
     }
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0,
@@ -897,7 +898,7 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
     }
     store::set_active(&db.pool, account, false).await.unwrap();
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0,
@@ -910,7 +911,7 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
     );
 
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         1
@@ -1133,7 +1134,7 @@ async fn a_restored_database_stays_passive_until_resumed() {
         Some(json!({ "action_id": action, "status": "uncertain" }))
     );
     assert_eq!(
-        delivery::admit_pending(&db.pool, &registry(), 8)
+        inbound::admit_pending::<delivery::Mail>(&db.pool, &registry(), 8)
             .await
             .unwrap(),
         0

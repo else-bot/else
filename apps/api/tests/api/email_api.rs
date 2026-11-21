@@ -286,9 +286,13 @@ async fn mail_event(
         .await
         .unwrap()
     );
-    else_api::connectors::delivery::admit_pending(&h.app.db.pool, &h.app.state.registry, 32)
-        .await
-        .unwrap();
+    else_api::connector_core::inbound::admit_pending::<else_api::connectors::delivery::Mail>(
+        &h.app.db.pool,
+        &h.app.state.registry,
+        32,
+    )
+    .await
+    .unwrap();
     h.app.scheduler.wake();
     sqlx::query_scalar("SELECT turn_id FROM connector_deliveries WHERE turn_id IS NOT NULL LIMIT 1")
         .fetch_one(&h.app.db.pool)
