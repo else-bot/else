@@ -92,7 +92,7 @@ impl Shell {
         self._prefetch = None;
         let from = self.active.as_ref().map(|active| active.id);
         let section = self.settings_section();
-        self.show_server_list();
+        self.show_server_list(window, cx);
         self.activate(saved.profile.clone(), client, window, cx);
         let Some(active) = self.active.as_ref().filter(|active| active.id == id) else {
             return;

@@ -37,6 +37,13 @@ impl ServerPage {
         }
     }
 
+    /// Wipes the editor's typed owner token before the page drops.
+    fn close(self, window: &mut Window, cx: &mut App) {
+        if let Self::Add(form) | Self::Edit { form, .. } = self {
+            form.close(window, cx);
+        }
+    }
+
     /// The saved server the editor edits.
     pub(in crate::connection) fn editing(&self) -> Option<Uuid> {
         match self {
@@ -52,7 +59,8 @@ pub(in crate::connection) struct Settings {
     pane: Pane,
     pub backups: Option<Mounted<backups::View>>,
     pub email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
-    pub servers: ServerPage,
+    /// Private, so an editor can only leave through [`Settings::set_servers`].
+    servers: ServerPage,
     pub focus: FocusHandle,
     pub navigation_focus: [FocusHandle; 10],
 }
@@ -80,9 +88,28 @@ impl Settings {
         std::mem::replace(&mut self.pane, pane).close(window, cx);
     }
 
-    /// Drops every pane, the warm ones too.
+    pub(in crate::connection) fn servers(&self) -> &ServerPage {
+        &self.servers
+    }
+
+    pub(in crate::connection) fn form_mut(&mut self) -> Option<&mut ConnectForm> {
+        self.servers.form_mut()
+    }
+
+    /// Replaces the Servers page, wiping a dropped editor's owner token.
+    pub(in crate::connection) fn set_servers(
+        &mut self,
+        page: ServerPage,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        std::mem::replace(&mut self.servers, page).close(window, cx);
+    }
+
+    /// Drops every pane, the warm ones too, and the server editor.
     pub(in crate::connection) fn clear(&mut self, window: &mut Window, cx: &mut App) {
         self.show(Pane::None, window, cx);
+        self.set_servers(ServerPage::List, window, cx);
         self.backups = None;
         self.email = None;
     }

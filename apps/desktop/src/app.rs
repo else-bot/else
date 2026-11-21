@@ -166,8 +166,8 @@ pub fn install_menus(cx: &mut App) {
     }
     use gpui_kit::base::input;
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &CloseWindow, cx| cx.hide());
-    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &CloseWindow, cx| hide(cx));
+    cx.on_action(|_: &Hide, cx| hide(cx));
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window, _| window.minimize_window()));
@@ -273,6 +273,19 @@ pub(crate) fn on_commands<E: InteractiveElement>(element: E, app: &Entity<ElseAp
     on::<CiteSelection, _>(element, app, |app, window, cx| {
         app.cite_selection(window, cx)
     })
+}
+
+/// Closes every window's settings sheet, then hides the app. Deferred
+/// because a key binding dispatches while its window is updating.
+fn hide(cx: &mut App) {
+    cx.defer(|cx| {
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, cx| {
+                crate::connection::close_settings(window, cx)
+            });
+        }
+        cx.hide();
+    });
 }
 
 /// Deferred because a key binding dispatches while its window is updating.

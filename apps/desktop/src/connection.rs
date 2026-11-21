@@ -107,7 +107,7 @@ impl Front {
     fn form(&self) -> Option<&ConnectForm> {
         match self {
             Self::Onboarding(form) => Some(form),
-            Self::Settings(settings) => settings.servers.form(),
+            Self::Settings(settings) => settings.servers().form(),
             Self::Session => None,
         }
     }
@@ -115,7 +115,7 @@ impl Front {
     fn form_mut(&mut self) -> Option<&mut ConnectForm> {
         match self {
             Self::Onboarding(form) => Some(form),
-            Self::Settings(settings) => settings.servers.form_mut(),
+            Self::Settings(settings) => settings.form_mut(),
             Self::Session => None,
         }
     }
@@ -302,8 +302,10 @@ impl Shell {
     /// Replaces what the window shows. Leaving settings closes its panes,
     /// so the ones holding typed secrets wipe them.
     fn set_front(&mut self, front: Front, window: &mut Window, cx: &mut App) {
-        if let Front::Settings(mut settings) = std::mem::replace(&mut self.front, front) {
-            settings.clear(window, cx);
+        match std::mem::replace(&mut self.front, front) {
+            Front::Settings(mut settings) => settings.clear(window, cx),
+            Front::Onboarding(form) => form.close(window, cx),
+            Front::Session => {}
         }
     }
 
@@ -522,6 +524,25 @@ impl Shell {
             cx.notify();
         }
     }
+}
+
+/// Leaves the settings sheet through [`Shell::cancel`], which wipes what
+/// its panes typed. macOS hides the window instead of closing it, so a
+/// sheet left open would come back with its secrets still typed.
+pub(crate) fn close_settings(window: &mut Window, cx: &mut App) {
+    let Some(shell) = window
+        .root::<gpui_kit::base::Root>()
+        .flatten()
+        .and_then(|root| root.read(cx).view().clone().downcast::<Shell>().ok())
+    else {
+        return;
+    };
+    shell.update(cx, |shell, cx| {
+        if shell.settings_section().is_some() {
+            window.close_all_dialogs(cx);
+            shell.cancel(window, cx);
+        }
+    });
 }
 
 impl Render for Shell {

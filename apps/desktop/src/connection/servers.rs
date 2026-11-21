@@ -399,7 +399,7 @@ impl Shell {
             },
         };
         if let Some(settings) = self.front.settings_mut() {
-            settings.servers = page;
+            settings.set_servers(page, window, cx);
         }
         self.select_settings(SettingsSection::Server, window, cx);
         self.open_remote(saved.as_ref().map(|s| &s.profile), window, cx);
@@ -407,9 +407,9 @@ impl Shell {
     }
 
     /// Back to the server list, dropping an open editor and its attempt.
-    pub(super) fn show_server_list(&mut self) {
+    pub(super) fn show_server_list(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(settings) = self.front.settings_mut() {
-            settings.servers = ServerPage::List;
+            settings.set_servers(ServerPage::List, window, cx);
         }
     }
 
@@ -417,8 +417,8 @@ impl Shell {
         let Some(settings) = self.front.settings_mut() else {
             return;
         };
-        if settings.servers.form().is_some() {
-            settings.servers = ServerPage::List;
+        if settings.servers().form().is_some() {
+            settings.set_servers(ServerPage::List, window, cx);
         }
         settings.focus.focus(window, cx);
         cx.notify();
@@ -515,7 +515,7 @@ impl Shell {
             return;
         }
         if let Some(settings) = self.front.settings_mut() {
-            settings.servers = ServerPage::Update(id);
+            settings.set_servers(ServerPage::Update(id), window, cx);
         }
         self.remote_updates
             .get(&id)
@@ -524,19 +524,19 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn close_server_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_server_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(settings) = self.front.settings_mut()
-            && matches!(settings.servers, ServerPage::Update(_))
+            && matches!(settings.servers(), ServerPage::Update(_))
         {
-            settings.servers = ServerPage::List;
+            settings.set_servers(ServerPage::List, window, cx);
         }
         cx.notify();
     }
 
     /// The saved server whose update card shows instead of the list.
     pub(super) fn server_update_target(&self) -> Option<Uuid> {
-        match self.front.settings()?.servers {
-            ServerPage::Update(id) => Some(id),
+        match self.front.settings()?.servers() {
+            ServerPage::Update(id) => Some(*id),
             _ => None,
         }
     }

@@ -103,6 +103,17 @@ pub(super) enum Page {
     Remote(RemoteForm),
 }
 
+impl Page {
+    /// Wipes the typed owner token and its undo history. The last drawn
+    /// frame still holds the field, and a hidden window draws no other.
+    fn close(self, window: &mut Window, cx: &mut App) {
+        if let Self::Remote(form) = self {
+            form.token
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+    }
+}
+
 /// The form that connects to a server: onboarding's local or remote
 /// choice, and the settings editor that adds or edits one.
 pub(super) struct ConnectForm {
@@ -138,6 +149,15 @@ impl ConnectForm {
     pub(super) fn edited(&mut self) {
         self.draft.edited();
         self._attempt = None;
+    }
+
+    /// Replaces the page, wiping the owner token typed on the old one.
+    pub(super) fn set_page(&mut self, page: Page, window: &mut Window, cx: &mut App) {
+        std::mem::replace(&mut self.page, page).close(window, cx);
+    }
+
+    pub(super) fn close(self, window: &mut Window, cx: &mut App) {
+        self.page.close(window, cx);
     }
 
     pub(super) fn typed_name(&self, cx: &App) -> Option<String> {
@@ -201,11 +221,15 @@ impl Shell {
             return;
         };
         form.edited();
-        form.page = Page::Remote(RemoteForm {
-            origin,
-            token,
-            _subscriptions: subscriptions,
-        });
+        form.set_page(
+            Page::Remote(RemoteForm {
+                origin,
+                token,
+                _subscriptions: subscriptions,
+            }),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -214,7 +238,7 @@ impl Shell {
             return;
         };
         form.edited();
-        form.page = Page::Welcome;
+        form.set_page(Page::Welcome, window, cx);
         form.focus.focus(window, cx);
         cx.notify();
     }
@@ -278,7 +302,7 @@ impl Shell {
         let editing = self
             .front
             .settings()
-            .and_then(|settings| settings.servers.editing());
+            .and_then(|settings| settings.servers().editing());
         let onboarding = matches!(self.front, Front::Onboarding(_));
         let Some(setup) = self.front.form_mut() else {
             return;
@@ -370,7 +394,7 @@ impl Shell {
         };
         match &self.front {
             Front::Onboarding(_) => self.finish_onboarding(verified, name, window, cx),
-            Front::Settings(settings) => match &settings.servers {
+            Front::Settings(settings) => match settings.servers() {
                 ServerPage::Add(_) => self.finish_add(verified, name, window, cx),
                 ServerPage::Edit { id, opened, .. } => {
                     let name = name.filter(|name| name != opened);
@@ -419,7 +443,7 @@ impl Shell {
         }
         match self.save_verified(&profile, name, None, true, window, cx) {
             Ok(true) => self.adopt(profile, client, true, window, cx),
-            Ok(false) => self.show_server_list(),
+            Ok(false) => self.show_server_list(window, cx),
             Err(error) => self.refuse(error),
         }
     }
@@ -436,7 +460,7 @@ impl Shell {
     ) {
         match self.save_verified(&profile, name, Some(id), true, window, cx) {
             Ok(true) => self.adopt(profile, client, true, window, cx),
-            Ok(false) => self.show_server_list(),
+            Ok(false) => self.show_server_list(window, cx),
             Err(error) => self.refuse(error),
         }
     }
