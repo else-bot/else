@@ -531,6 +531,11 @@ async fn only_a_login_check_that_answered_reports_a_signed_out_cli() {
         detect_with(dir.path(), version, "exit 1").await,
         not_logged_in
     );
+    let killed = detect_with(dir.path(), version, "kill -TERM $$").await;
+    assert!(
+        matches!(&killed, Availability::Unavailable(why) if why.starts_with("Claude Code could not check its login")),
+        "{killed:?}"
+    );
     let flood = "head -c 2000000 /dev/zero | tr '\\0' a";
     assert_eq!(
         detect_with(dir.path(), version, flood).await,

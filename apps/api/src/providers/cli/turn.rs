@@ -361,7 +361,7 @@ impl<A: Adapter> Cli<A> {
 
 impl<A: Adapter> Cli<A> {
     /// The launch of `args` and `env` in `dirs` for `input`'s turn, with
-    /// the turn's attachments staged in the project, the current program,
+    /// the current program, the turn's attachments staged in the project,
     /// and the task grant when else.bot's tools are offered.
     pub(in crate::providers) async fn prepare_launch(
         &self,
@@ -371,6 +371,12 @@ impl<A: Adapter> Cli<A> {
         args: Vec<OsString>,
         mut env: Vec<(String, String)>,
     ) -> Result<LaunchSpec, TurnOutcome> {
+        let program = ready.program.current().await.map_err(|why| {
+            TurnOutcome::failed(
+                FailureCode::ProviderUnavailable,
+                format!("Could not start {}: {why}", A::PRODUCT),
+            )
+        })?;
         attachments::stage(&dirs.project, &input.files)
             .await
             .map_err(|err| {
@@ -379,12 +385,6 @@ impl<A: Adapter> Cli<A> {
                     format!("The attached files could not be prepared: {err}"),
                 )
             })?;
-        let program = ready.program.current().await.map_err(|why| {
-            TurnOutcome::failed(
-                FailureCode::ProviderUnavailable,
-                format!("Could not start {}: {why}", A::PRODUCT),
-            )
-        })?;
         if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
             env.push((GRANT_ENV.to_owned(), grant.clone()));
         }
@@ -529,7 +529,7 @@ impl Delivery {
                 let prompt = match write(&mut attempt, &packet, stop).await {
                     Ok(()) => Ok(Prompt::Written),
                     Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(Prompt::Refused),
-                    Err(err) => Err(unknown(err)),
+                    Err(err) => return Ok((attempt, Err(unknown(err)))),
                 };
                 attempt.end_input();
                 Ok((attempt, prompt))
@@ -551,12 +551,10 @@ impl Delivery {
     }
 }
 
-/// Record [`TurnSink::sending`]; a fenced turn ends interrupted.
 async fn sending(sink: &dyn TurnSink) -> Result<(), TurnOutcome> {
     sink.sending().await.map_err(|_| TurnOutcome::Interrupted)
 }
 
-/// Write to the CLI's input until it is written or the stop escalates.
 async fn write(attempt: &mut StreamAttempt, text: &str, stop: &Stop) -> std::io::Result<()> {
     tokio::select! {
         written = attempt.write(text) => written,

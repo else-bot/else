@@ -144,8 +144,17 @@ impl StreamAttempt {
     }
 
     pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {
-        drop(self.stdin);
-        attempt::conclude(ended, self.scope, Some(self.stderr), sink, self.label).await
+        // A CLI that ended its turn exits at the end of its input. Any other
+        // is killed with its input still open, so it never reads a cut-off
+        // write as the whole of it.
+        let stdin = match ended {
+            Ended::Terminal { .. } => None,
+            _ => self.stdin,
+        };
+        let outcome =
+            attempt::conclude(ended, self.scope, Some(self.stderr), sink, self.label).await;
+        drop(stdin);
+        outcome
     }
 
     /// End an attempt that reported nothing to a sink: kill and sweep it.

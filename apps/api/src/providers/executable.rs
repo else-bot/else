@@ -248,8 +248,6 @@ async fn native(
         }
     };
     let which = format!("`{} which {name}`", manager.name());
-    // With this process's environment and directory, which the shim picks
-    // its version from.
     let run = Run {
         context: Context::Inherited,
         limit: 64 * 1024,

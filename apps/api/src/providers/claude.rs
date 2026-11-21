@@ -161,11 +161,12 @@ async fn ready(
     let version = turn::version(&host, &program, &env, ClaudeCode::PRODUCT).await?;
     let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
     let config = config.ok_or(not_logged_in)?;
-    // A logged-out CLI exits with failure; a check that never answered
-    // says nothing about the login.
+    // A logged-out CLI exits with failure; a check that never answered,
+    // or was killed by a signal, says nothing about the login.
     match host.probe(program.path(), &["auth", "status"], &env).await {
         Ok(status) if claude_home::logged_in(&status) => {}
-        Ok(_) | Err(RunError::Failed { .. } | RunError::Empty) => {
+        Ok(_) | Err(RunError::Empty) => return Err(not_logged_in.into()),
+        Err(RunError::Failed { status, .. }) if status.code().is_some() => {
             return Err(not_logged_in.into());
         }
         Err(why) => {
