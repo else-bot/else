@@ -1,3 +1,4 @@
+use crate::api::ClientError;
 use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
@@ -16,21 +17,24 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.dismiss_owner_notice(bot, notice).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
+            let _ = this.update_in(cx, |view, window, cx| {
                 match result {
                     Ok(notice) => {
-                        if let Some(c) = app.conversation.as_mut() {
+                        if let Some(c) = view.conversation.as_mut() {
                             c.apply_owner_notice(notice);
                         }
-                        app.sync_rows(window, cx);
+                        view.sync_rows(window, cx);
                     }
-                    Err(err) if app.unauthorized(&err, cx) => {}
+                    Err(ClientError::Unauthorized) => {}
                     // The owner's message settled it first; the stream shows that.
                     Err(err) if err.code() == Some("owner_notice_settled") => {}
-                    Err(err) => app.notice(err.to_string(), cx),
+                    Err(err) => view.notice(err.to_string(), cx),
                 }
                 cx.notify();
             });

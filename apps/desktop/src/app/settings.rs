@@ -92,7 +92,11 @@ impl EventEmitter<PanelEvent> for BotPanel {}
 
 /// Hands a rejected owner token to the window, even after the panel that
 /// sent the request is gone.
-fn report_unauthorized(app: &WeakEntity<ElseApp>, err: &ClientError, cx: &mut AsyncWindowContext) {
+pub(super) fn report_unauthorized(
+    app: &WeakEntity<ElseApp>,
+    err: &ClientError,
+    cx: &mut AsyncWindowContext,
+) {
     let _ = app.update(cx, |app, cx| app.unauthorized(err, cx));
 }
 

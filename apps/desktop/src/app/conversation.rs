@@ -46,23 +46,25 @@ impl Unread {
 #[derive(Clone, Default, PartialEq)]
 pub(super) struct TranscriptInputs {
     pub(super) connected: bool,
-    /// The connection editor covers the window.
     pub(super) hidden: bool,
     pub(super) bots: Vec<Bot>,
     pub(super) mention_bots: Arc<MentionRegistry>,
-    /// This bot's sends the server has not confirmed.
     pub(super) pending: Vec<PendingSend>,
-    /// The quotes in this bot's draft, painted on the rows they cite.
     pub(super) quotes: Vec<Quote>,
-    /// An undo of this bot's rules is in flight.
     pub(super) restoring_rules: bool,
 }
 
+/// Whether the window shows a view or keeps it warm. A warm view keeps its
+/// conversation current but builds no rows or cards until it is shown.
+enum Presence {
+    Shown,
+    Parked,
+}
+
 /// One bot's transcript: its rows, their cards and the list they scroll in.
-/// The window draws it as a cached view, so it redraws only when it
-/// notifies itself.
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
+    presence: Presence,
     pub(super) app: WeakEntity<ElseApp>,
     pub(super) client: Arc<Client>,
     pub(super) inputs: TranscriptInputs,
@@ -203,6 +205,7 @@ impl ConversationView {
         });
         Self {
             bot_id,
+            presence: Presence::Parked,
             app,
             client,
             inputs,
@@ -242,7 +245,17 @@ impl ConversationView {
     /// Settles what only the shown view finishes, before switching away:
     /// older pages and gaps that were loading, a pending jump and the
     /// unread divider. Its newest page keeps loading.
+    pub(super) fn show(&mut self) {
+        self.presence = Presence::Shown;
+    }
+
+    pub(super) fn shown(&self) -> bool {
+        matches!(self.presence, Presence::Shown)
+    }
+
     pub(super) fn park(&mut self) {
+        self.presence = Presence::Parked;
+        self.park_find();
         self.cards.park();
         self._reply_clock = None;
         self.unread = None;
@@ -473,7 +486,6 @@ impl ElseApp {
         }
     }
 
-    /// What `bot`'s view reads from the window.
     pub(super) fn transcript_inputs(&self, bot: Uuid) -> TranscriptInputs {
         TranscriptInputs {
             connected: self.connection == super::Connection::Connected,
@@ -514,8 +526,6 @@ impl ElseApp {
         view.update(cx, |view, cx| view.set_inputs(inputs, window, cx));
     }
 
-    /// Rebuilds the shown view's rows after the conversation or the
-    /// window's pending sends changed.
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.clone() else {
             return;
@@ -531,8 +541,6 @@ impl ElseApp {
     }
 }
 
-/// A handler that runs `f` on the window, for a control drawn outside the
-/// window's own context.
 /// The row that shows `key`, or for an item folded into a task, the task's
 /// row.
 pub(super) fn row_index(
@@ -562,7 +570,6 @@ pub(super) fn on_app<E: ?Sized>(
 }
 
 impl ConversationView {
-    /// Tells the list that row `key` changed height.
     pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
         if let Some(ix) = self.row_index(key) {
             self.list.remeasure_items(ix..ix + 1);
@@ -570,8 +577,6 @@ impl ConversationView {
         cx.notify();
     }
 
-    /// Takes what the window pushed, and brings the cards that depend on
-    /// the connection in line with it.
     pub(super) fn set_inputs(
         &mut self,
         inputs: TranscriptInputs,
@@ -599,8 +604,6 @@ impl ConversationView {
         cx.notify();
     }
 
-    /// A handler that runs `f` on the window, for a control whose action
-    /// reaches past this conversation.
     pub(super) fn on_app<E: ?Sized>(
         &self,
         f: impl Fn(&mut ElseApp, &E, &mut Window, &mut Context<ElseApp>) + 'static,
@@ -637,6 +640,9 @@ impl ConversationView {
     /// Asks the window to check what the owner has read, once this view is
     /// no longer being updated.
     pub(super) fn check_reading(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shown() {
+            return;
+        }
         let app = self.app.clone();
         window.defer(cx, move |window, cx| {
             let _ = app.update(cx, |app, cx| app.check_reading(window, cx));
@@ -890,9 +896,10 @@ impl ConversationView {
         cx.notify();
     }
 
-    /// Builds the rows from the conversation and the inputs, keeping the
-    /// list's measurements of the rows that did not change.
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shown() {
+            return;
+        }
         let bot = self.bot_id;
         if self.inputs.bots.iter().any(|b| b.id == bot && b.silenced()) {
             self.unread = None;
@@ -905,6 +912,14 @@ impl ConversationView {
             .filter(|p| conversation.is_none_or(|c| !c.has_request(p.request_id)))
             .cloned()
             .collect();
+        if pending.len() < self.inputs.pending.len() {
+            // A loaded page confirmed a send; the window drops it and
+            // rebuilds these rows.
+            let app = self.app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.sync_rows(window, cx));
+            });
+        }
         let Transcript {
             rows,
             texts,

@@ -224,7 +224,7 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         let bot = self.bot_id;
         let pending = self
             .conversation
@@ -245,6 +245,9 @@ impl ConversationView {
         };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_question(bot, question, answer).await;
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update(cx, |app, cx| {
                 app.question_answered(question, attempt, result, cx)
             });
@@ -277,7 +280,7 @@ impl ConversationView {
                     err => err.to_string(),
                 })
             });
-        let rejected = result.as_ref().is_err_and(|err| self.unauthorized(err, cx));
+        let rejected = matches!(result, Err(ClientError::Unauthorized));
         if rejected || !settled {
             return;
         }

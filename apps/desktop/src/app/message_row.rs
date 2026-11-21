@@ -204,8 +204,6 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// Reports where `element`, the latest reply, was laid out, so the
-    /// window can tell whether the owner saw it.
     pub(super) fn report_reply_layout<E: ElementExt>(
         &self,
         element: E,
@@ -253,7 +251,6 @@ impl ConversationView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let view = &*self;
         let key = row.key;
         let grouped = row.routine.is_some();
         let footer = row.footer_stamp.filter(|_| !grouped).map(clock);
@@ -299,13 +296,13 @@ impl ConversationView {
         Some(match key {
             RowKey::Gap(_) => return None,
             RowKey::QuietRun(turn) => {
-                let run = view.conversation.as_ref()?.turn(turn)?.routine.as_ref()?;
+                let run = self.conversation.as_ref()?.turn(turn)?.routine.as_ref()?;
                 routine_run(turn, run, false, &self.app, cx).into_any_element()
             }
             RowKey::QuietRuns(first) => {
-                let open = super::transcript::group_open(&row.quiet_runs, &view.open_quiet);
+                let open = super::transcript::group_open(&row.quiet_runs, &self.open_quiet);
                 quiet_runs(
-                    view.conversation.as_ref()?,
+                    self.conversation.as_ref()?,
                     first,
                     &row.quiet_runs,
                     open,
@@ -314,7 +311,7 @@ impl ConversationView {
                 .into_any_element()
             }
             RowKey::Item(id) => {
-                let conversation = view.conversation.as_ref()?;
+                let conversation = self.conversation.as_ref()?;
                 let item = conversation.item(id)?;
                 if let Some(update) = &item.routine_update {
                     return Some(
@@ -341,9 +338,9 @@ impl ConversationView {
                     return Some(self.render_bot_created(id, created, footer, cx));
                 }
                 if let Some(update) = &item.rules_update {
-                    return Some(self.render_rules_update(id, view.bot_id, update, footer, cx));
+                    return Some(self.render_rules_update(id, self.bot_id, update, footer, cx));
                 }
-                let text = view.texts.get(&key)?;
+                let text = self.texts.get(&key)?;
                 let user = item.kind == ItemKind::User;
                 let turn = conversation.turn(item.turn_id);
                 if item.reaction.is_some() {
@@ -356,7 +353,7 @@ impl ConversationView {
                 if !user
                     && row.starts_run
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
-                    && let Some(bot) = self.inputs.bots.iter().find(|b| b.id == view.bot_id)
+                    && let Some(bot) = self.inputs.bots.iter().find(|b| b.id == self.bot_id)
                 {
                     column = column.child(
                         h_flex()
@@ -386,7 +383,7 @@ impl ConversationView {
                 };
                 let card = match Author::of(item.kind) {
                     Some(author) => {
-                        let (owner, bot) = (self.app.clone(), view.bot_id);
+                        let (owner, bot) = (self.app.clone(), self.bot_id);
                         card.context_menu(move |menu, window, cx| {
                             ElseApp::message_menu(owner.clone(), bot, id, author, menu, window, cx)
                         })
@@ -411,7 +408,7 @@ impl ConversationView {
                                 .right_0()
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
-                                .child(self.message_actions(view.bot_id, id)),
+                                .child(self.message_actions(self.bot_id, id)),
                         )
                         .into_any_element(),
                     Some(Author::Owner) => div()
@@ -438,7 +435,7 @@ impl ConversationView {
                 column.into_any_element()
             }
             RowKey::Task(id) => {
-                let turn = view.conversation.as_ref()?.turn(id)?;
+                let turn = self.conversation.as_ref()?.turn(id)?;
                 gpui_kit::component::v_flex()
                     .w_full()
                     .gap_1()
@@ -449,7 +446,7 @@ impl ConversationView {
             RowKey::Card(card) => self.render_card(card, CardPlacement::Row, window, cx)?,
             RowKey::Pending(request_id) => {
                 let pending = (self.inputs.pending.iter()).find(|p| p.request_id == request_id)?;
-                let text = view.texts.get(&key)?;
+                let text = self.texts.get(&key)?;
                 let mark = pending.reaction.map(|r| r.kind.mark());
                 let settled = matches!(
                     pending.delivery(),
@@ -474,7 +471,7 @@ impl ConversationView {
                         .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label(label)
                 };
-                let bot = view.bot_id;
+                let bot = self.bot_id;
                 let failed = |status: String,
                               color: Hsla,
                               reason: Option<&str>,

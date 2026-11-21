@@ -335,8 +335,7 @@ impl ElseApp {
             self.ensure_settings(window, cx);
             self.check_reading(window, cx);
         }
-        // Releases the computer view the details panel was showing, and
-        // hands the transcript its new reach, which syncs its cards.
+        // Releases the computer view the details panel was showing.
         cx.notify();
     }
 

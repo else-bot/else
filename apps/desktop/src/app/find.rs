@@ -170,7 +170,9 @@ impl ConversationView {
                         }),
                         Err(_) => Phase::Failed,
                     };
-                    view.show_match_if_shown(window, cx);
+                    if view.shown() {
+                        view.show_match(window, cx);
+                    }
                 });
             }),
         };
@@ -235,7 +237,7 @@ impl ConversationView {
                         if !merged {
                             // Another load changed what is loaded there;
                             // ask again around the match.
-                            view.show_match_if_shown(window, cx);
+                            view.show_match(window, cx);
                             return None;
                         }
                         view.sync_rows(window, cx);
@@ -371,18 +373,16 @@ impl ConversationView {
         })
     }
 
-    /// Shows the current match, if the window shows this view.
-    fn show_match_if_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (app, view) = (self.app.clone(), cx.entity());
-        // The window reads which view it shows only after this update.
-        window.defer(cx, move |window, cx| {
-            let shown = app
-                .read_with(cx, |app, _| app.view.as_ref() == Some(&view))
-                .unwrap_or(false);
-            if shown {
-                view.update(cx, |view, cx| view.show_match(window, cx));
-            }
-        });
+    /// Drops the load of an unlanded match, which `resume_find` starts
+    /// again once the view is shown.
+    pub(super) fn park_find(&mut self) {
+        if let Some(Find {
+            phase: Phase::Found(found),
+            ..
+        }) = self.find.as_mut()
+        {
+            found._load = None;
+        }
     }
 }
 

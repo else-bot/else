@@ -101,12 +101,10 @@ impl ElseApp {
         self.view.as_ref().map(|view| view.read(cx).bot_id)
     }
 
-    /// The shown conversation, to read.
     pub(super) fn shown<'a>(&self, cx: &'a App) -> Option<&'a ConversationView> {
         self.view.as_ref().map(|view| view.read(cx))
     }
 
-    /// Changes the shown conversation and redraws it.
     pub(super) fn update_view<R>(
         &self,
         cx: &mut App,
@@ -121,7 +119,6 @@ impl ElseApp {
         })
     }
 
-    /// `bot`'s view, shown or warm.
     pub(super) fn view_of(&self, bot: Uuid, cx: &App) -> Option<Entity<ConversationView>> {
         match &self.view {
             Some(view) if view.read(cx).bot_id == bot => Some(view.clone()),
@@ -141,6 +138,9 @@ impl ElseApp {
                 .take(bot)
                 .unwrap_or_else(|| self.new_view(bot, cx))
         });
+        if let Some(next) = &next {
+            next.update(cx, |view, _| view.show());
+        }
         if let Some(old) = std::mem::replace(&mut self.view, next) {
             let bot = old.update(cx, |view, cx| {
                 view.clear_secret_forms(window, cx);

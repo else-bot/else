@@ -206,8 +206,6 @@ enum Widget {
     },
 }
 
-/// The conversation a row belongs to: where its files load from and the
-/// window its links act on.
 #[derive(Clone)]
 pub(super) struct RowHost {
     pub(super) client: Arc<crate::api::Client>,

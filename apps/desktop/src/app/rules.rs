@@ -254,7 +254,6 @@ impl ElseApp {
             .map(|conversation| conversation.rules_version())
     }
 
-    /// Whether an undo of `bot`'s rules is in flight.
     pub(super) fn restoring_rules(&self, bot: Uuid) -> bool {
         self.rules.get(&bot).is_some_and(|cache| cache.restoring)
     }

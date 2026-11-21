@@ -154,8 +154,12 @@ impl ConversationView {
         let Some(attempt) = card.request.begin(()) else {
             return;
         };
+        let app = self.app.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_secret(bot, request, env).await;
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update_in(cx, |app, window, cx| {
                 app.secret_answered(request, attempt, result, window, cx)
             });
@@ -177,7 +181,7 @@ impl ConversationView {
             .secrets
             .get_mut(&request)
             .is_some_and(|card| card.request.settle(attempt, &result));
-        let rejected = result.as_ref().is_err_and(|err| self.unauthorized(err, cx));
+        let rejected = matches!(result, Err(ClientError::Unauthorized));
         if rejected || !settled {
             return;
         }

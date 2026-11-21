@@ -181,9 +181,12 @@ impl ConversationView {
                 cx.notify();
             });
         }
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_skill_install(bot, id, approval).await;
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update_in(cx, |app, window, cx| {
                 app.skill_answered(id, attempt, result, window, cx)
             });
@@ -200,7 +203,7 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if result.as_ref().is_err_and(|err| self.unauthorized(err, cx)) {
+        if matches!(result, Err(ClientError::Unauthorized)) {
             return;
         }
         // A card rebuilt after a disconnect no longer knows the attempt; it

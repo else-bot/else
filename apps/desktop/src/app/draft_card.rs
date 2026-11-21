@@ -250,7 +250,7 @@ impl ConversationView {
         let Some((attempt, operation)) = sent else {
             return;
         };
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = match operation {
                 Operation::Approve { edit, always } => {
@@ -258,6 +258,9 @@ impl ConversationView {
                 }
                 Operation::Discard => client.discard_draft(bot, id).await,
             };
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update_in(cx, |view, window, cx| {
                 view.draft_acted(id, Some(attempt), result, window, cx)
             });
@@ -289,7 +292,7 @@ impl ConversationView {
             }
             (None, _) => None,
         };
-        if result.as_ref().is_err_and(|err| self.unauthorized(err, cx)) || tracked == Some(false) {
+        if matches!(result, Err(ClientError::Unauthorized)) || tracked == Some(false) {
             return;
         }
         match result {
@@ -310,9 +313,12 @@ impl ConversationView {
 
     fn stop_approving_always(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let bot = self.bot_id;
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.stop_approving_always(bot, id).await;
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update_in(cx, |view, window, cx| {
                 if let Err(err) = result {
                     view.draft_acted(id, None, Err(err), window, cx);
