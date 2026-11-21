@@ -79,22 +79,23 @@ async fn a_configured_npm_script_gives_way_to_the_installed_binary() {
     let script = file("npm/.bin/grok", "#!/bin/sh\nexec node grok.js\n");
     let native = file("opt/grok", "\x7fELF");
     let home = dir.path().join("home");
+    let host = Host::new(&dir.path().join("data"), &dir.path().join("bots"));
     assert_eq!(
-        paths(lookup(Some(&script), Some(&home)).await),
+        paths(lookup(&host, Some(&script), Some(&home)).await),
         Ok(Some(script.clone()))
     );
     let binary = file("home/bin/grok", "\x7fELF");
     let home = std::fs::canonicalize(home).unwrap();
     assert_eq!(
-        paths(lookup(Some(&script), Some(&home)).await),
+        paths(lookup(&host, Some(&script), Some(&home)).await),
         Ok(Some(binary))
     );
     assert_eq!(
-        paths(lookup(Some(&native), Some(&home)).await),
+        paths(lookup(&host, Some(&native), Some(&home)).await),
         Ok(Some(native))
     );
     let missing = dir.path().join("missing/grok");
-    assert!(lookup(Some(&missing), Some(&home)).await.is_err());
+    assert!(lookup(&host, Some(&missing), Some(&home)).await.is_err());
 }
 
 #[test]

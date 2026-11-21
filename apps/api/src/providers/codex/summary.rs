@@ -1,5 +1,5 @@
 use super::super::codex_rpc::AppServer;
-use super::policy::{Allowed, Reported, TurnEvents};
+use super::policy::{Messages, Reported, Thread};
 use super::turn::Running;
 use super::{Codex, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
 use crate::providers::cli::attempt::{self, Violation};
@@ -137,15 +137,12 @@ impl Codex {
             .await
             .map_err(|e| e.to_string())?;
         let native_turn = turn["turn"]["id"].as_str().unwrap_or_default().to_owned();
-        let project = std::path::PathBuf::from(&server.cwd);
-        let mut events = TurnEvents {
-            thread_id: &thread_id,
-            native_turn: &native_turn,
-            profile,
-            allowed: Allowed::Messages,
-            current_message: None,
-            project: &project,
-            steers: Default::default(),
+        let mut events = Messages {
+            thread: Thread {
+                id: &thread_id,
+                native_turn: &native_turn,
+                profile,
+            },
         };
         let mut running = Running {
             server,

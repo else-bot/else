@@ -20,12 +20,16 @@ async fn installed() -> PathBuf {
     if link.is_file() {
         return link;
     }
-    else_api::providers::executable::executable(None, "cursor-agent")
-        .await
-        .expect("resolve Cursor CLI")
-        .expect("Cursor CLI in ~/.local/bin, on PATH, or in ELSE_CURSOR_BIN")
-        .path()
-        .to_owned()
+    else_api::providers::executable::executable(
+        &Host::new(&std::env::temp_dir(), &std::env::temp_dir()),
+        None,
+        "cursor-agent",
+    )
+    .await
+    .expect("resolve Cursor CLI")
+    .expect("Cursor CLI in ~/.local/bin, on PATH, or in ELSE_CURSOR_BIN")
+    .path()
+    .to_owned()
 }
 
 fn live() -> bool {

@@ -9,7 +9,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::host::{RUN_TIMEOUT, Supervised};
+use super::host::{Context, Host, Run, RunError};
 
 /// A provider CLI to launch. One found by [`executable`] remembers how: a
 /// version manager's upgrade can remove the version a shim resolved to,
@@ -23,6 +23,7 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 struct Lookup {
+    host: Host,
     given: PathBuf,
     configured: bool,
     name: String,
@@ -54,7 +55,7 @@ impl Program {
             find(None, &found.name, &found.setting, path)?
         };
         if let Some(given) = given.filter(|given| is_executable(given)) {
-            return locate(&given, &found.name, &found.setting, path).await;
+            return locate(&found.host, &given, &found.name, &found.setting, path).await;
         }
         Err(format!(
             "`{}` was not found at {}. Install it or set {}.",
@@ -79,8 +80,13 @@ impl From<PathBuf> for Program {
 /// `Ok(None)` means it is not on `PATH`. An error says why the found or
 /// configured file cannot be used; a configured path never falls back to
 /// `PATH`.
-pub async fn executable(configured: Option<&Path>, name: &str) -> Result<Option<Program>, String> {
+pub async fn executable(
+    host: &Host,
+    configured: Option<&Path>,
+    name: &str,
+) -> Result<Option<Program>, String> {
     executable_as(
+        host,
         configured,
         name,
         &format!("ELSE_{}_BIN", name.to_uppercase()),
@@ -90,11 +96,13 @@ pub async fn executable(configured: Option<&Path>, name: &str) -> Result<Option<
 
 /// [`executable`] for a CLI configured by a `setting` not named after it.
 pub async fn executable_as(
+    host: &Host,
     configured: Option<&Path>,
     name: &str,
     setting: &str,
 ) -> Result<Option<Program>, String> {
     program(
+        host,
         configured,
         name,
         setting,
@@ -104,6 +112,7 @@ pub async fn executable_as(
 }
 
 async fn program(
+    host: &Host,
     configured: Option<&Path>,
     name: &str,
     setting: &str,
@@ -113,8 +122,9 @@ async fn program(
         return Ok(None);
     };
     Ok(Some(Program {
-        path: locate(&given, name, setting, path).await?,
+        path: locate(host, &given, name, setting, path).await?,
         found: Some(Lookup {
+            host: host.clone(),
             given,
             configured: configured.is_some(),
             name: name.to_owned(),
@@ -152,12 +162,13 @@ fn find(
 
 /// The executable `found` runs: itself, or the version its shim selects.
 async fn locate(
+    host: &Host,
     found: &Path,
     name: &str,
     setting: &str,
     path: Option<&OsStr>,
 ) -> Result<PathBuf, String> {
-    native(found, name, path).await.map_err(|why| {
+    native(host, found, name, path).await.map_err(|why| {
         format!(
             "`{name}` at {} {why}; set {setting} to the {name} executable itself",
             found.display()
@@ -216,7 +227,12 @@ fn classify(path: &Path) -> Result<Found, String> {
     Ok(Found::Native)
 }
 
-async fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
+async fn native(
+    host: &Host,
+    found: &Path,
+    name: &str,
+    path: Option<&OsStr>,
+) -> Result<PathBuf, String> {
     let (manager, binary) = match classify(found)? {
         Found::Native => return Ok(found.to_path_buf()),
         Found::Link(manager, binary) => (manager, binary),
@@ -232,15 +248,16 @@ async fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBu
         }
     };
     let which = format!("`{} which {name}`", manager.name());
-    let out = run_which(&binary, name)
-        .await
-        .map_err(|e| format!("is a shim and {which} did not run ({e})"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let reason = stderr.lines().next().unwrap_or("").trim();
-        return Err(format!("is a shim and {which} failed ({reason})"));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run = Run {
+        context: Context::Inherited,
+        limit: 64 * 1024,
+        ..Run::new(&binary, &["which", name])
+    };
+    let stdout = host.run(&run).await.map_err(|err| match err {
+        RunError::Failed { .. } => format!("is a shim and {which} failed ({err})"),
+        err => format!("is a shim and {which} did not run ({err})"),
+    })?;
+    let stdout = String::from_utf8_lossy(&stdout);
     let target = match stdout.trim().lines().collect::<Vec<_>>()[..] {
         [line] if Path::new(line).is_absolute() => PathBuf::from(line),
         _ => {
@@ -265,50 +282,14 @@ async fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBu
     }
 }
 
-/// `binary which name` with this process's environment and directory, which
-/// a shim picks its version from, so not through [`super::host::Host::run`].
-/// Bounded in bytes and time; its process group is killed if it overruns.
-async fn run_which(binary: &Path, name: &str) -> std::io::Result<std::process::Output> {
-    use tokio::io::AsyncReadExt;
-    const LIMIT: u64 = 64 * 1024;
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .args(["which", name])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    let mut process = Supervised::spawn(command)?;
-    let (stdout, stderr) = (process.child.stdout.take(), process.child.stderr.take());
-    let run = async {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        if let (Some(stdout), Some(stderr)) = (stdout, stderr) {
-            let (mut stdout, mut stderr) = (stdout.take(LIMIT), stderr.take(LIMIT));
-            tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
-        }
-        let status = process.child.wait().await?;
-        Ok(std::process::Output {
-            status,
-            stdout: out,
-            stderr: err,
-        })
-    };
-    let result = tokio::time::timeout(RUN_TIMEOUT, run).await;
-    result.unwrap_or_else(|_| {
-        Err(std::io::Error::other(format!(
-            "it did not finish within {RUN_TIMEOUT:?}"
-        )))
-    })
-}
-
 fn search(path: Option<&OsStr>, name: &str) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .map(|dir| dir.join(name))
         .find(|p| is_executable(p))
 }
 
-fn is_executable(path: &Path) -> bool {
+/// Whether `path` is a file someone may execute.
+pub fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
@@ -325,9 +306,15 @@ mod tests {
         path: Option<&OsStr>,
     ) -> Result<Option<PathBuf>, String> {
         let setting = format!("ELSE_{}_BIN", name.to_uppercase());
-        program(configured, name, &setting, path)
+        program(&host(), configured, name, &setting, path)
             .await
             .map(|p| p.map(|p| p.path))
+    }
+
+    /// A host whose runs leave nothing behind.
+    fn host() -> Host {
+        let data = std::env::temp_dir().join(format!("else-executable-{}", uuid::Uuid::new_v4()));
+        Host::new(&data, Path::new("/"))
     }
 
     struct Tree(tempfile::TempDir);
@@ -465,7 +452,10 @@ mod tests {
             resolve(None, "codex", Some(&path)).await,
             Ok(Some(link.clone()))
         );
-        let program = executable(Some(&link), "codex").await.unwrap().unwrap();
+        let program = executable(&host(), Some(&link), "codex")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(program.path(), link);
 
         let new = tree.file(
@@ -487,7 +477,7 @@ mod tests {
         let tree = Tree::new();
         let old = tree.file("npm/bin/codex", "old", 0o755);
         let path = tree.path(&["npm/bin", "homebrew/bin"]);
-        let program = program(None, "codex", "ELSE_CODEX_BIN", Some(&path))
+        let program = program(&host(), None, "codex", "ELSE_CODEX_BIN", Some(&path))
             .await
             .unwrap()
             .unwrap();
@@ -514,7 +504,10 @@ mod tests {
         let mise = tree.manager("bin/mise", &answer("1.0"));
         let old = tree.file("installs/1.0/codex", "old", 0o755);
         let shim = tree.link("shims/codex", &mise);
-        let program = executable(Some(&shim), "codex").await.unwrap().unwrap();
+        let program = executable(&host(), Some(&shim), "codex")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(program.current().await, Ok(old));
 
         let new = tree.file("installs/2.0/codex", "new", 0o755);
@@ -527,7 +520,7 @@ mod tests {
     async fn a_removed_cli_names_the_file_and_the_setting() {
         let tree = Tree::new();
         let found = tree.file("bin/cursor-agent", "native", 0o755);
-        let program = executable_as(Some(&found), "cursor-agent", "ELSE_CURSOR_BIN")
+        let program = executable_as(&host(), Some(&found), "cursor-agent", "ELSE_CURSOR_BIN")
             .await
             .unwrap()
             .unwrap();

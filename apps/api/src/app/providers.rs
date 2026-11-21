@@ -454,18 +454,28 @@ pub enum FailureCode {
     ProfileMismatch,
     ProviderMisconfigured,
     AttachmentUnavailable,
-    /// A code an older build stored; only decoding a row makes one, so a
-    /// misspelled code cannot be written.
+    /// A code an older build stored.
     #[strum(disabled)]
-    Other(String),
+    Other(Unknown),
 }
+
+/// A stored failure code this build does not know. Only
+/// [`FailureCode::decode`] makes one, so a misspelled code cannot be written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unknown(String);
 
 impl FailureCode {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Other(code) => code,
+            Self::Other(Unknown(code)) => code,
             known => known.into(),
         }
+    }
+
+    /// The code stored as `code`.
+    pub fn decode(code: &str) -> Self {
+        code.parse()
+            .unwrap_or_else(|_| Self::Other(Unknown(code.to_owned())))
     }
 }
 
@@ -497,9 +507,7 @@ impl sqlx::Encode<'_, sqlx::Sqlite> for FailureCode {
 impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for FailureCode {
     fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let code = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
-        Ok(code
-            .parse()
-            .unwrap_or_else(|_| Self::Other(code.to_owned())))
+        Ok(Self::decode(code))
     }
 }
 
@@ -773,7 +781,7 @@ pub trait Provider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::FailureCode;
+    use super::{FailureCode, Unknown};
 
     #[tokio::test]
     async fn failure_codes_keep_their_stored_strings() {
@@ -795,7 +803,7 @@ mod tests {
             (FailureCode::ProviderMisconfigured, "provider_misconfigured"),
             (FailureCode::AttachmentUnavailable, "attachment_unavailable"),
             (
-                FailureCode::Other("from_an_older_build".into()),
+                FailureCode::Other(Unknown("from_an_older_build".into())),
                 "from_an_older_build",
             ),
         ] {

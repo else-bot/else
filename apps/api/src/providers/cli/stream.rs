@@ -26,7 +26,7 @@ pub enum Interrupt {
     Signal,
 }
 
-/// How writing the prompt of [`StreamAttempt::spawn_with_prompt`] ended.
+/// How writing a prompt that the CLI reads to the end of its input ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prompt {
     /// All of it went into the pipe.
@@ -62,22 +62,19 @@ impl StreamAttempt {
         Self::start(host, spec, stdin, interrupt, label)
     }
 
-    /// Start a CLI that reads its prompt from stdin to the end and is
-    /// stopped by SIGINT.
-    pub async fn spawn_with_prompt(
+    /// Start a CLI that reads its prompt from stdin to the end, which
+    /// [`Self::end_input`] marks, and is stopped by SIGINT.
+    pub fn spawn_for_prompt(
         host: &Host,
         spec: &LaunchSpec,
-        prompt: &str,
         label: &'static str,
-    ) -> std::io::Result<(Self, Prompt)> {
-        let mut attempt = Self::start(host, spec, Stdio::piped(), Interrupt::Signal, label)?;
-        let prompt = match attempt.write(prompt).await {
-            Ok(()) => Prompt::Written,
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Prompt::Refused,
-            Err(e) => return Err(e),
-        };
-        attempt.stdin = None;
-        Ok((attempt, prompt))
+    ) -> std::io::Result<Self> {
+        Self::start(host, spec, Stdio::piped(), Interrupt::Signal, label)
+    }
+
+    /// Close the CLI's input.
+    pub fn end_input(&mut self) {
+        self.stdin = None;
     }
 
     fn start(
@@ -147,8 +144,17 @@ impl StreamAttempt {
     }
 
     pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {
-        drop(self.stdin);
-        attempt::conclude(ended, self.scope, Some(self.stderr), sink, self.label).await
+        // A CLI that ended its turn exits at the end of its input. Any other
+        // is killed with its input still open, so it never reads a cut-off
+        // write as the whole of it.
+        let stdin = match ended {
+            Ended::Terminal { .. } => None,
+            _ => self.stdin,
+        };
+        let outcome =
+            attempt::conclude(ended, self.scope, Some(self.stderr), sink, self.label).await;
+        drop(stdin);
+        outcome
     }
 
     /// End an attempt that reported nothing to a sink: kill and sweep it.

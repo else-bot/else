@@ -53,6 +53,8 @@ if os.path.exists(os.path.join(here, "read-prefix")):
               {"type": "result", "subtype": "success", "is_error": False, "result": "Done"}]:
         print(json.dumps(dict(e, session_id=chat)), flush=True)
     sys.exit()
+if os.path.exists(os.path.join(here, "ignore-input")):
+    time.sleep(3600)
 prompt = sys.stdin.read()
 store = os.path.join(home, ".cursor/chats", hashlib.md5(os.getcwd().encode()).hexdigest(), chat)
 if resumed and not os.path.exists(os.path.join(store, "store.db")):
@@ -572,6 +574,24 @@ async fn a_cli_that_stops_reading_its_prompt_does_not_complete_the_turn() {
 }
 
 #[tokio::test]
+async fn a_prompt_write_that_times_out_is_uncertain_and_retires_the_session() {
+    let server = Server::new().await;
+    std::fs::write(server.path("bin/ignore-input"), "").unwrap();
+    let sink = Sink::default();
+    tokio::time::pause();
+    let outcome = server
+        .run(input(&unread_prompt(), Origin::OwnerRequest), &sink)
+        .await;
+    assert_eq!(
+        outcome,
+        TurnOutcome::Uncertain {
+            message: "Delivery to Cursor is unknown: the CLI stopped reading its input".into()
+        }
+    );
+    assert!(sink.retired(), "the session may hold part of the prompt");
+}
+
+#[tokio::test]
 async fn the_cli_lists_the_accounts_models() {
     let server = Server::new().await;
     assert_eq!(
@@ -621,15 +641,16 @@ async fn the_installers_link_is_used_and_kept_unresolved() {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&version, &link).unwrap();
     let home = Some(dir.path());
+    let host = Host::new(&dir.path().join("data"), &dir.path().join("bots"));
     let found = async |configured: Option<&Path>, home| {
-        lookup(configured, home)
+        lookup(&host, configured, home)
             .await
             .map(|p| p.map(|p| p.path().to_owned()))
     };
     assert_eq!(found(None, home).await, Ok(Some(link.clone())));
     assert_eq!(found(Some(&link), None).await, Ok(Some(link)));
     let missing = dir.path().join("missing");
-    let err = lookup(Some(&missing), home).await.unwrap_err();
+    let err = lookup(&host, Some(&missing), home).await.unwrap_err();
     assert!(err.contains("ELSE_CURSOR_BIN"), "{err}");
 }
 

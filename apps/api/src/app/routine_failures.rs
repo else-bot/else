@@ -15,6 +15,8 @@ use chrono::{DateTime, Utc};
 use crate::app::providers::FailureCode;
 use crate::db::turns::TurnStatus;
 
+const UNEXPECTED: &str = "an unexpected error happened";
+
 /// Consecutive failed occurrences after which a routine is paused.
 pub const MAX_FAILED_RUNS: i64 = 3;
 
@@ -24,8 +26,9 @@ pub enum Ended<'a> {
     Completed,
     /// Stopped by the owner or a deletion.
     Stopped,
+    /// `code` is `None` when the turn recorded none.
     Failed {
-        code: &'a FailureCode,
+        code: Option<&'a FailureCode>,
     },
     Uncertain,
 }
@@ -33,13 +36,10 @@ pub enum Ended<'a> {
 impl<'a> Ended<'a> {
     /// `None` while the turn has not ended.
     pub fn of(status: TurnStatus, code: Option<&'a FailureCode>) -> Option<Self> {
-        static UNRECORDED: FailureCode = FailureCode::Other(String::new());
         match status {
             TurnStatus::Completed => Some(Self::Completed),
             TurnStatus::Interrupted => Some(Self::Stopped),
-            TurnStatus::Failed => Some(Self::Failed {
-                code: code.unwrap_or(&UNRECORDED),
-            }),
+            TurnStatus::Failed => Some(Self::Failed { code }),
             TurnStatus::Uncertain => Some(Self::Uncertain),
             TurnStatus::Queued
             | TurnStatus::Preparing
@@ -96,7 +96,7 @@ impl FailureCode {
             Self::ProfileMismatch => "the AI provider ran a different model than the one chosen",
             Self::ProviderMisconfigured => "its model settings are missing",
             Self::AttachmentUnavailable => "its files could not be prepared",
-            Self::Other(_) => "an unexpected error happened",
+            Self::Other(_) => UNEXPECTED,
         }
     }
 }
@@ -154,14 +154,16 @@ pub fn react(ended: Ended<'_>, run: Run) -> Reaction {
     // A routine the owner switched on, off, or dismissed during the retry
     // keeps the owner's choice.
     let resumes = run.attempt == Attempt::Resume && run.paused;
-    let code = match ended {
+    let (failed, needs_action) = match ended {
         Ended::Completed if resumes => return Reaction::Resume,
         Ended::Completed => return Reaction::Reset,
         Ended::Stopped => return Reaction::Ignore,
-        Ended::Failed { code } => Some(code),
-        Ended::Uncertain => None,
+        Ended::Failed { code } => (
+            true,
+            code.is_some_and(|code| code.cause() == Cause::NeedsAction),
+        ),
+        Ended::Uncertain => (false, false),
     };
-    let needs_action = code.is_some_and(|code| code.cause() == Cause::NeedsAction);
     if resumes {
         return Reaction::StayPaused(if needs_action {
             Pause::NeedsAction
@@ -175,7 +177,7 @@ pub fn react(ended: Ended<'_>, run: Run) -> Reaction {
     if needs_action {
         return Reaction::Pause(Pause::NeedsAction);
     }
-    if code.is_some() && run.attempt == Attempt::First {
+    if failed && run.attempt == Attempt::First {
         return Reaction::Retry;
     }
     if run.failed_runs + 1 >= MAX_FAILED_RUNS {
@@ -206,10 +208,12 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
     let name = notice.name;
     let (what, error) = match notice.ended {
         Ended::Failed { code } => (
-            code.explanation(),
-            match notice.message {
-                Some(message) if !message.is_empty() => format!("`{code}`: {message}"),
-                _ => format!("`{code}`"),
+            code.map_or(UNEXPECTED, FailureCode::explanation),
+            match (code, notice.message.filter(|m| !m.is_empty())) {
+                (Some(code), Some(message)) => format!("`{code}`: {message}"),
+                (Some(code), None) => format!("`{code}`"),
+                (None, Some(message)) => message.to_owned(),
+                (None, None) => "no error was recorded".to_owned(),
             },
         ),
         _ => (
@@ -300,7 +304,7 @@ mod tests {
         failed_runs: 0,
     };
     const CLOSED: Ended<'static> = Ended::Failed {
-        code: &FailureCode::ProviderUnavailable,
+        code: Some(&FailureCode::ProviderUnavailable),
     };
 
     #[test]
@@ -341,14 +345,19 @@ mod tests {
             FailureCode::InvalidProfile,
         ] {
             assert_eq!(
-                react(Ended::Failed { code: &code }, FRESH),
+                react(Ended::Failed { code: Some(&code) }, FRESH),
                 Reaction::Pause(Pause::NeedsAction),
                 "{code}"
             );
         }
-        let unknown = FailureCode::Other("something_new".into());
+        let unknown = FailureCode::decode("something_new");
         assert_eq!(
-            react(Ended::Failed { code: &unknown }, FRESH),
+            react(
+                Ended::Failed {
+                    code: Some(&unknown)
+                },
+                FRESH
+            ),
             Reaction::Retry,
             "a code an older build stored stays transient"
         );
@@ -367,7 +376,7 @@ mod tests {
         assert_eq!(
             react(
                 Ended::Failed {
-                    code: &FailureCode::ProviderRefused
+                    code: Some(&FailureCode::ProviderRefused)
                 },
                 off
             ),
@@ -387,7 +396,7 @@ mod tests {
         assert_eq!(
             react(
                 Ended::Failed {
-                    code: &FailureCode::PolicyViolation
+                    code: Some(&FailureCode::PolicyViolation)
                 },
                 paused
             ),
@@ -420,6 +429,39 @@ mod tests {
             "the owner's switch stays off"
         );
         assert_eq!(react(CLOSED, switched_off), Reaction::Report);
+    }
+
+    #[test]
+    fn a_failure_without_a_recorded_code_is_transient_and_reported_as_unexpected() {
+        let ended = Ended::of(TurnStatus::Failed, None).unwrap();
+        assert_eq!(react(ended, FRESH), Reaction::Retry);
+        let base = Notice {
+            name: "Update tickets",
+            ended,
+            message: None,
+            retried: true,
+            enabled: true,
+            failed_runs: 1,
+            next: None,
+            reminder: false,
+        };
+        let text = notice(&base, Reaction::Report);
+        assert!(
+            text.contains("failed because an unexpected error happened"),
+            "{text}"
+        );
+        assert!(text.ends_with("Error: no error was recorded"), "{text}");
+        let explained = notice(
+            &Notice {
+                message: Some("the provider process exited"),
+                ..base
+            },
+            Reaction::Report,
+        );
+        assert!(
+            explained.ends_with("Error: the provider process exited"),
+            "{explained}"
+        );
     }
 
     #[test]

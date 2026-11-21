@@ -1077,10 +1077,12 @@ fn account_rate_limit_updates_report_both_windows() {
         service_tier: "priority".into(),
     };
     let mut events = super::policy::TurnEvents {
-        thread_id: "th",
-        native_turn: "tu",
-        profile: &profile,
-        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
+        thread: super::policy::Thread {
+            id: "th",
+            native_turn: "tu",
+            profile: &profile,
+        },
+        tools: ToolSet::HostAndElsebot,
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1122,10 +1124,12 @@ fn token_usage_of_this_turn_is_reported_per_model_request() {
         service_tier: "priority".into(),
     };
     let mut events = super::policy::TurnEvents {
-        thread_id: "th",
-        native_turn: "tu",
-        profile: &profile,
-        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
+        thread: super::policy::Thread {
+            id: "th",
+            native_turn: "tu",
+            profile: &profile,
+        },
+        tools: ToolSet::HostAndElsebot,
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1158,10 +1162,12 @@ fn context_compaction_is_reported_once_per_signal() {
         service_tier: "priority".into(),
     };
     let mut events = super::policy::TurnEvents {
-        thread_id: "th",
-        native_turn: "tu",
-        profile: &profile,
-        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
+        thread: super::policy::Thread {
+            id: "th",
+            native_turn: "tu",
+            profile: &profile,
+        },
+        tools: ToolSet::HostAndElsebot,
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1230,10 +1236,12 @@ fn a_steered_message_names_the_turn_and_its_echo_is_taken_once() {
         service_tier: "priority".into(),
     };
     let mut events = super::policy::TurnEvents {
-        thread_id: "th",
-        native_turn: "tu",
-        profile: &profile,
-        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
+        thread: super::policy::Thread {
+            id: "th",
+            native_turn: "tu",
+            profile: &profile,
+        },
+        tools: ToolSet::HostAndElsebot,
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),

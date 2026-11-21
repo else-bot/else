@@ -40,12 +40,15 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
         eprintln!("SKIPPED: set ELSE_CODEX_BIN to check installed Codex without inference");
         return;
     };
-    let program = crate::providers::executable::executable(Some(Path::new(&program)), "codex")
-        .await
-        .expect("resolve Codex CLI")
-        .expect("configured Codex CLI")
-        .path()
-        .to_owned();
+    let scratch = tempfile::tempdir().unwrap();
+    let host = Host::new(&scratch.path().join("data"), &scratch.path().join("bots"));
+    let program =
+        crate::providers::executable::executable(&host, Some(Path::new(&program)), "codex")
+            .await
+            .expect("resolve Codex CLI")
+            .expect("configured Codex CLI")
+            .path()
+            .to_owned();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("owner-home");
     let projects = dir.path().join("projects");

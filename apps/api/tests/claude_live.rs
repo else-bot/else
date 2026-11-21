@@ -21,12 +21,16 @@ const MODEL: &str = "claude-haiku-5-5";
 async fn installed(name: &str) -> PathBuf {
     let setting = format!("ELSE_{}_BIN", name.to_uppercase());
     let configured = std::env::var_os(&setting).map(PathBuf::from);
-    else_api::providers::executable::executable(configured.as_deref(), name)
-        .await
-        .unwrap_or_else(|reason| panic!("{reason}"))
-        .unwrap_or_else(|| panic!("{name} on PATH or {setting}"))
-        .path()
-        .to_owned()
+    else_api::providers::executable::executable(
+        &Host::new(&std::env::temp_dir(), &std::env::temp_dir()),
+        configured.as_deref(),
+        name,
+    )
+    .await
+    .unwrap_or_else(|reason| panic!("{reason}"))
+    .unwrap_or_else(|| panic!("{name} on PATH or {setting}"))
+    .path()
+    .to_owned()
 }
 
 async fn claude(data: &Path, tool_url: &str) -> Claude {

@@ -26,7 +26,7 @@ use super::definitions::Definition;
 use super::host::{BotDirs, Host, Run};
 use super::models::Listed;
 use super::{grok_home, prompt};
-use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{FailureCode, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
@@ -53,7 +53,7 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
         let (host, bin) = (host.clone(), bin.clone());
         Box::pin(async move {
             let home = grok_home::host_home();
-            let program = lookup(bin.as_deref(), home.as_deref()).await;
+            let program = lookup(&host, bin.as_deref(), home.as_deref()).await;
             ready(Some(host), program, home).await
         })
     });
@@ -90,21 +90,19 @@ fn listed_models(printed: &str) -> Result<Vec<Listed>, String> {
 /// install and the npm package's launcher both run it). The link is kept,
 /// not resolved, so it follows Grok's own updates.
 fn installed(home: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let path = home.join("bin").join("grok");
-    path.metadata()
-        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .then_some(path)
+    super::is_executable(&path).then_some(path)
 }
 
 /// `ELSE_GROK_BIN` or `PATH`, under the same rule as [`choose`]: the
 /// installer writes `ELSE_GROK_BIN` from its own `PATH`, so it can name the
 /// npm package's script too. A setting that does not resolve stays an error.
 async fn lookup(
+    host: &Host,
     configured: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Option<super::Program>, String> {
-    let found = super::executable(configured, "grok").await;
+    let found = super::executable(host, configured, "grok").await;
     match configured {
         Some(_) if found.is_err() => found,
         _ => choose(found, home.and_then(installed)),
@@ -190,18 +188,6 @@ impl Adapter for GrokCli {
             ToolSet::Elsebot => "tools:elsebot-v1",
             ToolSet::None => "tools:none",
         }
-    }
-
-    async fn run(
-        &self,
-        cli: &Cli<Self>,
-        ready: &Ready<PathBuf>,
-        profile: &Profile,
-        input: &TurnInput,
-        sink: &dyn TurnSink,
-        stop: Stop,
-    ) -> TurnOutcome {
-        cli.stream(ready, profile, input, sink, stop).await
     }
 
     async fn list_models(&self, ready: &Ready<PathBuf>) -> Result<Vec<Listed>, String> {

@@ -97,9 +97,9 @@ const RUN_LIMIT: usize = 1024 * 1024;
 pub struct Run {
     pub program: PathBuf,
     pub args: Vec<OsString>,
-    /// Extra environment, on top of the passed session variables.
+    /// Extra environment, on top of the context's.
     pub env: Vec<(String, String)>,
-    pub dir: PathBuf,
+    pub context: Context,
     /// Every process the run starts carries it, so the run's leftovers are
     /// swept by it. One run per marker at a time.
     pub marker: Uuid,
@@ -116,7 +116,7 @@ impl Run {
             program: program.to_owned(),
             args: args.iter().map(OsString::from).collect(),
             env: Vec::new(),
-            dir: std::env::temp_dir(),
+            context: Context::Isolated(std::env::temp_dir()),
             marker: Uuid::new_v4(),
             input: Vec::new(),
             limit: RUN_LIMIT,
@@ -131,13 +131,23 @@ impl Run {
             program: spec.program.clone(),
             args: spec.args.clone(),
             env: spec.env.clone(),
-            dir: spec.dirs.project.clone(),
+            context: Context::Isolated(spec.dirs.project.clone()),
             marker: spec.turn_id,
             input: Vec::new(),
             limit: RUN_LIMIT,
             timeout: RUN_TIMEOUT,
         }
     }
+}
+
+/// Where a run starts and which environment it inherits.
+#[derive(Debug, Clone)]
+pub enum Context {
+    /// In this directory, with only the passed session variables.
+    Isolated(PathBuf),
+    /// In this process's directory, with its whole environment, which a
+    /// version manager's shim picks its version from.
+    Inherited,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -273,7 +283,7 @@ impl Started {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Host {
     data_dir: PathBuf,
     bots_dir: PathBuf,
@@ -346,7 +356,7 @@ impl Host {
         let mut retries = 5;
         let mut scope = loop {
             let mut command =
-                self.command_in(&run.program, &run.args, &run.env, &run.dir, run.marker);
+                self.command_in(&run.program, &run.args, &run.env, &run.context, run.marker);
             command
                 .stdin(stdin())
                 .stdout(Stdio::piped())
@@ -425,7 +435,7 @@ impl Host {
             &spec.program,
             &spec.args,
             &spec.env,
-            &spec.dirs.project,
+            &Context::Isolated(spec.dirs.project.clone()),
             spec.turn_id,
         )
     }
@@ -435,15 +445,15 @@ impl Host {
         program: &Path,
         args: &[OsString],
         env: &[(String, String)],
-        dir: &Path,
+        context: &Context,
         marker: Uuid,
     ) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(program);
+        if let Context::Isolated(dir) = context {
+            command.current_dir(dir).env_clear().envs(passed_env());
+        }
         command
             .args(args)
-            .current_dir(dir)
-            .env_clear()
-            .envs(passed_env())
             .envs(env.iter().map(|(k, v)| (k, v)))
             .env(MARKER_VAR, self.marker(marker))
             .process_group(0)

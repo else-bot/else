@@ -19,6 +19,7 @@ use crate::app::providers::{FailureCode, TurnOutcome, Usage};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use crate::providers::cli::json::Fields;
+use crate::providers::cli::process::last_lines;
 use crate::providers::cli::turn::ToolSet;
 
 const FIELDS: Fields = Fields("Cursor");
@@ -410,10 +411,5 @@ fn usage_limit(stderr: &str) -> bool {
 }
 
 fn last_line(stderr: &str) -> &str {
-    stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no message")
+    last_lines(stderr, 1).pop().unwrap_or("no message")
 }

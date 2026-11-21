@@ -58,7 +58,7 @@ use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::Listed;
 use super::prompt;
 use super::{attachments, claude_home};
-use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
@@ -91,9 +91,10 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
         Box::pin(async move {
             let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
             let home = std::env::var("HOME").ok();
+            let program = super::executable(&host, bin.as_deref(), "claude").await;
             ready(
                 Some(host),
-                super::executable(bin.as_deref(), "claude").await,
+                program,
                 claude_home::host_config(config_dir.as_deref(), home.as_deref()),
                 claude_home::host_account(config_dir.as_deref(), home.as_deref()),
             )
@@ -160,16 +161,19 @@ async fn ready(
     let version = turn::version(&host, &program, &env, ClaudeCode::PRODUCT).await?;
     let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
     let config = config.ok_or(not_logged_in)?;
-    // A logged-out CLI exits with failure; only a check that never
-    // answered says something else.
+    // A logged-out CLI exits with failure; a check that never answered,
+    // or was killed by a signal, says nothing about the login.
     match host.probe(program.path(), &["auth", "status"], &env).await {
         Ok(status) if claude_home::logged_in(&status) => {}
-        Err(why @ (RunError::TimedOut(_) | RunError::Start(_) | RunError::Read(_))) => {
+        Ok(_) | Err(RunError::Empty) => return Err(not_logged_in.into()),
+        Err(RunError::Failed { status, .. }) if status.code().is_some() => {
+            return Err(not_logged_in.into());
+        }
+        Err(why) => {
             return Err(format!(
                 "Claude Code could not check its login (`claude auth status`: {why})."
             ));
         }
-        _ => return Err(not_logged_in.into()),
     }
     Ok(Ready {
         host,
@@ -341,18 +345,6 @@ impl Adapter for ClaudeCode {
             ToolSet::Elsebot => "tools:elsebot-v2",
             ToolSet::None => "tools:none",
         }
-    }
-
-    async fn run(
-        &self,
-        cli: &Cli<Self>,
-        ready: &Ready<Login>,
-        profile: &Profile,
-        input: &TurnInput,
-        sink: &dyn TurnSink,
-        stop: Stop,
-    ) -> TurnOutcome {
-        cli.stream(ready, profile, input, sink, stop).await
     }
 
     async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
