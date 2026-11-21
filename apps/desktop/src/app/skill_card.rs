@@ -105,9 +105,12 @@ impl ConversationView {
         }
         card.files.loading = true;
         card.files.error = None;
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_install(bot, id).await;
+            let rejected = result
+                .as_ref()
+                .is_err_and(|err| super::report_unauthorized(&app, err, cx));
             let _ = this.update_in(cx, |app, _, cx| {
                 let Some(card) = app.cards.skills.get_mut(&id) else {
                     return;
@@ -115,6 +118,7 @@ impl ConversationView {
                 card.files.loading = false;
                 match result {
                     Ok(detail) => card.files.contents = Some(detail.contents),
+                    Err(_) if rejected => {}
                     Err(err) => card.files.error = Some(err.to_string()),
                 }
                 app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);

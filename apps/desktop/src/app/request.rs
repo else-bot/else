@@ -13,10 +13,12 @@ pub(in crate::app) enum Request<Op> {
         attempt: Uuid,
         op: Op,
     },
-    /// Sending `op` again after its outcome was unknown.
+    /// Sending `op` again after its outcome was unknown. `error` says why
+    /// it was unknown, for when the resend is rejected unhandled.
     Resending {
         attempt: Uuid,
         op: Op,
+        error: String,
     },
     /// The server accepted `op`; the stream settles the card next.
     Accepted(Op),
@@ -104,14 +106,15 @@ impl<Op> Request<Op> {
     where
         Op: Clone,
     {
-        let Self::Unconfirmed { op, .. } = self else {
+        let Self::Unconfirmed { op, error } = self else {
             return None;
         };
-        let op = op.clone();
+        let (op, error) = (op.clone(), std::mem::take(error));
         let attempt = Uuid::new_v4();
         *self = Self::Resending {
             attempt,
             op: op.clone(),
+            error,
         };
         Some((attempt, op))
     }
@@ -143,34 +146,36 @@ impl<Op> Request<Op> {
         result: &Result<T, ClientError>,
         message: impl FnOnce(&ClientError) -> String,
     ) -> Settle {
-        let (op, resent) = match std::mem::take(self) {
+        let (op, earlier) = match std::mem::take(self) {
             Self::Sending {
                 attempt: current,
                 op,
-            } if current == attempt => (op, false),
+            } if current == attempt => (op, None),
             Self::Resending {
                 attempt: current,
                 op,
-            } if current == attempt => (op, true),
+                error,
+            } if current == attempt => (op, Some(error)),
             other => {
                 *self = other;
                 return Settle::Stale;
             }
         };
-        *self = match result {
-            Ok(_) => Self::Accepted(op),
-            Err(err)
+        *self = match (result, earlier) {
+            (Ok(_), _) => Self::Accepted(op),
+            (Err(ClientError::Unauthorized), Some(error)) => Self::Unconfirmed { op, error },
+            (Err(err), earlier)
                 if err.outcome_unknown()
                     || err.is_request_conflict()
-                    || (resent && err.never_handled()) =>
+                    || (earlier.is_some() && err.never_handled()) =>
             {
                 Self::Unconfirmed {
                     op,
                     error: message(err),
                 }
             }
-            Err(ClientError::Unauthorized) => Self::Idle,
-            Err(err) => Self::Failed(message(err)),
+            (Err(ClientError::Unauthorized), None) => Self::Idle,
+            (Err(err), _) => Self::Failed(message(err)),
         };
         if matches!(result, Err(ClientError::Unauthorized)) {
             Settle::Rejected
@@ -291,6 +296,7 @@ mod tests {
             );
             assert!(request.unconfirmed());
             assert!(!request.busy());
+            let earlier = request.error().unwrap().to_owned();
             let (retry, op) = request.retry().unwrap();
             assert_ne!(retry, attempt);
             assert_eq!(op, "discard");
@@ -298,7 +304,8 @@ mod tests {
                 request,
                 Request::Resending {
                     attempt: retry,
-                    op: "discard"
+                    op: "discard",
+                    error: earlier,
                 }
             );
         }
@@ -322,23 +329,43 @@ mod tests {
 
     #[test]
     fn a_resend_the_server_never_handled_keeps_the_op_unconfirmed() {
-        for error in [
-            ClientError::Unauthorized,
-            ClientError::Transport("Not on your Tailscale network.".into()),
-        ] {
-            let mut request = Request::Idle;
-            let first = request.begin("create").unwrap();
-            assert_eq!(
-                request.settle(first, &Err::<(), _>(unreachable())),
-                Settle::Settled
-            );
-            let (resend, _) = request.retry().unwrap();
-            let rejected = matches!(error, ClientError::Unauthorized);
-            let settled = request.settle(resend, &Err::<(), _>(error));
-            assert_eq!(settled == Settle::Rejected, rejected);
-            assert!(request.unconfirmed());
-            assert_eq!(request.retry().unwrap().1, "create");
-        }
+        let mut request = Request::Idle;
+        let first = request.begin("create").unwrap();
+        assert_eq!(
+            request.settle(first, &Err::<(), _>(unreachable())),
+            Settle::Settled
+        );
+        let (resend, _) = request.retry().unwrap();
+        let offline = ClientError::Transport("Not on your Tailscale network.".into());
+        assert_eq!(
+            request.settle(resend, &Err::<(), _>(offline)),
+            Settle::Settled
+        );
+        assert_eq!(request.error(), Some("Not on your Tailscale network."));
+        assert_eq!(request.retry().unwrap().1, "create");
+    }
+
+    #[test]
+    fn a_resend_with_a_rejected_token_keeps_the_earlier_error() {
+        let mut request = Request::Idle;
+        let first = request.begin("create").unwrap();
+        let timeout = api(503, "unavailable");
+        assert_eq!(
+            request.settle(first, &Err::<(), _>(timeout)),
+            Settle::Settled
+        );
+        let (resend, _) = request.retry().unwrap();
+        assert_eq!(
+            request.settle(resend, &Err::<(), _>(ClientError::Unauthorized)),
+            Settle::Rejected
+        );
+        assert_eq!(
+            request,
+            Request::Unconfirmed {
+                op: "create",
+                error: "Nope.".into()
+            }
+        );
     }
 
     #[test]

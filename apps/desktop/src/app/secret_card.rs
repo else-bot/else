@@ -188,8 +188,9 @@ impl ConversationView {
                 form.clear(window, cx);
             }
         } else if let Some(form) = &card.form {
+            let busy = card.request.busy() || !self.inputs.connected;
             form.fields.update(cx, |fields, cx| {
-                fields.busy = false;
+                fields.busy = busy;
                 cx.notify();
             });
         }

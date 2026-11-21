@@ -89,6 +89,13 @@ impl ProfilePicker {
     }
 
     /// Shows the server's answer to a check of provider `id`.
+    /// Drops a check whose answer the window handles instead, such as a
+    /// rejected owner token.
+    pub fn recheck_dropped(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.checks.remove(id);
+        cx.notify();
+    }
+
     pub fn rechecked(
         &mut self,
         id: &str,

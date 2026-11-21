@@ -396,8 +396,9 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let answer = client.recheck_provider(id.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                if let Err(err) = &answer {
-                    app.unauthorized(err, cx);
+                if answer.as_ref().is_err_and(|err| app.unauthorized(err, cx)) {
+                    let _ = picker.update(cx, |picker, cx| picker.recheck_dropped(&id, cx));
+                    return;
                 }
                 if let (Ok(info), Some(caps)) = (&answer, app.caps.as_mut())
                     && let Some(slot) = Arc::make_mut(caps)
