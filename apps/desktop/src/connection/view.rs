@@ -215,23 +215,20 @@ impl Shell {
                     .loading(busy.is_some())
                     .on_click(cx.listener(|shell, _, window, cx| shell.start_local(window, cx))),
             )
-            .when(setup.presentation == Presentation::Onboarding, |panel| {
-                panel
-                    .child(
-                        Button::new("connection-edit")
-                            .control(Tier::Secondary, Scale::Standard, busy.is_some(), cx)
-                            .label("Edit configuration")
-                            .w_full()
-                            .mt_2()
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_remote(None, window, cx)
-                            })),
-                    )
-                    .child(note(
-                        "Use Edit configuration to connect to a server on another machine.",
-                        theme,
-                    ))
-            })
+            .child(
+                Button::new("connection-edit")
+                    .control(Tier::Secondary, Scale::Standard, busy.is_some(), cx)
+                    .label("Edit configuration")
+                    .w_full()
+                    .mt_2()
+                    .on_click(
+                        cx.listener(|shell, _, window, cx| shell.open_remote(None, window, cx)),
+                    ),
+            )
+            .child(note(
+                "Use Edit configuration to connect to a server on another machine.",
+                theme,
+            ))
     }
 
     pub(super) fn render_remote(
@@ -242,7 +239,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Div {
         let busy = setup.draft.busy().is_some();
-        let settings = matches!(setup.presentation, Presentation::Settings(_));
         let field = |label: &'static str, input: AnyElement, hint: &'static str| {
             v_flex()
                 .gap(px(6.))
@@ -261,28 +257,18 @@ impl Shell {
             _ => setup.error.clone(),
         };
         v_flex()
-            .when(!settings, |panel| {
-                panel.child(
-                    div().pb(px(16.)).child(
-                        Button::new("connection-back")
-                            .control(Tier::Ghost, Scale::Compact, false, cx)
-                            .label("Back to local setup")
-                            .icon(IconName::ChevronLeft)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.back_to_welcome(window, cx)
-                            })),
-                    ),
-                )
-            })
-            .child(heading(
-                if settings {
-                    "Connection details"
-                } else {
-                    "Connect to a remote server"
-                }
-                .into(),
-                theme,
-            ))
+            .child(
+                div().pb(px(16.)).child(
+                    Button::new("connection-back")
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .label("Back to local setup")
+                        .icon(IconName::ChevronLeft)
+                        .on_click(
+                            cx.listener(|shell, _, window, cx| shell.back_to_welcome(window, cx)),
+                        ),
+                ),
+            )
+            .child(heading("Connect to a remote server".into(), theme))
             .child(intro(
                 "Use the address and owner key from the machine running your else.bot server.",
                 theme,
@@ -310,8 +296,6 @@ impl Shell {
                     .control(Tier::Primary, Scale::Standard, busy, cx)
                     .label(if busy {
                         "Connecting…"
-                    } else if settings {
-                        "Save connection"
                     } else {
                         "Connect to server"
                     })
