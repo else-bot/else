@@ -9,7 +9,6 @@ use crate::http::tool_result::{Done, Refusal, ToolResult};
 
 pub(super) fn secret_schema() -> Value {
     json!({
-        "name": "request_secret",
         "description": "Ask the owner for a login or credentials when a computer_secrets search finds none. \
             The owner types them into a private card; they are saved in the Vault for every bot \
             and never shown to you. For a website login, pass website and env USERNAME and \
@@ -40,7 +39,6 @@ pub(super) fn secret_schema() -> Value {
 
 pub(super) fn choice_schema() -> Value {
     json!({
-        "name": "ask_owner",
         "description": "Ask the owner a question in a card: 2 to 5 descriptive choices when a pick settles \
             it, or no choices for an open question answered in chat. Without multiple, the card also \
             takes a typed answer, so list only real options. A new owner message skips the card. At most one per attempt.",
@@ -71,7 +69,6 @@ pub(super) fn choice_schema() -> Value {
 
 pub(super) fn permission_schema() -> Value {
     json!({
-        "name": "ask_permission",
         "description": "Ask the owner to approve one destructive or external action you will take with your \
             HOST shell or file tools, which the API cannot gate. Computer and MCP tools declare \
             effect instead. Pass authorization only with the owner's exact words from the \
@@ -111,7 +108,6 @@ pub(super) fn permission_schema() -> Value {
 
 pub(super) fn confirm_permission_schema() -> Value {
     json!({
-        "name": "confirm_permission",
         "description": "Record the owner's explicit instruction, in the current message, to always allow a \
             type of work; quote their exact words. Scopes: task for recurring host or computer work \
             (never MCP), mcp_tool for one MCP tool, computer_tool for one computer tool's \
@@ -240,7 +236,6 @@ pub(super) async fn confirm_permission(
 
 pub(super) fn handoff_schema() -> Value {
     json!({
-        "name": "computer_handoff",
         "description": "Ask the owner to take over your computer when only they can get past something \
             on screen: a captcha, a 2FA prompt, a login not in the Vault, or a broken page. Pins a Take \
             over bar, shares your current screen, and returns parked: leave the screen as it is, \
@@ -312,7 +307,6 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
 pub(super) fn notice_schema() -> Value {
     use crate::db::owner_notices::{MAX_SUMMARY, MAX_TRIED};
     json!({
-        "name": "notify_owner",
         "description": "In a delegated task, flag before your final message that it ends needing the \
             owner: a decision, or a blocker only they can clear. Shows a Needs you card in both \
             chats. Otherwise declare fyi or nothing. Not for what a card asks (ask_owner, \

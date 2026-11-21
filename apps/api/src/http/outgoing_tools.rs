@@ -29,19 +29,26 @@ fn draft_id() -> Value {
     json!({ "type": "string", "format": "uuid", "description": "The draft's id." })
 }
 
-pub(super) fn schemas() -> Vec<Value> {
-    let write = json!({ "readOnlyHint": false, "destructiveHint": false,
-                        "idempotentHint": true, "openWorldHint": false });
-    let address = json!({ "type": "string", "minLength": 3, "maxLength": outgoing::MAX_ADDRESS });
-    let list = json!({ "type": "array", "maxItems": outgoing::MAX_RECIPIENTS, "items": address });
-    let body = json!({ "type": "string", "minLength": 1, "maxLength": outgoing::MAX_BODY,
-                       "description": "The complete plain text to send." });
-    let handle = |description: &str| {
-        json!({ "type": "string", "minLength": 1, "maxLength": outgoing::MAX_HANDLE,
-                "description": description })
-    };
-    let platforms: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();
-    let attachments = json!({
+fn write() -> Value {
+    json!({ "readOnlyHint": false, "destructiveHint": false,
+            "idempotentHint": true, "openWorldHint": false })
+}
+
+fn address() -> Value {
+    json!({ "type": "string", "minLength": 3, "maxLength": outgoing::MAX_ADDRESS })
+}
+
+fn list() -> Value {
+    json!({ "type": "array", "maxItems": outgoing::MAX_RECIPIENTS, "items": address() })
+}
+
+fn body() -> Value {
+    json!({ "type": "string", "minLength": 1, "maxLength": outgoing::MAX_BODY,
+            "description": "The complete plain text to send." })
+}
+
+fn attachments() -> Value {
+    json!({
         "type": "array", "maxItems": outgoing::MAX_FILES,
         "description": "Files to send: {path} in your project or ~/work, or {email} for an \
             attachment of an email you can read, by its part. Limits per platform are checked now.",
@@ -62,150 +69,169 @@ pub(super) fn schemas() -> Vec<Value> {
                                        "uid": { "type": "integer", "minimum": 1 } },
                                    "additionalProperties": false },
                       "part": { "type": "integer", "minimum": 0 } } } } } ] },
-    });
-    vec![
-        json!({
-            "name": "draft_email",
-            "description": "Draft an email for the owner to review, edit, and approve in a card; use it, not \
-                ask_permission, for any email you would send. For a connected account, pass \
-                account_id instead of from, and reply_to to answer one of its messages; send_draft \
-                sends it once approved. To revise, pass replaces with the draft's id. At most one \
-                per attempt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "from": { "type": "string", "minLength": 3, "maxLength": outgoing::MAX_ADDRESS,
-                              "description": "The address you will send from with your own \
-                                  tools. Omit with account_id." },
-                    "account_id": { "type": "string", "format": "uuid",
-                                    "description": "A connected account from mail_accounts that \
-                                        this email goes from." },
-                    "reply_to": { "type": "object",
-                                  "description": "With account_id: the message this answers, \
-                                      {folder, uid_validity, uid} from mail_action. Only its \
-                                      thread is used; set to, cc, and subject yourself.",
-                                  "properties": {
-                                      "folder": { "type": "string" },
-                                      "uid_validity": { "type": "integer", "minimum": 1 },
-                                      "uid": { "type": "integer", "minimum": 1 } },
-                                  "required": ["folder", "uid_validity", "uid"],
-                                  "additionalProperties": false },
-                    "to": { "type": "array", "minItems": 1, "maxItems": outgoing::MAX_RECIPIENTS,
-                            "items": address },
-                    "cc": list.clone(),
-                    "bcc": list,
-                    "subject": { "type": "string", "maxLength": outgoing::MAX_SUBJECT },
-                    "body": body.clone(),
-                    "attachments": attachments.clone(),
-                    "replaces": draft_id(),
-                },
-                "required": ["to", "subject", "body"],
-                "additionalProperties": false,
+    })
+}
+
+fn handle(description: &str) -> Value {
+    json!({ "type": "string", "minLength": 1, "maxLength": outgoing::MAX_HANDLE,
+            "description": description })
+}
+
+fn platforms() -> Vec<&'static str> {
+    Platform::ALL.iter().map(|p| p.as_str()).collect()
+}
+
+pub(super) fn email_schema() -> Value {
+    json!({
+        "description": "Draft an email for the owner to review, edit, and approve in a card; use it, not \
+            ask_permission, for any email you would send. For a connected account, pass \
+            account_id instead of from, and reply_to to answer one of its messages; send_draft \
+            sends it once approved. To revise, pass replaces with the draft's id. At most one \
+            per attempt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": { "type": "string", "minLength": 3, "maxLength": outgoing::MAX_ADDRESS,
+                          "description": "The address you will send from with your own \
+                              tools. Omit with account_id." },
+                "account_id": { "type": "string", "format": "uuid",
+                                "description": "A connected account from mail_accounts that \
+                                    this email goes from." },
+                "reply_to": { "type": "object",
+                              "description": "With account_id: the message this answers, \
+                                  {folder, uid_validity, uid} from mail_action. Only its \
+                                  thread is used; set to, cc, and subject yourself.",
+                              "properties": {
+                                  "folder": { "type": "string" },
+                                  "uid_validity": { "type": "integer", "minimum": 1 },
+                                  "uid": { "type": "integer", "minimum": 1 } },
+                              "required": ["folder", "uid_validity", "uid"],
+                              "additionalProperties": false },
+                "to": { "type": "array", "minItems": 1, "maxItems": outgoing::MAX_RECIPIENTS,
+                        "items": address() },
+                "cc": list(),
+                "bcc": list(),
+                "subject": { "type": "string", "maxLength": outgoing::MAX_SUBJECT },
+                "body": body(),
+                "attachments": attachments(),
+                "replaces": draft_id(),
             },
-            "annotations": write,
-        }),
-        json!({
-            "name": "draft_message",
-            "description": "Draft a message or post (x, telegram, discord, whatsapp) for the owner to review, edit, and \
-                approve in a card; use it, not ask_permission, for anything you would send. With a \
-                native connection, pass account_id and the destination from social_connections or a \
-                public Telegram @username or t.me link; send_draft sends it once approved. To \
-                revise, pass replaces. At most one per attempt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "platform": { "type": "string", "enum": platforms },
-                    "account_id": {"type":"string","format":"uuid","description":"Native social connection ID from social_connections. Sends through send_draft."},
-                    "reply_to": handle("Optional remote message ID being replied to."),
-                    "account": handle("The account you will send from, as the platform shows \
-                        it (for example @handle). Optional."),
-                    "destination": handle("Where it goes, as the platform knows it: the \
-                        chat, group, channel, or user (required except for x), or for x \
-                        the user to DM or the post it replies to. Omit for a new public X post."),
-                    "task": handle("The recurring job of a message to a chat or user (never a \
-                        public post), such as \"Initial lead DMs\", so Approve always covers it to \
-                        anyone. Reuse a listed always-approved task exactly."),
-                    "body": body,
-                    "attachments": attachments,
-                    "replaces": draft_id(),
-                },
-                "required": ["platform", "body"],
-                "additionalProperties": false,
+            "required": ["to", "subject", "body"],
+            "additionalProperties": false,
+        },
+        "annotations": write(),
+    })
+}
+
+pub(super) fn message_schema() -> Value {
+    json!({
+        "description": "Draft a message or post (x, telegram, discord, whatsapp) for the owner to review, edit, and \
+            approve in a card; use it, not ask_permission, for anything you would send. With a \
+            native connection, pass account_id and the destination from social_connections or a \
+            public Telegram @username or t.me link; send_draft sends it once approved. To \
+            revise, pass replaces. At most one per attempt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "platform": { "type": "string", "enum": platforms() },
+                "account_id": {"type":"string","format":"uuid","description":"Native social connection ID from social_connections. Sends through send_draft."},
+                "reply_to": handle("Optional remote message ID being replied to."),
+                "account": handle("The account you will send from, as the platform shows \
+                    it (for example @handle). Optional."),
+                "destination": handle("Where it goes, as the platform knows it: the \
+                    chat, group, channel, or user (required except for x), or for x \
+                    the user to DM or the post it replies to. Omit for a new public X post."),
+                "task": handle("The recurring job of a message to a chat or user (never a \
+                    public post), such as \"Initial lead DMs\", so Approve always covers it to \
+                    anyone. Reuse a listed always-approved task exactly."),
+                "body": body(),
+                "attachments": attachments(),
+                "replaces": draft_id(),
             },
-            "annotations": write,
-        }),
-        json!({
-            "name": "confirm_draft_approval",
-            "description": "Record that the owner's latest message approves the open draft exactly as it reads: \
-                only when [else.bot outgoing drafts] marks it in_context=\"true\" and their words \
-                clearly say to send it as is. A change request means revising with replaces. Then \
-                send it: send_draft for a connected account, otherwise once through start_draft_send \
-                or approved_draft, then report_draft_send.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "draft_id": draft_id(),
-                    "always": { "type": "string", "minLength": 1, "maxLength": 1000,
-                                "description": "Only when the owner asks to always approve drafts \
-                                    like this: their exact words from that message. Grants what the \
-                                    card's Approve always would; rules grant nothing." },
-                },
-                "required": ["draft_id"],
-                "additionalProperties": false,
+            "required": ["platform", "body"],
+            "additionalProperties": false,
+        },
+        "annotations": write(),
+    })
+}
+
+pub(super) fn confirm_approval_schema() -> Value {
+    json!({
+        "description": "Record that the owner's latest message approves the open draft exactly as it reads: \
+            only when [else.bot outgoing drafts] marks it in_context=\"true\" and their words \
+            clearly say to send it as is. A change request means revising with replaces. Then \
+            send it: send_draft for a connected account, otherwise once through start_draft_send \
+            or approved_draft, then report_draft_send.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "draft_id": draft_id(),
+                "always": { "type": "string", "minLength": 1, "maxLength": 1000,
+                            "description": "Only when the owner asks to always approve drafts \
+                                like this: their exact words from that message. Grants what the \
+                                card's Approve always would; rules grant nothing." },
             },
-            "annotations": write,
-        }),
-        json!({
-            "name": "start_draft_send",
-            "description": "Claim an approved draft before sending it with your HOST tools (the \
-                owner's machine). Returns the exact content to send; send exactly that, once, \
-                then call report_draft_send. With a computer tool, do not call this: pass the \
-                draft id as approved_draft with effect external instead, which claims it for \
-                that one call. No other approval is needed for that one send.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "draft_id": draft_id() },
-                "required": ["draft_id"],
-                "additionalProperties": false,
+            "required": ["draft_id"],
+            "additionalProperties": false,
+        },
+        "annotations": write(),
+    })
+}
+
+pub(super) fn start_send_schema() -> Value {
+    json!({
+        "description": "Claim an approved draft before sending it with your HOST tools (the \
+            owner's machine). Returns the exact content to send; send exactly that, once, \
+            then call report_draft_send. With a computer tool, do not call this: pass the \
+            draft id as approved_draft with effect external instead, which claims it for \
+            that one call. No other approval is needed for that one send.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "draft_id": draft_id() },
+            "required": ["draft_id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": false, "openWorldHint": false },
+    })
+}
+
+pub(super) fn send_schema() -> Value {
+    json!({
+        "description": "Send an approved draft from its connected account: exactly the approved revision, \
+            once, with the receipt on its card, so no report_draft_send. Calling it again in \
+            this request returns the same send. Status sending means the outcome is not known \
+            yet: call it again later, never mail_action.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "draft_id": draft_id() },
+            "required": ["draft_id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": true },
+    })
+}
+
+pub(super) fn report_send_schema() -> Value {
+    json!({
+        "description": "Report how sending an approved draft ended: sent only after the mail \
+            server, platform, or service confirmed it; failed when it was refused or never \
+            sent; uncertain when it may have gone out (a timeout or dropped connection after \
+            sending). Never send an uncertain draft again without the owner's new approval.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "draft_id": draft_id(),
+                "status": { "type": "string", "enum": ["sent", "failed", "uncertain"] },
+                "detail": { "type": "string", "maxLength": MAX_DETAIL,
+                            "description": "The receipt, message or post id, or the error." },
             },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": false, "openWorldHint": false },
-        }),
-        json!({
-            "name": "send_draft",
-            "description": "Send an approved draft from its connected account: exactly the approved revision, \
-                once, with the receipt on its card, so no report_draft_send. Calling it again in \
-                this request returns the same send. Status sending means the outcome is not known \
-                yet: call it again later, never mail_action.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "draft_id": draft_id() },
-                "required": ["draft_id"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": true },
-        }),
-        json!({
-            "name": "report_draft_send",
-            "description": "Report how sending an approved draft ended: sent only after the mail \
-                server, platform, or service confirmed it; failed when it was refused or never \
-                sent; uncertain when it may have gone out (a timeout or dropped connection after \
-                sending). Never send an uncertain draft again without the owner's new approval.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "draft_id": draft_id(),
-                    "status": { "type": "string", "enum": ["sent", "failed", "uncertain"] },
-                    "detail": { "type": "string", "maxLength": MAX_DETAIL,
-                                "description": "The receipt, message or post id, or the error." },
-                },
-                "required": ["draft_id", "status"],
-                "additionalProperties": false,
-            },
-            "annotations": write,
-        }),
-    ]
+            "required": ["draft_id", "status"],
+            "additionalProperties": false,
+        },
+        "annotations": write(),
+    })
 }
 
 fn draft_json(draft: &OutgoingDraft) -> Value {

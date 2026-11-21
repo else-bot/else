@@ -484,7 +484,6 @@ const EXTRAS_NEED_MODEL: &str = "provider_id, reasoning_effort, and service_tier
 
 pub fn create_schema() -> Value {
     json!({
-        "name": "routine_create",
         "description": "Save one of your own recurring tasks; it runs on a schedule in your \
             conversation with the owner. Each run gives you the prompt as a scheduled routine \
             task; you do it and report the results to the owner. Returns the routine with its \
@@ -502,7 +501,6 @@ pub fn create_schema() -> Value {
 
 pub fn list_schema() -> Value {
     json!({
-        "name": "routine_list",
         "description": "List your routines with their schedule, time zone, whether each is \
             enabled, the next run time, and the last run's outcome.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
@@ -533,7 +531,6 @@ pub fn update_schema() -> Value {
     properties["enabled"] = json!({ "type": "boolean",
         "description": "False pauses future runs; true resumes counting from now." });
     json!({
-        "name": "routine_update",
         "description": "Change one of your routines: pass only the fields to set. Setting the \
             values it already has changes nothing.",
         "inputSchema": {
@@ -548,7 +545,6 @@ pub fn update_schema() -> Value {
 
 pub fn delete_schema() -> Value {
     json!({
-        "name": "routine_delete",
         "description": "Delete one of your routines. It never runs again; a run already in \
             progress finishes.",
         "inputSchema": {
@@ -563,7 +559,6 @@ pub fn delete_schema() -> Value {
 
 pub fn run_schema() -> Value {
     json!({
-        "name": "routine_run",
         "description": "Run one of your routines now, when the owner asks to run, rerun, or \
             retry it. Its schedule, active hours, and enabled state stay as they are. The run \
             starts after your current reply and reports to the owner like a scheduled run, so \
@@ -581,7 +576,6 @@ pub fn run_schema() -> Value {
 
 pub fn reminder_schema() -> Value {
     json!({
-        "name": "reminder_create",
         "description": "Save a one-off task that runs once at a set time in your conversation \
             with the owner, such as \"in 6 hours, check on Scout\" or \"tomorrow at 9\". The \
             run gives you the prompt; do it and report. It leaves the list once it succeeds. \
@@ -953,7 +947,6 @@ pub const NO_NEWS: &str = "no_news";
 
 pub fn no_news_schema() -> Value {
     json!({
-        "name": NO_NEWS,
         "description": "In a run of a quiet routine, record that it has nothing to report, so \
             the owner gets no alert; the run still shows in its history. Only when the run \
             found nothing new and changed nothing. A run that asked the owner or acted outside \

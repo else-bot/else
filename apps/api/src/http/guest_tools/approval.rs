@@ -353,9 +353,11 @@ mod tests {
             declared_effect("computer_read_file", &json!({ "effect": null })),
             Ok(None)
         );
-        let schemas = crate::http::guest_tools::tool_list();
-        for tool in &schemas {
+        for tool in crate::http::tool_defs::definitions() {
             let name = tool["name"].as_str().unwrap();
+            if !name.starts_with("computer_") {
+                continue;
+            }
             let declared = tool["inputSchema"]["properties"].get("effect").is_some();
             let rule = crate::http::tool_defs::get(name).unwrap().effect;
             assert_eq!(rule.declared(), declared, "{name}");

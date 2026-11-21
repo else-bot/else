@@ -12,27 +12,43 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub fn schemas() -> Vec<Value> {
-    vec![
-        json!({"name":"social_connect","description":"Open a private native connection card in this bot chat. Telegram and Discord take a bot token the owner enters on the card; WhatsApp links the owner's personal account by QR code. Never ask for tokens or codes in chat. Parks the attempt until the owner finishes or cancels.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["telegram","discord","whatsapp"]},"reason":{"type":"string","minLength":1,"maxLength":500,"description":"Why access is needed and what you will do with it, shown on the card."}},"required":["provider","reason"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
-        json!({"name":"social_connections","description":"List the native social connections this task may use, the chats each has seen, their \
-            capabilities and limits, and your triggers. Call it before social operations. \
-            Telegram history starts at connection; a chat appears once it messages the bot, or \
-            once you use a public @username or t.me link. Tokens are never returned.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-        json!({"name":"social_trigger_set","description":"Wake yourself when a message arrives on a social connection, as the owner asked. \
-            destination: a chat ID from social_connections, or a public Telegram @username or \
-            t.me link; omit it for any chat. wake: mentions or all. instructions: what to do \
-            when woken, in the owner's words. Setting a chat again replaces its trigger. When \
-            woken you may read only that chat.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"destination":{"type":"string","maxLength":100},"wake":{"type":"string","enum":["mentions","all"]},"instructions":{"type":"string","minLength":1,"maxLength":4000}},"required":["connection_id","wake","instructions"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
-        json!({"name":"social_trigger_list","description":"List your own social triggers.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-        json!({"name":"social_trigger_delete","description":"Delete one of your own social triggers by ID when the owner asks you to stop watching a chat.","inputSchema":{"type":"object","properties":{"trigger_id":{"type":"string","format":"uuid"}},"required":["trigger_id"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true}}),
-        json!({"name":"social_action","description":"Native Telegram, Discord, or WhatsApp operations on a connection. \
-            Reads: conversations, history, search (observed messages only), message, chat, \
-            members. Mutations (edit, delete, react, pin, unpin, create_thread, poll, \
-            create_group) need a stable action_id and the owner's approval of the exact call. \
-            To send a message, use draft_message, then send_draft.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"action_id":{"type":"string","format":"uuid"},"command":{"type":"object","properties":{"operation":{"type":"string","enum":OPERATIONS},"destination":{"type":"string"},"message_id":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"query":{"type":"string","maxLength":500},"body":{"type":"string","maxLength":4000},"emoji":{"type":"string","maxLength":100},"name":{"type":"string","maxLength":100},"question":{"type":"string","maxLength":300},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":10},"participants":{"type":"array","items":{"type":"string","maxLength":100},"minItems":1,"maxItems":50,"description":"create_group: WhatsApp chat IDs or phone numbers with country code."}},"required":["operation"],"additionalProperties":false}},"required":["connection_id","command"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
-        json!({"name":"social_action_status","description":"Read the durable result of a social mutation. An uncertain or dispatching action must never be blindly repeated with a new ID.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"action_id":{"type":"string","format":"uuid"}},"required":["connection_id","action_id"],"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
-    ]
+pub(super) fn connect_schema() -> Value {
+    json!({"description":"Open a private native connection card in this bot chat. Telegram and Discord take a bot token the owner enters on the card; WhatsApp links the owner's personal account by QR code. Never ask for tokens or codes in chat. Parks the attempt until the owner finishes or cancels.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["telegram","discord","whatsapp"]},"reason":{"type":"string","minLength":1,"maxLength":500,"description":"Why access is needed and what you will do with it, shown on the card."}},"required":["provider","reason"],"additionalProperties":false},"annotations":{"readOnlyHint":false}})
+}
+
+pub(super) fn connections_schema() -> Value {
+    json!({"description":"List the native social connections this task may use, the chats each has seen, their \
+        capabilities and limits, and your triggers. Call it before social operations. \
+        Telegram history starts at connection; a chat appears once it messages the bot, or \
+        once you use a public @username or t.me link. Tokens are never returned.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}})
+}
+
+pub(super) fn trigger_set_schema() -> Value {
+    json!({"description":"Wake yourself when a message arrives on a social connection, as the owner asked. \
+        destination: a chat ID from social_connections, or a public Telegram @username or \
+        t.me link; omit it for any chat. wake: mentions or all. instructions: what to do \
+        when woken, in the owner's words. Setting a chat again replaces its trigger. When \
+        woken you may read only that chat.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"destination":{"type":"string","maxLength":100},"wake":{"type":"string","enum":["mentions","all"]},"instructions":{"type":"string","minLength":1,"maxLength":4000}},"required":["connection_id","wake","instructions"],"additionalProperties":false},"annotations":{"readOnlyHint":false}})
+}
+
+pub(super) fn trigger_list_schema() -> Value {
+    json!({"description":"List your own social triggers.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}})
+}
+
+pub(super) fn trigger_delete_schema() -> Value {
+    json!({"description":"Delete one of your own social triggers by ID when the owner asks you to stop watching a chat.","inputSchema":{"type":"object","properties":{"trigger_id":{"type":"string","format":"uuid"}},"required":["trigger_id"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true}})
+}
+
+pub(super) fn action_schema() -> Value {
+    json!({"description":"Native Telegram, Discord, or WhatsApp operations on a connection. \
+        Reads: conversations, history, search (observed messages only), message, chat, \
+        members. Mutations (edit, delete, react, pin, unpin, create_thread, poll, \
+        create_group) need a stable action_id and the owner's approval of the exact call. \
+        To send a message, use draft_message, then send_draft.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"action_id":{"type":"string","format":"uuid"},"command":{"type":"object","properties":{"operation":{"type":"string","enum":OPERATIONS},"destination":{"type":"string"},"message_id":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"query":{"type":"string","maxLength":500},"body":{"type":"string","maxLength":4000},"emoji":{"type":"string","maxLength":100},"name":{"type":"string","maxLength":100},"question":{"type":"string","maxLength":300},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":10},"participants":{"type":"array","items":{"type":"string","maxLength":100},"minItems":1,"maxItems":50,"description":"create_group: WhatsApp chat IDs or phone numbers with country code."}},"required":["operation"],"additionalProperties":false}},"required":["connection_id","command"],"additionalProperties":false},"annotations":{"readOnlyHint":false}})
+}
+
+pub(super) fn action_status_schema() -> Value {
+    json!({"description":"Read the durable result of a social mutation. An uncertain or dispatching action must never be blindly repeated with a new ID.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"action_id":{"type":"string","format":"uuid"}},"required":["connection_id","action_id"],"additionalProperties":false},"annotations":{"readOnlyHint":true}})
 }
 impl From<Error> for Refusal {
     fn from(error: Error) -> Self {

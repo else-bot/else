@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::owner_tools::{Card, Declined, ask};
+use super::tool_defs::read_only;
 use super::tool_result::{self, Done, Refusal, ToolResult};
 use crate::grants::Grant;
 
@@ -13,6 +14,126 @@ use crate::grants::Grant;
 #[serde(deny_unknown_fields)]
 struct ListBotsArgs {
     category_id: Option<Uuid>,
+}
+
+pub(super) fn list_schema() -> Value {
+    json!({
+        "description": "Discover all other active bots and categories, including the main bot ID. Filter by category_id to find council members. This does not grant access to their private memory.",
+        "inputSchema": {"type": "object", "properties": {"category_id": {"type": "string", "format": "uuid"}}, "additionalProperties": false},
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn create_schema() -> Value {
+    json!({
+        "description": "Register a new else.bot specialist for an owner request, with no shared memory or \
+            access. Pass its purpose, which is saved to its memory, and model only when the \
+            owner named one. Returns its bot_id at once: delegate its first task to it in this \
+            attempt. Repeating the same name in this request returns the same bot. category_id \
+            comes from list_bots.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 1,
+                          "maxLength": crate::app::bots::MAX_NAME_CHARS,
+                          "description": "Short display name, for example GitHub." },
+                "purpose": { "type": "string", "minLength": 1, "maxLength": crate::app::bots::MAX_PURPOSE_CHARS },
+                "category_id": { "type": "string", "format": "uuid" },
+                "model": { "type": "string", "maxLength": super::routines::MAX_MODEL_CHARS,
+                           "description": "Only when the owner named the model: its ID or name, such as grok-4.7 or Claude Opus \
+                               5.5; it selects the provider. Omit it for the default. An unmatched name creates \
+                               nothing; the error lists models." },
+                "provider_id": { "type": "string",
+                                 "description": format!(
+                                     "With model, only when the owner named the provider ({}).",
+                                     crate::providers::definitions::id_list()
+                                 ) },
+                "reasoning_effort": { "type": "string",
+                                      "description": "With model, only when the owner asked for \
+                                          one (low, medium, high, xhigh, max)." },
+                "service_tier": { "type": "string",
+                                  "description": "With model, only when the owner asked: \
+                                      priority is the Fast tier, default the standard one." },
+            },
+            "required": ["name"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) fn rename_schema() -> Value {
+    json!({
+        "description": "Rename an existing else.bot when asked, including yourself or another bot. \
+            Available to any bot for work rooted in an owner request. Use the exact target_bot_id \
+            from your registry, task, or a create_bot result. Changes only the display name; \
+            repeating the same name changes nothing. Confirm the saved name from the result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_bot_id": { "type": "string", "format": "uuid" },
+                "name": { "type": "string", "minLength": 1,
+                          "maxLength": crate::app::bots::MAX_NAME_CHARS },
+            },
+            "required": ["target_bot_id", "name"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) fn model_schema() -> Value {
+    json!({
+        "description": "Set an else.bot's own model, reasoning effort, and service tier when the owner asks, \
+            including yours or another bot's, by exact target_bot_id. Its next turn uses it; a \
+            running turn and routines with their own model keep theirs. An unmatched model \
+            changes nothing and the error lists models. Confirm the saved model from the result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_bot_id": { "type": "string", "format": "uuid" },
+                "model": { "type": "string", "minLength": 1,
+                           "maxLength": super::routines::MAX_MODEL_CHARS,
+                           "description": "Its ID or name, such as gpt-6.1-sol or Claude Opus 5.5; it selects the provider. Omit to keep the bot's model." },
+                "provider_id": { "type": "string",
+                                 "description": format!(
+                                     "With model, only when the owner named the provider ({}).",
+                                     crate::providers::definitions::id_list()
+                                 ) },
+                "reasoning_effort": { "type": "string",
+                                      "description": "low, medium, high, xhigh, or max. Omit to keep the bot's current effort for that provider." },
+                "service_tier": { "type": "string",
+                                  "description": "priority is the Fast tier, default the standard one. Omit to keep the bot's current tier." },
+            },
+            "required": ["target_bot_id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) fn delete_schema() -> Value {
+    json!({
+        "description": "Ask the owner to delete another else.bot by exact target_bot_id, for an owner request. \
+            The owner always approves on a card listing its routines, triggers and tasks that \
+            stop; this parks. Once approved, call it again with the same target_bot_id. Never \
+            yourself or the main bot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_bot_id": { "type": "string", "format": "uuid" },
+                "reason": { "type": "string", "maxLength": crate::app::questions::MAX_TITLE,
+                            "description": "Why, in the owner's words. Shown on the card." },
+            },
+            "required": ["target_bot_id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": true,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 pub(super) async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {

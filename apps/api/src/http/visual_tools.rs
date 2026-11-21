@@ -10,7 +10,6 @@ pub const NAME: &str = "visual_preview";
 
 pub(super) fn schema() -> Value {
     json!({
-        "name": NAME,
         "description": "Without path: the rules for writing an HTML visual (theme variables, \
             limits); read them first. With path: render that .html file as the owner's chat \
             shows it and see the image, with content_height and any remote URLs that never \

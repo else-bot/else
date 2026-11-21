@@ -9,6 +9,95 @@ use uuid::Uuid;
 use super::AppState;
 use crate::grants::Grant;
 
+/// The owner reads a task by this line; the task text stays folded.
+const TITLE_DESCRIPTION: &str =
+    "A short name for the task, for the owner, e.g. Triage overnight WhatsApp DMs. No IDs.";
+
+pub(super) fn delegate_schema() -> Value {
+    json!({
+        "description": "Hand one subtask to another registered bot (the main bot included) \
+            from your registry or a create_bot result, by its exact bot_id. It is for work, not \
+            status reports. Returns status pending with a task_id at once. Then tell the owner \
+            briefly and end this attempt; the other bot's reply arrives later in a \
+            continuation. At most one per attempt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_bot_id": { "type": "string", "format": "uuid" },
+                "task": { "type": "string", "minLength": 1, "maxLength": 4000,
+                          "description": "What the other bot should do, self-contained." },
+                "title": { "type": "string", "minLength": 1,
+                           "maxLength": crate::db::delegations::MAX_TITLE_CHARS,
+                           "description": TITLE_DESCRIPTION },
+                "files": { "type": "array", "maxItems": crate::app::messages::MAX_MESSAGE_FILES,
+                           "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                           "description": "Project paths of files the other bot needs, up to 10 MiB \
+                               each. It gets exact copies, never your project. Its replies can \
+                               attach files back the same way you attach them for the owner." },
+                "owner_answer": { "type": "string", "format": "uuid",
+                                  "description": "ID of an answered choice card, yours or from a task you delegated, \
+                                      that decides this task. The other bot sees the answer as the owner's words. \
+                                      It does not use the request's delegate budget." },
+            },
+            "required": ["target_bot_id", "task", "title"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) fn council_schema() -> Value {
+    json!({
+        "description": "Ask 1 to 32 distinct bots for reports on the same self-contained task. Use list_bots with category_id to find every member of a category. Accepted atomically; runs asynchronously and returns all outcomes in a continuation. After pending, end this attempt immediately. Delegated tasks cannot create councils. No memory or permissions are shared.",
+        "inputSchema": {"type": "object", "properties": {
+            "target_bot_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 1, "maxItems": crate::db::delegations::MAX_COUNCIL_BOTS, "uniqueItems": true},
+            "task": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "title": {"type": "string", "minLength": 1, "maxLength": crate::db::delegations::MAX_TITLE_CHARS, "description": TITLE_DESCRIPTION}
+        }, "required": ["target_bot_ids", "task", "title"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+    })
+}
+
+pub(super) fn update_schema() -> Value {
+    json!({
+        "description": "Change a task you delegated that is still in progress, by its task_id. \
+            The other bot stops its current attempt and continues the same task with your \
+            message and its earlier work; the result still arrives in a continuation. Returns \
+            the task's state. An ended task is not changed; its outcome arrives in a continuation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "format": "uuid" },
+                "message": { "type": "string", "minLength": 1, "maxLength": 4000,
+                             "description": "The change, written to the other bot as a follow-up to its task." },
+            },
+            "required": ["task_id", "message"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) fn cancel_schema() -> Value {
+    json!({
+        "description": "Stop a task you delegated that is still in progress, by its task_id. \
+            Returns its state: stopping until the other bot's attempt ends; the outcome, \
+            normally cancelled with any partial reply, arrives in a continuation. An ended task is not changed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "format": "uuid" },
+            },
+            "required": ["task_id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": true,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
 pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::delegations::{self, DelegateError};
     let Some(target) = args["target_bot_id"]

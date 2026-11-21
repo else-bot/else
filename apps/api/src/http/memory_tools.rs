@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::mcp::{slice, wire_size};
+use super::tool_defs::read_only;
 use super::tool_result::{Done, Refusal, ToolResult};
 use crate::app::memory_tree::NodeId;
 use crate::db::memory::{self, EntryRow, RESPONSE_BUDGET};
@@ -42,6 +43,112 @@ fn fill(
         added += 1;
     }
     added
+}
+
+fn bot() -> Value {
+    json!({ "type": "string", "format": "uuid",
+            "description": "Another bot's ID from memory_bots. Omit for your own memory." })
+}
+
+pub(super) fn bots_schema() -> Value {
+    json!({
+        "description": "List the bots whose memory you may read: yourself, and bots the owner shared.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn search_schema() -> Value {
+    json!({
+        "description": "Search original memory entries (messages, corrections, tool activity) by words. \
+            Returns up to 20 hits, best first, with sequence numbers to read in full. Entries an owner \
+            correction replaced are hidden unless include_superseded is true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY },
+                "bot_id": bot(),
+                "include_superseded": { "type": "boolean" },
+                "cursor": { "type": "string", "description": "next_cursor from a previous page" },
+            },
+            "required": ["query"],
+            "additionalProperties": false,
+        },
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn read_schema() -> Value {
+    json!({
+        "description": "Read original memory entries in order from start_seq (count up to 20). \
+            With count 1, offset pages through a long entry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start_seq": { "type": "integer", "minimum": 0 },
+                "count": { "type": "integer", "minimum": 1, "maximum": MAX_READ },
+                "offset": { "type": "integer", "minimum": 0 },
+                "bot_id": bot(),
+            },
+            "required": ["start_seq"],
+            "additionalProperties": false,
+        },
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn view_schema() -> Value {
+    json!({
+        "description": "The saved overview of a bot's memory: ordered nodes, each covering a range of \
+            entries (start+span), oldest first. Summaries are exact copies or joins of originals; \
+            zoom into a node, or read originals, before relying on it. Reports covered and pending \
+            ranges explicitly.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "bot_id": bot(),
+                "from_index": { "type": "integer", "minimum": 0,
+                                "description": "next_index from a previous page" },
+            },
+            "additionalProperties": false,
+        },
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn zoom_schema() -> Value {
+    json!({
+        "description": "Open one node from memory_view or a previous zoom: its two halves, or for \
+            span 1 the original entry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start_seq": { "type": "integer", "minimum": 0 },
+                "span": { "type": "integer", "minimum": 1 },
+                "bot_id": bot(),
+            },
+            "required": ["start_seq", "span"],
+            "additionalProperties": false,
+        },
+        "annotations": read_only(),
+    })
+}
+
+pub(super) fn date_schema() -> Value {
+    json!({
+        "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seq": { "type": "integer", "minimum": 0 },
+                "end_seq": { "type": "integer", "minimum": 0 },
+                "bot_id": bot(),
+            },
+            "required": ["seq"],
+            "additionalProperties": false,
+        },
+        "annotations": read_only(),
+    })
 }
 
 async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, Refusal> {

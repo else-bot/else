@@ -13,59 +13,57 @@ use crate::app::watchers::{
 use crate::db::task_secrets;
 use crate::db::watchers::{self, NewWatcher, Started, StopBy, Stopped};
 
-pub(super) const START: &str = "computer_watch_start";
-pub(super) const LIST: &str = "computer_watches";
-pub(super) const STOP: &str = "computer_watch_stop";
 const MAX_TEXT: usize = 8000;
 
-pub(super) fn tools(guest: &Value) -> Vec<Value> {
-    vec![
-        json!({
-            "name": START,
-            "description": "Watch for something that may take hours or days (up to 30 days): \
-                else.bot runs check in your computer every every_minutes until it prints \
-                anything (found), fails 3 times in a row, or hours pass, then wakes you once \
-                with prompt. Your turn ends now and the owner can keep chatting. The check \
-                must only look, never act; act when woken.",
-            "inputSchema": { "type": "object", "properties": {
-                "check": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT,
-                    "description": "Shell command, safe to repeat. Exit 0 printing nothing: not \
-                        yet. Exit 0 printing something: found. A line starting STATUS: is shown \
-                        to the owner and is not output." },
-                "every_minutes": { "type": "integer", "minimum": MIN_EVERY_MINUTES,
-                    "maximum": MAX_EVERY_MINUTES, "description": "Default 15." },
-                "hours": { "type": "integer", "minimum": 1, "maximum": MAX_HOURS,
-                    "description": "Deadline from now. Promise the owner nothing past it." },
-                "purpose": { "type": "string", "minLength": 1, "maxLength": 300,
-                    "description": "What it waits for, in the owner's words, e.g. example.com \
-                        becomes available." },
-                "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT,
-                    "description": "Your instructions to yourself for when it finds it, e.g. \
-                        Register example.com, then tell the owner." },
-                "secrets": { "type": "array", "maxItems": 4, "uniqueItems": true,
-                    "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$" },
-                    "description": "Vault entry names (see computer_secrets) whose variables every \
-                        check gets. Read them from the environment; never print them." } },
-                "required": ["check", "hours", "purpose", "prompt"], "additionalProperties": false },
-            "annotations": guest,
-        }),
-        json!({
-            "name": LIST,
-            "description": "Your active watchers with their deadline, last status and next check.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-            "annotations": { "readOnlyHint": true, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        }),
-        json!({
-            "name": STOP,
-            "description": "Stop one of your watchers. It does not wake you.",
-            "inputSchema": { "type": "object", "properties": {
-                "watch_id": { "type": "string", "format": "uuid" } },
-                "required": ["watch_id"], "additionalProperties": false },
-            "annotations": { "readOnlyHint": false, "destructiveHint": true,
-                             "idempotentHint": true, "openWorldHint": false },
-        }),
-    ]
+pub(in crate::http) fn start_schema() -> Value {
+    json!({
+        "description": "Watch for something that may take hours or days (up to 30 days): \
+            else.bot runs check in your computer every every_minutes until it prints \
+            anything (found), fails 3 times in a row, or hours pass, then wakes you once \
+            with prompt. Your turn ends now and the owner can keep chatting. The check \
+            must only look, never act; act when woken.",
+        "inputSchema": { "type": "object", "properties": {
+            "check": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT,
+                "description": "Shell command, safe to repeat. Exit 0 printing nothing: not \
+                    yet. Exit 0 printing something: found. A line starting STATUS: is shown \
+                    to the owner and is not output." },
+            "every_minutes": { "type": "integer", "minimum": MIN_EVERY_MINUTES,
+                "maximum": MAX_EVERY_MINUTES, "description": "Default 15." },
+            "hours": { "type": "integer", "minimum": 1, "maximum": MAX_HOURS,
+                "description": "Deadline from now. Promise the owner nothing past it." },
+            "purpose": { "type": "string", "minLength": 1, "maxLength": 300,
+                "description": "What it waits for, in the owner's words, e.g. example.com \
+                    becomes available." },
+            "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT,
+                "description": "Your instructions to yourself for when it finds it, e.g. \
+                    Register example.com, then tell the owner." },
+            "secrets": { "type": "array", "maxItems": 4, "uniqueItems": true,
+                "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$" },
+                "description": "Vault entry names (see computer_secrets) whose variables every \
+                    check gets. Read them from the environment; never print them." } },
+            "required": ["check", "hours", "purpose", "prompt"], "additionalProperties": false },
+        "annotations": super::guest_annotations(),
+    })
+}
+
+pub(in crate::http) fn list_schema() -> Value {
+    json!({
+        "description": "Your active watchers with their deadline, last status and next check.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": { "readOnlyHint": true, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(in crate::http) fn stop_schema() -> Value {
+    json!({
+        "description": "Stop one of your watchers. It does not wake you.",
+        "inputSchema": { "type": "object", "properties": {
+            "watch_id": { "type": "string", "format": "uuid" } },
+            "required": ["watch_id"], "additionalProperties": false },
+        "annotations": { "readOnlyHint": false, "destructiveHint": true,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 fn watcher_result(watcher: &watchers::Watcher) -> Value {

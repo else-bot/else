@@ -567,11 +567,61 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    let mut sorted = names.clone();
-    sorted.sort();
-    let mut expected = else_api::app::tools::TOOL_NAMES.to_vec();
-    expected.sort();
-    assert_eq!(sorted, expected);
+    // Reordering tools/list invalidates every provider's prompt cache.
+    assert_eq!(
+        names,
+        [
+            "mcp_list",
+            "mcp_install",
+            "mcp_request",
+            "mcp_wait",
+            "mcp_connect",
+            "skill_install",
+            "skill_read",
+            "memory_bots",
+            "memory_search",
+            "memory_read",
+            "memory_view",
+            "delegate",
+            "council",
+            "request_secret",
+            "ask_owner",
+            "ask_permission",
+            "delete_bot",
+            "draft_email",
+            "draft_message",
+            "webhook_create",
+            "mail_trigger_set",
+            "webhook_update",
+            "social_connect",
+            "social_action",
+            "computer_run",
+            "computer_job_start",
+            "computer_job",
+            "computer_watch_start",
+            "computer_write_file",
+            "computer_read_file",
+            "computer_fetch",
+            "computer_browser",
+            "computer_screenshot",
+            "computer_input",
+            "computer_resize",
+            "computer_handoff",
+            "notify_owner",
+            "mail_accounts",
+            "mail_connect",
+            "mail_disconnect",
+            "mail_action",
+            "mail_action_status",
+            "social_connections",
+            "social_action_status",
+            "rules_update",
+            "visual_preview",
+            "find_tool",
+            "use_tool",
+        ]
+    );
+    assert_eq!(names, else_api::app::tools::TOOL_NAMES);
     for tool in listed.body["result"]["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
         let read_only = name.starts_with("memory_")

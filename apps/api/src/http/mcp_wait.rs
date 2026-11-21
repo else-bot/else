@@ -27,7 +27,6 @@ const CONCURRENT_CHECKS: usize = 4;
 
 pub fn schema() -> Value {
     json!({
-        "name": NAME,
         "description": "Park until a job you started through mcp_request stops, instead of polling or \
             blocking (such as T3 Code's t3_thread_wait): name the MCP's read-only status tool \
             (such as task_status) and arguments, a JSON pointer to the status, and the values \
@@ -555,10 +554,9 @@ mod tests {
         ] {
             assert!(wait.contains(needle), "mcp_wait lacks {needle}: {wait}");
         }
-        let request = crate::http::shared_mcp::schemas()
-            .into_iter()
-            .find(|tool| tool["name"] == "mcp_request")
-            .unwrap();
+        let request = crate::http::tool_defs::get("mcp_request")
+            .unwrap()
+            .definition();
         assert!(
             request["description"]
                 .as_str()

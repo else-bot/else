@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn find_returns_matching_deferred_schemas_only() {
-        let all = super::super::mcp::all_tools();
+        let all = super::super::tool_defs::definitions();
         let exact = find(&all, "routine_create");
         assert_eq!(exact["tools"][0]["name"], "routine_create");
         assert!(exact["tools"][0]["inputSchema"].is_object());
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn find_returns_only_the_deferred_tools_a_query_names() {
-        let all = super::super::mcp::all_tools();
+        let all = super::super::tool_defs::definitions();
         let names = |query: &str| -> Vec<String> {
             find(&all, query)["tools"]
                 .as_array()
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn use_tool_runs_only_deferred_tools_with_declared_arguments() {
-        let all = super::super::mcp::all_tools();
+        let all = super::super::tool_defs::definitions();
         assert_eq!(
             target(&all, &json!({ "name": "routine_list", "arguments": {} })),
             Ok(("routine_list", &json!({})))
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn no_deferred_tool_declares_an_approval_effect() {
-        for tool in super::super::mcp::all_tools() {
+        for tool in super::super::tool_defs::definitions() {
             let name = tool["name"].as_str().unwrap();
             if DEFERRED_TOOLS.contains(&name) {
                 let props = &tool["inputSchema"]["properties"];
@@ -266,9 +266,9 @@ mod tests {
                 _ => {}
             }
         }
-        for tool in listed(super::super::mcp::all_tools())
+        for tool in listed(super::super::tool_defs::definitions())
             .into_iter()
-            .chain(super::super::mcp::all_tools())
+            .chain(super::super::tool_defs::definitions())
         {
             let name = tool["name"].as_str().unwrap();
             let text = tool["description"].as_str().unwrap();
