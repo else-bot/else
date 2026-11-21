@@ -542,15 +542,10 @@ impl Client {
         }
     }
 
-    pub async fn cancel(
-        self: Arc<Self>,
-        bot: Uuid,
-        request_id: Uuid,
-    ) -> Result<String, ClientError> {
+    pub async fn cancel(self: Arc<Self>, bot: Uuid, request_id: Uuid) -> Result<(), ClientError> {
         let body = json!({ "request_id": request_id });
-        self.call::<serde_json::Value>(Method::POST, format!("/v1/bots/{bot}/cancel"), Some(body))
+        self.call_unit(Method::POST, format!("/v1/bots/{bot}/cancel"), Some(body))
             .await
-            .map(|v| v["state"].as_str().unwrap_or_default().to_owned())
     }
 
     /// Save requested and owner-added fields, or decline with `None`.

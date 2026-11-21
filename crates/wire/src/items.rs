@@ -51,6 +51,16 @@ pub struct Item {
     pub attempt: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemEnvelope {
+    pub item: Item,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Items {
+    pub items: Vec<Item>,
+}
+
 /// A stored file scoped to one bot. Messages reference its ID, never a client path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {

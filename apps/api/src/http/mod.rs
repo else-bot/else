@@ -324,7 +324,7 @@ async fn readiness(
     }
 }
 
-async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn capabilities(State(state): State<Arc<AppState>>) -> Json<Capabilities> {
     let (configured, defaults, onboarding_required, server_name, server_icon) = tokio::join!(
         configured_profiles(&state.db),
         settings::defaults(&state),
@@ -342,7 +342,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .iter()
         .find(|view| view.state.available)
         .map(|view| view.state.id.clone());
-    Json(json!(Capabilities {
+    Json(Capabilities {
         api_version: Some("v1".into()),
         bot_avatar_on_create: true,
         answers_notice: true,
@@ -360,7 +360,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             max_text_bytes: crate::app::messages::MAX_TEXT_BYTES,
             max_bot_name_chars: crate::app::bots::MAX_NAME_CHARS,
         },
-    }))
+    })
 }
 
 /// A provider as capabilities list it, given the providers with a saved

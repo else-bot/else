@@ -13,7 +13,6 @@ use else_wire::settings::{
     ServerInfo, Shared, SharedIconBody,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::{AppState, Routes};
@@ -107,22 +106,24 @@ pub async fn defaults(state: &AppState) -> Result<Option<ProfileChoice>, ApiErro
         .map(ProfileChoice::from))
 }
 
-async fn show_defaults(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(DefaultsEnvelope {
-        defaults: defaults(&state).await?
-    })))
+async fn show_defaults(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DefaultsEnvelope>, ApiError> {
+    Ok(Json(DefaultsEnvelope {
+        defaults: defaults(&state).await?,
+    }))
 }
 
 async fn set_defaults(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<ProfileRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DefaultsEnvelope>, ApiError> {
     let provider_id = validate_choice(&state, &body)?;
     let profile = body.profile();
     save_defaults(&state, provider_id, &profile).await?;
-    Ok(Json(json!(DefaultsEnvelope {
+    Ok(Json(DefaultsEnvelope {
         defaults: Some(profile.choice(provider_id)),
-    })))
+    }))
 }
 
 /// Make `provider_id` the default provider with this (validated) profile.
@@ -179,13 +180,13 @@ async fn recheck(
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(provider_id): ApiPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotProfileEnvelope<ProviderProfile>>, ApiError> {
     let record = profiles::get(&state.db, &provider_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!(BotProfileEnvelope {
-        profile: ProviderProfile::from(&record)
-    })))
+    Ok(Json(BotProfileEnvelope {
+        profile: ProviderProfile::from(&record),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -201,7 +202,7 @@ async fn update(
     State(state): State<Arc<AppState>>,
     ApiPath(provider_id): ApiPath<String>,
     ApiJson(body): ApiJson<UpdateBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotProfileEnvelope<ProviderProfile>>, ApiError> {
     let saved = profiles::get(&state.db, &provider_id).await?.is_some();
     let adapter = state.registry.get(&provider_id);
     if !saved && !adapter.is_some_and(|p| p.uses_profile()) {
@@ -243,9 +244,9 @@ async fn update(
             _ => ApiError::not_found(),
         })?;
         if let Some(record) = created {
-            return Ok(Json(json!(BotProfileEnvelope {
-                profile: ProviderProfile::from(&record)
-            })));
+            return Ok(Json(BotProfileEnvelope {
+                profile: ProviderProfile::from(&record),
+            }));
         }
     }
     let patch = ProfilePatch {
@@ -271,9 +272,9 @@ async fn update(
         ),
         ProfileError::Db(err) => err.into(),
     })?;
-    Ok(Json(json!(BotProfileEnvelope {
-        profile: ProviderProfile::from(&record)
-    })))
+    Ok(Json(BotProfileEnvelope {
+        profile: ProviderProfile::from(&record),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -289,7 +290,7 @@ struct ServerBody {
 async fn name_server(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<ServerBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ServerEnvelope>, ApiError> {
     let name = body.name.trim();
     if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err(ApiError::bad_request(
@@ -299,12 +300,12 @@ async fn name_server(
     }
     let kept =
         crate::db::installation::set_server_name(&state.db, name, body.only_if_unnamed).await?;
-    Ok(Json(json!(ServerEnvelope {
+    Ok(Json(ServerEnvelope {
         server: ServerInfo {
             name: kept,
-            icon: Shared::Unsupported
-        }
-    })))
+            icon: Shared::Unsupported,
+        },
+    }))
 }
 
 #[derive(Deserialize)]
@@ -324,7 +325,7 @@ struct IconBody {
 async fn set_server_icon(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<IconBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ServerEnvelope<IconOnly>>, ApiError> {
     let picture = body
         .picture
         .map(|data| base64::engine::general_purpose::STANDARD.decode(data.as_bytes()))
@@ -334,20 +335,22 @@ async fn set_server_icon(
         .map_err(|reason| ApiError::bad_request("invalid_input", reason))?;
     let kept =
         crate::db::installation::set_server_icon(&state.db, &icon, body.only_if_unset).await?;
-    Ok(Json(json!(ServerEnvelope {
-        server: IconOnly { icon: kept }
-    })))
+    Ok(Json(ServerEnvelope {
+        server: IconOnly { icon: kept },
+    }))
 }
 
-async fn show_server_icon(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn show_server_icon(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SharedIconBody>, ApiError> {
     let (icon, picture) = crate::db::installation::server_icon_with_picture(&state.db)
         .await?
         .unzip();
     let picture = picture
         .flatten()
         .map(|png| base64::engine::general_purpose::STANDARD.encode(png));
-    Ok(Json(json!(SharedIconBody {
+    Ok(Json(SharedIconBody {
         icon: icon.unwrap_or(Shared::Unset),
-        picture
-    })))
+        picture,
+    }))
 }

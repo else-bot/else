@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use else_wire::secrets::{Answer, List, RevealedSecret, SavedSecret, VaultEntry};
 use serde::{Deserialize, Deserializer};
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath, SecretJson};
@@ -107,11 +107,11 @@ pub(super) fn error(err: SecretError) -> ApiError {
     }
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<List>, ApiError> {
     let secrets = task_secrets::list(&state.db).await?;
-    Ok(Json(json!(List {
-        secrets: secrets.iter().map(Into::into).collect()
-    })))
+    Ok(Json(List {
+        secrets: secrets.iter().map(Into::into).collect(),
+    }))
 }
 
 /// Create or replace an entry.
@@ -119,7 +119,7 @@ async fn replace(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
     SecretJson(body): SecretJson<Body>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<(StatusCode, Json<SavedSecret>), ApiError> {
     store(&state, &name, body, Mode::CreateOrReplace).await
 }
 
@@ -128,7 +128,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
     SecretJson(body): SecretJson<Body>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<(StatusCode, Json<SavedSecret>), ApiError> {
     store(&state, &name, body, Mode::CreateOnly).await
 }
 
@@ -137,7 +137,7 @@ async fn store(
     name: &str,
     body: Body,
     mode: Mode,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<(StatusCode, Json<SavedSecret>), ApiError> {
     let key = &*state.secret_key;
     let meta = meta(body.description, body.website)?;
     let created = task_secrets::put(&state.db, key, name, &body.env, &meta, mode)
@@ -155,11 +155,11 @@ async fn store(
         } else {
             StatusCode::OK
         },
-        Json(json!(SavedSecret {
+        Json(SavedSecret {
             name: name.to_owned(),
             env: body.env.keys().cloned().collect(),
-            not_redacted: short
-        })),
+            not_redacted: short,
+        }),
     ))
 }
 
@@ -169,7 +169,7 @@ async fn edit(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
     SecretJson(body): SecretJson<Edit>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<VaultEntry>, ApiError> {
     let patch = Patch {
         meta: meta(body.description, body.website)?,
         set: body.set,
@@ -178,20 +178,20 @@ async fn edit(
     let entry = task_secrets::update(&state.db, Some(&*state.secret_key), &name, &patch)
         .await
         .map_err(error)?;
-    Ok(Json(json!(VaultEntry::from(&entry))))
+    Ok(Json(VaultEntry::from(&entry)))
 }
 
 /// Show an entry's values to the owner, who confirmed it in the desktop.
 async fn reveal(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let env = task_secrets::reveal(&state.db, Some(&*state.secret_key), &name)
         .await
         .map_err(error)?;
     tracing::info!(secret = %name, "the owner revealed a vault entry");
     let env = env.iter().map(|(k, v)| (k.clone(), v.as_str())).collect();
-    Ok(Json(json!(RevealedSecret { env })))
+    Ok(Json(RevealedSecret::<&str> { env }).into_response())
 }
 
 async fn remove(
@@ -226,14 +226,14 @@ fn settle_error(err: SettleError) -> ApiError {
     }
 }
 
-fn settled(state: &AppState, settled: Settled) -> Json<Value> {
+fn settled(state: &AppState, settled: Settled) -> Json<Answer> {
     if settled.requeued {
         state.scheduler.wake();
     }
-    Json(json!(Answer {
+    Json(Answer {
         request: (&settled.request).into(),
-        requeued: settled.requeued
-    }))
+        requeued: settled.requeued,
+    })
 }
 
 /// Answer a bot's secret request: store the requested variables, and any the
@@ -243,7 +243,7 @@ async fn fulfill(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
     SecretJson(body): SecretJson<Body>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Answer>, ApiError> {
     let meta = meta(body.description, body.website)?;
     let done = secret_requests::fulfill(
         &state.db,
@@ -261,7 +261,7 @@ async fn fulfill(
 async fn cancel(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Answer>, ApiError> {
     let done = secret_requests::cancel(&state.db, bot_id, request_id)
         .await
         .map_err(settle_error)?;

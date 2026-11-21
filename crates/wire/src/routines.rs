@@ -148,6 +148,11 @@ pub struct RoutineEnvelope {
     pub queued: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Routines {
+    pub routines: Vec<Routine>,
+}
+
 /// A bot's webhook. An authenticated call wakes the bot with `prompt` at
 /// most as often as its pace allows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +173,11 @@ pub struct Webhook {
     #[serde(default)]
     pub updated_at: DateTime<Utc>,
     pub last_wake: Option<WebhookWake>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookEnvelope {
+    pub webhook: Webhook,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,4 +231,9 @@ pub struct Watcher {
     #[serde(default)]
     pub created_at: DateTime<Utc>,
     pub created_turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherEnvelope {
+    pub watcher: Watcher,
 }

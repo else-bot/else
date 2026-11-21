@@ -235,27 +235,27 @@ pub fn routes() -> Routes {
     }
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(Library {
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Library>, ApiError> {
+    Ok(Json(Library {
         skills: skills::list(&state.db)
             .await?
             .iter()
             .map(Into::into)
-            .collect()
-    })))
+            .collect(),
+    }))
 }
 
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SkillContents>, ApiError> {
     let (skill, contents) = skills::get(&state.db, &id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!(SkillContents {
+    Ok(Json(SkillContents {
         skill: (&skill).into(),
-        contents
-    })))
+        contents,
+    }))
 }
 
 async fn remove(
@@ -291,27 +291,27 @@ fn settle_error(err: SettleError) -> ApiError {
     }
 }
 
-fn settled(state: &AppState, settled: Settled) -> Json<Value> {
+fn settled(state: &AppState, settled: Settled) -> Json<Answer> {
     if settled.requeued {
         state.scheduler.wake();
     }
-    Json(json!(Answer {
+    Json(Answer {
         install: (&settled.install).into(),
-        requeued: settled.requeued
-    }))
+        requeued: settled.requeued,
+    })
 }
 
 async fn review(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<InstallReview>, ApiError> {
     let (install, contents) = skills::review(&state.db, bot_id, id)
         .await
         .map_err(settle_error)?;
-    Ok(Json(json!(InstallReview {
+    Ok(Json(InstallReview {
         install: (&install).into(),
-        contents
-    })))
+        contents,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -328,7 +328,7 @@ async fn approve(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, Uuid)>,
     SecretJson(body): SecretJson<Approval>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Answer>, ApiError> {
     let done = skills::approve(
         &state.db,
         Some(&*state.secret_key),
@@ -345,7 +345,7 @@ async fn approve(
 async fn decline(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Answer>, ApiError> {
     let done = skills::decline(&state.db, bot_id, id)
         .await
         .map_err(settle_error)?;

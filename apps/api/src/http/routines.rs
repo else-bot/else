@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use else_wire::routines::{Routine as WireRoutine, RoutineEnvelope};
+use else_wire::routines::{Routine as WireRoutine, RoutineEnvelope, Routines};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -85,7 +85,7 @@ fn code(err: &RoutineError) -> &'static str {
 async fn owner_list(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Routines>, ApiError> {
     let mut tx = state.db.begin().await?;
     match bots::status(&mut *tx, bot_id).await? {
         None => return Err(ApiError::not_found()),
@@ -94,9 +94,9 @@ async fn owner_list(
     }
     let list = routines::list(&mut tx, bot_id).await?;
     tx.commit().await?;
-    Ok(Json(json!({
-        "routines": list.iter().map(WireRoutine::from).collect::<Vec<_>>(),
-    })))
+    Ok(Json(Routines {
+        routines: list.iter().map(WireRoutine::from).collect(),
+    }))
 }
 
 /// `Some(None)` for an explicit `null`; a missing field stays `None`.
@@ -123,7 +123,7 @@ async fn owner_update(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<OwnerPatch>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RoutineEnvelope>, ApiError> {
     let model = match body.model {
         None => None,
         Some(None) => Some(ModelSetting::Inherit { requested: None }),
@@ -150,10 +150,10 @@ async fn owner_update(
         Utc::now(),
     )
     .await?;
-    Ok(Json(json!(RoutineEnvelope {
+    Ok(Json(RoutineEnvelope {
         routine: WireRoutine::from(&routine),
         queued: None,
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -169,7 +169,7 @@ async fn owner_retry(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<RetryRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RoutineEnvelope>, ApiError> {
     let by = routines::RunNow::Resume {
         bot_id,
         request_id: body.request_id,
@@ -181,10 +181,10 @@ async fn owner_retry(
     if queued {
         state.scheduler.wake();
     }
-    Ok(Json(json!(RoutineEnvelope {
+    Ok(Json(RoutineEnvelope {
         routine: WireRoutine::from(&routine),
         queued: Some(queued),
-    })))
+    }))
 }
 
 async fn owner_delete(

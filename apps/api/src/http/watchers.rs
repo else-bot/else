@@ -7,8 +7,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use else_wire::routines::Watcher;
-use serde_json::{Value, json};
+use else_wire::routines::{Watcher, WatcherEnvelope};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath};
@@ -26,11 +25,13 @@ pub fn routes() -> Routes {
 async fn owner_stop(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, watcher_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<WatcherEnvelope>, ApiError> {
     match watchers::stop(&state.db, bot_id, watcher_id, StopBy::Owner).await? {
         Stopped::Stopped(watcher) => {
             state.scheduler.wake();
-            Ok(Json(json!({ "watcher": Watcher::from(&watcher) })))
+            Ok(Json(WatcherEnvelope {
+                watcher: Watcher::from(&watcher),
+            }))
         }
         Stopped::NotActive(_) => Err(ApiError::new(
             StatusCode::CONFLICT,

@@ -80,20 +80,20 @@ pub(super) fn error(e: Error) -> ApiError {
         _ => ApiError::unavailable("social_unavailable", e.to_string()),
     }
 }
-async fn list(State(s): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list(State(s): State<Arc<AppState>>) -> Result<Json<wire::Connections>, ApiError> {
     let connections = store::connections(&s.db).await.map_err(error)?;
-    Ok(Json(json!(wire::Connections {
+    Ok(Json(wire::Connections {
         connections: connections.iter().map(Into::into).collect(),
-    })))
+    }))
 }
 async fn detail(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::ConnectionEnvelope>, ApiError> {
     let connection = store::connection(&s.db, id).await.map_err(error)?;
-    Ok(Json(json!(wire::ConnectionEnvelope {
+    Ok(Json(wire::ConnectionEnvelope {
         connection: (&connection).into(),
-    })))
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,7 +106,7 @@ struct Connect {
 async fn connect(
     State(s): State<Arc<AppState>>,
     SecretJson(request): SecretJson<Connect>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::ConnectionEnvelope>, ApiError> {
     let m = &s.socials;
     if request.provider.setup() != SetupKind::Token {
         return Err(error(Error::Invalid(
@@ -127,9 +127,9 @@ async fn connect(
     .await
     .map_err(error)?;
     m.changed(c.id).await;
-    Ok(Json(json!(wire::ConnectionEnvelope {
+    Ok(Json(wire::ConnectionEnvelope {
         connection: (&c).into(),
-    })))
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,7 +140,7 @@ async fn active(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(request): ApiJson<Active>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::ConnectionEnvelope>, ApiError> {
     let m = &s.socials;
     let to = if request.active {
         ConnectionState::Active
@@ -154,9 +154,9 @@ async fn active(
         }
         store::StateChange::Unchanged(c) => c,
     };
-    Ok(Json(json!(wire::ConnectionEnvelope {
+    Ok(Json(wire::ConnectionEnvelope {
         connection: (&c).into(),
-    })))
+    }))
 }
 /// Tell the connection's worker about a committed change from a task of its
 /// own, so a dropped request cannot lose the signal that stops in-flight work.
@@ -221,15 +221,15 @@ async fn toggle_trigger(
     State(s): State<Arc<AppState>>,
     ApiPath((bot, id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(input): ApiJson<Toggle>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::TriggerEnvelope>, ApiError> {
     super::turns::active_bot(&s, bot).await?;
     let change = store::set_trigger_enabled(&s.db, bot, id, input.enabled)
         .await
         .map_err(error)?;
     super::social_tools::reconnect(&s, &change).await;
-    Ok(Json(json!(wire::TriggerEnvelope {
+    Ok(Json(wire::TriggerEnvelope {
         trigger: (&change.value).into(),
-    })))
+    }))
 }
 async fn delete_trigger(
     State(s): State<Arc<AppState>>,
@@ -252,29 +252,29 @@ async fn complete(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::SetupEnvelope>, ApiError> {
     let m = &s.socials;
     let setup = store::settle_setup(&s.db, id, Some(input.connection_id), input.note.as_deref())
         .await
         .map_err(error)?;
     m.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
-    Ok(Json(json!(wire::SetupEnvelope {
+    Ok(Json(wire::SetupEnvelope {
         setup: (&setup).into(),
-    })))
+    }))
 }
 async fn cancel(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::SetupEnvelope>, ApiError> {
     let setup = store::settle_setup(&s.db, id, None, None)
         .await
         .map_err(error)?;
     s.socials.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
-    Ok(Json(json!(wire::SetupEnvelope {
+    Ok(Json(wire::SetupEnvelope {
         setup: (&setup).into(),
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -289,22 +289,22 @@ async fn start_pairing(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     purpose: fn(Uuid) -> Purpose,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::PairingEnvelope>, ApiError> {
     let view = s.socials.start_pairing(purpose(id)).await.map_err(error)?;
-    Ok(Json(json!(wire::PairingEnvelope { pairing: view })))
+    Ok(Json(wire::PairingEnvelope { pairing: view }))
 }
 async fn pairing(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     Query(after): Query<After>,
     purpose: fn(Uuid) -> Purpose,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::PairingEnvelope>, ApiError> {
     let view = s
         .socials
         .pairing(purpose(id), after.after)
         .await
         .map_err(error)?;
-    Ok(Json(json!(wire::PairingEnvelope { pairing: view })))
+    Ok(Json(wire::PairingEnvelope { pairing: view }))
 }
 async fn stop_repair_pairing(
     State(s): State<Arc<AppState>>,

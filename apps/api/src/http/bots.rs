@@ -7,7 +7,6 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use else_wire::settings::{BotProfile, BotProfileEnvelope};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
@@ -243,7 +242,7 @@ impl From<crate::db::bot_profiles::BotProfileError> for ApiError {
 async fn show_profile(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotProfileEnvelope<Option<BotProfile>>>, ApiError> {
     bots::find(&state.db, bot_id)
         .await?
         .filter(|bot| bot.status == BotStatus::Active)
@@ -258,18 +257,18 @@ async fn show_profile(
                 revision: None,
             }),
     };
-    Ok(Json(json!(BotProfileEnvelope { profile })))
+    Ok(Json(BotProfileEnvelope { profile }))
 }
 
 async fn set_profile(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<super::settings::ProfileRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotProfileEnvelope<BotProfile>>, ApiError> {
     let provider_id = super::settings::validate_choice(&state, &body)?;
     let saved =
         crate::db::bot_profiles::put(&state.db, bot_id, provider_id, &body.profile()).await?;
-    Ok(Json(json!(BotProfileEnvelope {
+    Ok(Json(BotProfileEnvelope {
         profile: BotProfile::from(&saved),
-    })))
+    }))
 }
