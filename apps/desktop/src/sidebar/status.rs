@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
+use else_wire::bots::Phase;
 
 use crate::api::{Bot, SidebarStatus, WaitingOn};
-use crate::model::Phase;
 
 /// How long a request has waited, in its largest whole unit: `now`, `5m`,
 /// `2h`, `3d`.

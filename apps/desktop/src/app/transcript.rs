@@ -4,12 +4,16 @@ use super::reply::Author;
 use super::row_text::{RowFormat, RowSource};
 use super::task_reply::state::{TaskReply, place_cards, task_replies};
 use crate::api::ReplyPosition;
-use crate::api::socials::SetupStatus;
 use crate::model::{
-    Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, ItemKind, OwnerNotice,
-    QuestionStatus, SecretRequestStatus, SkillInstallStatus, TurnStatus,
+    Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, OwnerNotice,
+    SkillInstallStatus,
 };
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use else_wire::items::ItemKind;
+use else_wire::questions::QuestionStatus;
+use else_wire::secrets::SecretRequestStatus;
+use else_wire::socials::SetupStatus;
+use else_wire::turns::TurnStatus;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 

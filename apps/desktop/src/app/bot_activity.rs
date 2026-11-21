@@ -12,8 +12,8 @@ use crate::attachments::MessagePart;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{
     BotCreated, BotReplyStatus, Conversation, ExchangeAsk, Item, OwnerNeed, OwnerNoticeStatus,
-    TurnStatus,
 };
+use else_wire::turns::TurnStatus;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Theme, v_flex};

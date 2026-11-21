@@ -2,6 +2,8 @@
 mod tests;
 mod view;
 
+use else_wire::socials::ConnectionState;
+use else_wire::socials::Health;
 use std::sync::Arc;
 
 use gpui_kit::component::input::{InputState, TextareaState};
@@ -9,9 +11,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::Client;
-use crate::api::socials::{
-    Connection, ConnectionState, Health, Pairing, PairingTarget, PairingView, Provider,
-};
+use crate::api::socials::{Connection, Pairing, PairingTarget, PairingView, Provider};
 
 enum Receipt {
     Loading {

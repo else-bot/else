@@ -1,8 +1,9 @@
 use super::*;
-use crate::api::{LocalBackupStatus, RemoteBackupStatus};
+use crate::api::LocalBackupStatus;
 use crate::connection::settings::settings_column;
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::{DateTime, Local, Utc};
+use else_wire::backups::RemoteBackupStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;

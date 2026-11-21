@@ -45,8 +45,6 @@ mod view;
 mod visuals;
 mod waiting_tray;
 mod warm;
-
-use crate::model::Phase;
 use categories::CategoryFormHolder;
 use conversation::ConversationView;
 use create_bot::CreateFormHolder;
@@ -57,6 +55,8 @@ use reply::Draft;
 use settings::BotSettings;
 use settings::model::ModelDialog;
 use transcript::RowKey;
+
+use else_wire::bots::Phase;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

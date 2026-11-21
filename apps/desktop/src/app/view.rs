@@ -14,8 +14,9 @@ use crate::controls::{
     COMPOSER_ACTION, Control as _, Scale, Tier, composer_actions, composer_turn, send_button,
     stop_button,
 };
-use crate::model::{Phase, TurnStatus};
 use crate::sidebar::status::{Kind, Subtitle};
+use else_wire::bots::Phase;
+use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::Icon;

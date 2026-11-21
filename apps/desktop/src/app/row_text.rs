@@ -4,7 +4,7 @@ use super::link_target::LinkTarget;
 use super::reply::{Author, Passage, QuotedReply};
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, byte_size, file_id, input_content};
-use crate::model::ItemKind;
+use else_wire::items::ItemKind;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{

@@ -9,6 +9,12 @@ pub use skills::*;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use else_wire::items::ItemKind;
+use else_wire::questions::{QuestionKind, QuestionStatus};
+use else_wire::routines::{PausedReason, RunStatus, SkipReason};
+use else_wire::rules::RuleAuthor;
+use else_wire::secrets::SecretRequestStatus;
+use else_wire::turns::TurnStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -17,13 +23,7 @@ use crate::api::socials::Trigger;
 use crate::api::{Activity, Bot};
 
 mod outgoing;
-mod status;
 pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
-pub(crate) use status::wire_state;
-pub use status::{
-    ItemKind, PausedReason, Phase, QuestionKind, QuestionStatus, RuleAuthor, RunStatus,
-    SecretRequestStatus, SkipReason, TurnStatus,
-};
 
 /// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
 #[derive(Debug, Clone, PartialEq, Eq)]

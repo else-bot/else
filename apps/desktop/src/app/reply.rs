@@ -1,6 +1,6 @@
 use super::attachments::DraftFile;
-use crate::model::ItemKind;
 use crate::model::ReactionKind;
+use else_wire::items::ItemKind;
 use gpui_kit::component::input::InputContent;
 use std::collections::HashMap;
 use std::ops::Range;

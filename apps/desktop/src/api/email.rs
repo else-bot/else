@@ -1,4 +1,5 @@
 use super::{Client, ClientError};
+use else_wire::email::{AccountHealth, AccountState};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -156,26 +157,6 @@ pub struct EmailAccount {
     pub config: EmailConfig,
     pub state: AccountState,
     pub health: AccountHealth,
-}
-
-crate::model::wire_state! {
-    pub enum AccountState {
-        Active = "active",
-        Paused = "paused",
-        Removed = "removed",
-    }
-    _ => Unknown
-}
-
-crate::model::wire_state! {
-    /// What the server last saw of an account's mail server.
-    pub enum AccountHealth {
-        /// Not checked since the account or its credential changed.
-        Unchecked = "unknown",
-        Connected = "connected",
-    }
-    /// Any failure, sent as its error code.
-    _ => Failing
 }
 
 #[derive(Deserialize)]

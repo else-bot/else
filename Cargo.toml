@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/api", "apps/desktop", "crates/plain-text", "crates/tailnet", "crates/visual"]
+members = ["apps/api", "apps/desktop", "crates/plain-text", "crates/tailnet", "crates/visual", "crates/wire"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +11,7 @@ rust-version = "1.100"
 else-plain-text = { path = "crates/plain-text" }
 else-tailnet = { path = "crates/tailnet" }
 else-visual = { path = "crates/visual" }
+else-wire = { path = "crates/wire" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false }
 base64 = "0.23.1"

@@ -8,8 +8,8 @@ use crate::app::clip;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
-use crate::model::QuestionKind;
-use crate::model::QuestionStatus;
+use else_wire::questions::QuestionKind;
+use else_wire::questions::QuestionStatus;
 use gpui_kit::component::radio::Radio;
 
 /// How long an approval choice lasts, as the scope list shows it.

@@ -1,6 +1,10 @@
 use crate::controls::{Control as _, Scale, Tier, hugging_segment, segment_track};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use else_wire::computers::DesiredState;
+
+use else_wire::computers::RuntimeState;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -10,8 +14,8 @@ use uuid::Uuid;
 use xkeysym::Keysym;
 
 use crate::api::{
-    Client, ClientError, ComputerState, ComputerUpgrade, DesiredState, DesktopCommand,
-    DesktopCommands, DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES, RuntimeState,
+    Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
+    DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES,
 };
 
 #[cfg(target_os = "macos")]

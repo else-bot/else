@@ -5,9 +5,9 @@
 //! Reads go to the server one request per bot at a time. Later wishes are
 //! merged into the next request instead of queued: positions only move
 //! forward, and of two explicit marks the later one wins.
-
-use crate::model::Phase;
 use std::collections::HashMap;
+
+use else_wire::bots::Phase;
 
 use uuid::Uuid;
 

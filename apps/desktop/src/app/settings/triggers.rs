@@ -299,7 +299,7 @@ struct TriggerCard {
 fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
     let mail = conversation.mail_triggers().iter().map(|trigger| {
         let mut pills = vec!["Email".to_owned(), "New mail".to_owned()];
-        if trigger.state == crate::api::AccountState::Paused {
+        if trigger.state == else_wire::email::AccountState::Paused {
             pills.push("inbox paused".to_owned());
         }
         TriggerCard {

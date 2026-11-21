@@ -7,6 +7,8 @@
 
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
+use else_wire::questions::QuestionKind;
+use else_wire::questions::QuestionStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
@@ -27,7 +29,7 @@ use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY, Question,
-    QuestionAnswer, QuestionKind, QuestionStatus, QuestionUse,
+    QuestionAnswer, QuestionUse,
 };
 
 mod approval;
@@ -677,10 +679,8 @@ mod tests {
             "a short card counts when whole"
         );
     }
-    use crate::model::{
-        APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionKind, QuestionStatus,
-        QuestionUse,
-    };
+    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionUse};
+    use else_wire::questions::{QuestionKind, QuestionStatus};
     use uuid::Uuid;
 
     fn question(kind: QuestionKind, status: QuestionStatus, answer: Option<&str>) -> Question {

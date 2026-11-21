@@ -2,7 +2,7 @@ use super::*;
 use crate::api::EmailProvider;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier, text_field};
-use crate::model::QuestionStatus;
+use else_wire::questions::QuestionStatus;
 use flow::{Consent, Flow, Resolution};
 use gpui_kit::component::input::{Input, InputState};
 

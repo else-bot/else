@@ -38,8 +38,8 @@ pub mod socials;
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
 pub use desktop::{
-    ComputerState, ComputerUpgrade, DesiredState, DesktopCommand, DesktopCommands, DesktopEvent,
-    DesktopMode, MAX_CLIPBOARD_BYTES, RuntimeState,
+    ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode,
+    MAX_CLIPBOARD_BYTES,
 };
 use serde_json::json;
 
@@ -278,7 +278,7 @@ struct Onboarded {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Activity {
-    pub phase: crate::model::Phase,
+    pub phase: else_wire::bots::Phase,
     pub active_turn_id: Option<Uuid>,
     pub queued_count: u32,
     /// Set while the active turn is parked on tasks it handed to other

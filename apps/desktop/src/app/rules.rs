@@ -3,7 +3,7 @@
 //! history.
 
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
-use crate::model::RuleAuthor;
+use else_wire::rules::RuleAuthor;
 use std::collections::HashMap;
 
 use super::ElseApp;

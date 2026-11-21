@@ -1,3 +1,4 @@
+use else_wire::socials::{ConnectionState, Health, SetupStatus};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -68,15 +69,6 @@ pub struct SocialSetup {
     pub reason: String,
     pub status: SetupStatus,
     pub connection_id: Option<Uuid>,
-}
-
-crate::model::wire_state! {
-    pub enum SetupStatus {
-        Pending = "pending",
-        Connected = "connected",
-        Cancelled = "cancelled",
-    }
-    _ => Unknown
 }
 
 /// Where a device pairing links: a bot's setup card, or a connection the
@@ -156,89 +148,6 @@ impl Connection {
             "messages go elsewhere"
         } else {
             self.health.as_str()
-        }
-    }
-}
-
-/// A connection's state as the server sends it; a newer server's state
-/// keeps its text so the panel can still show it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(from = "String")]
-pub enum ConnectionState {
-    Active,
-    Paused,
-    Removed,
-    Other(String),
-}
-
-impl From<String> for ConnectionState {
-    fn from(text: String) -> Self {
-        match text.as_str() {
-            "active" => Self::Active,
-            "paused" => Self::Paused,
-            "removed" => Self::Removed,
-            _ => Self::Other(text),
-        }
-    }
-}
-
-impl ConnectionState {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Active => "active",
-            Self::Paused => "paused",
-            Self::Removed => "removed",
-            Self::Other(text) => text,
-        }
-    }
-}
-
-/// How a connection's listener is doing; a newer server's health keeps its
-/// text so the panel can still show it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(from = "String")]
-pub enum Health {
-    Connecting,
-    Connected,
-    Reconnecting,
-    /// Another receiver took the platform's single listener slot.
-    ReceiverConflict,
-    /// The account signed this device out; the owner must pair it again.
-    SignedOut,
-    Paused,
-    Removed,
-    Restored,
-    Other(String),
-}
-
-impl From<String> for Health {
-    fn from(text: String) -> Self {
-        match text.as_str() {
-            "connecting" => Self::Connecting,
-            "connected" => Self::Connected,
-            "reconnecting" => Self::Reconnecting,
-            "receiver_conflict" => Self::ReceiverConflict,
-            "signed_out" => Self::SignedOut,
-            "paused" => Self::Paused,
-            "removed" => Self::Removed,
-            "restored" => Self::Restored,
-            _ => Self::Other(text),
-        }
-    }
-}
-
-impl Health {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Connecting => "connecting",
-            Self::Connected => "connected",
-            Self::Reconnecting => "reconnecting",
-            Self::ReceiverConflict => "receiver_conflict",
-            Self::SignedOut => "signed_out",
-            Self::Paused => "paused",
-            Self::Removed => "removed",
-            Self::Restored => "restored",
-            Self::Other(text) => text,
         }
     }
 }

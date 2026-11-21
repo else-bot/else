@@ -1,10 +1,10 @@
 use crate::app::transcript::CardKey;
+use else_wire::socials::SetupStatus;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
-use crate::api::socials::SetupStatus;
 
 pub(super) struct SocialCard {
     view: Entity<crate::socials::SocialsView>,

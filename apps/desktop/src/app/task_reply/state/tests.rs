@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::transcript::CardKey;
-use crate::model::ItemKind;
 use crate::model::{Frame, Snapshot};
+use else_wire::items::ItemKind;
 use serde_json::{Value, json};
 
 fn id(value: u128) -> Uuid {

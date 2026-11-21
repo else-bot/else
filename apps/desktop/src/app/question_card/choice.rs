@@ -1,6 +1,7 @@
 use crate::app::clip;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
+use else_wire::questions::QuestionStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -18,7 +19,7 @@ use uuid::Uuid;
 use super::super::action_card::OPTION_HEIGHT;
 use super::super::message_row::CardPlacement;
 use super::{Connection, ElseApp, Extent, QuestionForm, Request, RowKey, callout, letter, receipt};
-use crate::model::{Question, QuestionAnswer, QuestionStatus};
+use crate::model::{Question, QuestionAnswer};
 
 /// The field on a pending single-choice card for an answer its options don't
 /// cover, and the reply field of an open question. Its text is sent as an
@@ -573,7 +574,9 @@ fn divider(label: String, color: Hsla) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{QuestionForm, Request, Settled, settled};
-    use crate::model::{Question, QuestionAnswer, QuestionChoice, QuestionKind, QuestionStatus};
+    use crate::model::{Question, QuestionAnswer, QuestionChoice};
+    use else_wire::questions::QuestionKind;
+    use else_wire::questions::QuestionStatus;
     use uuid::Uuid;
 
     fn question(

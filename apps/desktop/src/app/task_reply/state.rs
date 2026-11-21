@@ -1,7 +1,9 @@
 use crate::app::RowKey;
 use crate::app::transcript::CardKey;
-use crate::model::{Conversation, ItemKind, TurnStatus};
+use crate::model::Conversation;
 use chrono::{DateTime, Utc};
+use else_wire::items::ItemKind;
+use else_wire::turns::TurnStatus;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 

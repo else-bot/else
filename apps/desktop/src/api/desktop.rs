@@ -1,4 +1,5 @@
 use super::{Client, ClientError};
+use else_wire::computers::{DesiredState, RuntimeState};
 use futures_util::{SinkExt as _, StreamExt as _};
 use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
@@ -42,33 +43,6 @@ pub struct ComputerState {
     pub memory_mib: Option<u32>,
     #[serde(default)]
     pub default_memory_mib: Option<u32>,
-}
-
-crate::model::wire_state! {
-    /// What the runtime last observed of a bot's computer.
-    pub enum RuntimeState {
-        Absent = "absent",
-        Creating = "creating",
-        Starting = "starting",
-        Running = "running",
-        Pausing = "pausing",
-        Paused = "paused",
-        Resuming = "resuming",
-        Stopping = "stopping",
-        Stopped = "stopped",
-        Missing = "missing",
-        Error = "error",
-    }
-    _ => Unknown
-}
-
-crate::model::wire_state! {
-    /// Whether the owner let the computer start on demand or stopped it.
-    pub enum DesiredState {
-        Auto = "auto",
-        Stopped = "stopped",
-    }
-    _ => Unknown
 }
 
 impl ComputerState {
