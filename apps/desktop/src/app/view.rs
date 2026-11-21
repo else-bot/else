@@ -1,6 +1,6 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
-use super::settings::watching_label;
+use super::panel::watching_label;
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, ElseApp, FindInConversation, FocusComposer,
     FocusSidebar, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,

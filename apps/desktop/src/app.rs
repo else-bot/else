@@ -24,6 +24,7 @@ mod mentions;
 mod message_menu;
 mod message_row;
 mod notice_card;
+mod panel;
 mod pause;
 mod pending_send;
 mod question_card;
