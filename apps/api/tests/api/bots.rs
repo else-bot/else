@@ -742,3 +742,144 @@ async fn last_message_at_follows_messages_not_metadata_edits() {
         "other bots are unaffected"
     );
 }
+
+/// A Codex whose catalog refresh can retire every model, and that can hold
+/// one validation open to overlap a resend with a creation in progress.
+#[derive(Default)]
+struct Refreshing {
+    retired: std::sync::atomic::AtomicBool,
+    hold: std::sync::Mutex<Option<Hold>>,
+}
+
+struct Hold {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+impl Refreshing {
+    fn retire(&self) {
+        self.retired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl else_api::app::providers::Provider for Refreshing {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+    fn label(&self) -> &'static str {
+        "Codex (refreshing catalog)"
+    }
+    fn availability(&self) -> else_api::app::providers::Availability {
+        else_api::app::providers::Availability::Available
+    }
+    fn uses_profile(&self) -> bool {
+        true
+    }
+    fn validate_profile(&self, p: &else_api::app::providers::Profile) -> Result<(), String> {
+        let verdict = if self.retired.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(format!("{} is no longer offered", p.model))
+        } else {
+            Ok(())
+        };
+        let hold = self.hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            hold.entered.send(()).unwrap();
+            hold.release.recv().unwrap();
+        }
+        verdict
+    }
+    async fn run(
+        &self,
+        input: else_api::app::providers::TurnInput,
+        sink: &dyn else_api::app::providers::TurnSink,
+        stop: else_api::app::providers::Stop,
+    ) -> else_api::app::providers::TurnOutcome {
+        else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5))
+            .run(input, sink, stop)
+            .await
+    }
+}
+
+fn create_with_profile(request_id: Uuid, name: &str) -> serde_json::Value {
+    json!({
+        "request_id": request_id,
+        "name": name,
+        "profile": { "provider_id": "codex", "model": "gpt-6.1-sol",
+                     "reasoning_effort": "medium", "service_tier": "default" },
+    })
+}
+
+async fn refreshing_app() -> (Arc<TestApp>, Arc<Refreshing>) {
+    let catalog = Arc::new(Refreshing::default());
+    let app = TestApp::builder()
+        .providers(vec![catalog.clone()])
+        .start()
+        .await;
+    (Arc::new(app), catalog)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_retry_returns_the_bot_after_its_model_leaves_the_catalog() {
+    let (app, catalog) = refreshing_app().await;
+    let body = create_with_profile(Uuid::new_v4(), "Work");
+    let first = app.owner("POST", "/v1/bots", Some(body.clone())).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+
+    catalog.retire();
+    let before = row_counts(&app).await;
+    let retry = app.owner("POST", "/v1/bots", Some(body)).await;
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.body["bot"]["id"], first.body["bot"]["id"]);
+    assert_eq!(row_counts(&app).await, before);
+
+    let fresh = app
+        .owner(
+            "POST",
+            "/v1/bots",
+            Some(create_with_profile(Uuid::new_v4(), "Other")),
+        )
+        .await;
+    assert_eq!(fresh.status, StatusCode::BAD_REQUEST, "{}", fresh.body);
+    assert_eq!(fresh.body["error"]["code"], "invalid_profile");
+}
+
+// The held validation blocks one worker thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_retry_during_the_first_creation_returns_its_bot_after_a_catalog_refresh() {
+    let (app, catalog) = refreshing_app().await;
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *catalog.hold.lock().unwrap() = Some(Hold {
+        entered,
+        release: release_rx,
+    });
+    let body = create_with_profile(Uuid::new_v4(), "Work");
+    let first = tokio::spawn({
+        let (app, body) = (app.clone(), body.clone());
+        async move { app.owner("POST", "/v1/bots", Some(body)).await }
+    });
+    common::until("the first send validates its profile", entered_rx)
+        .await
+        .unwrap();
+
+    catalog.retire();
+    let mut retry = tokio::spawn({
+        let app = app.clone();
+        async move { app.owner("POST", "/v1/bots", Some(body)).await }
+    });
+    common::never(
+        "the resend answers before the first send commits",
+        std::time::Duration::from_millis(300),
+        async { (&mut retry).await.map(|reply| reply.status) },
+    )
+    .await;
+    release.send(()).unwrap();
+
+    let first = common::until("the first send", first).await.unwrap();
+    let retry = common::until("the resend", retry).await.unwrap();
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.body["bot"]["id"], first.body["bot"]["id"]);
+}
