@@ -271,6 +271,16 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
     format!("{body}\n\nError: {error}")
 }
 
+/// The bot's message about a run it gave up reviewing: the run's outcome
+/// was neither retried nor counted.
+pub fn review_failed_notice(name: &str, reminder: bool) -> String {
+    let kind = if reminder { "reminder" } else { "routine" };
+    format!(
+        "I couldn't finish checking how the {kind} **{name}** went, so I didn't retry it or \
+         count it as a failure. If this keeps happening, ask me to look into it."
+    )
+}
+
 /// `at` in `timezone`, as the desktop shows times ("Sun 8 Nov, 04:00").
 pub fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
     match timezone.parse::<chrono_tz::Tz>() {
