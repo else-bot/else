@@ -5,9 +5,11 @@
 use std::fmt::Display;
 
 use super::Scheduler;
+use crate::connector_core::inbound;
+use crate::connectors::delivery::Mail;
 use crate::db::routines::{self, Check};
 use crate::db::{watchers, webhooks};
-use crate::{connectors, socials};
+use crate::socials::delivery::Social;
 
 /// Pending mail or social pairs admitted per pass.
 const DELIVERY_BATCH: i64 = 32;
@@ -55,11 +57,11 @@ pub(super) async fn all(scheduler: &Scheduler, launch: &(dyn Fn(Check) + Send + 
             logged("admitting webhook wakes", admitted.await);
         },
         async {
-            let admitted = connectors::delivery::admit_pending(pool, registry, DELIVERY_BATCH);
+            let admitted = inbound::admit_pending::<Mail>(pool, registry, DELIVERY_BATCH);
             logged("admitting email deliveries", admitted.await);
         },
         async {
-            let admitted = socials::delivery::admit_pending(pool, registry, DELIVERY_BATCH);
+            let admitted = inbound::admit_pending::<Social>(pool, registry, DELIVERY_BATCH);
             logged("admitting social deliveries", admitted.await);
         },
     );
