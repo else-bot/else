@@ -443,8 +443,6 @@ fn provider_view(
     }
 }
 
-/// What a bot reports when else.bot itself seems broken: the version and
-/// each part's state with the reason it gives.
 fn status_schema() -> serde_json::Value {
     json!({
         "description": "This else.bot installation's version and the state of each part \
@@ -457,6 +455,8 @@ fn status_schema() -> serde_json::Value {
     })
 }
 
+/// What a bot reports when else.bot itself seems broken: the version and
+/// each part's state with the reason it gives.
 pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     let (saved, backups) = tokio::join!(saved_models(&state.db), async {
         let backups = state.backups.as_ref().ok()?;
