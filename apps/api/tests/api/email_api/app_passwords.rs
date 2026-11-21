@@ -239,7 +239,7 @@ async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
             json!({"account_id":account.id,"command":{"operation":"folders"}}),
         )
     };
-    assert!(!folders().await.error);
+    folders().await.ok();
     tokio::time::timeout(common::SETTLE, inbox.ready.notified())
         .await
         .expect("the inbox is watched");

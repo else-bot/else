@@ -71,7 +71,7 @@ async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_g
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let args = json!({"account_id": account, "reason": "Reconnect it with a fresh sign-in."});
     let pending = tool(app, &token, "mail_disconnect", args.clone()).await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     assert_eq!(pending.result["parked"], true, "{}", pending.body);
     let question = pending.result["question_id"].as_str().unwrap().to_owned();
     let shown = card(app, &main, &question).await;
@@ -104,7 +104,7 @@ async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_g
     answer(app, &main, &question, "approve").await;
     let token = h.continued(turn, &token).await;
     let removed = tool(app, &token, "mail_disconnect", args.clone()).await;
-    assert!(!removed.error, "{}", removed.body);
+    removed.ok();
     assert_eq!(removed.result["status"], "removed", "{}", removed.body);
     assert_eq!(removed.result["address"], "bot@example.com");
     assert_eq!(
@@ -117,7 +117,7 @@ async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_g
     assert_eq!(card(app, &main, &question).await["status"], "answered");
 
     let retry = tool(app, &token, "mail_disconnect", args).await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(retry.result["status"], "not_connected");
     h.release(turn).await;
 

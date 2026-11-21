@@ -87,7 +87,7 @@ fn sol(effort: &str, tier: &str) -> Value {
 
 async fn create(app: &TestApp, token: &str, args: Value) -> Value {
     let called = tool(app, token, "routine_create", args).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     assert_eq!(called.result["created"], true, "{}", called.body);
     called.result
 }
@@ -540,7 +540,7 @@ async fn the_bot_keeps_resets_or_changes_a_routine_model() {
     let update = |args: Value| tool(&h.app, &token, "routine_update", args);
 
     let renamed = update(json!({ "routine_id": id, "name": "Morning digest" })).await;
-    assert!(!renamed.error, "{}", renamed.body);
+    renamed.ok();
     assert_eq!(renamed.result["routine"]["model"], routine["model"]);
     assert_eq!(renamed.result["model_note"], Value::Null);
 
@@ -548,7 +548,7 @@ async fn the_bot_keeps_resets_or_changes_a_routine_model() {
     assert_eq!(changed.result["routine"]["model"]["model"], "gpt-6.1-sol");
 
     let unknown = update(json!({ "routine_id": id, "model": "Gemini 3" })).await;
-    assert!(!unknown.error, "an unresolved model never fails the update");
+    unknown.ok();
     assert_eq!(unknown.result["routine"]["model"], Value::Null);
     assert_eq!(unknown.result["routine"]["requested_model"], "Gemini 3");
 
@@ -593,7 +593,7 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
     let (turn, token) = h.running(&main, GATE).await;
     let args = json!({ "name": "Sol", "purpose": "Answers with Sol.", "model": "GPT 6.1 Sol" });
     let created = tool(&h.app, &token, "create_bot", args.clone()).await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     assert_eq!(
         created.result["model"]["provider_id"], "codex",
         "{}",
@@ -756,7 +756,7 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     let args = json!({ "target_bot_id": dev, "model": "GPT 6.1 Sol",
                        "reasoning_effort": "high", "service_tier": "default" });
     let set = tool(&h.app, &token, "set_bot_model", args.clone()).await;
-    assert!(!set.error, "{}", set.body);
+    set.ok();
     assert_eq!(set.result["bot_id"], dev);
     assert_eq!(set.result["model"]["provider_id"], "codex");
     assert_eq!(set.result["model"]["model"], "gpt-6.1-sol");
@@ -784,7 +784,7 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
         json!({ "target_bot_id": dev, "reasoning_effort": "low" }),
     )
     .await;
-    assert!(!effort.error, "{}", effort.body);
+    effort.ok();
     assert_eq!(
         effort.result["model"]["model"], "gpt-6.1-sol",
         "the model is kept"
@@ -800,7 +800,7 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
         json!({ "target_bot_id": main, "model": "gpt-6-luna" }),
     )
     .await;
-    assert!(!own.error, "{}", own.body);
+    own.ok();
     assert_eq!(profile(main.clone()).await["model"], "gpt-6-luna");
     finish(&h, turn).await;
 

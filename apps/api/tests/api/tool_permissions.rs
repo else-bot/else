@@ -44,7 +44,7 @@ async fn setup() -> (Harness, String, uuid::Uuid, String) {
         "args":["-u", "-c", SERVER]}}),
     )
     .await;
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     (h, bot, turn, token)
 }
 
@@ -67,7 +67,7 @@ async fn stop(h: &Harness, bot: &str, turn: uuid::Uuid) {
 
 pub(super) fn executed(called: &recorder::Called, title: &str) {
     assert_eq!(called.status, StatusCode::OK, "{}", called.body);
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     let body: Value = serde_json::from_str(
         called.result["result"]["content"][0]["text"]
             .as_str()
@@ -394,7 +394,7 @@ async fn delegated_work_uses_the_bots_saved_tool_permission_and_offers_another()
         }),
     )
     .await;
-    assert!(!delegated.error, "{}", delegated.body);
+    delegated.ok();
     let task: uuid::Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()

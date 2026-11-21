@@ -307,7 +307,7 @@ async fn the_owner_reads_while_a_bot_command_holds_the_account() {
     };
     let (held, view) = tokio::join!(held, owner);
     assert_eq!(view.status, StatusCode::OK, "{}", view.body);
-    assert!(!held.error, "{}", held.body);
+    held.ok();
 }
 
 #[tokio::test]
@@ -400,7 +400,7 @@ async fn the_owner_opens_an_email_the_bot_already_read_without_fetching_it_again
         json!({"account_id":account.id,"command":{"operation":"read","message":message}}),
     )
     .await;
-    assert!(!read.error, "{}", read.body);
+    read.ok();
     assert_eq!(fetches(&mailbox), 1);
 
     let view = h
@@ -419,7 +419,7 @@ async fn the_owner_opens_an_email_the_bot_already_read_without_fetching_it_again
                "command":{"operation":"trash","message":message}}),
     )
     .await;
-    assert!(!trashed.error, "{}", trashed.body);
+    trashed.ok();
     h.app
         .owner("GET", &messages_path(account.id, 9), None)
         .await;
@@ -544,7 +544,7 @@ async fn a_bot_trashes_the_email_and_the_reader_opens_it_in_trash() {
                "command":{"operation":"trash","message":arrived()}}),
     )
     .await;
-    assert!(!trashed.error, "{}", trashed.body);
+    trashed.ok();
 
     let mail = turn_mail(&h, bot, turn).await;
     assert_eq!(mail["subject"], "Verify your email");
@@ -686,7 +686,7 @@ async fn finding_a_bot_archived_email_keeps_who_archived_it() {
                "command":{"operation":"archive","message":arrived()}}),
     )
     .await;
-    assert!(!archived.error, "{}", archived.body);
+    archived.ok();
 
     let view = h
         .app

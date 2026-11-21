@@ -69,7 +69,7 @@ async fn start(s: &Setup, check: &str, hours: i64) -> common::recorder::Called {
 
 async fn started(s: &Setup) -> Uuid {
     let called = start(s, CHECK, 240).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     assert_eq!(called.result.get("parked"), None, "the turn is not parked");
     called.result["watch_id"].as_str().unwrap().parse().unwrap()
 }
@@ -103,7 +103,7 @@ async fn start_with_secrets(s: &Setup, secrets: Value) -> common::recorder::Call
 async fn started_with_token(s: &Setup) -> Uuid {
     save_secret(s, "registrar", json!({ "REGISTRAR_TOKEN": TOKEN })).await;
     let called = start_with_secrets(s, json!(["registrar"])).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     assert_eq!(called.result["secrets"], json!(["registrar"]));
     called.result["watch_id"].as_str().unwrap().parse().unwrap()
 }
@@ -452,7 +452,7 @@ async fn the_owners_stop_wakes_the_bot_and_the_bots_own_stop_does_not() {
     assert_eq!(again.body["error"]["code"], "not_active");
 
     let own = start(&s, "./other-check.sh", 24).await;
-    assert!(!own.error, "{}", own.body);
+    own.ok();
     let turns = bot_turns(&s).await;
     let dropped = tool(
         &s.h.app,
@@ -461,7 +461,7 @@ async fn the_owners_stop_wakes_the_bot_and_the_bots_own_stop_does_not() {
         json!({ "watch_id": own.result["watch_id"] }),
     )
     .await;
-    assert!(!dropped.error, "{}", dropped.body);
+    dropped.ok();
     assert_eq!(dropped.result["status"], "ended");
     assert_eq!(dropped.result["outcome"], "stopped");
     s.h.app.scheduler.wake();
@@ -499,7 +499,7 @@ async fn a_bot_runs_at_most_four_watchers_and_a_retry_returns_the_same_one() {
     );
     for n in 0..3 {
         let more = start(&s, &format!("./check-{n}.sh"), 24).await;
-        assert!(!more.error, "{}", more.body);
+        more.ok();
     }
     let refused = start(&s, "./check-5.sh", 24).await;
     assert!(refused.error, "{}", refused.body);
@@ -605,11 +605,7 @@ async fn a_check_whose_vault_entry_was_deleted_fails_and_says_why() {
             .await;
     assert!(deleted.status.is_success(), "{}", deleted.body);
     let retried = start_with_secrets(&s, json!(["registrar"])).await;
-    assert!(
-        !retried.error,
-        "a retry still finds its watcher: {}",
-        retried.body
-    );
+    retried.ok();
     assert_eq!(retried.result["watch_id"], id.to_string());
     let launched = s.guest.launches().len();
     let jobs = || async {
@@ -680,7 +676,7 @@ async fn a_check_whose_vault_entries_cannot_be_read_fails_and_says_why() {
     save_secret(&s, "registrar", json!({ "REGISTRAR_TOKEN": TOKEN })).await;
     save_secret(&s, "dns", json!({ "DNS_TOKEN": "dns-0123456789" })).await;
     let called = start_with_secrets(&s, json!(["registrar", "dns"])).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     let id: Uuid = called.result["watch_id"].as_str().unwrap().parse().unwrap();
     let job = running_check(&s, id).await;
     check_ends(&s, job, "done 0\n").await;

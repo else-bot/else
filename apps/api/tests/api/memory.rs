@@ -291,7 +291,7 @@ fn assert_memory_reply(called: &Called) {
 
 fn bounded_memory_result(called: Called) -> Value {
     assert_memory_reply(&called);
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     called.result
 }
 

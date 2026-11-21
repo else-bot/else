@@ -160,7 +160,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         let token = &token;
         async move {
             let called = tool(app, token, name, args).await;
-            assert!(!called.error, "{name}: {}", called.body);
+            called.ok();
             called.result
         }
     };

@@ -59,7 +59,7 @@ async fn routine(
                 "config":{"type":"stdio", "command":"python3", "args":["-u", "-c", SERVER]}}),
         )
         .await;
-        assert!(!installed.error, "{}", installed.body);
+        installed.ok();
     }
     let created = create(
         &h.app,

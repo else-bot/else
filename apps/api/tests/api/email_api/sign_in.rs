@@ -276,7 +276,7 @@ async fn owner_routes_never_return_credentials_and_task_tokens_cannot_manage_acc
         assert_eq!(saved.status, StatusCode::OK);
     }
     let visible = tool(&h.app, &token, "mail_accounts", json!({})).await;
-    assert!(!visible.error, "{}", visible.body);
+    visible.ok();
     assert_eq!(visible.result["accounts"][0]["id"], json!(account.id));
     for _ in 0..2 {
         let revoked = h

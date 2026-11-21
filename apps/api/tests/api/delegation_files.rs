@@ -95,7 +95,7 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
         json!({ "target_bot_id": twitter, "task": task, "files": ["cards/whale.png"] }),
     )
     .await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     let pending = pending.result;
     assert_eq!(pending["status"], "pending", "{pending}");
     let digest = hex::encode(Sha256::digest(&card));
@@ -189,7 +189,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
                 "files": ["cards/whale.png"] }),
     )
     .await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     let pending = pending.result;
     let task: Uuid = pending["task_id"].as_str().unwrap().parse().unwrap();
     let child = child_of(app, task).await;
@@ -207,7 +207,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
             json!({ "task_id": task, "message": format!("{GATE_EVERY_ATTEMPT} Use the blue caption.") }),
         )
         .await;
-        assert!(!reply.error, "{}", reply.body);
+        reply.ok();
         app.wait_turn(child, &["interrupted"]).await;
         let replacement = child_of(app, task).await;
         h.started(replacement).await
@@ -222,7 +222,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
                 "choices": ["The blue one", "The red one"] }),
     )
     .await;
-    assert!(!asked.error, "{}", asked.body);
+    asked.ok();
     h.release(asking).await;
     app.wait_turn(asking, &["waiting"]).await;
 

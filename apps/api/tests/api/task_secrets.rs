@@ -1041,7 +1041,7 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
         typed("x-login", Some("PASSWORD")),
     )
     .await;
-    assert!(!filled.error, "{}", filled.body);
+    filled.ok();
     let result = filled.result;
     assert_eq!(
         result["added"],

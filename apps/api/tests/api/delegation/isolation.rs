@@ -217,7 +217,7 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         json!({ "target_bot_id": work, "task": GATE }),
     )
     .await;
-    assert!(!delegated.error, "{}", delegated.body);
+    delegated.ok();
     h.release(root).await;
     let task = delegated.result["task_id"]
         .as_str()
@@ -238,7 +238,7 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         call(private.parse().unwrap()).await.error,
         "Work's own grant to Private is not inherited"
     );
-    assert!(!call(shared.parse().unwrap()).await.error);
-    assert!(!call(work.parse().unwrap()).await.error);
+    call(shared.parse().unwrap()).await.ok();
+    call(work.parse().unwrap()).await.ok();
     h.release(child).await;
 }

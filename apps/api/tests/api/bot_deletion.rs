@@ -51,7 +51,7 @@ async fn with_routine(h: &Harness, bot: &str) {
         json!({ "name": "X Ads budget", "prompt": "Check the X Ads budget.", "cron": "0 9 1 1 *" }),
     )
     .await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     h.release(turn).await;
     h.app.wait_turn(turn, &["completed"]).await;
 }
@@ -71,7 +71,7 @@ async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let args = json!({ "target_bot_id": growth, "reason": "Marketing Manager owns its work now." });
     let pending = tool(&h.app, &token, "delete_bot", args.clone()).await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     assert_eq!(pending.result["status"], "pending");
     assert_eq!(pending.result["parked"], true);
     let question = pending.result["question_id"].as_str().unwrap().to_owned();
@@ -95,7 +95,7 @@ async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
     answer(&h.app, &main, &question, "approve").await;
     let token = h.continued(turn, &token).await;
     let deleted = tool(&h.app, &token, "delete_bot", args.clone()).await;
-    assert!(!deleted.error, "{}", deleted.body);
+    deleted.ok();
     assert_eq!(
         deleted.result["removed"]["routines"],
         json!(["X Ads budget"])
@@ -111,7 +111,7 @@ async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
     );
 
     let retry = tool(&h.app, &token, "delete_bot", args).await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(retry.result["status"], "deleted");
     assert!(retry.result.get("question_id").is_none());
     h.release(turn).await;
@@ -161,7 +161,7 @@ async fn refused_targets_and_a_denial_leave_the_bot_active() {
     answer(&h.app, &main, &question, "deny").await;
     let token = h.continued(turn, &token).await;
     let denied = tool(&h.app, &token, "delete_bot", args).await;
-    assert!(!denied.error, "{}", denied.body);
+    denied.ok();
     assert_eq!(denied.result["status"], "denied");
     assert_eq!(status(&h.app, &growth).await, "active");
     h.release(turn).await;
@@ -181,7 +181,7 @@ async fn a_task_cannot_delete_the_bot_that_delegated_it() {
         json!({ "target_bot_id": worker, "task": format!("{GATE_EVERY_ATTEMPT} Retire bots.") }),
     )
     .await;
-    assert!(!delegated.error, "{}", delegated.body);
+    delegated.ok();
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
