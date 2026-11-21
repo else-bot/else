@@ -396,7 +396,6 @@ impl Backups {
             let mut created = false;
             let check = async {
                 s3.list(&s3.key(".connection-check/")).await?;
-                s3.list_multipart(&s3.key(".connection-check/")).await?;
                 if s3.put(&key, payload.clone(), true).await? != super::s3::Put::Created {
                     return Err(super::s3::S3Error::Protocol("probe key already exists".into()));
                 }

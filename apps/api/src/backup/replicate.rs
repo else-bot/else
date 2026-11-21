@@ -48,7 +48,6 @@ pub struct Stats {
     pub reused: usize,
     /// Every byte this run wrote to the bucket.
     pub uploaded_bytes: u64,
-    pub aborted: usize,
     /// Sampled chunks verified, and those found damaged and deleted.
     pub checked: usize,
     pub damaged: usize,
@@ -425,9 +424,15 @@ impl Replicator {
             return Ok(whole);
         }
         let leftovers = self.set_key(&set_id, "");
-        for (upload_key, upload_id) in self.s3.list_multipart(&leftovers).await? {
+        let uploads = match self.s3.list_multipart(&leftovers).await {
+            Ok(uploads) => uploads,
+            // Only builds up to 0.0.45 started multipart uploads, and a
+            // least-privilege token may not be allowed to list them.
+            Err(S3Error::Status { status: 403, .. }) => Vec::new(),
+            Err(err) => return Err(err.into()),
+        };
+        for (upload_key, upload_id) in uploads {
             self.s3.abort_multipart(&upload_key, &upload_id).await?;
-            run.stats.aborted += 1;
         }
         for object in self.s3.list(&leftovers).await? {
             self.s3.delete(&object.key).await?;
