@@ -371,13 +371,15 @@ impl ElseApp {
                             app.create = None;
                             window.close_dialog(cx);
                         }
-                        if app.bots.iter().any(|b| b.id == bot.id) {
-                            return;
+                        let listed = app.bots.iter().any(|b| b.id == bot.id);
+                        if !listed {
+                            app.bots.push(bot.clone());
                         }
-                        app.bots.push(bot.clone());
                         app.select(Some(bot.id), window, cx);
                         app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                        app.refresh_now(window, cx);
+                        if !listed {
+                            app.refresh_now(window, cx);
+                        }
                     }
                     Err(_) => {
                         holder.update(cx, |h, cx| {
