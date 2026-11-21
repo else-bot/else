@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod backups;
+mod bot_tools;
 pub mod bots;
 pub mod categories;
 pub mod computers;
@@ -17,6 +18,7 @@ pub mod mcp;
 mod mcp_result;
 pub mod mcp_wait;
 pub mod memory;
+mod memory_tools;
 pub mod onboarding;
 pub mod outgoing_drafts;
 pub(crate) mod outgoing_tools;

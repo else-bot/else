@@ -15,8 +15,8 @@ use super::AppState;
 use super::tool_result::{Done, ToolResult};
 use super::tool_search::{FIND, USE};
 use super::{
-    connectors, delegation_tools, guest_tools, mcp, mcp_wait, outgoing_tools, owner_tools,
-    routines, rules, shared_mcp, skills, social_tools, visual_tools, webhooks,
+    bot_tools, connectors, delegation_tools, guest_tools, mcp_wait, memory_tools, outgoing_tools,
+    owner_tools, routines, rules, shared_mcp, skills, social_tools, visual_tools, webhooks,
 };
 use crate::grants::{Grant, Tool};
 
@@ -280,16 +280,16 @@ const TOOLS: &[ToolDef] = &[
         Box::pin(skills::read(c.state, c.grant, c.args))
     }),
     ToolDef::listed("memory_bots", Tool::ReadMemory, |c| {
-        Box::pin(mcp::bots(c.state, c.grant))
+        Box::pin(memory_tools::bots(c.state, c.grant))
     }),
     ToolDef::listed("memory_search", Tool::ReadMemory, |c| {
-        Box::pin(mcp::search(c.state, c.grant, c.args))
+        Box::pin(memory_tools::search(c.state, c.grant, c.args))
     }),
     ToolDef::listed("memory_read", Tool::ReadMemory, |c| {
-        Box::pin(mcp::read(c.state, c.grant, c.args))
+        Box::pin(memory_tools::read(c.state, c.grant, c.args))
     }),
     ToolDef::listed("memory_view", Tool::ReadMemory, |c| {
-        Box::pin(mcp::view(c.state, c.grant, c.args))
+        Box::pin(memory_tools::view(c.state, c.grant, c.args))
     }),
     ToolDef::listed("delegate", Tool::Delegate, |c| {
         Box::pin(delegation_tools::delegate(c.state, c.grant, c.args))
@@ -312,7 +312,7 @@ const TOOLS: &[ToolDef] = &[
     })
     .parking(),
     ToolDef::listed("delete_bot", Tool::EditBot, |c| {
-        Box::pin(mcp::delete_bot(c.state, c.grant, c.args))
+        Box::pin(bot_tools::delete_bot(c.state, c.grant, c.args))
     })
     .parking(),
     ToolDef::listed("draft_email", Tool::DraftEmail, |c| {
@@ -460,19 +460,19 @@ const TOOLS: &[ToolDef] = &[
     })
     .logs(by_id),
     ToolDef::deferred("memory_zoom", Tool::ReadMemory, |c| {
-        Box::pin(mcp::zoom(c.state, c.grant, c.args))
+        Box::pin(memory_tools::zoom(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("memory_date", Tool::ReadMemory, |c| {
-        Box::pin(mcp::date(c.state, c.grant, c.args))
+        Box::pin(memory_tools::date(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("else_status", Tool::Diagnose, |c| {
         Box::pin(async move { Ok(Done::json(super::status(c.state).await)) })
     }),
     ToolDef::deferred("list_bots", Tool::Delegate, |c| {
-        Box::pin(mcp::list_bots(c.state, c.grant, c.args))
+        Box::pin(bot_tools::list_bots(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("create_bot", Tool::CreateBot, |c| {
-        Box::pin(mcp::create_bot(c.state, c.grant, c.args))
+        Box::pin(bot_tools::create_bot(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("delegation_update", Tool::Delegate, |c| {
         Box::pin(delegation_tools::update(c.state, c.grant, c.args))
@@ -481,10 +481,10 @@ const TOOLS: &[ToolDef] = &[
         Box::pin(delegation_tools::cancel(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("rename_bot", Tool::EditBot, |c| {
-        Box::pin(mcp::rename_bot(c.state, c.grant, c.args))
+        Box::pin(bot_tools::rename_bot(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("set_bot_model", Tool::EditBot, |c| {
-        Box::pin(mcp::set_bot_model(c.state, c.grant, c.args))
+        Box::pin(bot_tools::set_bot_model(c.state, c.grant, c.args))
     }),
     ToolDef::deferred("confirm_permission", Tool::AskOwner, |c| {
         Box::pin(owner_tools::confirm_permission(c.state, c.grant, c.args))
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn each_tool_has_one_row_and_one_schema() {
-        let all = mcp::all_tools();
+        let all = super::super::mcp::all_tools();
         let schemas: Vec<&str> = all.iter().filter_map(|t| t["name"].as_str()).collect();
         for (i, tool) in TOOLS.iter().enumerate() {
             let rows = TOOLS[i..].iter().filter(|t| t.name == tool.name).count();
