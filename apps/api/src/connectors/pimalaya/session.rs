@@ -61,12 +61,12 @@ impl Socket {
     }
     async fn upgrade(self, connector: &TlsConnector, host: &str) -> Result<Self, MailError> {
         let Self::Plain(socket) = self else {
-            return Err(MailError::new("mail_tls_failed"));
+            return Err(MailError::new(MailErrorCode::MailTlsFailed));
         };
         let name = ServerName::try_from(host.to_owned()).map_err(failure)?;
         Ok(Self::Tls(Box::new(
             connector.connect(name, socket).await.map_err(|error| {
-                MailError::new("mail_tls_failed").cause(format!(
+                MailError::new(MailErrorCode::MailTlsFailed).cause(format!(
                     "the secure connection failed ({})",
                     safe_text(&error)
                 ))
@@ -88,7 +88,7 @@ impl Imap {
             Self::connect(endpoint, auth, &tls_connector()?),
         )
         .await
-        .map_err(|_| MailError::new("mail_timeout"))?
+        .map_err(|_| MailError::new(MailErrorCode::MailTimeout))?
     }
     pub(super) async fn connect(
         endpoint: &Endpoint,
@@ -126,14 +126,15 @@ impl Imap {
             match state {
                 ImapCoroutineState::Complete(Ok(data)) => {
                     return Ok(Self {
-                        socket: socket.ok_or_else(|| MailError::new("mail_tls_failed"))?,
+                        socket: socket
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?,
                         fragmentizer: parser,
                         tags,
                         capabilities: data.capability,
                     });
                 }
                 ImapCoroutineState::Complete(Err(_)) => {
-                    return Err(MailError::new(AUTHENTICATION_FAILED));
+                    return Err(MailError::new(MailErrorCode::MailAuthenticationFailed));
                 }
                 ImapCoroutineState::Yielded(y) => match y {
                     ImapSessionOpenYield::WantsTcpConnect { host, port } => {
@@ -158,13 +159,13 @@ impl Imap {
                         socket = Some(
                             socket
                                 .take()
-                                .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                                .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                                 .upgrade(connector, &endpoint.host)
                                 .await?,
                         );
                     }
                     ImapSessionOpenYield::WantsUnixConnect(_) => {
-                        return Err(MailError::new("mail_tls_failed"));
+                        return Err(MailError::new(MailErrorCode::MailTlsFailed));
                     }
                     ImapSessionOpenYield::WantsTag => {
                         arg = Some(tags.generate().as_ref().as_bytes().to_vec())
@@ -172,18 +173,18 @@ impl Imap {
                     ImapSessionOpenYield::WantsRead => {
                         let n = socket
                             .as_mut()
-                            .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                             .read(&mut bytes)
                             .await
                             .map_err(failure)?;
                         budget = budget
                             .checked_sub(n)
-                            .ok_or_else(|| MailError::new("mail_response_too_large"))?;
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailResponseTooLarge))?;
                         arg = Some(bytes[..n].to_vec());
                     }
                     ImapSessionOpenYield::WantsWrite(bytes) => socket
                         .as_mut()
-                        .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                        .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                         .write(&bytes)
                         .await
                         .map_err(failure)?,
@@ -243,7 +244,7 @@ impl Smtp {
             Self::connect(endpoint, auth, &tls_connector()?),
         )
         .await
-        .map_err(|_| MailError::new("mail_timeout"))?
+        .map_err(|_| MailError::new(MailErrorCode::MailTimeout))?
     }
     pub(super) async fn connect(
         endpoint: &Endpoint,
@@ -280,11 +281,12 @@ impl Smtp {
             match state {
                 SmtpCoroutineState::Complete(Ok(_)) => {
                     return Ok(Self {
-                        socket: socket.ok_or_else(|| MailError::new("mail_tls_failed"))?,
+                        socket: socket
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?,
                     });
                 }
                 SmtpCoroutineState::Complete(Err(_)) => {
-                    return Err(MailError::new(AUTHENTICATION_FAILED));
+                    return Err(MailError::new(MailErrorCode::MailAuthenticationFailed));
                 }
                 SmtpCoroutineState::Yielded(y) => match y {
                     SmtpSessionOpenYield::WantsTcpConnect { host, port } => {
@@ -309,29 +311,29 @@ impl Smtp {
                         socket = Some(
                             socket
                                 .take()
-                                .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                                .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                                 .upgrade(connector, &endpoint.host)
                                 .await?,
                         )
                     }
                     SmtpSessionOpenYield::WantsUnixConnect(_) => {
-                        return Err(MailError::new("mail_tls_failed"));
+                        return Err(MailError::new(MailErrorCode::MailTlsFailed));
                     }
                     SmtpSessionOpenYield::WantsRead => {
                         let n = socket
                             .as_mut()
-                            .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                             .read(&mut bytes)
                             .await
                             .map_err(io_failure)?;
                         budget = budget
                             .checked_sub(n)
-                            .ok_or_else(|| MailError::new("mail_response_too_large"))?;
+                            .ok_or_else(|| MailError::new(MailErrorCode::MailResponseTooLarge))?;
                         arg = Some(bytes[..n].to_vec());
                     }
                     SmtpSessionOpenYield::WantsWrite(bytes) => socket
                         .as_mut()
-                        .ok_or_else(|| MailError::new("mail_tls_failed"))?
+                        .ok_or_else(|| MailError::new(MailErrorCode::MailTlsFailed))?
                         .write(&bytes)
                         .await
                         .map_err(io_failure)?,

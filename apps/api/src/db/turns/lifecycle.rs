@@ -633,14 +633,10 @@ pub async fn finish_attempt(
             ..
         }
     );
-    crate::db::handoffs::transition(
-        conn,
-        turn,
-        attempt,
-        "sending",
-        if refused { "prepared" } else { "uncertain" },
-    )
-    .await?;
+    // Only a handoff in flight changes. One still prepared never left, and
+    // an accepted or uncertain one already holds its outcome, so a refusal
+    // or a turn without a handoff needs nothing here.
+    crate::db::handoffs::unacknowledged(conn, turn, attempt, refused).await?;
     if updated == 1 {
         if status.is_ended() {
             ended(conn, bot, turn).await?;

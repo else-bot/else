@@ -236,7 +236,7 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
         Check::Failed { message, permanent } => (message.as_str(), false, true, *permanent),
     };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let settled: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+    let settled: Option<(Uuid, Uuid, Status)> = sqlx::query_as(
         "UPDATE mcp_waits SET
              checks = checks + 1,
              failures = CASE WHEN ?3 THEN failures + 1 ELSE 0 END,
@@ -262,7 +262,7 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
     let Some((turn_id, bot_id, status)) = settled else {
         return Ok(false);
     };
-    if status == "pending" {
+    if status == Status::Pending {
         // The owner's row shows each check's status as it lands.
         events::turn_changed(&mut tx, bot_id, turn_id).await?;
         tx.commit().await?;

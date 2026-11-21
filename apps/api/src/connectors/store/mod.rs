@@ -21,10 +21,12 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig, MailError,
-    MailTrigger, MessageRef, MoveKind, Permissions, Place, Provider, Scan,
+    Account, AccountState, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig,
+    MailError, MailErrorCode, MailTrigger, MessageRef, MoveKind, Permissions, Place, Provider,
+    Scan,
 };
 use crate::connector_core::actions::{BeginError, Column, Columns, Ledger, Start, Status};
+use crate::connector_core::inbound::DeliveryStatus;
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
 
@@ -80,21 +82,23 @@ pub enum StoreError {
 impl From<StoreError> for MailError {
     fn from(error: StoreError) -> Self {
         match error {
-            StoreError::NotFound => MailError::new("mail_account_not_found"),
-            StoreError::Forbidden => MailError::new("mail_forbidden"),
-            StoreError::NotRunning => MailError::new("mail_not_running"),
-            StoreError::Inactive => MailError::new("mail_account_paused"),
-            StoreError::Changed => MailError::new("mail_account_changed"),
-            StoreError::Conflict => MailError::new("mail_action_conflict"),
-            StoreError::AddressTaken => MailError::new("mail_account_exists"),
-            StoreError::Limit(limit) => MailError::new("connector_limit").detail(limit),
-            StoreError::Invalid(why) => MailError::new("invalid_mail_request").detail(why),
-            StoreError::Crypto => MailError::new("mail_credential_unavailable"),
+            StoreError::NotFound => MailError::new(MailErrorCode::MailAccountNotFound),
+            StoreError::Forbidden => MailError::new(MailErrorCode::MailForbidden),
+            StoreError::NotRunning => MailError::new(MailErrorCode::MailNotRunning),
+            StoreError::Inactive => MailError::new(MailErrorCode::MailAccountPaused),
+            StoreError::Changed => MailError::new(MailErrorCode::MailAccountChanged),
+            StoreError::Conflict => MailError::new(MailErrorCode::MailActionConflict),
+            StoreError::AddressTaken => MailError::new(MailErrorCode::MailAccountExists),
+            StoreError::Limit(limit) => MailError::new(MailErrorCode::ConnectorLimit).detail(limit),
+            StoreError::Invalid(why) => {
+                MailError::new(MailErrorCode::InvalidMailRequest).detail(why)
+            }
+            StoreError::Crypto => MailError::new(MailErrorCode::MailCredentialUnavailable),
             StoreError::Db(error) => {
                 // sqlx text can quote stored values, so it is logged, never
                 // shown to the owner or the bot.
                 tracing::warn!(%error, "mail store failed");
-                MailError::new("mail_unavailable")
+                MailError::new(MailErrorCode::MailUnavailable)
             }
         }
     }

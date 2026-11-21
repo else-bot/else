@@ -154,16 +154,72 @@ pub async fn record_packet(
     Ok(())
 }
 
-/// Move this attempt's handoff between delivery states, inside the
-/// caller's transaction (the turn's own transition).
-pub async fn transition(
+/// A handoff's delivery, as stored in `handoffs.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum State {
+    Prepared,
+    Sending,
+    Accepted,
+    /// The packet may have reached the provider; nobody acknowledged it.
+    Uncertain,
+}
+
+/// What a handoff transition did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    Moved,
+    /// This attempt carries no handoff.
+    NoHandoff,
+    /// The handoff was not in the source state; it stays in this one.
+    Refused(State),
+}
+
+/// The packet is going out: `prepared` to `sending`.
+pub async fn send(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     attempt: i32,
-    from: &str,
-    to: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<Moved, sqlx::Error> {
+    transition(conn, turn_id, attempt, State::Prepared, State::Sending).await
+}
+
+/// The provider took the packet: `sending` to `accepted`.
+pub async fn accept(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    attempt: i32,
+) -> Result<Moved, sqlx::Error> {
+    transition(conn, turn_id, attempt, State::Sending, State::Accepted).await
+}
+
+/// The turn ended without acknowledgment: a packet the provider refused
+/// goes back to `prepared`, any other in-flight packet becomes `uncertain`.
+pub async fn unacknowledged(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    attempt: i32,
+    refused: bool,
+) -> Result<Moved, sqlx::Error> {
+    let to = if refused {
+        State::Prepared
+    } else {
+        State::Uncertain
+    };
+    transition(conn, turn_id, attempt, State::Sending, to).await
+}
+
+/// Move this attempt's handoff from `from` to `to`, inside the caller's
+/// transaction (the turn's own transition), so the follow-up read sees the
+/// state that refused the move.
+async fn transition(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    attempt: i32,
+    from: State,
+    to: State,
+) -> Result<Moved, sqlx::Error> {
+    let moved = sqlx::query(
         "UPDATE handoffs SET state = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              target_session_id = coalesce(target_session_id,
                  (SELECT provider_session_id FROM turns WHERE id = ?1))
@@ -174,8 +230,18 @@ pub async fn transition(
     .bind(from)
     .bind(to)
     .execute(&mut *conn)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected();
+    if moved == 1 {
+        return Ok(Moved::Moved);
+    }
+    let found: Option<State> =
+        sqlx::query_scalar("SELECT state FROM handoffs WHERE turn_id = ?1 AND attempt = ?2")
+            .bind(turn_id)
+            .bind(attempt)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(found.map_or(Moved::NoHandoff, Moved::Refused))
 }
 
 /// A handoff still `sending` whose turn has ended without acknowledgment

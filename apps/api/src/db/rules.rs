@@ -10,11 +10,12 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::TurnStatus;
+use super::turns::{ConversationKind, TurnStatus};
 use crate::app::providers::Origin;
 use crate::app::rules::{
     Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules, RulesUpdate,
 };
+use crate::db::bots::{self, BotStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RulesError {
@@ -114,30 +115,31 @@ async fn authorize_turn(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Authority, RulesError> {
-    let row: Option<(Uuid, TurnStatus, String, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, b.status, c.kind, d.owner_question_id
+    let row: Option<(Uuid, TurnStatus, BotStatus, ConversationKind, Option<Uuid>)> =
+        sqlx::query_as(
+            "SELECT t.bot_id, t.status, b.status, c.kind, d.owner_question_id
          FROM turns t JOIN bots b ON b.id = t.bot_id
          JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
          LEFT JOIN delegations d ON d.child_turn_id = t.id
          WHERE t.id = ?1 AND t.conversation_id = ?2",
-    )
-    .bind(caller.turn_id)
-    .bind(caller.conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+        )
+        .bind(caller.turn_id)
+        .bind(caller.conversation_id)
+        .fetch_optional(&mut *conn)
+        .await?;
     let Some((bot, status, bot_status, kind, question)) = row else {
         return Err(RulesError::NotRunning);
     };
     if bot != caller.bot_id {
         return Err(RulesError::NotAllowed);
     }
-    let authority = match (kind.as_str(), question) {
-        ("owner", _)
+    let authority = match (kind, question) {
+        (ConversationKind::Owner, _)
             if super::delegations::origin(conn, caller.turn_id).await? == Origin::OwnerRequest =>
         {
             Authority::OwnerRequest
         }
-        ("task", Some(question)) => {
+        (ConversationKind::Task, Some(question)) => {
             let chosen: Vec<String> = super::owner_questions::get(conn, question)
                 .await?
                 .map(|question| question.selected().into_iter().map(|c| c.label).collect())
@@ -155,7 +157,7 @@ async fn authorize_turn(
         }
         _ => return Err(RulesError::NotAllowed),
     };
-    if !status.serves_tools() || bot_status != "active" {
+    if !status.serves_tools() || !bot_status.is_active() {
         return Err(RulesError::NotRunning);
     }
     Ok(authority)
@@ -295,13 +297,9 @@ pub async fn restore(
     expected: Option<i64>,
 ) -> Result<i64, RulesError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&mut *tx, bot_id).await? {
         None => return Err(RulesError::NotFound),
-        Some("active") => {}
+        Some(BotStatus::Active) => {}
         Some(_) => return Err(RulesError::BotDeleted),
     }
     let target: Option<String> = if version == 0 {

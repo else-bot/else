@@ -3,6 +3,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::providers::{Availability, Profile};
+use crate::db::bots::{self, BotStatus};
 use crate::providers::Registry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,11 +110,10 @@ pub(super) async fn put_in(
     provider_id: &str,
     profile: &Profile,
 ) -> Result<BotProfile, BotProfileError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    if status.as_deref() != Some("active") {
+    if !bots::status(&mut *conn, bot_id)
+        .await?
+        .is_some_and(BotStatus::is_active)
+    {
         return Err(BotProfileError::NotFound);
     }
     if let Some(current) = own(conn, bot_id).await?

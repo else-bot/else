@@ -39,7 +39,7 @@ pub async fn record_scan(
     scan: &Scan,
 ) -> Result<bool, StoreError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<(String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let row: Option<(AccountState, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
         "SELECT state, generation, cursor_uid_validity, cursor_last_uid FROM connector_accounts WHERE id = ?1",
     )
     .bind(id)
@@ -48,7 +48,10 @@ pub async fn record_scan(
     let Some((state, current, validity, last)) = row else {
         return Ok(false);
     };
-    if state != "active" || current != generation || cursor_of((validity, last)).as_ref() != old {
+    if state != AccountState::Active
+        || current != generation
+        || cursor_of((validity, last)).as_ref() != old
+    {
         return Ok(false);
     }
     let mut cursor = scan.cursor.clone();
@@ -107,14 +110,15 @@ pub async fn record_scan(
         .await?;
         let Some(event) = event else { continue };
         sqlx::query(
-            "INSERT INTO connector_deliveries (event_id, bot_id, account_id, binding_id)
-             SELECT ?1, g.bot_id, g.account_id, g.binding_id FROM connector_grants g
+            "INSERT INTO connector_deliveries (event_id, bot_id, account_id, binding_id, status)
+             SELECT ?1, g.bot_id, g.account_id, g.binding_id, ?3 FROM connector_grants g
              JOIN bots b ON b.id = g.bot_id
              WHERE g.account_id = ?2 AND g.can_read AND g.can_wake
                AND b.status = 'active' AND NOT b.cancel_pending",
         )
         .bind(event)
         .bind(id)
+        .bind(DeliveryStatus::Pending)
         .execute(&mut *tx)
         .await?;
     }

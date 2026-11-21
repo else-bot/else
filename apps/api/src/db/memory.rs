@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::turns::{ConversationKind, ItemKind};
+
 /// Longest single entry body. Longer originals are split into parts.
 pub const MAX_PART_BYTES: usize = 64_000;
 /// Search hits per page.
@@ -18,7 +20,8 @@ pub const SEARCH_PAGE: i64 = 20;
 /// Serialized result budget for one retrieval response.
 pub const RESPONSE_BUDGET: usize = 16_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Kind {
@@ -37,13 +40,24 @@ impl Kind {
 
     /// Authority follows from the kind: only the owner's own words are
     /// owner authority, so model or tool text can never become one.
-    pub fn authority(self) -> &'static str {
+    pub fn authority(self) -> Authority {
         match self {
-            Kind::OwnerMessage | Kind::OwnerCorrection => "owner",
-            Kind::AssistantMessage | Kind::DelegatedTask => "assistant",
-            Kind::ToolActivity => "tool",
+            Kind::OwnerMessage | Kind::OwnerCorrection => Authority::Owner,
+            Kind::AssistantMessage | Kind::DelegatedTask => Authority::Assistant,
+            Kind::ToolActivity => Authority::Tool,
         }
     }
+}
+
+/// Whose words an entry holds, as stored in `memory_entry.authority`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum Authority {
+    Owner,
+    Assistant,
+    Tool,
+    External,
 }
 
 pub struct NewEntry<'a> {
@@ -153,13 +167,13 @@ pub async fn append(
         return Ok(existing.into_iter().map(|(seq, _)| seq).collect());
     }
     if let Some(target) = entry.supersedes_seq {
-        let authority: Option<String> =
+        let authority: Option<Authority> =
             sqlx::query_scalar("SELECT authority FROM memory_entry WHERE bot_id = ?1 AND seq = ?2")
                 .bind(bot_id)
                 .bind(target)
                 .fetch_optional(&mut *conn)
                 .await?;
-        if authority.as_deref() != Some("owner") {
+        if authority != Some(Authority::Owner) {
             return Err(AppendError::InvalidCorrection);
         }
     }
@@ -219,10 +233,10 @@ pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), 
         bot_id: Uuid,
         conversation_id: Uuid,
         turn_id: Uuid,
-        kind: String,
+        kind: ItemKind,
         text: String,
         provider_id: Option<String>,
-        conversation_kind: String,
+        conversation_kind: ConversationKind,
     }
     let row: Option<ItemRow> = sqlx::query_as(
         "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind AS conversation_kind
@@ -243,10 +257,10 @@ pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), 
     else {
         return Ok(());
     };
-    let kind = match kind.as_str() {
-        "user" if conversation_kind == "task" => Kind::DelegatedTask,
-        "user" => Kind::OwnerMessage,
-        "assistant" => Kind::AssistantMessage,
+    let kind = match (kind, conversation_kind) {
+        (ItemKind::User, ConversationKind::Task) => Kind::DelegatedTask,
+        (ItemKind::User, ConversationKind::Owner) => Kind::OwnerMessage,
+        (ItemKind::Assistant, _) => Kind::AssistantMessage,
         _ => return Ok(()),
     };
     let key = format!("item:{item_id}");
@@ -319,8 +333,8 @@ pub async fn readable_bots(
 #[derive(Debug, sqlx::FromRow)]
 pub struct EntryRow {
     pub seq: i64,
-    pub kind: String,
-    pub authority: String,
+    pub kind: Kind,
+    pub authority: Authority,
     pub body: String,
     pub source: Value,
     pub part_index: i32,
@@ -494,8 +508,8 @@ mod tests {
     #[test]
     fn only_owner_kinds_carry_owner_authority() {
         for kind in [Kind::AssistantMessage, Kind::ToolActivity] {
-            assert_ne!(kind.authority(), "owner");
+            assert_ne!(kind.authority(), Authority::Owner);
         }
-        assert_eq!(Kind::OwnerCorrection.authority(), "owner");
+        assert_eq!(Kind::OwnerCorrection.authority(), Authority::Owner);
     }
 }

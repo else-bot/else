@@ -44,7 +44,7 @@ impl Inbox {
         if !found
             && (![9, 11].contains(&message.uid) || self.gone.lock().unwrap().contains(message))
         {
-            return Err(MailError::new("message_not_found"));
+            return Err(MailError::new(MailErrorCode::MessageNotFound));
         }
         Ok(Fetched {
             raw: RAW.as_bytes().into(),
@@ -74,7 +74,7 @@ impl Inbox {
 impl MailReader for Mailbox {
     async fn read_message(&mut self, message: &MessageRef) -> Result<Fetched, MailError> {
         if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MailError::new("mail_transport_failed"));
+            return Err(MailError::new(MailErrorCode::MailTransportFailed));
         }
         self.serve(message)
     }
@@ -119,7 +119,7 @@ impl MailTransport for Mailbox {
             MailCommand::Locate { .. }
                 if self.unsearchable.load(std::sync::atomic::Ordering::SeqCst) =>
             {
-                Err(MailError::new("mail_transport_failed"))
+                Err(MailError::new(MailErrorCode::MailTransportFailed))
             }
             MailCommand::Locate { .. } => Ok(json!({"message":*self.found.lock().unwrap()})),
             MailCommand::Folders => {
@@ -127,7 +127,7 @@ impl MailTransport for Mailbox {
                 self.release.notified().await;
                 Ok(json!({"folders":[]}))
             }
-            _ => Err(MailError::new("message_not_found")),
+            _ => Err(MailError::new(MailErrorCode::MessageNotFound)),
         }
     }
     async fn fetch(
@@ -140,7 +140,7 @@ impl MailTransport for Mailbox {
     }
     async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
         if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MailError::new(AUTHENTICATION_FAILED));
+            return Err(MailError::new(MailErrorCode::MailAuthenticationFailed));
         }
         self.sessions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

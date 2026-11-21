@@ -47,7 +47,7 @@ pub(super) struct AccountRow {
     id: Uuid,
     config: Json<MailConfig>,
     generation: i64,
-    state: String,
+    state: AccountState,
     health: String,
 }
 
@@ -124,7 +124,7 @@ pub async fn create(
         id,
         config: config.clone(),
         generation: 1,
-        state: "active".into(),
+        state: AccountState::Active,
         health: Health::Unknown,
     })
 }
@@ -314,9 +314,9 @@ pub async fn set_active(
     active: bool,
 ) -> Result<Option<Account>, StoreError> {
     let (to, from) = if active {
-        ("active", "paused")
+        (AccountState::Active, AccountState::Paused)
     } else {
-        ("paused", "active")
+        (AccountState::Paused, AccountState::Active)
     };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -440,10 +440,11 @@ pub async fn remove(pool: &SqlitePool, id: Uuid) -> Result<bool, StoreError> {
         .execute(&mut *tx)
         .await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_deliveries SET status = 'cancelled', settled_at = {NOW}
+        "UPDATE connector_deliveries SET status = ?2, settled_at = {NOW}
          WHERE account_id = ?1 AND status = 'pending'"
     )))
     .bind(id)
+    .bind(DeliveryStatus::Cancelled)
     .execute(&mut *tx)
     .await?;
     inboxes_changed(&mut tx).await?;
@@ -467,8 +468,9 @@ pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     .execute(&mut *tx)
     .await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_deliveries SET status = 'cancelled', settled_at = {NOW} WHERE status = 'pending'"
+        "UPDATE connector_deliveries SET status = ?1, settled_at = {NOW} WHERE status = 'pending'"
     )))
+    .bind(DeliveryStatus::Cancelled)
     .execute(&mut *tx)
     .await?;
     ACTIONS.recover(&mut tx).await?;

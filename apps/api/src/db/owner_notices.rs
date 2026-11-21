@@ -28,7 +28,18 @@ pub const MAX_LINE: usize = 200;
 
 /// What a delegated task declared it needs from the owner, stored as
 /// `delegations.owner_need`. NULL there means it declared nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    sqlx::Type,
+)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Need {
@@ -54,7 +65,8 @@ impl From<Kind> for Need {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Kind {
@@ -70,7 +82,8 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Status {
@@ -106,10 +119,10 @@ type Row = (
     Uuid,
     Uuid,
     Uuid,
-    String,
+    Kind,
     String,
     Option<String>,
-    String,
+    Status,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
 );
@@ -123,10 +136,10 @@ fn notice(
         id,
         bot_id,
         turn_id,
-        kind: kind.parse().unwrap_or(Kind::Blocked),
+        kind,
         summary,
         tried,
-        status: status.parse().unwrap_or(Status::Pending),
+        status,
         created_at,
         settled_at,
     }
@@ -273,7 +286,7 @@ pub async fn declare(
         Declaration::Fyi { line } => Some(line.as_str()),
         _ => None,
     };
-    let stored: Option<String> = sqlx::query_scalar(
+    let stored: Option<Need> = sqlx::query_scalar(
         "UPDATE delegations SET owner_need = ?2, owner_line = ?3
          WHERE child_turn_id = ?1 AND status IN ('queued', 'running') RETURNING owner_need",
     )
@@ -282,7 +295,7 @@ pub async fn declare(
     .bind(line)
     .fetch_optional(&mut *tx)
     .await?;
-    if stored.as_deref() != Some(need.as_str()) {
+    if stored != Some(need) {
         return Err(CreateError::NotRunning);
     }
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;

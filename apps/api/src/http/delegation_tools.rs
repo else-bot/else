@@ -110,8 +110,12 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> T
     )
     .await
     {
-        Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
-            let log = format!("already {} {}", accepted.status, accepted.delegation_id);
+        Ok(accepted) if accepted.status.is_ended() => {
+            let log = format!(
+                "already {} {}",
+                accepted.status.as_str(),
+                accepted.delegation_id
+            );
             let result = json!({
                 "status": accepted.status,
                 "task_id": accepted.delegation_id,
@@ -304,9 +308,7 @@ pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> To
     .await
     {
         Ok(accepted) => {
-            let pending = accepted
-                .iter()
-                .any(|a| matches!(a.status.as_str(), "queued" | "running"));
+            let pending = accepted.iter().any(|a| !a.status.is_ended());
             if pending {
                 state.grants.park(grant.turn_id).await;
                 state.scheduler.wake();

@@ -123,32 +123,14 @@ pub fn description(text: &str) -> Result<String, SecretError> {
     Ok(text.to_owned())
 }
 
-/// How a bot used a secret.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// How a bot used a secret, as stored in `secret_uses.use`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum Use {
     Command,
     Job,
     Browser,
-}
-
-impl Use {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Command => "command",
-            Self::Job => "job",
-            Self::Browser => "browser",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "command" => Some(Self::Command),
-            "job" => Some(Self::Job),
-            "browser" => Some(Self::Browser),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -414,7 +396,7 @@ type InfoRow = (
     Option<String>,
     Option<Uuid>,
     Option<String>,
-    Option<String>,
+    Option<Use>,
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
@@ -427,7 +409,7 @@ const INFO: &str = "SELECT s.name, s.env_names, s.updated_at, s.description, s.w
 fn info(
     (name, env, updated_at, description, website, bot_id, bot_name, kind, at): InfoRow,
 ) -> SecretInfo {
-    let last_used = match (bot_id, kind.as_deref().and_then(Use::parse), at) {
+    let last_used = match (bot_id, kind, at) {
         (Some(bot_id), Some(kind), Some(at)) => Some(LastUse {
             bot_id,
             bot_name,
@@ -554,7 +536,7 @@ pub async fn record_use(
         .bind(name)
         .bind(bot_id)
         .bind(turn_id)
-        .bind(kind.as_str())
+        .bind(kind)
         .execute(pool)
         .await;
         let pruned = match recorded {

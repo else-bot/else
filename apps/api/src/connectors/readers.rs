@@ -59,19 +59,6 @@ pub(super) struct Readers {
     slots: crate::actor::Actor<HashMap<Uuid, (u64, Arc<Slot>)>>,
 }
 
-/// An error about the message itself, after which the session still works.
-fn about_message(error: &MailError) -> bool {
-    matches!(
-        error.code,
-        "message_not_found"
-            | "stale_message_reference"
-            | "invalid_message_uid"
-            | "invalid_mail_request"
-            | "invalid_email_message"
-            | "mail_message_too_large"
-    )
-}
-
 impl Readers {
     async fn slot(&self, account_id: Uuid) -> (u64, Arc<Slot>) {
         self.slots
@@ -156,7 +143,9 @@ impl Readers {
         let (result, session, path) = match warm {
             Some(mut warm) => match warm.session.read_message(message).await {
                 Ok(fetched) => (Ok(fetched), Some(warm.session), Path::Warm),
-                Err(error) if about_message(&error) => (Err(error), Some(warm.session), Path::Warm),
+                Err(error) if error.code.about_message() => {
+                    (Err(error), Some(warm.session), Path::Warm)
+                }
                 Err(_) => {
                     drop(warm);
                     let (result, session) = fresh(open, message).await;
@@ -216,7 +205,7 @@ where
     };
     match session.read_message(message).await {
         Ok(fetched) => (Ok(fetched), Some(session)),
-        Err(error) if about_message(&error) => (Err(error), Some(session)),
+        Err(error) if error.code.about_message() => (Err(error), Some(session)),
         Err(error) => (Err(error), None),
     }
 }
@@ -224,6 +213,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::types::MailErrorCode;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -250,7 +240,7 @@ mod tests {
     impl MailReader for Session {
         async fn read_message(&mut self, message: &MessageRef) -> Result<Fetched, MailError> {
             if self.0.broken.swap(false, Ordering::SeqCst) {
-                return Err(MailError::new("mail_transport_failed"));
+                return Err(MailError::new(MailErrorCode::MailTransportFailed));
             }
             match message.uid {
                 9 => {}
@@ -258,7 +248,7 @@ mod tests {
                     self.0.started.notify_one();
                     self.0.release.notified().await;
                 }
-                _ => return Err(MailError::new("message_not_found")),
+                _ => return Err(MailError::new(MailErrorCode::MessageNotFound)),
             }
             Ok(Fetched {
                 raw: b"raw".as_slice().into(),

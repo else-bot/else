@@ -11,16 +11,40 @@ pub struct Whereabouts {
     pub place: Place,
 }
 
-type PlaceRow = (String, Option<String>, Option<i64>, Option<i64>);
+#[derive(Clone, Copy, sqlx::Type, strum::IntoStaticStr)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+enum Location {
+    Arrived,
+    Archived,
+    Trashed,
+    Moved,
+    Deleted,
+}
+
+impl From<&Place> for Location {
+    fn from(place: &Place) -> Self {
+        match place {
+            Place::Arrived => Self::Arrived,
+            Place::Moved { kind, .. } => match kind {
+                MoveKind::Archived => Self::Archived,
+                MoveKind::Trashed => Self::Trashed,
+                MoveKind::Moved => Self::Moved,
+            },
+            Place::Deleted => Self::Deleted,
+        }
+    }
+}
+
+type PlaceRow = (Location, Option<String>, Option<i64>, Option<i64>);
 
 fn place_of((location, folder, uid_validity, uid): PlaceRow) -> Result<Place, StoreError> {
-    let kind = match location.as_str() {
-        "arrived" => return Ok(Place::Arrived),
-        "deleted" => return Ok(Place::Deleted),
-        "archived" => MoveKind::Archived,
-        "trashed" => MoveKind::Trashed,
-        "moved" => MoveKind::Moved,
-        _ => return Err(StoreError::Invalid("unknown mail location")),
+    let kind = match location {
+        Location::Arrived => return Ok(Place::Arrived),
+        Location::Deleted => return Ok(Place::Deleted),
+        Location::Archived => MoveKind::Archived,
+        Location::Trashed => MoveKind::Trashed,
+        Location::Moved => MoveKind::Moved,
     };
     let folder = folder.ok_or(StoreError::Invalid("a moved message has a folder"))?;
     let message = match (uid_validity, uid) {
@@ -45,12 +69,12 @@ fn place_row(place: &Place) -> PlaceRow {
         Place::Moved {
             folder, message, ..
         } => (
-            place.as_str().to_owned(),
+            place.into(),
             Some(folder.clone()),
             message.as_ref().map(|m| i64::from(m.uid_validity)),
             message.as_ref().map(|m| i64::from(m.uid)),
         ),
-        Place::Arrived | Place::Deleted => (place.as_str().to_owned(), None, None, None),
+        Place::Arrived | Place::Deleted => (place.into(), None, None, None),
     }
 }
 
@@ -65,7 +89,7 @@ pub async fn whereabouts(
     struct Row {
         id: Uuid,
         message_id: Option<String>,
-        location: String,
+        location: Location,
         moved_folder: Option<String>,
         moved_uid_validity: Option<i64>,
         moved_uid: Option<i64>,
@@ -166,7 +190,7 @@ pub async fn found(
                  WHERE id = ?1 AND location = ?2 AND moved_folder = ?5 AND moved_uid IS NULL",
             )
             .bind(event_id)
-            .bind(seen.as_str())
+            .bind(Location::from(seen))
             .bind(i64::from(message.uid_validity))
             .bind(i64::from(message.uid))
             .bind(folder)
@@ -234,7 +258,7 @@ async fn place_in(
     .bind(uid_validity)
     .bind(uid)
     .bind(turn_id)
-    .bind(guard.as_ref().map(|g| g.0.clone()))
+    .bind(guard.as_ref().map(|g| g.0))
     .bind(guard.as_ref().and_then(|g| g.1.clone()))
     .bind(guard.as_ref().and_then(|g| g.2))
     .bind(guard.as_ref().and_then(|g| g.3))

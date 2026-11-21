@@ -4,6 +4,7 @@
 //! cannot resolve never blocks saving, the routine inherits the bot's model
 //! and keeps the request for the owner to see.
 
+use crate::db::bots::{self, BotStatus};
 use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use std::sync::Arc;
 
@@ -86,13 +87,9 @@ async fn owner_list(
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let mut tx = state.db.begin().await?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&mut *tx, bot_id).await? {
         None => return Err(ApiError::not_found()),
-        Some("active") => {}
+        Some(BotStatus::Active) => {}
         Some(_) => return Err(super::turns::bot_deleted()),
     }
     let list = routines::list(&mut tx, bot_id).await?;

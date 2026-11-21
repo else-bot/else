@@ -12,7 +12,7 @@ use super::super::AppState;
 use crate::app::messages::{MAX_ATTACHMENT_BYTES, media_type, validate_name};
 use crate::app::outgoing::send::Approved;
 use crate::app::outgoing::{DraftFile, EmailPart, FileSource};
-use crate::connectors::types::MailCommand;
+use crate::connectors::types::{MailCommand, MailErrorCode};
 use crate::grants::{Grant, Tool};
 
 /// One file read for a draft, before it is stored.
@@ -67,12 +67,12 @@ async fn project_file(state: &AppState, grant: &Grant, path: &str) -> Result<Rea
 async fn email_file(state: &AppState, grant: &Grant, part: &EmailPart) -> Result<Read, String> {
     let refused = |code: &str| format!("FILE_UNAVAILABLE: email attachment {}: {code}", part.part);
     if !grant.allows(Tool::Mail) {
-        return Err(refused("mail_forbidden"));
+        return Err(refused(MailErrorCode::MailForbidden.as_str()));
     }
     let manager = &state.connectors;
     super::super::mail_attachments::readable(state, grant, part.account_id)
         .await
-        .map_err(|error| refused(error.code))?;
+        .map_err(|error| refused(error.code.as_str()))?;
     let fetched = manager
         .execute(
             part.account_id,
@@ -85,7 +85,7 @@ async fn email_file(state: &AppState, grant: &Grant, part: &EmailPart) -> Result
             },
         )
         .await
-        .map_err(|error| refused(error.code))?;
+        .map_err(|error| refused(error.code.as_str()))?;
     let listed = &fetched["attachments"][0];
     if let Some(code) = listed["error"].as_str() {
         return Err(refused(code));
@@ -93,7 +93,7 @@ async fn email_file(state: &AppState, grant: &Grant, part: &EmailPart) -> Result
     let data = listed["data_base64"]
         .as_str()
         .and_then(|data| STANDARD.decode(data).ok())
-        .ok_or_else(|| refused("mail_transport_failed"))?;
+        .ok_or_else(|| refused(MailErrorCode::MailTransportFailed.as_str()))?;
     if data.len() as u64 > MAX_ATTACHMENT_BYTES {
         return Err(refused("larger than 10 MiB"));
     }

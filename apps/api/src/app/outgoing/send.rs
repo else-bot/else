@@ -96,7 +96,7 @@ pub async fn send_connected(
                     let attachments = files.iter().map(mail_file).collect();
                     let command = email.send_command(attachments, Some(message_id));
                     let result = via.send_mail(account_id, action_id, command).await;
-                    let refused = result.err().map(|error| error.code);
+                    let refused = result.err().map(|error| error.code.as_str());
                     outgoing_drafts::after_mail_send(db, draft_id, refused).await?
                 }
                 MailSend::Sent(draft) => *draft,

@@ -39,7 +39,7 @@ impl Provider {
                 "Drafts",
                 "Sent Messages",
             ),
-            Self::Imap => return Err(MailError::new("custom_endpoints_required")),
+            Self::Imap => return Err(MailError::new(MailErrorCode::CustomEndpointsRequired)),
         };
         Ok(MailConfig {
             provider: self,
@@ -93,7 +93,7 @@ impl Provider {
                 "https://api.login.yahoo.com/oauth2/get_token",
                 "mail-r mail-w",
             )),
-            _ => Err(MailError::new("oauth_unavailable")),
+            _ => Err(MailError::new(MailErrorCode::OauthUnavailable)),
         }
     }
 }
@@ -127,7 +127,7 @@ impl MailConfig {
             .iter()
             .any(|s| !folder(s))
         {
-            return Err(MailError::new("invalid_mail_config"));
+            return Err(MailError::new(MailErrorCode::InvalidMailConfig));
         }
         if self.provider != Provider::Imap {
             let preset = self.provider.config(self.address.clone())?;
@@ -138,7 +138,7 @@ impl MailConfig {
                 || self.smtp.port != preset.smtp.port
                 || self.smtp.start_tls != preset.smtp.start_tls
             {
-                return Err(MailError::new("provider_endpoint_mismatch"));
+                return Err(MailError::new(MailErrorCode::ProviderEndpointMismatch));
             }
         }
         Ok(())
@@ -171,7 +171,7 @@ impl Credential {
         if valid && self.sealed_size_fits() {
             Ok(())
         } else {
-            Err(MailError::new("invalid_mail_credential"))
+            Err(MailError::new(MailErrorCode::InvalidMailCredential))
         }
     }
 
@@ -273,7 +273,7 @@ pub(crate) fn message_id(id: &str) -> bool {
 impl MailCommand {
     pub fn validate(&self) -> Result<(), MailError> {
         self.rule()
-            .map_err(|rule| MailError::new("invalid_mail_command").detail(rule))
+            .map_err(|rule| MailError::new(MailErrorCode::InvalidMailCommand).detail(rule))
     }
 
     fn rule(&self) -> Rule {
@@ -387,7 +387,8 @@ mod tests {
             oauth(8192, 8192)
                 .validate(Provider::Gmail)
                 .unwrap_err()
-                .code,
+                .code
+                .as_str(),
             "invalid_mail_credential"
         );
     }

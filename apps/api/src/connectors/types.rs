@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -89,12 +90,24 @@ impl Drop for Credential {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum AccountState {
+    Active,
+    Paused,
+    Removed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: Uuid,
     pub config: MailConfig,
     pub generation: i64,
-    pub state: String,
+    pub state: AccountState,
     pub health: Health,
 }
 
@@ -177,7 +190,7 @@ pub struct Permissions {
 pub struct MailTrigger {
     pub account_id: Uuid,
     pub address: String,
-    pub state: String,
+    pub state: AccountState,
     pub health: String,
     pub wake: bool,
     pub instructions: String,
@@ -422,27 +435,6 @@ impl MoveKind {
     }
 }
 
-impl Place {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Arrived => "arrived",
-            Self::Moved {
-                kind: MoveKind::Archived,
-                ..
-            } => "archived",
-            Self::Moved {
-                kind: MoveKind::Trashed,
-                ..
-            } => "trashed",
-            Self::Moved {
-                kind: MoveKind::Moved,
-                ..
-            } => "moved",
-            Self::Deleted => "deleted",
-        }
-    }
-}
-
 pub struct Scan {
     pub cursor: Cursor,
     pub arrivals: Vec<Arrival>,
@@ -491,10 +483,171 @@ impl SendPhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::Display, strum::IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MailErrorCode {
+    ActionIdRequired,
+    AttachmentNotOpened,
+    AttachmentPageNotFound,
+    ConnectorLimit,
+    CustomEndpointsRequired,
+    InvalidEmailAddress,
+    InvalidEmailMessage,
+    InvalidMailAttachment,
+    InvalidMailCommand,
+    InvalidMailConfig,
+    InvalidMailCredential,
+    InvalidMailLimit,
+    InvalidMailRequest,
+    InvalidMessageUid,
+    InvalidOauthCallback,
+    InvalidOauthClient,
+    InvalidOauthResponse,
+    InvalidOauthState,
+    InvalidRedirect,
+    MailAccountBusy,
+    MailAccountChanged,
+    MailAccountExists,
+    MailAccountNotFound,
+    MailAccountPaused,
+    MailAccountUnavailable,
+    MailActionConflict,
+    MailActionNotFound,
+    MailAttachmentsTooLarge,
+    MailAuthenticationFailed,
+    MailCredentialUnavailable,
+    MailDraftsNeedACard,
+    MailForbidden,
+    MailIdleNotSupported,
+    MailMessageIncomplete,
+    MailMessageTooLarge,
+    MailMissingUidNext,
+    MailMissingUidValidity,
+    MailMoveNotSupported,
+    MailNotRunning,
+    MailQueryTooLarge,
+    MailQueueExpired,
+    MailReceiptUnavailable,
+    MailRejected,
+    MailReplyHasNoRecipient,
+    MailResponseTooLarge,
+    MailSendNeedsApprovedDraft,
+    MailSignInFailed,
+    MailTimeout,
+    MailTlsFailed,
+    MailTransportFailed,
+    MailUidExpungeNotSupported,
+    MailUnavailable,
+    MailWatchFailed,
+    MaintenanceInProgress,
+    MessageDeleted,
+    MessageNotFound,
+    OauthMailAccessRequired,
+    OauthReauthenticationRequired,
+    OauthRefreshTokenRequired,
+    OauthRequestRejected,
+    OauthSetupExpired,
+    OauthSetupLimit,
+    OauthUnavailable,
+    OauthWizardUnavailable,
+    ProviderEndpointMismatch,
+    StaleMessageReference,
+}
+
+impl MailErrorCode {
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
+    /// Whether a message read failed without invalidating its mail session.
+    pub fn about_message(self) -> bool {
+        matches!(
+            self,
+            Self::MessageNotFound
+                | Self::StaleMessageReference
+                | Self::InvalidMessageUid
+                | Self::InvalidMailRequest
+                | Self::InvalidEmailMessage
+                | Self::MailMessageTooLarge
+        )
+    }
+
+    pub fn rejects_credential(self) -> bool {
+        matches!(
+            self,
+            Self::MailAuthenticationFailed | Self::OauthReauthenticationRequired
+        )
+    }
+
+    /// The status `From<MailError> for ApiError` answers with; handlers that
+    /// refuse before reaching the mail layer choose their own.
+    pub fn http_status(self) -> StatusCode {
+        match self {
+            Self::MailUnavailable
+            | Self::OauthUnavailable
+            | Self::MailAccountUnavailable
+            | Self::MaintenanceInProgress => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ConnectorLimit | Self::OauthSetupLimit | Self::MailAccountBusy => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+            _ => StatusCode::BAD_REQUEST,
+        }
+    }
+
+    pub fn http_message(self) -> Option<&'static str> {
+        match self {
+            Self::OauthRequestRejected => Some(
+                "The mail provider rejected the token request. Check the OAuth app's settings, then try again.",
+            ),
+            Self::OauthMailAccessRequired => {
+                Some("Allow Gmail access when signing in with Google, then try again.")
+            }
+            _ => None,
+        }
+    }
+
+    /// The owner's reader has more specific responses for some failures.
+    pub fn reader_response(self) -> Option<(StatusCode, &'static str)> {
+        Some(match self {
+            Self::MessageDeleted => (StatusCode::NOT_FOUND, "This email was deleted."),
+            Self::MessageNotFound | Self::StaleMessageReference => (
+                StatusCode::NOT_FOUND,
+                "This email left its folder, and the mail server did not say where it went.",
+            ),
+            Self::MailForbidden => (StatusCode::NOT_FOUND, "This inbox is no longer connected."),
+            Self::MailAccountPaused => (
+                StatusCode::CONFLICT,
+                "This inbox is paused. Resume it in Settings, Email, to read its mail.",
+            ),
+            Self::MailMessageTooLarge => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "This email is over 64 MiB, too large to show.",
+            ),
+            Self::MailAuthenticationFailed | Self::OauthReauthenticationRequired => (
+                StatusCode::CONFLICT,
+                "The mail server no longer accepts the saved sign-in. Reconnect the inbox in \
+                 Settings, Email.",
+            ),
+            _ => return None,
+        })
+    }
+}
+
+impl From<MailErrorCode> for Health {
+    fn from(code: MailErrorCode) -> Self {
+        match code {
+            MailErrorCode::MailAuthenticationFailed => Self::CredentialRejected,
+            MailErrorCode::OauthReauthenticationRequired => Self::ReauthenticationRequired,
+            code => Self::Failing(code.as_str().into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{code}{}", .detail.map(|d| format!(": {d}")).unwrap_or_default())]
 pub struct MailError {
-    pub code: &'static str,
+    pub code: MailErrorCode,
     /// Which field failed and its allowed values, for the bot to correct.
     pub detail: Option<&'static str>,
     /// Set on a failed send: how far it got.
@@ -504,7 +657,7 @@ pub struct MailError {
     pub cause: Option<String>,
 }
 impl MailError {
-    pub fn new(code: &'static str) -> Self {
+    pub fn new(code: MailErrorCode) -> Self {
         Self {
             code,
             detail: None,
@@ -538,12 +691,12 @@ impl MailError {
     /// while waiting for the server's reply after the whole message was sent".
     pub fn reason(&self) -> String {
         let cause = self.cause.as_deref().unwrap_or(match self.code {
-            "mail_timeout" => "the mail server timed out",
-            AUTHENTICATION_FAILED => "the mail server rejected the sign-in",
-            REAUTHENTICATION_REQUIRED => "the account needs a new sign-in",
-            "mail_tls_failed" => "the secure connection failed",
-            "mail_transport_failed" => "the connection to the mail server failed",
-            code => code,
+            MailErrorCode::MailTimeout => "the mail server timed out",
+            MailErrorCode::MailAuthenticationFailed => "the mail server rejected the sign-in",
+            MailErrorCode::OauthReauthenticationRequired => "the account needs a new sign-in",
+            MailErrorCode::MailTlsFailed => "the secure connection failed",
+            MailErrorCode::MailTransportFailed => "the connection to the mail server failed",
+            code => code.as_str(),
         });
         match self.phase {
             Some(phase) => format!("{cause} {}", phase.during()),

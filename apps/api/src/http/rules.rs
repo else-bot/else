@@ -165,23 +165,11 @@ async fn routines_next(state: &AppState, bot_id: Uuid) -> Option<String> {
     })
 }
 
-async fn active_bot(state: &AppState, bot_id: Uuid) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
-        None => Err(ApiError::not_found()),
-        Some("active") => Ok(()),
-        Some(_) => Err(super::turns::bot_deleted()),
-    }
-}
-
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    active_bot(&state, bot_id).await?;
+    super::turns::active_bot(&state, bot_id).await?;
     let mut conn = state.db.acquire().await?;
     let versions = rules::history(&mut conn, bot_id).await?;
     let (version, markdown) = versions

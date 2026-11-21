@@ -472,7 +472,7 @@ pub async fn authorize(
     write: bool,
     send: bool,
 ) -> Result<Access, Error> {
-    let kind: Option<String> = sqlx::query_scalar(
+    let kind: Option<crate::db::turns::ItemKind> = sqlx::query_scalar(
         "SELECT i.kind FROM social_connections c JOIN turns t ON t.id=?4 JOIN bots b ON b.id=t.bot_id
          JOIN items i ON i.id=t.owner_item_id
          WHERE c.id=?1 AND c.state='active' AND c.generation=?2 AND t.bot_id=?3
@@ -484,8 +484,8 @@ pub async fn authorize(
     .bind(turn)
     .fetch_optional(&mut *conn)
     .await?;
-    let access = match kind.ok_or(Error::Forbidden)?.as_str() {
-        "connector" => {
+    let access = match kind.ok_or(Error::Forbidden)? {
+        crate::db::turns::ItemKind::Connector => {
             let chats: Vec<String> = sqlx::query_scalar(
                 "SELECT DISTINCT destination FROM social_deliveries
                  WHERE turn_id=?1 AND connection_id=?2 AND bot_id=?3",

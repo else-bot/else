@@ -11,6 +11,8 @@ use super::turns::TurnStatus;
 use super::turns::lifecycle::{self, Step};
 use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
+use crate::db::bots::BotStatus;
+use crate::db::handoffs::{self, Moved, State as HandoffState};
 use crate::db::in_ids;
 
 mod steers;
@@ -204,12 +206,22 @@ impl SinkState {
         Fenced
     }
 
+    /// The turn's step decides, so a handoff that refused to follow it is
+    /// logged, not fatal; one already where the step leads needs nothing.
+    fn handoff_moved(&self, moved: Moved, to: HandoffState) {
+        if let Moved::Refused(found) = moved
+            && found != to
+        {
+            tracing::warn!(turn = %self.turn_id, attempt = self.attempt, ?to, ?found, "handoff transition refused");
+        }
+    }
+
     async fn guard(
         &self,
         conn: &mut SqliteConnection,
         allowed: impl Fn(TurnStatus) -> bool,
     ) -> Result<Option<OwnerTranscript>, sqlx::Error> {
-        let row: Option<(String, Uuid, i64)> = sqlx::query_as(
+        let row: Option<(BotStatus, Uuid, i64)> = sqlx::query_as(
             "SELECT b.status, c.id, c.last_item_seq
              FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
              WHERE b.id = ?1",
@@ -217,7 +229,7 @@ impl SinkState {
         .bind(self.bot_id)
         .fetch_optional(&mut *conn)
         .await?;
-        let Some((_, conversation_id, last_seq)) = row.filter(|(status, ..)| status == "active")
+        let Some((_, conversation_id, last_seq)) = row.filter(|(status, ..)| status.is_active())
         else {
             return Ok(None);
         };
@@ -248,25 +260,13 @@ impl SinkState {
             }
             match step {
                 Step::Sending => {
-                    crate::db::handoffs::transition(
-                        &mut tx,
-                        self.turn_id,
-                        self.attempt,
-                        "prepared",
-                        "sending",
-                    )
-                    .await?;
+                    let moved = handoffs::send(&mut tx, self.turn_id, self.attempt).await?;
+                    self.handoff_moved(moved, HandoffState::Sending);
                     crate::db::steers::fold(&mut tx, self.turn_id, &self.folded_steers).await?;
                 }
                 Step::Running => {
-                    crate::db::handoffs::transition(
-                        &mut tx,
-                        self.turn_id,
-                        self.attempt,
-                        "sending",
-                        "accepted",
-                    )
-                    .await?
+                    let moved = handoffs::accept(&mut tx, self.turn_id, self.attempt).await?;
+                    self.handoff_moved(moved, HandoffState::Accepted);
                 }
             }
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
@@ -569,42 +569,37 @@ impl SinkState {
                 Ok(())
             }
             Err(Fenced) => {
+                let Ok(mut tx) = self.pool.begin_with("BEGIN IMMEDIATE").await else {
+                    return Err(Fenced);
+                };
                 let cancelling: Result<bool, sqlx::Error> = sqlx::query_scalar(
                     "SELECT t.status = 'cancelling' AND b.status = 'active'
                      FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
                 )
                 .bind(self.turn_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await;
-                if matches!(cancelling, Ok(true)) {
-                    self.fenced = false;
-                    let accepted = async {
-                        let mut conn = self.pool.acquire().await?;
-                        if self.delivers_cut {
-                            crate::db::limit_cuts::mark_delivered(
-                                &mut conn,
-                                self.turn_id,
-                                self.attempt,
-                            )
-                            .await?;
-                        }
-                        crate::db::handoffs::transition(
-                            &mut conn,
-                            self.turn_id,
-                            self.attempt,
-                            "sending",
-                            "accepted",
-                        )
-                        .await
-                    }
-                    .await;
-                    if let Err(err) = accepted {
-                        tracing::warn!(turn = %self.turn_id, error = %err, "recording handoff acceptance failed");
-                    }
-                    Ok(())
-                } else {
-                    Err(Fenced)
+                if !matches!(cancelling, Ok(true)) {
+                    return Err(Fenced);
                 }
+                self.fenced = false;
+                let accepted = async {
+                    if self.delivers_cut {
+                        crate::db::limit_cuts::mark_delivered(&mut tx, self.turn_id, self.attempt)
+                            .await?;
+                    }
+                    let moved = handoffs::accept(&mut tx, self.turn_id, self.attempt).await?;
+                    tx.commit().await?;
+                    Ok::<_, sqlx::Error>(moved)
+                }
+                .await;
+                match accepted {
+                    Ok(moved) => self.handoff_moved(moved, HandoffState::Accepted),
+                    Err(err) => {
+                        tracing::warn!(turn = %self.turn_id, error = %err, "recording handoff acceptance failed")
+                    }
+                }
+                Ok(())
             }
         }
     }

@@ -532,3 +532,64 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
         .unwrap();
     assert_eq!(state, "uncertain");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_transition_from_the_wrong_state_is_refused() {
+    use else_api::db::handoffs::{Moved, State, unacknowledged};
+    let Two { h, .. } = two().await;
+    let app = h.app;
+    let bot = app.create_bot("Planner").await;
+    let (t1, _) = say(&app, &bot, A, "First on A.").await;
+    let (t2, _) = say(&app, &bot, B, "Then on B.").await;
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM handoffs WHERE turn_id = ?1")
+        .bind(t2)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let mut conn = app.db.pool.acquire().await.unwrap();
+    assert_eq!(
+        unacknowledged(&mut conn, t2, attempt, false).await.unwrap(),
+        Moved::Refused(State::Accepted)
+    );
+    assert_eq!(handoff(&app, t2).await.unwrap().state, "accepted");
+    assert_eq!(
+        unacknowledged(&mut conn, t1, 1, false).await.unwrap(),
+        Moved::NoHandoff
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_while_sending_puts_the_handoff_back_to_prepared() {
+    use else_api::app::providers::{FailureCode, TurnOutcome};
+    let Two { h, .. } = two().await;
+    let app = h.app;
+    let bot = app.create_bot("Planner").await;
+    say(&app, &bot, A, "First on A.").await;
+    let (turn, _) = say(&app, &bot, B, "Then on B.").await;
+    let (bot_id, attempt): (Uuid, i32) =
+        sqlx::query_as("SELECT bot_id, attempt FROM handoffs WHERE turn_id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = ?1")
+        .bind(turn)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE handoffs SET state = 'sending' WHERE turn_id = ?1")
+        .bind(turn)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let refused = TurnOutcome::Failed {
+        code: FailureCode::ProviderRefused,
+        message: "refused".into(),
+    };
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::turns::lifecycle::finish_attempt(&mut tx, bot_id, turn, attempt, &refused)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(handoff(&app, turn).await.unwrap().state, "prepared");
+}

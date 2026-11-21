@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::bots::BotError;
+use super::bots::{self, BotError, ReceiptOperation};
 use super::events;
 use super::turns::ACTIVE_STATUSES;
 use super::turns::lifecycle::{self, Unwind};
@@ -24,12 +24,21 @@ use super::turns::lifecycle::{self, Unwind};
 pub struct StopReceipt {
     pub request_id: Uuid,
     pub bot_id: Uuid,
-    /// `pending` until the provider has stopped, then `done`.
-    pub state: String,
+    pub state: ReceiptState,
     /// The active turn to interrupt, when this call started the stop.
     pub interrupt: Option<Uuid>,
     /// True when this call started the stop (not a retry).
     pub created: bool,
+}
+
+/// A Stop receipt's `request_receipts.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptState {
+    /// The provider has not stopped yet.
+    Pending,
+    Done,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -182,11 +191,7 @@ pub async fn stop_work(
     if crate::db::categories::used_by_category(&mut tx, request_id).await? {
         return Err(BotError::RequestConflict.into());
     }
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(status) = status else {
+    let Some(status) = bots::status(&mut *tx, bot_id).await? else {
         return Err(BotError::NotFound.into());
     };
     let last_turn_no: i64 = sqlx::query_scalar(
@@ -195,26 +200,29 @@ pub async fn stop_work(
     .bind(bot_id)
     .fetch_one(&mut *tx)
     .await?;
-    let receipt: Option<(String, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
+    let receipt: Option<(ReceiptOperation, Uuid, Vec<u8>, Option<ReceiptState>)> = sqlx::query_as(
         "SELECT operation, bot_id, payload_hash, state FROM request_receipts WHERE request_id = ?1",
     )
     .bind(request_id)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some((operation, saved_bot, hash, state)) = receipt {
-        if operation != "cancel" || saved_bot != bot_id || hash != stop_hash(bot_id) {
+        if operation != ReceiptOperation::Cancel || saved_bot != bot_id || hash != stop_hash(bot_id)
+        {
             return Err(BotError::RequestConflict.into());
         }
+        let state =
+            state.ok_or_else(|| sqlx::Error::Decode("cancel receipt without a state".into()))?;
         tx.commit().await?;
         return Ok(StopReceipt {
             request_id,
             bot_id,
-            state: state.unwrap_or_default(),
+            state,
             interrupt: None,
             created: false,
         });
     }
-    if status != "active" {
+    if !status.is_active() {
         return Err(StopError::Deleted);
     }
     sqlx::query(
@@ -241,7 +249,11 @@ pub async fn stop_work(
     Ok(StopReceipt {
         request_id,
         bot_id,
-        state: if settled { "done" } else { "pending" }.to_owned(),
+        state: if settled {
+            ReceiptState::Done
+        } else {
+            ReceiptState::Pending
+        },
         interrupt,
         created: true,
     })

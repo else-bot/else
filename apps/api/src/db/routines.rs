@@ -44,6 +44,7 @@ use crate::app::routines::{
     RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
 };
 use crate::computers::ComputerManager;
+use crate::db::bots::{self, BotStatus};
 use crate::providers::Registry;
 
 mod checks;
@@ -127,10 +128,7 @@ impl By {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastRun {
     pub due_at: DateTime<Utc>,
-    /// `checking`, `queued`, `running`, `skipped`, or the turn's terminal
-    /// status.
-    pub status: String,
-    pub skip_reason: Option<Skip>,
+    pub state: RunState,
     pub turn_id: Option<Uuid>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -208,7 +206,7 @@ struct Row {
 /// Where a run is, decoded from its row; the table's checks keep a turn
 /// and a skip reason exclusive, and a run with neither awaits its check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunState {
+pub enum RunState {
     Checking,
     Skipped(Skip),
     Turn(TurnStatus),
@@ -226,7 +224,9 @@ impl RunState {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// `checking`, `queued`, `running`, `skipped`, `no_news`, or the turn's
+    /// terminal status.
+    pub fn label(self) -> &'static str {
         match self {
             Self::Checking => "checking",
             Self::Skipped(_) => "skipped",
@@ -243,10 +243,7 @@ impl From<Row> for Routine {
     fn from(row: Row) -> Self {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
-            status: RunState::of(row.turn_status, row.skip_reason, row.report)
-                .label()
-                .to_owned(),
-            skip_reason: row.skip_reason,
+            state: RunState::of(row.turn_status, row.skip_reason, row.report),
             turn_id: row.turn_id,
             error_code: row.error_code,
             error_message: row.error_message,
@@ -361,7 +358,7 @@ pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
-    let row: Option<(Uuid, Uuid, TurnStatus, String, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, Uuid, TurnStatus, BotStatus, Uuid)> = sqlx::query_as(
         "SELECT t.bot_id, t.conversation_id, t.status, b.status, o.id
          FROM turns t JOIN bots b ON b.id = t.bot_id
          JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
@@ -381,7 +378,7 @@ pub(crate) async fn authorized_owner_conversation(
     {
         return Err(RoutineError::NotAllowed);
     }
-    if !status.serves_tools() || bot_status != "active" {
+    if !status.serves_tools() || !bot_status.is_active() {
         return Err(RoutineError::NotRunning);
     }
     Ok(owner_conversation)
@@ -390,18 +387,11 @@ pub(crate) async fn authorized_owner_conversation(
 pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {
     match by {
         By::Turn(caller) => authorized_owner_conversation(conn, caller).await.map(drop),
-        By::Owner { bot_id } => {
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-                    .bind(bot_id)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-            match status.as_deref() {
-                None => Err(RoutineError::NotFound),
-                Some("active") => Ok(()),
-                Some(_) => Err(RoutineError::BotDeleted),
-            }
-        }
+        By::Owner { bot_id } => match bots::status(&mut *conn, bot_id).await? {
+            None => Err(RoutineError::NotFound),
+            Some(BotStatus::Active) => Ok(()),
+            Some(_) => Err(RoutineError::BotDeleted),
+        },
     }
 }
 

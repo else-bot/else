@@ -741,7 +741,7 @@ struct QuietInbox {
 impl QuietInbox {
     fn signs_in(&self, auth: &Auth) -> Result<(), MailError> {
         if auth.secret.as_str() == REVOKED || self.revoked.load(Ordering::SeqCst) {
-            Err(MailError::new(AUTHENTICATION_FAILED))
+            Err(MailError::new(MailErrorCode::MailAuthenticationFailed))
         } else {
             Ok(())
         }
@@ -762,10 +762,10 @@ impl MailTransport for QuietInbox {
         Ok(json!({"folders":[]}))
     }
     async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
-        Err(MailError::new("message_not_found"))
+        Err(MailError::new(MailErrorCode::MessageNotFound))
     }
     async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
-        Err(MailError::new("mail_transport_failed"))
+        Err(MailError::new(MailErrorCode::MailTransportFailed))
     }
     async fn scan(
         &self,
@@ -894,16 +894,16 @@ impl MailTransport for Transport {
             store::recover(pool).await.unwrap();
         }
         if self.uncertain {
-            Err(MailError::new("connection_lost"))
+            Err(MailError::new(MailErrorCode::MailTransportFailed))
         } else {
             Ok(json!({"sent":true}))
         }
     }
     async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
-        Err(MailError::new("message_not_found"))
+        Err(MailError::new(MailErrorCode::MessageNotFound))
     }
     async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
-        Err(MailError::new("mail_transport_failed"))
+        Err(MailError::new(MailErrorCode::MailTransportFailed))
     }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
         Ok(Scan {
@@ -1077,6 +1077,7 @@ async fn store_refusals_reach_the_bot_under_their_own_codes() {
                 .await
                 .unwrap_err()
                 .code
+                .as_str()
         }
     };
     let action = Uuid::new_v4();
@@ -1280,7 +1281,12 @@ async fn mail_event_origin_removes_computer_authority() {
         .await
         .unwrap()
         .unwrap();
-    assert!(snapshot.items.iter().all(|item| item.kind != "connector"));
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .all(|item| item.kind != else_api::db::turns::ItemKind::Connector)
+    );
     let mut conn = h.app.db.pool.acquire().await.unwrap();
     let source: Uuid = sqlx::query_scalar("SELECT owner_item_id FROM turns WHERE id=?1")
         .bind(turn)
@@ -1679,7 +1685,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(account.state, "paused");
+        assert_eq!(account.state, AccountState::Paused);
         match store::credential(&restored, &key, account.id)
             .await
             .unwrap()

@@ -34,7 +34,9 @@ pub const MAX_REASON: usize = 500;
     serde::Deserialize,
     strum::IntoStaticStr,
     strum::EnumString,
+    sqlx::Type,
 )]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum Scope {
@@ -42,30 +44,14 @@ pub enum Scope {
     Bot,
 }
 
-impl Scope {
-    fn as_str(self) -> &'static str {
-        self.into()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Pending,
     Installed,
     Declined,
     Cancelled,
-}
-
-impl Status {
-    fn parse(text: &str) -> Self {
-        match text {
-            "installed" => Self::Installed,
-            "declined" => Self::Declined,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
-        }
-    }
 }
 
 /// An install card as the conversation shows it, without file contents.
@@ -100,8 +86,8 @@ type InstallRow = (
     Json<Source>,
     Json<Vec<FileInfo>>,
     Json<Vec<String>>,
-    String,
-    Option<String>,
+    Status,
+    Option<Scope>,
     bool,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
@@ -141,8 +127,8 @@ fn install(
         source: source.0,
         files: files.0,
         env: env.0,
-        status: Status::parse(&status),
-        scope: scope.as_deref().and_then(|s| s.parse().ok()),
+        status,
+        scope,
         key_stored,
         created_at,
         settled_at,
@@ -362,12 +348,8 @@ async fn settle_in(
          WHERE id = ?1 RETURNING {INSTALL_COLUMNS}"
     )))
     .bind(card.id)
-    .bind(if status == Status::Installed {
-        "installed"
-    } else {
-        "declined"
-    })
-    .bind(scope.map(Scope::as_str))
+    .bind(status)
+    .bind(scope)
     .bind(key_stored)
     .fetch_one(&mut *conn)
     .await?;
@@ -419,7 +401,7 @@ pub async fn approve(
          FROM skill_installs WHERE id = ?1",
     )
     .bind(id)
-    .bind(scope.as_str())
+    .bind(scope)
     .bind((scope == Scope::Bot).then_some(card.bot_id))
     .execute(&mut *tx)
     .await?;
@@ -475,14 +457,7 @@ pub struct Outcome {
     pub key_stored: bool,
 }
 
-type OutcomeRow = (
-    Uuid,
-    String,
-    String,
-    Option<String>,
-    Json<Vec<String>>,
-    bool,
-);
+type OutcomeRow = (Uuid, String, Status, Option<Scope>, Json<Vec<String>>, bool);
 
 pub async fn undelivered(
     conn: &mut SqliteConnection,
@@ -501,8 +476,8 @@ pub async fn undelivered(
         .map(|(id, skill_id, status, scope, env, key_stored)| Outcome {
             id,
             skill_id,
-            installed: status == "installed",
-            scope: scope.as_deref().and_then(|s| s.parse().ok()),
+            installed: status == Status::Installed,
+            scope,
             env: env.0,
             key_stored,
         })
@@ -553,7 +528,7 @@ type SkillRow = (
     String,
     String,
     Json<Source>,
-    String,
+    Scope,
     Option<Uuid>,
     Option<String>,
     Uuid,
@@ -609,7 +584,7 @@ fn skill(row: SkillRow, files: Vec<FileInfo>) -> SkillInfo {
         name,
         description,
         source: source.0,
-        scope: scope.parse().unwrap_or(Scope::All),
+        scope,
         bot_id,
         bot_name,
         installed_by: by,

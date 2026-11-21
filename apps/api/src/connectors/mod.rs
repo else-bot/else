@@ -114,7 +114,7 @@ fn failure_receipt(account_id: Uuid, action_id: Uuid, error: &MailError) -> (Out
         %account_id,
         %action_id,
         phase,
-        code = error.code,
+        code = error.code.as_str(),
         %reason,
         "mail action failed"
     );
@@ -204,7 +204,7 @@ impl ConnectorManager {
         self.workers
             .get_or_spawn(id, move |inbox| manager.account_loop(id, inbox))
             .await
-            .map_err(|_| MailError::new("connector_limit"))
+            .map_err(|_| MailError::new(MailErrorCode::ConnectorLimit))
     }
 
     /// Drops what the owner's reader kept for the account, so a paused,
@@ -242,11 +242,11 @@ impl ConnectorManager {
         let (reply, result) = oneshot::channel();
         worker
             .try_send(Request::Credential { credential, reply })
-            .map_err(|_| MailError::new("mail_account_busy"))?;
+            .map_err(|_| MailError::new(MailErrorCode::MailAccountBusy))?;
         tokio::time::timeout(Duration::from_secs(120), result)
             .await
-            .map_err(|_| MailError::new("mail_account_busy"))?
-            .map_err(|_| MailError::new("mail_account_unavailable"))?
+            .map_err(|_| MailError::new(MailErrorCode::MailAccountBusy))?
+            .map_err(|_| MailError::new(MailErrorCode::MailAccountUnavailable))?
     }
 
     /// Signs in with an owner's new password before it is saved. An OAuth
@@ -266,15 +266,15 @@ impl ConnectorManager {
         };
         self.transport.verify(config, &auth).await.map_err(|error| {
             match (error.code, config.provider) {
-                (AUTHENTICATION_FAILED, Provider::Icloud) => error.detail(
+                (MailErrorCode::MailAuthenticationFailed, Provider::Icloud) => error.detail(
                     "Apple rejected the password. Use an app-specific password, not your Apple \
                      Account password.",
                 ),
-                (AUTHENTICATION_FAILED, _) => error.detail(
+                (MailErrorCode::MailAuthenticationFailed, _) => error.detail(
                     "The mail server rejected the username or password. Check them, or use an \
                      app password from your provider.",
                 ),
-                _ => MailError::new("mail_sign_in_failed").detail(
+                _ => MailError::new(MailErrorCode::MailSignInFailed).detail(
                     "Could not sign in to the mail server. Check your connection and the server \
                      settings, then try again.",
                 ),
@@ -291,13 +291,13 @@ impl ConnectorManager {
             .scheduler
             .gate()
             .enter()
-            .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let account = store::account(&self.db, id)
             .await?
-            .ok_or_else(|| MailError::new("mail_account_unavailable"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MailAccountUnavailable))?;
         credential.validate(account.config.provider)?;
         if !store::replace_credential(&self.db, &self.key, id, &credential).await? {
-            return Err(MailError::new("mail_account_changed"));
+            return Err(MailError::new(MailErrorCode::MailAccountChanged));
         }
         Ok(())
     }
@@ -342,18 +342,18 @@ impl ConnectorManager {
             .await;
         let account = store::account(&self.db, account_id)
             .await?
-            .ok_or_else(|| MailError::new("mail_forbidden"))?;
-        if account.state != "active" {
-            return Err(MailError::new("mail_account_paused"));
+            .ok_or_else(|| MailError::new(MailErrorCode::MailForbidden))?;
+        if account.state != AccountState::Active {
+            return Err(MailError::new(MailErrorCode::MailAccountPaused));
         }
         let _admission = self
             .scheduler
             .gate()
             .enter()
-            .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let whereabouts = store::whereabouts(&self.db, account_id, &message).await?;
         let at = match whereabouts.as_ref().map(|w| &w.place) {
-            Some(Place::Deleted) => return Err(MailError::new("message_deleted")),
+            Some(Place::Deleted) => return Err(MailError::new(MailErrorCode::MessageDeleted)),
             Some(Place::Moved { message, .. }) => message.clone(),
             Some(Place::Arrived) | None => Some(message.clone()),
         };
@@ -369,14 +369,18 @@ impl ConnectorManager {
                 }
                 Err(error) => error,
             },
-            None => MailError::new("message_not_found"),
+            None => MailError::new(MailErrorCode::MessageNotFound),
         };
         let Some(Whereabouts {
             event_id,
             message_id: Some(message_id),
             place,
-        }) = whereabouts
-            .filter(|_| matches!(error.code, "message_not_found" | "stale_message_reference"))
+        }) = whereabouts.filter(|_| {
+            matches!(
+                error.code,
+                MailErrorCode::MessageNotFound | MailErrorCode::StaleMessageReference
+            )
+        })
         else {
             return Err(error);
         };
@@ -394,7 +398,7 @@ impl ConnectorManager {
             )
             .await?;
         let found = serde_json::from_value::<Option<MessageRef>>(located["message"].clone())
-            .map_err(|_| MailError::new("mail_transport_failed"))?;
+            .map_err(|_| MailError::new(MailErrorCode::MailTransportFailed))?;
         let now = match &found {
             Some(found) => Place::Moved {
                 kind: MoveKind::into_folder(&account.config, &found.folder),
@@ -415,7 +419,7 @@ impl ConnectorManager {
                 .map_or(Place::Arrived, |w| w.place)
         };
         let found = match now {
-            Place::Deleted => return Err(MailError::new("message_deleted")),
+            Place::Deleted => return Err(MailError::new(MailErrorCode::MessageDeleted)),
             Place::Moved {
                 message: Some(found),
                 ..
@@ -456,7 +460,10 @@ impl ConnectorManager {
         });
         let (fetched, path) = tokio::time::timeout(Duration::from_secs(120), read)
             .await
-            .unwrap_or((Err(MailError::new("mail_timeout")), readers::Path::Cold));
+            .unwrap_or((
+                Err(MailError::new(MailErrorCode::MailTimeout)),
+                readers::Path::Cold,
+            ));
         let signed_in = signed_in.into_inner().expect("unpoisoned");
         tracing::info!(
             %account_id,
@@ -468,10 +475,7 @@ impl ConnectorManager {
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(error) => {
-                if matches!(
-                    error.code,
-                    AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED
-                ) {
+                if error.code.rejects_credential() {
                     self.health(account.id, account.generation, error.code)
                         .await;
                     // The watch signed in before the rejection; restart it
@@ -518,7 +522,7 @@ impl ConnectorManager {
         command.validate()?;
         let mutates = command.mutates();
         if mutates && action_id.is_none() {
-            return Err(MailError::new("action_id_required"));
+            return Err(MailError::new(MailErrorCode::ActionIdRequired));
         }
         let (reply, result) = oneshot::channel();
         let queued = tokio::time::Instant::now();
@@ -532,18 +536,20 @@ impl ConnectorManager {
         };
         let account = store::account(&self.db, account_id)
             .await?
-            .ok_or_else(|| MailError::new("mail_forbidden"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MailForbidden))?;
         self.authorization(&account, &command).await?;
         let worker = self.worker(account_id).await?;
         worker
             .try_send(Request::Mail(command))
-            .map_err(|_| MailError::new("mail_account_busy"))?;
+            .map_err(|_| MailError::new(MailErrorCode::MailAccountBusy))?;
         match tokio::time::timeout(Duration::from_secs(120), result).await {
-            Ok(result) => result.map_err(|_| MailError::new("mail_account_unavailable"))?,
+            Ok(result) => {
+                result.map_err(|_| MailError::new(MailErrorCode::MailAccountUnavailable))?
+            }
             Err(_) if mutates => Ok(
                 json!({"action_id":action_id,"status":"pending","instruction":"Read mail_action_status or retry the same action ID. Do not create another action ID."}),
             ),
-            Err(_) => Err(MailError::new("mail_account_busy")),
+            Err(_) => Err(MailError::new(MailErrorCode::MailAccountBusy)),
         }
     }
 
@@ -551,7 +557,7 @@ impl ConnectorManager {
         loop {
             if let Ok(accounts) = store::accounts(&self.db).await {
                 for account in accounts {
-                    if account.state == "active" {
+                    if account.state == AccountState::Active {
                         let _ = self.worker(account.id).await;
                     }
                 }
@@ -586,7 +592,7 @@ impl ConnectorManager {
             .scheduler
             .gate()
             .enter()
-            .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let mut credential = store::credential(&self.db, &self.key, account.id).await?;
         if oauth::refresh(account.config.provider, &mut credential).await?
             && !store::save_credential(
@@ -598,14 +604,14 @@ impl ConnectorManager {
             )
             .await?
         {
-            return Err(MailError::new("mail_account_changed"));
+            return Err(MailError::new(MailErrorCode::MailAccountChanged));
         }
         let (secret, oauth) = match &credential {
             Credential::Password { password } => (password.clone(), false),
             Credential::OAuth2 { access_token, .. } => (
                 access_token
                     .clone()
-                    .ok_or_else(|| MailError::new(REAUTHENTICATION_REQUIRED))?,
+                    .ok_or_else(|| MailError::new(MailErrorCode::OauthReauthenticationRequired))?,
                 true,
             ),
         };
@@ -636,16 +642,16 @@ impl ConnectorManager {
         &self,
         id: Uuid,
         command: &Command,
-        rejected: &mut Option<(i64, &'static str)>,
+        rejected: &mut Option<(i64, MailErrorCode)>,
     ) -> Result<Value, MailError> {
         if tokio::time::Instant::now() >= command.deadline {
-            return Err(MailError::new("mail_queue_expired"));
+            return Err(MailError::new(MailErrorCode::MailQueueExpired));
         }
         let _admission = self
             .scheduler
             .gate()
             .enter()
-            .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+            .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let account = store::account(&self.db, id)
             .await?
             .ok_or(store::StoreError::NotFound)?;
@@ -654,8 +660,11 @@ impl ConnectorManager {
         self.authorization(&account, command).await?;
         let started = tokio::time::Instant::now();
         let auth = self.auth(&account).await.inspect_err(|error| {
-            if error.code == REAUTHENTICATION_REQUIRED {
-                *rejected = Some((account.generation, REAUTHENTICATION_REQUIRED));
+            if error.code == MailErrorCode::OauthReauthenticationRequired {
+                *rejected = Some((
+                    account.generation,
+                    MailErrorCode::OauthReauthenticationRequired,
+                ));
             }
         })?;
         let action_id = match (command.command.mutates(), command.caller) {
@@ -706,8 +715,8 @@ impl ConnectorManager {
                     .await
             }
         };
-        if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
-            *rejected = Some((account.generation, AUTHENTICATION_FAILED));
+        if matches!(&result, Err(error) if error.code == MailErrorCode::MailAuthenticationFailed) {
+            *rejected = Some((account.generation, MailErrorCode::MailAuthenticationFailed));
         }
         if let (
             Ok(value),
@@ -735,15 +744,15 @@ impl ConnectorManager {
         store::ACTIONS
             .finish(&self.db, id, action_id, outcome, fields)
             .await
-            .map_err(|_| MailError::new("mail_receipt_unavailable"))
+            .map_err(|_| MailError::new(MailErrorCode::MailReceiptUnavailable))
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {
         let account = store::account(&self.db, id)
             .await?
-            .ok_or_else(|| MailError::new("mail_account_unavailable"))?;
-        if account.state != "active" {
-            return Err(MailError::new("mail_account_paused"));
+            .ok_or_else(|| MailError::new(MailErrorCode::MailAccountUnavailable))?;
+        if account.state != AccountState::Active {
+            return Err(MailError::new(MailErrorCode::MailAccountPaused));
         }
         let auth = self.auth(&account).await?;
         Ok((account, auth))
@@ -758,7 +767,7 @@ impl ConnectorManager {
         let id = account.id;
         let since = store::health_version(&self.db, id)
             .await
-            .map_err(|_| MailError::new("mail_account_unavailable"))?;
+            .map_err(|_| MailError::new(MailErrorCode::MailAccountUnavailable))?;
         let cursor = loop {
             let old = store::cursor(&self.db, id).await?;
             // Only the server waits stop early. A database write that began
@@ -773,11 +782,11 @@ impl ConnectorManager {
                     .scheduler
                     .gate()
                     .enter()
-                    .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+                    .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
                 if !store::record_scan(&self.db, id, account.generation, old.as_ref(), &scan)
                     .await?
                 {
-                    return Err(MailError::new("mail_account_changed"));
+                    return Err(MailError::new(MailErrorCode::MailAccountChanged));
                 }
             }
             self.scheduler.wake();
@@ -793,15 +802,15 @@ impl ConnectorManager {
             .await
     }
 
-    async fn health(&self, id: Uuid, generation: i64, code: &str) {
-        if code == "mail_account_paused" {
+    async fn health(&self, id: Uuid, generation: i64, code: MailErrorCode) {
+        if code == MailErrorCode::MailAccountPaused {
             return;
         }
-        if matches!(code, AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED) {
+        if code.rejects_credential() {
             self.drop_reads(id, false).await;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
-            let health = Health::from(code.to_owned());
+            let health = Health::from(code);
             let _ = store::set_health(&self.db, id, generation, &health).await;
         }
     }
@@ -838,7 +847,7 @@ impl ConnectorManager {
                     }
                     Err(error) => {
                         if let Ok(Some(account)) = store::account(&self.db, id).await
-                            && account.state == "active"
+                            && account.state == AccountState::Active
                         {
                             self.health(id, account.generation, error.code).await;
                         }
@@ -878,7 +887,7 @@ impl ConnectorManager {
                     match result {
                         Ok(Ok(())) => { failures = 0; retry_at = tokio::time::Instant::now(); }
                         result => {
-                            let code = match result { Ok(Err(error)) => error.code, _ => "mail_watch_failed" };
+                            let code = match result { Ok(Err(error)) => error.code, _ => MailErrorCode::MailWatchFailed };
                             self.health(id,completed.generation,code).await;
                             failures = failures.saturating_add(1);
                             retry_at = tokio::time::Instant::now() + retry_delay(failures);
