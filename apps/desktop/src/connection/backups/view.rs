@@ -200,7 +200,7 @@ impl View {
             } else {
                 "Back up now"
             })
-            .loading(self.operation == Operation::Starting)
+            .loading(self.running() == Some(Operation::Starting))
             .on_click(cx.listener(|view, _, window, cx| view.run_remote(window, cx)));
         let mut content = v_flex()
             .gap_5()
@@ -519,7 +519,7 @@ impl View {
                         Button::new("backup-test-connection")
                             .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Test connection")
-                            .loading(self.operation == Operation::Testing)
+                            .loading(self.running() == Some(Operation::Testing))
                             .on_click(
                                 cx.listener(|view, _, window, cx| {
                                     view.test_destination(window, cx)
@@ -531,7 +531,7 @@ impl View {
                         Button::new("backup-save-destination")
                             .control(Tier::Primary, Scale::Standard, busy || !form.verified, cx)
                             .label("Save changes")
-                            .loading(self.operation == Operation::Saving)
+                            .loading(self.running() == Some(Operation::Saving))
                             .on_click(
                                 cx.listener(|view, _, window, cx| view.save_edit(window, cx)),
                             ),
@@ -541,7 +541,7 @@ impl View {
                     Button::new("backup-save-policy")
                         .control(Tier::Primary, Scale::Standard, busy, cx)
                         .label("Save changes")
-                        .loading(self.operation == Operation::Saving)
+                        .loading(self.running() == Some(Operation::Saving))
                         .on_click(cx.listener(|view, _, window, cx| view.save_edit(window, cx))),
                 );
             }

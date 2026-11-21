@@ -8,7 +8,7 @@ impl View {
             "Installed once. Shared skills are available to every bot.",
             cx,
         ));
-        let busy = self.busy || !self.connected;
+        let busy = self.busy.is_some() || !self.connected;
         let Some(entries) = self.entries.value() else {
             return body.child("Loading installed skills…").into_any_element();
         };

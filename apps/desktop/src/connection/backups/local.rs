@@ -243,7 +243,7 @@ impl View {
             .when_some(self.local_form.as_ref(), |section, form| {
                 section.child(form.render(
                     local,
-                    self.operation == Operation::SavingLocal,
+                    self.running() == Some(Operation::SavingLocal),
                     self.busy() || self.editor.is_some() || snapshot.pause.is_some(),
                     stacked,
                     cx,

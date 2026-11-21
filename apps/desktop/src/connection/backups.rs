@@ -8,14 +8,13 @@ use crate::attachments::byte_size;
 use else_wire::backups::BackupSnapshot;
 use std::time::Duration;
 
-use super::loaded::Loaded;
+use super::loaded::{Guard, Loaded};
 use super::pane::PaneEvent;
 
 use form::{DestinationForm, Editor, LocalForm, PolicyForm};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
-    Idle,
     Testing,
     Saving,
     SavingLocal,
@@ -27,7 +26,7 @@ pub(super) struct View {
     snapshot: Loaded<BackupSnapshot>,
     editor: Option<Editor>,
     local_form: Option<LocalForm>,
-    operation: Operation,
+    operation: Option<(Operation, Guard)>,
     error: Option<String>,
     feedback: Option<String>,
     _poll: Task<()>,
@@ -46,16 +45,19 @@ impl View {
         self.local_form.as_ref().is_some_and(|form| form.dirty(cx))
     }
     fn busy(&self) -> bool {
-        self.operation != Operation::Idle
+        self.operation.is_some()
     }
 
-    /// Starts an operation. It may change what the server reports, so a poll
-    /// already in flight must not land after it.
+    fn running(&self) -> Option<Operation> {
+        self.operation.as_ref().map(|(operation, _)| *operation)
+    }
+
+    /// Starts an operation. It may change what the server reports, so no
+    /// poll lands or starts until it ends.
     fn start(&mut self, operation: Operation) {
-        self.operation = operation;
+        self.operation = Some((operation, self.snapshot.operate()));
         self.error = None;
         self.feedback = None;
-        self.snapshot.supersede();
     }
 
     fn accept(
@@ -82,6 +84,22 @@ impl View {
             }
             Some(_) => {}
         }
+    }
+
+    fn apply_poll(
+        &mut self,
+        attempt: Uuid,
+        result: Result<BackupSnapshot, ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(snapshot) => self.accept(Reply::Poll(attempt), snapshot, window, cx),
+            Err(err) => {
+                self.snapshot.settle(attempt, Err(err.to_string()));
+            }
+        }
+        cx.notify();
     }
 
     fn poll_delay(&self) -> Duration {
@@ -115,7 +133,6 @@ fn land(state: &mut Loaded<BackupSnapshot>, reply: Reply, snapshot: BackupSnapsh
         .value()
         .is_some_and(|current| snapshot.revision < current.revision)
     {
-        state.supersede();
         return false;
     }
     match reply {
@@ -149,39 +166,20 @@ impl Shell {
 impl View {
     fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let poll_client = client.clone();
-        let poll = cx.spawn_in(window, async move |this, cx| {
-            // An operation may change what the server reports, so no poll
-            // starts while one runs.
-            while let Ok(attempt) =
-                this.update(cx, |view, _| (!view.busy()).then(|| view.snapshot.begin()))
-            {
-                if let Some(attempt) = attempt {
-                    let result = poll_client.clone().backups().await;
-                    let open = this.update_in(cx, |view, window, cx| {
-                        match result {
-                            Ok(snapshot) => view.accept(Reply::Poll(attempt), snapshot, window, cx),
-                            Err(err) => {
-                                view.snapshot.settle(attempt, Err(err.to_string()));
-                            }
-                        }
-                        cx.notify();
-                    });
-                    if open.is_err() {
-                        break;
-                    }
-                }
-                let Ok(delay) = this.update(cx, |view, _| view.poll_delay()) else {
-                    break;
-                };
-                cx.background_executor().timer(delay).await;
-            }
-        });
+        let poll = Loaded::poll(
+            window,
+            cx,
+            |view: &mut Self| &mut view.snapshot,
+            Self::poll_delay,
+            move || poll_client.clone().backups(),
+            Self::apply_poll,
+        );
         Self {
             client,
             snapshot: Loaded::default(),
             editor: None,
             local_form: None,
-            operation: Operation::Idle,
+            operation: None,
             error: None,
             feedback: None,
             _poll: poll,
@@ -265,7 +263,7 @@ impl View {
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.test_backup_destination(revision, destination).await;
             let _ = this.update(cx, |view, cx| {
-                view.operation = Operation::Idle;
+                view.operation = None;
                 match result {
                     Ok(message) => {
                         if let Some(Editor::Destination(form)) = &mut view.editor {
@@ -336,7 +334,7 @@ impl View {
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.save_backups(settings).await;
             let _ = this.update_in(cx, |view, window, cx| {
-                view.operation = Operation::Idle;
+                view.operation = None;
                 match result {
                     Ok(snapshot) => {
                         view.accept(Reply::Operation, snapshot, window, cx);
@@ -393,7 +391,7 @@ impl View {
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.save_local_backups(settings).await;
             let _ = this.update_in(cx, |view, window, cx| {
-                view.operation = Operation::Idle;
+                view.operation = None;
                 match result {
                     Ok(snapshot) => {
                         view.local_form = None;
@@ -422,7 +420,7 @@ impl View {
                 None
             };
             let _ = this.update_in(cx, |view, window, cx| {
-                view.operation = Operation::Idle;
+                view.operation = None;
                 match result {
                     Ok(()) => {
                         if let Some(snapshot) = snapshot {
@@ -478,17 +476,18 @@ mod tests {
     fn a_poll_sent_before_an_operation_cannot_replace_its_result() {
         for lands_while_running in [true, false] {
             let mut state = Loaded::default();
-            let first = state.begin();
+            let first = state.begin().expect("no operation runs");
             assert!(land(&mut state, Reply::Poll(first), snapshot(3, false)));
-            let late = state.begin();
-            state.supersede();
+            let late = state.begin().expect("no operation runs");
+            let operation = state.operate();
             if lands_while_running {
                 assert!(!land(&mut state, Reply::Poll(late), snapshot(3, false)));
             }
             assert!(land(&mut state, Reply::Operation, snapshot(3, true)));
+            drop(operation);
             assert!(!land(&mut state, Reply::Poll(late), snapshot(3, false)));
             assert_eq!(running(&state), Some(true));
-            let next = state.begin();
+            let next = state.begin().expect("no operation runs");
             assert!(land(&mut state, Reply::Poll(next), snapshot(3, false)));
             assert_eq!(running(&state), Some(false), "a poll after it lands");
         }
@@ -498,11 +497,10 @@ mod tests {
     fn an_older_settings_revision_never_replaces_a_newer_one() {
         let mut state = Loaded::default();
         assert!(land(&mut state, Reply::Operation, snapshot(4, false)));
-        let poll = state.begin();
+        let poll = state.begin().expect("no operation runs");
         assert!(!land(&mut state, Reply::Poll(poll), snapshot(3, true)));
         assert!(!land(&mut state, Reply::Operation, snapshot(3, true)));
         assert_eq!(running(&state), Some(false));
-        assert!(!state.awaits(poll), "the outdated poll is over");
     }
 
     #[test]

@@ -62,18 +62,14 @@ impl View {
         cx: &mut Context<Self>,
     ) -> Self {
         let poll_client = client.clone();
-        let poll = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(attempt) = this.update(cx, |view, _| view.state.begin()) {
-                let result = poll_client.clone().usage().await;
-                if this
-                    .update(cx, |view, cx| view.apply(attempt, result, cx))
-                    .is_err()
-                {
-                    break;
-                }
-                cx.background_executor().timer(REFRESH).await;
-            }
-        });
+        let poll = Loaded::poll(
+            window,
+            cx,
+            |view: &mut Self| &mut view.state,
+            |_| REFRESH,
+            move || poll_client.clone().usage(),
+            |view, attempt, result, _, cx| view.apply(attempt, result, cx),
+        );
         Self {
             client,
             app,
@@ -130,7 +126,9 @@ impl View {
 
     /// Fetches the report once, keeping the page as it is until it arrives.
     fn refetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let attempt = self.state.begin();
+        let Some(attempt) = self.state.begin() else {
+            return;
+        };
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.usage().await;

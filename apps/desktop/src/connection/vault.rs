@@ -15,9 +15,11 @@ use gpui_kit::component::{
 };
 use std::collections::BTreeMap;
 
+use super::loaded::{Guard, Loaded};
+
 pub(super) struct View {
     client: Arc<Client>,
-    entries: Option<Vec<VaultEntry>>,
+    entries: Loaded<Vec<VaultEntry>>,
     search: Entity<InputState>,
     _search: Subscription,
     phase: Phase,
@@ -33,13 +35,16 @@ enum Phase {
     Closed,
     Browsing,
     Editing(Editor),
-    Saving(Editor),
+    Saving(Editor, Guard),
     Revealing(String),
     Revealed {
         name: String,
         env: BTreeMap<String, String>,
     },
-    Deleting(String),
+    Deleting {
+        name: String,
+        _operation: Guard,
+    },
     Unconfirmed(String),
 }
 
@@ -73,7 +78,7 @@ impl View {
         );
         let mut this = Self {
             client,
-            entries: None,
+            entries: Loaded::default(),
             search,
             _search: subscription,
             phase: Phase::Browsing,
@@ -89,7 +94,7 @@ impl View {
     pub(super) fn has_unsaved_work(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Editing(_) | Phase::Saving(_) | Phase::Deleting(_)
+            Phase::Editing(_) | Phase::Saving(..) | Phase::Deleting { .. }
         )
     }
 
@@ -101,7 +106,7 @@ impl View {
 
     fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.task = None;
-        if let Phase::Editing(editor) | Phase::Saving(editor) = &self.phase {
+        if let Phase::Editing(editor) | Phase::Saving(editor, _) = &self.phase {
             editor
                 .fields
                 .update(cx, |fields, cx| fields.clear(window, cx));
@@ -111,19 +116,23 @@ impl View {
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attempt) = self.entries.begin() else {
+            return;
+        };
         let client = self.client.clone();
         self.load = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.vault().await;
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(entries) => {
-                        this.entries = Some(entries);
-                        this.error = None;
-                        if matches!(this.phase, Phase::Unconfirmed(_)) {
-                            this.phase = Phase::Browsing;
-                        }
-                    }
-                    Err(error) => this.error = Some(error.to_string()),
+                let loaded = result.is_ok();
+                if !this
+                    .entries
+                    .settle(attempt, result.map_err(|error| error.to_string()))
+                {
+                    return;
+                }
+                this.error = None;
+                if loaded && matches!(this.phase, Phase::Unconfirmed(_)) {
+                    this.phase = Phase::Browsing;
                 }
                 cx.notify();
             });
@@ -179,7 +188,7 @@ impl View {
             if editor.original.is_none()
                 && self
                     .entries
-                    .as_ref()
+                    .value()
                     .is_some_and(|entries| entries.iter().any(|e| e.name == name))
             {
                 return Err(
@@ -222,7 +231,7 @@ impl View {
             fields.busy = true;
             cx.notify();
         });
-        self.phase = Phase::Saving(editor);
+        self.phase = Phase::Saving(editor, self.entries.operate());
         self.error = None;
         let client = self.client.clone();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -238,9 +247,10 @@ impl View {
                 client.create_secret(name, secret).await.map(|saved| saved.not_redacted)
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                let Phase::Saving(editor) = std::mem::replace(&mut this.phase, Phase::Browsing) else {
+                let Phase::Saving(editor, operation) = std::mem::replace(&mut this.phase, Phase::Browsing) else {
                     return;
                 };
+                drop(operation);
                 match settle(result) {
                     Settled::Saved(short) => {
                         editor.fields.update(cx, |fields, cx| fields.clear(window, cx));
@@ -276,47 +286,34 @@ impl View {
             return;
         }
         let this = cx.weak_entity();
-        let cancel = cx.focus_handle();
-        let once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if once.replace(false) {
-                cancel.focus(window, cx);
-            }
-            let this = this.clone();
-            let name = name.clone();
-            dialog.w(px(440.))
-                .title(if reveal {
-                    format!("Reveal {name}?")
-                } else {
-                    format!("Delete {name} for every bot?")
-                })
-                .close_button(false)
-                .on_ok(|_, _, _| false)
-                .child(div().text_sm().child(if reveal {
-                    "The saved values will be visible on this screen until you hide them or leave the Vault."
-                } else {
-                    "Every bot will lose access to this entry. This cannot be undone."
-                }))
-                .footer(
-                    h_flex().w_full().justify_end().gap_2()
-                        .child(
-                            Button::new("vault-confirm-cancel")
-                                .control(Tier::Secondary, Scale::Standard, false, cx)
-                                .label("Cancel")
-                                .track_focus(&cancel)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("vault-confirm")
-                                .control(if reveal { Tier::Primary } else { Tier::Danger }, Scale::Standard, false, cx)
-                                .label(if reveal { "Reveal values" } else { "Delete for all bots" })
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = this.update(cx, |this, cx| this.perform(name.clone(), reveal, window, cx));
-                                }),
-                        ),
-                )
-        });
+        let (title, body, confirm, tier) = if reveal {
+            (
+                format!("Reveal {name}?"),
+                "The saved values will be visible on this screen until you hide them or leave the Vault.",
+                "Reveal values",
+                Tier::Primary,
+            )
+        } else {
+            (
+                format!("Delete {name} for every bot?"),
+                "Every bot will lose access to this entry. This cannot be undone.",
+                "Delete for all bots",
+                Tier::Danger,
+            )
+        };
+        crate::panel_kit::confirm_dialog(
+            window,
+            cx,
+            title,
+            body,
+            confirm,
+            tier,
+            move |window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.perform(name.clone(), reveal, window, cx)
+                });
+            },
+        );
     }
 
     fn perform(&mut self, name: String, reveal: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,7 +324,10 @@ impl View {
         self.phase = if reveal {
             Phase::Revealing(name.clone())
         } else {
-            Phase::Deleting(name.clone())
+            Phase::Deleting {
+                name: name.clone(),
+                _operation: self.entries.operate(),
+            }
         };
         self.error = None;
         let client = self.client.clone();
@@ -342,7 +342,7 @@ impl View {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 match &this.phase {
-                    Phase::Revealing(active) | Phase::Deleting(active) if active == &name => {}
+                    Phase::Revealing(active) | Phase::Deleting { name: active, .. } if active == &name => {}
                     _ => return,
                 }
                 this.phase = Phase::Browsing;
@@ -371,10 +371,10 @@ impl Render for View {
         let theme = cx.theme().clone();
         let busy = matches!(
             self.phase,
-            Phase::Saving(_) | Phase::Revealing(_) | Phase::Deleting(_)
+            Phase::Saving(..) | Phase::Revealing(_) | Phase::Deleting { .. }
         );
         let blocked = busy || matches!(self.phase, Phase::Unconfirmed(_));
-        let editing = matches!(self.phase, Phase::Editing(_) | Phase::Saving(_));
+        let editing = matches!(self.phase, Phase::Editing(_) | Phase::Saving(..));
         let actions = vec![
             Button::new("vault-refresh")
                 .control(Tier::Secondary, Scale::Standard, busy || editing, cx)
@@ -391,7 +391,7 @@ impl Render for View {
                 .control(
                     Tier::Primary,
                     Scale::Standard,
-                    blocked || editing || self.entries.is_none(),
+                    blocked || editing || self.entries.value().is_none(),
                     cx,
                 )
                 .icon(IconName::Plus)
@@ -408,7 +408,7 @@ impl Render for View {
         if let Phase::Unconfirmed(message) = &self.phase {
             body = body.child(div().text_sm().child(message.clone()));
         }
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.as_ref().or(self.entries.error()) {
             body = body.child(
                 div()
                     .text_sm()
@@ -419,7 +419,7 @@ impl Render for View {
         if let Some(notice) = &self.notice {
             body = body.child(div().text_sm().child(notice.clone()));
         }
-        if let Phase::Editing(editor) | Phase::Saving(editor) = &self.phase {
+        if let Phase::Editing(editor) | Phase::Saving(editor, _) = &self.phase {
             body = body.child(
                 v_flex()
                     .gap_3()
@@ -476,12 +476,12 @@ impl Render for View {
             );
             return body.into_any_element();
         }
-        let Some(entries) = &self.entries else {
+        let Some(entries) = self.entries.value() else {
             return body
-                .child(if self.error.is_some() {
-                    "Could not load the Vault. Try Refresh."
-                } else {
+                .child(if self.entries.pending() {
                     "Loading Vault…"
+                } else {
+                    "Could not load the Vault. Try Refresh."
                 })
                 .into_any_element();
         };
