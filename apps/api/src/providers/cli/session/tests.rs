@@ -73,6 +73,7 @@ pub(crate) fn input() -> TurnInput {
 pub(crate) struct Log {
     pub calls: Mutex<Vec<String>>,
     pub sessions: Mutex<Vec<SessionState>>,
+    pub selections: Mutex<Vec<Selection>>,
     pub fenced: std::sync::atomic::AtomicBool,
     /// Steered messages [`TurnSink::steers`] hands out, once each.
     pub steers: Mutex<Vec<crate::app::providers::Steer>>,
@@ -95,7 +96,8 @@ impl Log {
 
 #[async_trait]
 impl TurnSink for Log {
-    async fn packet(&self, _: &Selection, _: &str) -> Result<(), Fenced> {
+    async fn packet(&self, selection: &Selection, _: &str) -> Result<(), Fenced> {
+        self.selections.lock().unwrap().push(selection.clone());
         self.push("packet")
     }
     async fn retire_session(&self) {

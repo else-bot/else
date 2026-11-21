@@ -775,10 +775,9 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     let (_, run_token) = h.started(run).await;
 
     let (owner_inputs, run_inputs) = tokio::join!(h.inputs(setup), h.inputs(run));
-    let owner_registry = else_api::providers::prompt::registry_text(&owner_inputs[0]);
-    let run_registry = else_api::providers::prompt::registry_text(&run_inputs[0]);
     assert_ne!(
-        owner_registry, run_registry,
+        else_api::providers::prompt::fingerprint_tag(&owner_inputs[0]),
+        else_api::providers::prompt::fingerprint_tag(&run_inputs[0]),
         "routine permissions affect session compatibility"
     );
     let run_rules = else_api::providers::prompt::instructions(&run_inputs[0], "/p");

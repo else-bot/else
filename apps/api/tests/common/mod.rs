@@ -12,6 +12,12 @@ pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 /// [`SETTLE`] for a live test, whose turns run a real model.
 pub const LIVE: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The packet a fresh native session receives for `input`.
+pub fn fresh_packet(input: &else_api::app::providers::TurnInput) -> String {
+    use else_api::providers::cli::session::{Opened, PreparedTurn};
+    PreparedTurn::new(input, String::new(), Opened::Fresh(String::new())).packet
+}
+
 /// Run `probe` until it returns a value, sleeping 25 ms after each miss. It
 /// has no deadline: bound it with [`until`]. Use [`never_polled`] for negative checks.
 pub async fn poll<T, F: std::future::Future<Output = Option<T>>>(

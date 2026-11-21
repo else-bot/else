@@ -17,9 +17,9 @@
 //! - `[synthetic:messages]` follows the reply with a second message.
 //!
 //! Like a host adapter it keeps a native session per conversation (resumed
-//! while its fingerprint matches, unless the test forgot it), sends the
-//! shared packet (missed history, handoff checkpoint, the owner's message),
-//! and records every packet so tests can check what a session received.
+//! while its fingerprint matches, unless the test forgot it), prepares the
+//! turn's packet through the same session code without saved memory, and
+//! records every packet so tests can check what a session received.
 //! Its checkpoint is deterministic text, or an error when a test asks.
 
 use std::collections::VecDeque;
@@ -31,9 +31,9 @@ use crate::app::providers::FailureCode;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use super::cli::session::{Opened, PreparedTurn};
 use crate::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, SessionState, Stop, TurnInput, TurnOutcome,
-    TurnSink,
+    Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 
 pub const ID: &str = "synthetic";
@@ -204,35 +204,20 @@ impl Provider for Synthetic {
                 })
             })
             .await;
-        let skills = super::default_skills::for_session(resumed.as_ref());
-        let context = super::context::for_session(&input, resumed.as_ref());
-        let mut state = match resumed {
-            Some(session) => session.clone(),
-            None => SessionState {
-                native_id: uuid::Uuid::new_v4().to_string(),
-                fingerprint: FINGERPRINT.into(),
-                considered_through_turn: 0,
-                memory_revision: None,
-                default_skills: Default::default(),
-                context: Default::default(),
-            },
+        // Tests assert packets without saved memory.
+        let input = TurnInput {
+            memory: None,
+            ..input
         };
-        if sink.session(&state).await.is_err() {
+        let opened = match &resumed {
+            Some(session) => Opened::Resumed(session),
+            None => Opened::Fresh(uuid::Uuid::new_v4().to_string()),
+        };
+        let mut turn = PreparedTurn::new(&input, FINGERPRINT.into(), opened);
+        if turn.record(sink).await.is_err() || sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (packet, selection) = super::prompt::turn_packet(
-            &input,
-            state.considered_through_turn,
-            None,
-            &skills,
-            &context,
-        );
-        if sink.packet(&selection, &packet).await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        if sink.sending().await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
+        let packet = turn.packet.clone();
         self.state
             .call(move |state| {
                 if state.packets.len() == 256 {
@@ -247,13 +232,13 @@ impl Provider for Synthetic {
                 message: "Stopped before the synthetic provider acknowledged.".into(),
             };
         }
-        if sink.running().await.is_err() {
+        if turn
+            .accept(sink, &serde_json::Value::Null, "")
+            .await
+            .is_err()
+        {
             return TurnOutcome::Interrupted;
         }
-        state.default_skills = skills.applied;
-        state.context = context.applied;
-        state.considered_through_turn = state.considered_through_turn.max(input.turn_no);
-        let _ = sink.session(&state).await;
         if directives.contains("[synthetic:fail]") {
             let _ = sink.text("Partial output before failure. ").await;
             return TurnOutcome::Failed {

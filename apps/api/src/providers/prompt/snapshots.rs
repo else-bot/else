@@ -10,12 +10,9 @@ use crate::app::providers::{Origin, OwnerAnswer, TurnInput};
 fn check(name: &str, input: &TurnInput) {
     let actual = format!(
         "== fingerprint tag\n{}\n== system\n{}\n== packet\n{}\n",
-        super::registry_text(input)
-            .lines()
-            .next()
-            .unwrap_or_default(),
+        super::fingerprint_tag(input),
         super::instructions(input, "/p"),
-        packet(input),
+        super::tests::sent(input, input.turn_no - 1),
     );
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/providers/prompt/snapshots")
@@ -29,20 +26,6 @@ fn check(name: &str, input: &TurnInput) {
         actual == expected,
         "the {name} prompt changed; rerun with UPDATE_SNAPSHOTS=1 if that is intended\n{actual}"
     );
-}
-
-/// The packet for a session that considered everything before this turn
-/// and holds the memory, default skills, and context blocks.
-fn packet(input: &TurnInput) -> String {
-    let skills = super::super::default_skills::Update {
-        text: None,
-        applied: Default::default(),
-    };
-    let context = super::super::context::Update {
-        text: None,
-        applied: Default::default(),
-    };
-    super::turn_packet(input, input.turn_no - 1, None, &skills, &context).0
 }
 
 fn input(origin: Origin) -> TurnInput {
