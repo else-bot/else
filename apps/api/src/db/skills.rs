@@ -716,8 +716,6 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_string(&stored).unwrap(), json);
-        let from_wire: SkillSource = wire.into();
-        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
     }
 
     #[test]

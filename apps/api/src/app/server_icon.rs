@@ -97,32 +97,6 @@ impl From<StoredIcon> for Stored {
     }
 }
 
-impl TryFrom<Stored> for StoredIcon {
-    type Error = WireLetterStyle;
-
-    fn try_from(icon: Stored) -> Result<Self, Self::Error> {
-        Ok(match icon {
-            Stored::Default {} => Self::Default {},
-            Stored::Letters {
-                style,
-                letters,
-                hue,
-            } => Self::Letters {
-                style: match style {
-                    WireLetterStyle::Gradient => LetterStyle::Gradient,
-                    WireLetterStyle::Monogram => LetterStyle::Monogram,
-                    other => return Err(other),
-                },
-                letters,
-                hue,
-            },
-            Stored::Pattern { hue } => Self::Pattern { hue },
-            Stored::Emoji { emoji, hue } => Self::Emoji { emoji, hue },
-            Stored::Picture { digest } => Self::Picture { digest },
-        })
-    }
-}
-
 /// A checked icon, ready to store.
 #[derive(Debug)]
 pub struct ServerIcon {

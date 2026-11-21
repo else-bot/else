@@ -1546,7 +1546,6 @@ mod tests {
                     task: task.map(str::to_owned),
                 }
             );
-            assert_eq!(serde_json::to_string(&DraftKind::from(wire)).unwrap(), json);
         }
     }
 

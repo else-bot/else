@@ -55,6 +55,8 @@ mod checks;
 pub(crate) use checks::stop_checks;
 pub use checks::{Check, SETTLE_BATCH, settle_checks};
 
+use checks::{CheckedJob, skip_checks};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct StoredRoutineUpdate {
     routine_id: Uuid,
@@ -69,16 +71,6 @@ impl From<&StoredRoutineUpdate> for else_wire::items::RoutineUpdate {
         }
     }
 }
-
-impl From<else_wire::items::RoutineUpdate> for StoredRoutineUpdate {
-    fn from(value: else_wire::items::RoutineUpdate) -> Self {
-        Self {
-            routine_id: value.routine_id,
-            name: value.name,
-        }
-    }
-}
-use checks::{CheckedJob, skip_checks};
 
 /// Due routines admitted per scheduler scan.
 pub const ADMIT_BATCH: i64 = 8;
@@ -1864,7 +1856,5 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_string(&stored).unwrap(), json);
-        let from_wire: StoredRoutineUpdate = wire.into();
-        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
     }
 }

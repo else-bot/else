@@ -291,7 +291,8 @@ wire_state! {
     _ => Unknown
 }
 
-/// A server icon as advertised to desktops. A picture may include its SHA-256 digest.
+/// A server icon as capabilities advertise it and the desktop caches it.
+/// Only the server fills a picture's `digest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Stored {

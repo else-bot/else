@@ -54,17 +54,6 @@ impl From<&SkillSource> for else_wire::skills::SkillSource {
     }
 }
 
-impl From<else_wire::skills::SkillSource> for SkillSource {
-    fn from(value: else_wire::skills::SkillSource) -> Self {
-        Self {
-            url: value.url,
-            repo: value.repo,
-            path: value.path,
-            commit: value.commit,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillFile {
     pub path: String,
@@ -76,16 +65,6 @@ impl From<&SkillFile> for else_wire::skills::SkillFile {
     fn from(value: &SkillFile) -> Self {
         Self {
             path: value.path.clone(),
-            size: value.size,
-            script: value.script,
-        }
-    }
-}
-
-impl From<else_wire::skills::SkillFile> for SkillFile {
-    fn from(value: else_wire::skills::SkillFile) -> Self {
-        Self {
-            path: value.path,
             size: value.size,
             script: value.script,
         }

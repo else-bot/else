@@ -17,6 +17,11 @@ use super::turns::TurnStatus;
 use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName, BotPurpose};
 use crate::app::providers::Profile;
 
+mod impact;
+mod sidebar;
+
+pub use impact::{Impact, impact};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct StoredBotCreated {
     bot_id: Uuid,
@@ -34,18 +39,6 @@ impl From<&StoredBotCreated> for else_wire::items::BotCreated {
             creator_bot_id: value.creator_bot_id,
             creator_name: value.creator_name.clone(),
             purpose: value.purpose.clone(),
-        }
-    }
-}
-
-impl From<else_wire::items::BotCreated> for StoredBotCreated {
-    fn from(value: else_wire::items::BotCreated) -> Self {
-        Self {
-            bot_id: value.bot_id,
-            name: value.name,
-            creator_bot_id: value.creator_bot_id,
-            creator_name: value.creator_name,
-            purpose: value.purpose,
         }
     }
 }
@@ -83,11 +76,6 @@ impl From<&WaitingOn> for else_wire::bots::WaitingOn {
         }
     }
 }
-
-mod impact;
-mod sidebar;
-
-pub use impact::{Impact, impact};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -906,7 +894,5 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_string(&stored).unwrap(), json);
-        let from_wire: StoredBotCreated = wire.into();
-        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
     }
 }

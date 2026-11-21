@@ -356,7 +356,6 @@ mod tests {
         use else_wire::settings::{LetterStyle, Stored};
 
         let json = r#"{"kind":"letters","style":"monogram","letters":"EB","hue":90}"#;
-        let expected: Value = serde_json::from_str(json).unwrap();
         let document: IconDocument = serde_json::from_str(json).unwrap();
         let wire = Shared::from(document);
         let icon = Stored::Letters {
@@ -364,13 +363,7 @@ mod tests {
             letters: Some("EB".into()),
             hue: Some(90),
         };
-        assert_eq!(wire, Shared::Set(icon.clone()));
-        let stored: StoredIcon = serde_json::from_str(json).unwrap();
-        assert_eq!(serde_json::json!(stored), expected);
-        assert_eq!(
-            serde_json::json!(StoredIcon::try_from(icon).unwrap()),
-            expected
-        );
+        assert_eq!(wire, Shared::Set(icon));
     }
 
     #[test]
@@ -378,6 +371,7 @@ mod tests {
         for json in [
             r#"{"kind":"image_url","url":"https://example.org/icon.png"}"#,
             r#"{"kind":"pattern","hue":90,"seed":"waves"}"#,
+            r#"{"kind":"letters","style":"neon"}"#,
         ] {
             let expected: Value = serde_json::from_str(json).unwrap();
             let document: IconDocument = serde_json::from_str(json).unwrap();

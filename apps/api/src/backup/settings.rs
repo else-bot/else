@@ -65,17 +65,6 @@ impl From<Service> for BackupService {
     }
 }
 
-impl From<BackupService> for Service {
-    fn from(service: BackupService) -> Self {
-        match service {
-            BackupService::R2 => Self::Known(KnownService::R2),
-            BackupService::S3 => Self::Known(KnownService::S3),
-            BackupService::Compatible => Self::Known(KnownService::Compatible),
-            BackupService::Other(service) => Self::Other(service),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredDestination {
     service: Service,
@@ -90,21 +79,6 @@ pub(super) struct StoredDestination {
 
 impl From<StoredDestination> for BackupDestination {
     fn from(value: StoredDestination) -> Self {
-        Self {
-            service: value.service.into(),
-            endpoint: value.endpoint,
-            region: value.region,
-            bucket: value.bucket,
-            prefix: value.prefix,
-            access_key_id: value.access_key_id,
-            path_style: value.path_style,
-            has_secret: value.has_secret,
-        }
-    }
-}
-
-impl From<BackupDestination> for StoredDestination {
-    fn from(value: BackupDestination) -> Self {
         Self {
             service: value.service.into(),
             endpoint: value.endpoint,
@@ -478,6 +452,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_destination_on_an_unknown_service_is_refused() {
+        let input = DestinationInput {
+            service: "gcs".into(),
+            endpoint: "https://storage.example.org".into(),
+            region: "auto".into(),
+            bucket: "vault".into(),
+            prefix: String::new(),
+            access_key_id: "key-1".into(),
+            path_style: false,
+            secret_access_key: Some("secret".into()),
+        };
+        assert!(matches!(
+            Destination::resolve(input, None),
+            Err(Error::Invalid("Choose R2, S3, or S3 compatible storage."))
+        ));
+    }
+
+    #[test]
     fn backup_destination_reads_existing_json() {
         let json = r#"{"service":"r2","endpoint":"https://backups.example.org","region":"auto","bucket":"vault","prefix":"else/","access_key_id":"key-1","path_style":false,"has_secret":true}"#;
         let stored: StoredDestination = serde_json::from_str(json).unwrap();
@@ -495,10 +487,6 @@ mod tests {
                 path_style: false,
                 has_secret: true,
             }
-        );
-        assert_eq!(
-            serde_json::to_string(&StoredDestination::from(wire)).unwrap(),
-            json
         );
     }
 

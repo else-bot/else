@@ -413,25 +413,6 @@ impl From<DraftKind> for else_wire::outgoing::DraftKind {
     }
 }
 
-impl From<else_wire::outgoing::DraftKind> for DraftKind {
-    fn from(kind: else_wire::outgoing::DraftKind) -> Self {
-        let platform = match kind.platform {
-            DraftPlatform::X => GrantPlatform::Known(Platform::X),
-            DraftPlatform::Telegram => GrantPlatform::Known(Platform::Telegram),
-            DraftPlatform::Discord => GrantPlatform::Known(Platform::Discord),
-            DraftPlatform::WhatsApp => GrantPlatform::Known(Platform::WhatsApp),
-            DraftPlatform::Other(platform) => GrantPlatform::Other(platform),
-        };
-        Self {
-            platform,
-            account_id: kind.account_id,
-            account: kind.account,
-            destination: kind.destination,
-            task: kind.task,
-        }
-    }
-}
-
 /// A snapshot of a file the owner approves with a draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftFile {
@@ -459,18 +440,6 @@ impl From<&DraftFile> for else_wire::outgoing::DraftFile {
             media_type: file.media_type.clone(),
             size: file.size,
             sha256: file.sha256.clone(),
-        }
-    }
-}
-
-impl From<else_wire::outgoing::DraftFile> for DraftFile {
-    fn from(file: else_wire::outgoing::DraftFile) -> Self {
-        Self {
-            id: file.id,
-            name: file.name,
-            media_type: file.media_type,
-            size: file.size,
-            sha256: file.sha256,
         }
     }
 }

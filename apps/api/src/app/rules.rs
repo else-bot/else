@@ -113,20 +113,6 @@ impl From<&DiffLine> for wire::DiffLine {
     }
 }
 
-impl From<wire::DiffLine> for DiffLine {
-    fn from(line: wire::DiffLine) -> Self {
-        Self {
-            op: match line.op {
-                wire::DiffOp::Same => DiffOp::Same,
-                wire::DiffOp::Add => DiffOp::Add,
-                wire::DiffOp::Remove => DiffOp::Remove,
-                _ => DiffOp::Unknown,
-            },
-            text: line.text,
-        }
-    }
-}
-
 /// A validated request to set one section's text; empty text removes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {

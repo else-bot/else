@@ -21,15 +21,6 @@ impl From<&Choice> for wire::QuestionChoice {
     }
 }
 
-impl From<wire::QuestionChoice> for Choice {
-    fn from(value: wire::QuestionChoice) -> Self {
-        Self {
-            id: value.id,
-            label: value.label,
-        }
-    }
-}
-
 /// The owner's answer to a question or approval request: which question
 /// (its kind, title, and bound action) and the choices the owner made, or
 /// that it ended unanswered.

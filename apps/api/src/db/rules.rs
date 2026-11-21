@@ -89,18 +89,6 @@ impl From<&UpdateChange> for RuleChange {
     }
 }
 
-impl From<RuleChange> for UpdateChange {
-    fn from(change: RuleChange) -> Self {
-        match change {
-            RuleChange::Added => Self::Known(ChangeKind::Added),
-            RuleChange::Changed => Self::Known(ChangeKind::Changed),
-            RuleChange::Removed => Self::Known(ChangeKind::Removed),
-            RuleChange::Restored => Self::Known(ChangeKind::Restored),
-            RuleChange::Unknown => Self::Other("unknown".into()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRulesUpdate {
     version: i64,
@@ -120,19 +108,6 @@ impl From<&StoredRulesUpdate> for RulesUpdate {
             change: (&update.change).into(),
             owner_words: update.owner_words.clone(),
             diff: update.diff.iter().map(Into::into).collect(),
-            undone_at: update.undone_at,
-        }
-    }
-}
-
-impl From<RulesUpdate> for StoredRulesUpdate {
-    fn from(update: RulesUpdate) -> Self {
-        Self {
-            version: update.version,
-            section: update.section,
-            change: update.change.into(),
-            owner_words: update.owner_words,
-            diff: update.diff.into_iter().map(Into::into).collect(),
             undone_at: update.undone_at,
         }
     }
@@ -480,8 +455,17 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_string(&stored).unwrap(), json);
-        let from_wire: StoredRulesUpdate = wire.into();
-        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
+    }
+
+    #[test]
+    fn rules_update_reads_the_undone_stamp_sql_adds() {
+        let json = r#"{"version":3,"section":"Replies","change":"changed","owner_words":"Keep replies short.","diff":[],"undone_at":"2026-11-02T09:30:00.250+00:00"}"#;
+        let stored: StoredRulesUpdate = serde_json::from_str(json).unwrap();
+        let wire: RulesUpdate = (&stored).into();
+        assert_eq!(
+            wire.undone_at,
+            Some("2026-11-02T09:30:00.250Z".parse().unwrap())
+        );
     }
 
     #[test]
