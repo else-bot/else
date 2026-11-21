@@ -286,13 +286,6 @@ impl ConversationView {
         cx.notify();
     }
 
-    pub(super) fn on_app<E: ?Sized>(
-        &self,
-        f: impl Fn(&mut ElseApp, &E, &mut Window, &mut Context<ElseApp>) + 'static,
-    ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
-        on_app(&self.app, f)
-    }
-
     /// Redraws card `key` after its request settled, and returns whether
     /// the caller goes on to handle the result. The view is drawn cached, so
     /// a result that arrives once the connection already dropped is drawn

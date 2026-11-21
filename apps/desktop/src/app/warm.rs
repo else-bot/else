@@ -147,7 +147,7 @@ impl ElseApp {
             Resume::Load => self.load_conversation(window, cx),
         }
         self.ensure_rules(bot, window, cx);
-        self.resume_find(window, cx);
+        self.update_view(cx, |view, cx| view.resume_find(window, cx));
     }
 
     /// Preloads `bot`'s conversation once the pointer or the quick

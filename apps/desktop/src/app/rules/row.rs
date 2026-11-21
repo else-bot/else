@@ -1,6 +1,7 @@
 //! The one-line note in the transcript when the bot edits a rule.
 
 use super::{RulesTab, change_label, when};
+use crate::app::conversation::on_app;
 use else_wire::rules::RulesUpdate;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -30,7 +31,7 @@ impl crate::app::conversation::ConversationView {
             cx,
         )
         .accessibility_label(format!("View the change to {}", update.section))
-        .on_click(self.on_app(move |app, _, window, cx| {
+        .on_click(on_app(&self.app, move |app, _, window, cx| {
             app.open_rules(
                 bot,
                 Some(section.clone()),
@@ -50,7 +51,7 @@ impl crate::app::conversation::ConversationView {
             )
             .loading(restoring)
             .accessibility_label(format!("Undo the change to {}", update.section))
-            .on_click(self.on_app(move |app, _, window, cx| {
+            .on_click(on_app(&self.app, move |app, _, window, cx| {
                 app.restore_rules(bot, previous, shown, window, cx)
             }))
         });

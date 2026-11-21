@@ -1,4 +1,5 @@
 use super::conversation::ConversationView;
+use super::conversation::on_app;
 use super::reply::Feedback as _;
 use super::reply::{Author, MessageReference, Quote};
 use super::{Connection, ElseApp, RowKey};
@@ -67,7 +68,7 @@ impl ConversationView {
                     .icon(IconName::Reply)
                     .tooltip("Reply")
                     .accessibility_label("Reply to message")
-                    .on_click(self.on_app(move |app, _, window, cx| {
+                    .on_click(on_app(&self.app, move |app, _, window, cx| {
                         app.start_reply(bot, item, window, cx);
                     })),
             )

@@ -625,7 +625,9 @@ impl ElseApp {
                     &FindInConversation,
                     Some(APP_CONTEXT),
                 )
-                .on_click(cx.listener(|app, _, window, cx| app.open_find(window, cx))),
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.update_view(cx, |view, cx| view.open_find(window, cx));
+                })),
         );
         if !self.details.open() {
             actions = actions.child(

@@ -1,3 +1,4 @@
+use super::conversation::on_app;
 use super::task_reply::state::format_elapsed;
 use super::transcript::RowKey;
 use crate::app::conversation::ConversationView;
@@ -173,7 +174,7 @@ impl ConversationView {
                                         "Open chat with {}",
                                         name(delegation)
                                     ))
-                                    .on_click(self.on_app(move |app, _, window, cx| {
+                                    .on_click(on_app(&self.app, move |app, _, window, cx| {
                                         app.open_bot(target, window, cx)
                                     })),
                                 ),

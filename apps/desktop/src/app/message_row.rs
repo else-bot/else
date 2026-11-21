@@ -221,7 +221,7 @@ impl ConversationView {
         })
     }
 
-    fn routines(&self) -> &[Routine] {
+    pub(super) fn routines(&self) -> &[Routine] {
         self.conversation.as_ref().map_or(&[], |c| c.routines())
     }
 
@@ -235,15 +235,6 @@ impl ConversationView {
             &self.app,
             cx,
         )
-    }
-
-    pub(super) fn model_remedy(&self, turn: &Turn, cx: &App) -> Option<Button> {
-        model_remedy(turn, self.bot_id, &self.app, cx)
-    }
-
-    pub(super) fn routine_retry(&self, turn: &Turn, cx: &App) -> Option<Button> {
-        let connected = self.inputs.connected;
-        routine_retry(turn, self.bot_id, self.routines(), connected, &self.app, cx)
     }
 
     pub(super) fn render_row_content(
@@ -503,7 +494,8 @@ impl ConversationView {
                                 .gap_x_2()
                                 .child(div().text_color(theme.muted_foreground).child("·"))
                                 .children(retry.then(|| {
-                                    action("retry", "Retry").on_click(self.on_app(
+                                    action("retry", "Retry").on_click(on_app(
+                                        &self.app,
                                         move |app, _, window, cx| {
                                             app.retry_pending(request_id, window, cx)
                                         },
@@ -518,13 +510,15 @@ impl ConversationView {
                                     )
                                 }))
                                 .children((mark.is_none() && pending.is_rejected()).then(|| {
-                                    action("restore", "Edit").on_click(self.on_app(
+                                    action("restore", "Edit").on_click(on_app(
+                                        &self.app,
                                         move |app, _, window, cx| {
                                             app.take_failed(request_id, true, window, cx)
                                         },
                                     ))
                                 }))
-                                .child(action("dismiss", "Dismiss").on_click(self.on_app(
+                                .child(action("dismiss", "Dismiss").on_click(on_app(
+                                    &self.app,
                                     move |app, _, window, cx| {
                                         app.take_failed(request_id, false, window, cx)
                                     },
@@ -611,7 +605,7 @@ pub(super) fn turn_status(
 
 /// Retry beside the failure of a routine's latest run, as in bot details,
 /// which it opens to show how the retry goes.
-fn routine_retry(
+pub(super) fn routine_retry(
     turn: &Turn,
     bot: Uuid,
     routines: &[Routine],
@@ -907,7 +901,12 @@ impl ConversationView {
 
 /// A Switch model action for a turn that failed because its provider
 /// cannot run now.
-fn model_remedy(turn: &Turn, bot: Uuid, app: &WeakEntity<ElseApp>, cx: &App) -> Option<Button> {
+pub(super) fn model_remedy(
+    turn: &Turn,
+    bot: Uuid,
+    app: &WeakEntity<ElseApp>,
+    cx: &App,
+) -> Option<Button> {
     (turn.status == TurnStatus::Failed
         && turn
             .error

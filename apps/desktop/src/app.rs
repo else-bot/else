@@ -256,8 +256,9 @@ pub(crate) fn on_commands<E: InteractiveElement>(element: E, app: &Entity<ElseAp
     let element = on::<LoadOlder, _>(element, app, |app, window, cx| {
         app.update_view(cx, |view, cx| view.load_older(window, cx));
     });
-    let element =
-        on::<FindInConversation, _>(element, app, |app, window, cx| app.open_find(window, cx));
+    let element = on::<FindInConversation, _>(element, app, |app, window, cx| {
+        app.update_view(cx, |view, cx| view.open_find(window, cx));
+    });
     let element = on::<NewCategory, _>(element, app, |app, window, cx| {
         if app.connection == Connection::Connected {
             app.open_category_dialog(None, window, cx);

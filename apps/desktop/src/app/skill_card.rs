@@ -1,3 +1,4 @@
+use super::conversation::on_app;
 use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
@@ -286,7 +287,7 @@ impl ConversationView {
                         Button::new(SharedString::from(format!("skill-settings-{id}")))
                             .control(Tier::Ghost, Scale::Compact, false, cx)
                             .label("Open in Settings")
-                            .on_click(self.on_app(|app, _, window, cx| {
+                            .on_click(on_app(&self.app, |app, _, window, cx| {
                                 // A click leaves nothing focused, and an action
                                 // without focus never reaches the Shell's handler.
                                 app.sidebar_focus.focus(window, cx);
