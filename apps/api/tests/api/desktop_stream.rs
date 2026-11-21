@@ -1068,3 +1068,41 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
     assert!(s.log.input("control").is_empty());
     ends_with(&mut socket, "server_stopping").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_control_lease_hands_control_back_and_keeps_watching() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=watch").await;
+    wait_mode(&mut socket, "watch").await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_control BEFORE INSERT ON computer_leases
+         WHEN NEW.holder LIKE 'desktop-control:%'
+         BEGIN SELECT RAISE(ABORT, 'control refused by the test'); END",
+    )
+    .execute(&s.app.db.pool)
+    .await
+    .unwrap();
+
+    send(&mut socket, json!({"type":"mode","mode":"control"})).await;
+    assert_eq!(next_json(&mut socket).await["code"], "control_failed");
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+    assert_eq!(s.leases("desktop-control:%").await, 0);
+    assert!(!s.log.lines().iter().any(|l| l == "control open"));
+
+    sqlx::query("DROP TRIGGER refuse_control")
+        .execute(&s.app.db.pool)
+        .await
+        .unwrap();
+    let mut other = s.open("mode=control").await;
+    assert_eq!(next_json(&mut other).await["type"], "size");
+    assert_eq!(
+        next_json(&mut other).await,
+        json!({"type":"mode","mode":"control"}),
+        "the failed attempt released its control claim"
+    );
+    assert_eq!(s.leases("desktop-control:%").await, 1);
+    drop(socket);
+}
