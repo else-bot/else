@@ -93,13 +93,7 @@ fn replicator(app: &TestApp, s3: &S3) -> Replicator {
 }
 
 fn worker(app: &TestApp, dir: &Path, replicator: Replicator) -> BackupWorker {
-    BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key()),
-        config(dir),
-    )
-    .with_replicator(replicator)
+    BackupWorker::new(app.db.pool.clone(), Arc::new(key()), config(dir)).with_replicator(replicator)
 }
 
 async fn populated() -> TestApp {
@@ -311,13 +305,8 @@ async fn an_interrupted_upload_resumes_and_reuses_what_it_uploaded() {
     );
     let left = chunk_ids(&s3).await;
     assert!(!left.is_empty(), "the crash left uploaded chunks");
-    let restarted = BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key()),
-        config(dir.path()),
-    )
-    .with_replicator(replicator(&app, &s3));
+    let restarted = BackupWorker::new(app.db.pool.clone(), Arc::new(key()), config(dir.path()))
+        .with_replicator(replicator(&app, &s3));
     let stats = restarted.replicate_now().await.unwrap().unwrap();
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
     assert!(stats.reused >= left.len(), "{stats:?}");

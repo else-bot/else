@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use sqlx::Connection;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+use sqlx::sqlite::SqliteConnection;
 
 use super::{
     ArtifactKind, BackupError, COMPLETE, Completion, Covered, DATABASE, DatabaseParams, MANIFEST,
@@ -72,10 +72,6 @@ pub struct RestoreReport {
     pub manifest: Manifest,
     /// The database's newest migration after restore.
     pub migration_version: i64,
-}
-
-fn options(params: &DatabaseParams) -> SqliteConnectOptions {
-    params.options.clone()
 }
 
 fn clean_stale(parent: &Path) -> Result<(), BackupError> {
@@ -263,6 +259,23 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     Ok(())
 }
 
+/// Verify `artifact` against the manifest and decrypt it to `target`, off
+/// the async runtime.
+async fn decrypt_artifact(
+    set_dir: &Path,
+    artifact: &super::Artifact,
+    identity: &age::x25519::Identity,
+    target: &Path,
+) -> Result<(), BackupError> {
+    let (set_dir, artifact, identity, target) = (
+        set_dir.to_owned(),
+        artifact.clone(),
+        identity.clone(),
+        target.to_owned(),
+    );
+    super::blocking(move || verify_and_decrypt(&set_dir, &artifact, &identity, &target)).await
+}
+
 fn verify_and_decrypt(
     set_dir: &Path,
     artifact: &super::Artifact,
@@ -387,9 +400,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
                 rebuilt.clone(),
                 request.max_bytes,
             );
-            tokio::task::spawn_blocking(move || super::store::rebuild(&set_dir, &out, opened, max))
-                .await
-                .map_err(|e| BackupError::Io(e.to_string()))??;
+            super::blocking(move || super::store::rebuild(&set_dir, &out, opened, max)).await?;
         }
         let (_, manifest, identity) = open_set(&rebuilt, request.key)?;
         let request = RestoreRequest {
@@ -401,17 +412,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         (request, manifest, identity)
     };
     let dump = staging.join("database.dump");
-    {
-        let set_dir = request.set_dir.to_owned();
-        let manifest = manifest.clone();
-        let identity = identity.clone();
-        let dump = dump.clone();
-        tokio::task::spawn_blocking(move || {
-            verify_and_decrypt(&set_dir, &manifest.artifacts[0], &identity, &dump)
-        })
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
-    }
+    decrypt_artifact(request.set_dir, &manifest.artifacts[0], &identity, &dump).await?;
 
     let target = request.server.with_database(request.target_database);
     let path = target.options.get_filename();
@@ -432,7 +433,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         let _ = std::fs::remove_file(path);
         return Err(BackupError::io(path.display(), e));
     }
-    let mut restored = load_and_check(&request, &manifest, &dump).await;
+    let mut restored = load_and_check(&request, &manifest).await;
     let _ = std::fs::remove_file(&dump);
     if restored.is_ok()
         && let Err(err) = restore_computers(&request, &manifest, &identity, &staging).await
@@ -455,10 +456,9 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
 async fn load_and_check(
     request: &RestoreRequest<'_>,
     manifest: &Manifest,
-    _dump: &Path,
 ) -> Result<i64, BackupError> {
     let target = request.server.with_database(request.target_database);
-    let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
+    let mut conn = SqliteConnection::connect_with(&target.options).await?;
     let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(&mut conn)
         .await?;
@@ -582,18 +582,14 @@ async fn restore_runtime(
             .find(|a| a.kind == ArtifactKind::Mcp)
         {
             let plain = staging.join("mcp.tar");
-            let set_dir = request.set_dir.to_owned();
-            let artifact = artifact.clone();
-            let identity = identity.clone();
+            decrypt_artifact(request.set_dir, artifact, identity, &plain).await?;
             let dir = target.data_dir.join("mcp");
-            tokio::task::spawn_blocking(move || {
-                let result = verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
-                    .and_then(|()| super::mcp::unpack(&plain, &dir));
+            super::blocking(move || {
+                let result = super::mcp::unpack(&plain, &dir);
                 let _ = std::fs::remove_file(&plain);
                 result
             })
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))??;
+            .await?;
         }
         let projects = projects_dir(target.data_dir);
         let format = super::projects::Format::of(manifest.schema_version);
@@ -602,20 +598,16 @@ async fn restore_runtime(
             .filter(|a| a.kind == ArtifactKind::Project)
         {
             let bot = artifact.bot_id.expect("validated");
-            ensure_private(&projects)?;
+            super::ensure_private_dir(&projects)?;
             let plain = staging.join(format!("project-{bot}.tar"));
-            let set_dir = request.set_dir.to_owned();
-            let artifact = artifact.clone();
-            let identity = identity.clone();
+            decrypt_artifact(request.set_dir, artifact, identity, &plain).await?;
             let dir = projects.join(bot.to_string());
-            tokio::task::spawn_blocking(move || {
-                let result = verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
-                    .and_then(|()| super::projects::unpack(&plain, &dir, format));
+            super::blocking(move || {
+                let result = super::projects::unpack(&plain, &dir, format);
                 let _ = std::fs::remove_file(&plain);
                 result
             })
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))??;
+            .await?;
         }
         for artifact in manifest.artifacts[1..]
             .iter()
@@ -629,21 +621,8 @@ async fn restore_runtime(
                     .and_then(|o| o.strip_suffix(".age"))
                     .expect("validated");
                 let dir = target.data_dir.join("artifacts").join(bot.to_string());
-                use std::os::unix::fs::DirBuilderExt;
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(&dir)
-                    .map_err(|e| BackupError::io(dir.display(), e))?;
-                let set_dir = request.set_dir.to_owned();
-                let artifact = artifact.clone();
-                let identity = identity.clone();
-                let path = dir.join(id);
-                tokio::task::spawn_blocking(move || {
-                    verify_and_decrypt(&set_dir, &artifact, &identity, &path)
-                })
-                .await
-                .map_err(|e| BackupError::Io(e.to_string()))??;
+                super::ensure_private_dir(&dir)?;
+                decrypt_artifact(request.set_dir, artifact, identity, &dir.join(id)).await?;
                 continue;
             }
             let entry = manifest
@@ -653,17 +632,7 @@ async fn restore_runtime(
                 .and_then(|b| b.computer.clone())
                 .expect("validated");
             let plain = staging.join(format!("vm-{bot}.msb"));
-            {
-                let set_dir = request.set_dir.to_owned();
-                let artifact = artifact.clone();
-                let identity = identity.clone();
-                let plain = plain.clone();
-                tokio::task::spawn_blocking(move || {
-                    verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
-                })
-                .await
-                .map_err(|e| BackupError::Io(e.to_string()))??;
-            }
+            decrypt_artifact(request.set_dir, artifact, identity, &plain).await?;
             let spec = crate::computers::Spec {
                 name: entry.runtime_name.clone(),
                 image: entry.image.clone(),
@@ -679,9 +648,8 @@ async fn restore_runtime(
                 files: Vec::new(),
                 mounts: match &entry.project_mount {
                     Some(mount) => {
-                        ensure_private(&projects)?;
                         let dir = projects.join(bot.to_string());
-                        ensure_private(&dir)?;
+                        super::ensure_private_dir(&dir)?;
                         vec![crate::computers::Mount {
                             host: std::fs::canonicalize(&dir)
                                 .map_err(|e| BackupError::io(dir.display(), e))?,
@@ -703,25 +671,24 @@ async fn restore_runtime(
                 BackupError::Producer(format!("restoring {}: {e}", entry.runtime_name))
             })?;
             if let Some(password) = &entry.desktop_password {
-                write_private(
-                    &target.data_dir.join("computers").join(bot.to_string()),
-                    "vnc.pass",
-                    &format!("{password}\n"),
-                )?;
+                let dir = target.data_dir.join("computers").join(bot.to_string());
+                super::ensure_private_dir(&dir)?;
+                let path = dir.join("vnc.pass");
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)
+                    .map_err(|e| BackupError::io(path.display(), e))?;
+                file.write_all(format!("{password}\n").as_bytes())
+                    .and_then(|()| file.sync_all())
+                    .map_err(|e| BackupError::io(path.display(), e))?;
             }
             restored.push(bot);
         }
     }
     Ok(())
-}
-
-fn ensure_private(dir: &Path) -> Result<(), BackupError> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| BackupError::io(dir.display(), e))
 }
 
 async fn reconcile(
@@ -730,7 +697,7 @@ async fn reconcile(
     restored: &[uuid::Uuid],
 ) -> Result<(), BackupError> {
     let target = request.server.with_database(request.target_database);
-    let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
+    let mut conn = SqliteConnection::connect_with(&target.options).await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
     let tracked = crate::computers::restore_passive(&mut tx, restored).await?;
     if tracked != restored.len() as u64 {
@@ -745,24 +712,4 @@ async fn reconcile(
     tx.commit().await?;
     conn.close().await?;
     Ok(())
-}
-
-fn write_private(dir: &Path, name: &str, contents: &str) -> Result<(), BackupError> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| BackupError::io(dir.display(), e))?;
-    let path = dir.join(name);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-        .map_err(|e| BackupError::io(path.display(), e))?;
-    file.write_all(contents.as_bytes())
-        .and_then(|_| file.sync_all())
-        .map_err(|e| BackupError::io(path.display(), e))
 }

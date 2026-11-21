@@ -95,6 +95,15 @@ pub enum BackupError {
     Leftover(String),
 }
 
+/// Run blocking file or crypto work off the async runtime.
+pub async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, BackupError> + Send + 'static,
+) -> Result<T, BackupError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))?
+}
+
 impl BackupError {
     pub fn io(what: impl std::fmt::Display, err: std::io::Error) -> Self {
         Self::Io(format!("{what}: {err}"))

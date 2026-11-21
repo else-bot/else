@@ -296,9 +296,7 @@ impl Replicator {
             Err(err) => return Err(err.into()),
         };
         let (keys, id) = (keys.clone(), id.to_owned());
-        tokio::task::spawn_blocking(move || keys.open(&id, &sealed).ok())
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))
+        super::blocking(move || Ok(keys.open(&id, &sealed).ok())).await
     }
 
     /// Of `ids`, the chunks that are missing or fail to verify.
@@ -515,11 +513,8 @@ impl Replicator {
             .map(|id| {
                 let store = store.clone();
                 async move {
-                    let read = {
-                        let id = id.clone();
-                        tokio::task::spawn_blocking(move || store.sealed(&id))
-                    };
-                    let sealed = read.await.map_err(|e| BackupError::Io(e.to_string()))??;
+                    let id_to_read = id.clone();
+                    let sealed = super::blocking(move || store.sealed(&id_to_read)).await?;
                     let bytes = sealed.len() as u64;
                     self.s3
                         .put(&self.chunk_key(keys, &id), sealed, true)
@@ -846,7 +841,7 @@ async fn download_chunked(
         let rebuild = {
             let (target, identity, stored) =
                 (dir.join(&artifact.object), identity.clone(), stored.clone());
-            tokio::task::spawn_blocking(move || {
+            super::blocking(move || {
                 let chunks = std::iter::from_fn(|| rx.blocking_recv());
                 chunks::rebuild(&target, &identity, &stored, chunks, max_bytes)
             })
@@ -875,7 +870,7 @@ async fn download_chunked(
         if let Some(err) = failed {
             return Err(err);
         }
-        let sealed = sealed.map_err(|e| BackupError::Io(e.to_string()))??;
+        let sealed = sealed?;
         artifacts.push(chunks::rebuilt(artifact, stored, sealed)?);
     }
     chunks::publish_rebuilt(dir, index.manifest, artifacts, completion, &identity)
@@ -893,9 +888,7 @@ async fn fetch_for_restore(
         )
         .await?;
     let (keys, id) = (keys.clone(), chunk.id.clone());
-    let plain = tokio::task::spawn_blocking(move || keys.open(&id, &sealed))
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
+    let plain = super::blocking(move || keys.open(&id, &sealed)).await?;
     if plain.len() != chunk.bytes as usize {
         return Err(BackupError::Invalid(format!(
             "chunk {} has the wrong length",

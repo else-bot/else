@@ -6,18 +6,21 @@
 //! the worker then moves the set into the local chunk store
 //! ([`super::store::adopt`]).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::{
-    Application, Artifact, ArtifactKind, BackupError, BotEntry, COMPLETE, Completion, Covered,
-    DATABASE, DatabaseParams, MANIFEST, Manifest, ObjectRef, ProjectState, ProviderState,
-    SCHEMA_VERSION, Sqlite, TableDigest, VmState,
+    Application, Artifact, ArtifactKind, BackupError, BotEntry, COMPLETE, Completion, Coverage,
+    Covered, DATABASE, MANIFEST, Manifest, ObjectRef, ProjectState, ProviderState, SCHEMA_VERSION,
+    Sqlite, TableDigest, VmState,
 };
 use crate::credentials::SecretKey;
 use crate::db::bots::BotStatus;
-use crate::maintenance::Step;
+use crate::maintenance::{Closed, Step};
 
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
@@ -179,11 +182,10 @@ impl OwnedFinalSet {
 /// Capture, encrypt, and publish a set with the configured checkpoint sources.
 pub async fn create_set(
     pool: &SqlitePool,
-    params: &DatabaseParams,
     key: &SecretKey,
     config: &BackupConfig,
     set_id: &str,
-    cancel: &tokio_util::sync::CancellationToken,
+    cancel: &CancellationToken,
     coordinator: &Coordinator,
 ) -> Result<SetSummary, BackupError> {
     if !super::valid_set_id(set_id) {
@@ -191,16 +193,20 @@ pub async fn create_set(
     }
     super::ensure_private_dir(&config.dir)?;
     let staged = StagedSet::create(&config.dir, set_id)?;
-    let captured = capture_into(
-        pool,
-        params,
-        key,
-        config,
-        set_id,
-        &staged.0,
-        cancel,
-        coordinator,
-    )
+    let captured = async {
+        let mut salt = [0u8; 32];
+        getrandom::fill(&mut salt).map_err(|e| BackupError::Crypto(e.to_string()))?;
+        let capture = Capture {
+            pool,
+            config,
+            coordinator,
+            cancel,
+            set_id,
+            staging: &staged.0,
+            identity: super::identity(key, &salt)?,
+        };
+        capture_set(&capture, super::encryption_for(key, &salt)).await
+    }
     .await;
     let (manifest, completion) = match captured {
         Ok(captured) => captured,
@@ -241,7 +247,7 @@ async fn seal_file(
     identity: age::x25519::Identity,
     limit: u64,
 ) -> Result<super::Sealed, BackupError> {
-    tokio::task::spawn_blocking(move || {
+    super::blocking(move || {
         let result = std::fs::File::open(&plain)
             .map_err(|e| BackupError::io(plain.display(), e))
             .and_then(|mut file| super::seal(&target, &identity, &mut file, limit));
@@ -249,7 +255,6 @@ async fn seal_file(
         result
     })
     .await
-    .map_err(|e| BackupError::Io(e.to_string()))?
 }
 
 async fn capture_computers(
@@ -420,13 +425,12 @@ async fn capture_files(
         let object = format!("file-{id}.age");
         let target = staging.join(&object);
         let identity = identity.clone();
-        let sealed = tokio::task::spawn_blocking(move || {
+        let sealed = super::blocking(move || {
             let mut file =
                 std::fs::File::open(&source).map_err(|e| BackupError::io(source.display(), e))?;
             super::seal(&target, &identity, &mut file, limit)
         })
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
+        .await?;
         if sealed.plaintext_sha256 != hex::encode(&sha) {
             let _ = std::fs::remove_file(staging.join(&object));
             missing.push(id);
@@ -473,13 +477,11 @@ async fn capture_projects(
         let object = super::projects::Format::TarZstd.object(*bot);
         let plain = staging.join(format!("project-{bot}.tar.zst"));
         let archive_target = plain.clone();
-        let unreadable =
-            tokio::task::spawn_blocking(move || super::projects::archive(&dir, &archive_target))
-                .await
-                .map_err(|e| BackupError::Io(e.to_string()))?
-                .inspect_err(|_| {
-                    let _ = std::fs::remove_file(&plain);
-                })?;
+        let unreadable = super::blocking(move || super::projects::archive(&dir, &archive_target))
+            .await
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&plain);
+            })?;
         if !unreadable.is_empty() {
             tracing::warn!(bot = %name, entries = unreadable.len(), "project entries could not be read and are not in the set");
         }
@@ -513,9 +515,7 @@ async fn capture_mcp(
 ) -> Result<Artifact, BackupError> {
     let plain = staging.join("mcp.tar");
     let archive_target = plain.clone();
-    tokio::task::spawn_blocking(move || super::mcp::archive(&dir, &archive_target, limit))
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
+    super::blocking(move || super::mcp::archive(&dir, &archive_target, limit)).await?;
     let sealed = seal_file(
         plain,
         staging.join(super::mcp::OBJECT),
@@ -534,268 +534,344 @@ async fn capture_mcp(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn capture_into(
-    pool: &SqlitePool,
-    _params: &DatabaseParams,
-    key: &SecretKey,
-    config: &BackupConfig,
-    set_id: &str,
-    staging: &Path,
-    cancel: &tokio_util::sync::CancellationToken,
-    coordinator: &Coordinator,
-) -> Result<(Manifest, Completion), BackupError> {
-    let capture_started_at = now();
-    let mut salt = [0u8; 32];
-    getrandom::fill(&mut salt).map_err(|e| BackupError::Crypto(e.to_string()))?;
-    let encryption = super::encryption_for(key, &salt);
-    let identity = super::identity(key, &salt)?;
+/// One capture: what it reads, where it stages, and the set's identity.
+struct Capture<'a> {
+    pool: &'a SqlitePool,
+    config: &'a BackupConfig,
+    coordinator: &'a Coordinator,
+    cancel: &'a CancellationToken,
+    set_id: &'a str,
+    staging: &'a Path,
+    identity: age::x25519::Identity,
+}
 
-    if coordinator.exclusive {
-        let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
-            crate::db::turns::ACTIVE_STATUSES
-        )))
-        .fetch_one(pool)
-        .await?;
-        if active {
-            return Err(BackupError::Deferred(
-                "turns are still active; start the API once so it reconciles them".into(),
-            ));
-        }
-        // Without the computers there is no per-computer lease check, and a
-        // restore releases every lease, so a still-running job could be
-        // stopped as idle afterwards.
-        if coordinator.computers.is_none() {
-            let jobs: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM guest_jobs
-                                WHERE status IN ('starting', 'running', 'cancelling'))",
-            )
+/// What the checkpoint captured besides the database.
+#[derive(Default)]
+struct Sources {
+    vm_artifacts: Vec<Artifact>,
+    vm_entries: HashMap<Uuid, (VmState, Option<super::ComputerEntry>)>,
+    file_artifacts: Vec<Artifact>,
+    missing_files: usize,
+    project_artifacts: Vec<Artifact>,
+    project_states: HashMap<Uuid, ProjectState>,
+    mcp: Option<Artifact>,
+}
+
+/// One consistent read of the database: its sealed image and the rows the
+/// manifest describes.
+struct Snapshot {
+    sealed: super::Sealed,
+    tables: Vec<TableDigest>,
+    migration_version: i64,
+    server_version: String,
+    bots: Vec<(Uuid, String, BotStatus)>,
+    sessions: Vec<(Uuid, String, String, String)>,
+    has_computer: Vec<Uuid>,
+}
+
+impl Capture<'_> {
+    /// Refuse a capture that cannot be consistent, then close the gate and
+    /// drain live work when a scheduler runs.
+    async fn quiesce(&self) -> Result<Option<Closed>, BackupError> {
+        let (pool, coordinator) = (self.pool, self.coordinator);
+        if coordinator.exclusive {
+            let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
+                crate::db::turns::ACTIVE_STATUSES
+            )))
             .fetch_one(pool)
             .await?;
-            if jobs {
+            if active {
                 return Err(BackupError::Deferred(
-                    "background jobs are still running in the bot computers; \
-                     let them finish or cancel them, then try again"
-                        .into(),
+                    "turns are still active; start the API once so it reconciles them".into(),
                 ));
             }
+            // Without the computers there is no per-computer lease check, and a
+            // restore releases every lease, so a still-running job could be
+            // stopped as idle afterwards.
+            if coordinator.computers.is_none() {
+                let jobs: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM guest_jobs
+                                    WHERE status IN ('starting', 'running', 'cancelling'))",
+                )
+                .fetch_one(pool)
+                .await?;
+                if jobs {
+                    return Err(BackupError::Deferred(
+                        "background jobs are still running in the bot computers; \
+                         let them finish or cancel them, then try again"
+                            .into(),
+                    ));
+                }
+            }
         }
+        let Some(scheduler) = &coordinator.scheduler else {
+            return Ok(None);
+        };
+        let deadline = tokio::time::Instant::now() + coordinator.drain;
+        let expected = last_pause(pool).await?;
+        let pause = crate::maintenance::Pause::backup(expected);
+        let closed = match scheduler.gate().close(coordinator.drain, pause).await {
+            Ok(Some(closed)) => closed,
+            Ok(None) => {
+                return Err(BackupError::Refused("another backup holds the gate".into()));
+            }
+            Err(admitted) => {
+                return Err(BackupError::Deferred(format!(
+                    "{admitted} requests or tasks did not finish within {} s",
+                    coordinator.drain.as_secs()
+                )));
+            }
+        };
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if !scheduler.drain(left).await? {
+            return Err(BackupError::Deferred(format!(
+                "active turns did not finish within {} s",
+                coordinator.drain.as_secs()
+            )));
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Err(calls) = closed.capture(left).await {
+            return Err(BackupError::Deferred(format!(
+                "{calls} tool calls did not finish within {} s",
+                coordinator.drain.as_secs()
+            )));
+        }
+        Ok(Some(closed))
     }
-    let paused_at = tokio::time::Instant::now();
-    let gate = match &coordinator.scheduler {
-        Some(scheduler) => {
-            let deadline = tokio::time::Instant::now() + coordinator.drain;
-            let expected = last_pause(pool).await?;
-            let pause = crate::maintenance::Pause::backup(expected);
-            let closed = match scheduler.gate().close(coordinator.drain, pause).await {
-                Ok(Some(closed)) => closed,
-                Ok(None) => {
-                    return Err(BackupError::Refused("another backup holds the gate".into()));
-                }
-                Err(admitted) => {
-                    return Err(BackupError::Deferred(format!(
-                        "{admitted} requests or tasks did not finish within {} s",
-                        coordinator.drain.as_secs()
-                    )));
-                }
-            };
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if !scheduler.drain(left).await? {
-                return Err(BackupError::Deferred(format!(
-                    "active turns did not finish within {} s",
-                    coordinator.drain.as_secs()
-                )));
+
+    /// Capture computers, host artifacts, project directories and shared
+    /// MCPs. Projects and MCPs need the gate or an exclusive run.
+    async fn sources(&self, gate: Option<&Closed>) -> Result<Sources, BackupError> {
+        let (pool, coordinator, staging, limit) = (
+            self.pool,
+            self.coordinator,
+            self.staging,
+            self.config.max_bytes,
+        );
+        let identity = &self.identity;
+        let bots: Vec<(Uuid, String, BotStatus)> =
+            sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
+                .fetch_all(pool)
+                .await?;
+        let step = |step| {
+            if let Some(closed) = gate {
+                closed.step(step);
             }
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if let Err(calls) = closed.capture(left).await {
-                return Err(BackupError::Deferred(format!(
-                    "{calls} tool calls did not finish within {} s",
-                    coordinator.drain.as_secs()
-                )));
-            }
-            Some(closed)
-        }
-        None => None,
-    };
-    let bot_rows: Vec<(uuid::Uuid, String, BotStatus)> =
-        sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
-            .fetch_all(pool)
-            .await?;
-    let step = |step| {
-        if let Some(closed) = &gate {
-            closed.step(step);
-        }
-    };
-    let (mut vm_artifacts, mut vm_entries) = match &coordinator.computers {
-        Some(computers) => {
+        };
+        let mut sources = Sources::default();
+        if let Some(computers) = &coordinator.computers {
             let progress = |done, total| step(Step::Computers { done, total });
-            capture_computers(
-                computers,
-                &bot_rows,
-                staging,
-                &identity,
-                config.max_bytes,
-                &progress,
-            )
-            .await?
-        }
-        None => Default::default(),
-    };
-    step(Step::Files);
-    let (mut file_artifacts, missing_files) = match &coordinator.computers {
-        Some(computers) => {
-            capture_files(
+            (sources.vm_artifacts, sources.vm_entries) =
+                capture_computers(computers, &bots, staging, identity, limit, &progress).await?;
+            step(Step::Files);
+            let missing;
+            (sources.file_artifacts, missing) = capture_files(
                 pool,
                 &computers.config().state_dir,
                 staging,
-                &identity,
-                config.max_bytes,
+                identity,
+                limit,
             )
-            .await?
+            .await?;
+            sources.missing_files = missing.len();
+        } else {
+            step(Step::Files);
         }
-        None => Default::default(),
-    };
-    let project_capture = async {
-        match (
-            &coordinator.projects_dir,
-            gate.is_some() || coordinator.exclusive,
-        ) {
-            (Some(dir), true) => {
-                capture_projects(&bot_rows, dir, staging, &identity, config.max_bytes).await
+        let checkpointed = gate.is_some() || coordinator.exclusive;
+        let projects = async {
+            match &coordinator.projects_dir {
+                Some(dir) if checkpointed => {
+                    capture_projects(&bots, dir, staging, identity, limit).await
+                }
+                _ => Ok(Default::default()),
             }
-            _ => Ok(Default::default()),
-        }
-    };
-    let mcp_capture = async {
-        match (
-            &coordinator.mcp_dir,
-            gate.is_some() || coordinator.exclusive,
-        ) {
-            (Some(dir), true) => capture_mcp(dir.clone(), staging, &identity, config.max_bytes)
-                .await
-                .map(Some),
-            _ => Ok(None),
-        }
-    };
-    step(Step::Projects);
-    let (projects, mcp) = tokio::join!(project_capture, mcp_capture);
-    let (mut project_artifacts, mut project_states) = projects?;
-    let mcp_artifact = mcp?;
-    if cancel.is_cancelled() {
-        return Err(BackupError::Interrupted);
+        };
+        let mcp = async {
+            match &coordinator.mcp_dir {
+                Some(dir) if checkpointed => capture_mcp(dir.clone(), staging, identity, limit)
+                    .await
+                    .map(Some),
+                _ => Ok(None),
+            }
+        };
+        step(Step::Projects);
+        let (projects, mcp) = tokio::join!(projects, mcp);
+        (sources.project_artifacts, sources.project_states) = projects?;
+        sources.mcp = mcp?;
+        Ok(sources)
     }
 
-    step(Step::Database);
-    let mut tx = pool.begin().await?;
-    let tables = table_digests(&mut tx).await?;
-    let migration_version: i64 =
-        sqlx::query_scalar("SELECT coalesce(max(version), 0) FROM _sqlx_migrations WHERE success")
+    /// Digest, read and seal the database in one SQLite snapshot.
+    async fn snapshot(&self) -> Result<Snapshot, BackupError> {
+        let mut tx = self.pool.begin().await?;
+        let tables = table_digests(&mut tx).await?;
+        let migration_version: i64 = sqlx::query_scalar(
+            "SELECT coalesce(max(version), 0) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let server_version: String = sqlx::query_scalar("SELECT sqlite_version()")
             .fetch_one(&mut *tx)
             .await?;
-    let server_version: String = sqlx::query_scalar("SELECT sqlite_version()")
-        .fetch_one(&mut *tx)
+        let bots: Vec<(Uuid, String, BotStatus)> =
+            sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
+                .fetch_all(&mut *tx)
+                .await?;
+        let sessions: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+            "SELECT bot_id, provider_id, native_session_id, status FROM provider_sessions
+             ORDER BY bot_id, created_at",
+        )
+        .fetch_all(&mut *tx)
         .await?;
-    let bots: Vec<(uuid::Uuid, String, BotStatus)> =
-        sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
-            .fetch_all(&mut *tx)
+        let has_computer: Vec<Uuid> =
+            sqlx::query_scalar("SELECT bot_id FROM bot_computers WHERE observed_state <> 'absent'")
+                .fetch_all(&mut *tx)
+                .await?;
+        let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+            .fetch_one(&mut *tx)
             .await?;
-    let sessions: Vec<(uuid::Uuid, String, String, String)> = sqlx::query_as(
-        "SELECT bot_id, provider_id, native_session_id, status FROM provider_sessions
-         ORDER BY bot_id, created_at",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let has_computer: Vec<uuid::Uuid> =
-        sqlx::query_scalar("SELECT bot_id FROM bot_computers WHERE observed_state <> 'absent'")
-            .fetch_all(&mut *tx)
+        let page_size: i64 = sqlx::query_scalar("PRAGMA page_size")
+            .fetch_one(&mut *tx)
             .await?;
-
-    let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
-        .fetch_one(&mut *tx)
-        .await?;
-    let page_size: i64 = sqlx::query_scalar("PRAGMA page_size")
-        .fetch_one(&mut *tx)
-        .await?;
-    if (pages as u64).saturating_mul(page_size as u64) > config.max_bytes {
-        return Err(BackupError::TooLarge(config.max_bytes));
-    }
-    if cancel.is_cancelled() {
-        return Err(BackupError::Interrupted);
-    }
-    if crate::faults::hit("backup.snapshot") {
-        return Err(BackupError::Producer("snapshot failed".into()));
-    }
-    let snapshot = tx.serialize(None).await?;
-    tx.commit().await?;
-    let target = staging.join(DATABASE);
-    let limit = config.max_bytes;
-    let dump_identity = identity.clone();
-    let capture_cancel = cancel.clone();
-    let sealed = tokio::task::spawn_blocking(move || {
-        struct Input<'a> {
-            bytes: &'a [u8],
-            cancel: &'a tokio_util::sync::CancellationToken,
+        if (pages as u64).saturating_mul(page_size as u64) > self.config.max_bytes {
+            return Err(BackupError::TooLarge(self.config.max_bytes));
         }
-        impl std::io::Read for Input<'_> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self.cancel.is_cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "backup cancelled",
-                    ));
-                }
-                std::io::Read::read(&mut self.bytes, buf)
+        if self.cancel.is_cancelled() {
+            return Err(BackupError::Interrupted);
+        }
+        if crate::faults::hit("backup.snapshot") {
+            return Err(BackupError::Producer("snapshot failed".into()));
+        }
+        let image = tx.serialize(None).await?;
+        tx.commit().await?;
+        let target = self.staging.join(DATABASE);
+        let (limit, identity, cancel) = (
+            self.config.max_bytes,
+            self.identity.clone(),
+            self.cancel.clone(),
+        );
+        let sealed = super::blocking(move || {
+            struct Input<'a> {
+                bytes: &'a [u8],
+                cancel: &'a CancellationToken,
             }
+            impl std::io::Read for Input<'_> {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    if self.cancel.is_cancelled() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "backup cancelled",
+                        ));
+                    }
+                    std::io::Read::read(&mut self.bytes, buf)
+                }
+            }
+            let mut input = Input {
+                bytes: image.as_ref(),
+                cancel: &cancel,
+            };
+            super::seal(&target, &identity, &mut input, limit)
+        })
+        .await;
+        if self.cancel.is_cancelled() {
+            return Err(BackupError::Interrupted);
         }
-        let mut input = Input {
-            bytes: snapshot.as_ref(),
-            cancel: &capture_cancel,
-        };
-        super::seal(&target, &dump_identity, &mut input, limit)
-    })
-    .await
-    .map_err(|e| BackupError::Producer(e.to_string()))?;
-    if cancel.is_cancelled() {
+        Ok(Snapshot {
+            sealed: sealed?,
+            tables,
+            migration_version,
+            server_version,
+            bots,
+            sessions,
+            has_computer,
+        })
+    }
+}
+
+/// Capture, encrypt and stage every object of the set, then its manifest.
+async fn capture_set(
+    capture: &Capture<'_>,
+    encryption: super::Encryption,
+) -> Result<(Manifest, Completion), BackupError> {
+    let capture_started_at = now();
+    let paused_at = tokio::time::Instant::now();
+    let gate = capture.quiesce().await?;
+    let sources = capture.sources(gate.as_ref()).await?;
+    if capture.cancel.is_cancelled() {
         return Err(BackupError::Interrupted);
     }
-    let sealed = sealed?;
+    if let Some(closed) = &gate {
+        closed.step(Step::Database);
+    }
+    let snapshot = capture.snapshot().await?;
     if let Some(closed) = gate {
         drop(closed);
         // Messages sent during the pause can now take over and run.
-        if let Some(scheduler) = &coordinator.scheduler {
+        if let Some(scheduler) = &capture.coordinator.scheduler {
             scheduler.wake();
         }
-        super::runs::paused(pool, set_id, paused_at.elapsed()).await?;
+        super::runs::paused(capture.pool, capture.set_id, paused_at.elapsed()).await?;
     }
+    let coordinated = capture.coordinator.computers.is_some()
+        && (capture.coordinator.scheduler.is_some() || capture.coordinator.exclusive);
+    let manifest = build_manifest(
+        capture.set_id,
+        encryption,
+        capture_started_at,
+        sources,
+        snapshot,
+        coordinated,
+    );
+    let json = serde_json::to_vec(&manifest).expect("serializable");
+    let sealed = super::seal(
+        &capture.staging.join(MANIFEST),
+        &capture.identity,
+        &mut json.as_slice(),
+        super::MAX_MANIFEST_BYTES,
+    )?;
+    super::sync_dir(capture.staging)?;
+    let completion = Completion {
+        schema_version: SCHEMA_VERSION,
+        set_id: manifest.set_id.clone(),
+        encryption: manifest.encryption.clone(),
+        manifest: ObjectRef {
+            object: MANIFEST.into(),
+            ciphertext_bytes: sealed.ciphertext_bytes,
+            ciphertext_sha256: sealed.ciphertext_sha256,
+        },
+        whole_assistant: manifest.coverage.whole_assistant,
+    };
+    Ok((manifest, completion))
+}
 
-    let coordinated = coordinator.computers.is_some()
-        && (coordinator.scheduler.is_some() || coordinator.exclusive);
-    let mut complete = coordinated && mcp_artifact.is_some();
+fn build_manifest(
+    set_id: &str,
+    encryption: super::Encryption,
+    capture_started_at: String,
+    mut sources: Sources,
+    snapshot: Snapshot,
+    coordinated: bool,
+) -> Manifest {
+    let Snapshot {
+        sealed,
+        tables,
+        migration_version,
+        server_version,
+        bots,
+        sessions,
+        has_computer,
+    } = snapshot;
     let entries: Vec<BotEntry> = bots
         .into_iter()
         .map(|(id, name, status)| {
-            let (vm, computer) = vm_entries.remove(&id).unwrap_or_else(|| {
+            let (vm, computer) = sources.vm_entries.remove(&id).unwrap_or_else(|| {
                 if has_computer.contains(&id) {
                     (VmState::Omitted, None)
                 } else {
                     (VmState::None, None)
                 }
             });
-            if vm == VmState::Missing || (vm == VmState::Omitted && status == BotStatus::Active) {
-                complete = false;
-            }
-            let project = project_states.remove(&id).unwrap_or_default();
-            if status == BotStatus::Active
-                && !matches!(project, ProjectState::Included | ProjectState::None)
-            {
-                complete = false;
-            }
-            if computer.as_ref().is_some_and(|c| {
-                c.desktop_port.is_some() && c.browser_checkpoint.as_deref() != Some("ok")
-            }) {
-                complete = false;
-            }
             BotEntry {
                 id,
                 provider_sessions: sessions
@@ -812,10 +888,16 @@ async fn capture_into(
                 vm,
                 computer,
                 provider_state: ProviderState::OmittedReauthRequired,
-                project,
+                project: sources.project_states.remove(&id).unwrap_or_default(),
             }
         })
         .collect();
+    let coverage = Coverage::derive(
+        coordinated,
+        &entries,
+        sources.missing_files,
+        sources.mcp.is_some(),
+    );
     let mut artifacts = vec![Artifact {
         kind: ArtifactKind::Sqlite,
         object: DATABASE.into(),
@@ -825,103 +907,24 @@ async fn capture_into(
         plaintext_bytes: sealed.plaintext_bytes,
         plaintext_sha256: sealed.plaintext_sha256,
     }];
-    artifacts.append(&mut vm_artifacts);
-    artifacts.append(&mut file_artifacts);
-    let projects_captured = !project_artifacts.is_empty()
-        || entries.iter().any(|b| {
-            !matches!(
-                b.project,
-                ProjectState::Omitted | ProjectState::OmittedDeletedBot
-            )
-        });
-    let projects_partial = entries.iter().any(|b| b.project == ProjectState::Partial);
-    artifacts.append(&mut project_artifacts);
-    let mcp = if let Some(artifact) = mcp_artifact {
-        artifacts.push(artifact);
-        Covered::Included
-    } else {
-        Covered::Omitted
-    };
-    if !missing_files.is_empty() {
-        complete = false;
-    }
-    let projects = if !projects_captured {
-        Covered::Omitted
-    } else if projects_partial {
-        Covered::Partial
-    } else {
-        Covered::Included
-    };
-    let mut coverage = if coordinated {
-        super::Coverage {
-            database: Covered::Included,
-            vm: if complete {
-                Covered::Included
-            } else {
-                Covered::Partial
-            },
-            projects,
-            mcp,
-            provider_state: ProviderState::OmittedReauthRequired,
-            whole_assistant: complete,
-            note: if complete {
-                "Whole assistant: the database, every active bot's computer (disk archives; \
-                 each image is stored once, in the first archive that uses it, which a restore \
-                 imports first), every bot's project directory (without node_modules, which a \
-                 reinstall restores), and the shared MCP skills, documentation and config. \
-                 Native provider sessions are not included: conversations are rebuilt from \
-                 SQLite and providers may need a fresh login."
-                    .into()
-            } else {
-                format!(
-                    "Partial: a bot's computer is missing from the runtime, a desktop browser was \
-                     not checkpointed, a project directory was not captured whole, or host \
-                     artifacts are missing ({}), or the shared MCP library was not captured, \
-                     so this set does not recover the whole assistant.",
-                    missing_files.len()
-                )
-            },
-        }
-    } else if projects != Covered::Omitted {
-        super::Coverage {
-            note: "The database and the bots' project directories only: bot computers \
-                   (files, browser profiles, running jobs) and native provider sessions are not \
-                   included. Restoring this set does not recover the whole assistant."
-                .into(),
-            projects,
-            ..super::database_only_coverage()
-        }
-    } else {
-        super::database_only_coverage()
-    };
-    coverage.mcp = mcp;
-    if !coordinated && coverage.mcp == Covered::Included {
-        coverage.note = format!(
-            "The database{} and shared MCP skills, documentation and config are included. \
-             Bot computers and native provider sessions are not included. Restoring this set \
-             does not recover the whole assistant.",
-            if coverage.projects == Covered::Omitted {
-                ""
-            } else {
-                ", bot project directories"
-            }
-        );
-    }
-
-    let manifest = Manifest {
+    artifacts.append(&mut sources.vm_artifacts);
+    artifacts.append(&mut sources.file_artifacts);
+    artifacts.append(&mut sources.project_artifacts);
+    artifacts.extend(sources.mcp);
+    Manifest {
         schema_version: SCHEMA_VERSION,
         set_id: set_id.to_owned(),
         created_at: now(),
         capture_started_at,
         capture_finished_at: now(),
-        encryption: encryption.clone(),
+        encryption,
         application: Application {
             version: env!("ELSE_VERSION").to_owned(),
             migration_version,
         },
         sqlite: Sqlite {
             server_version: server_version.clone(),
-            dump_version: server_version.clone(),
+            dump_version: server_version,
             format: "sqlite3".into(),
             extensions: Vec::new(),
         },
@@ -929,25 +932,208 @@ async fn capture_into(
         tables,
         bots: entries,
         coverage,
-    };
-    let json = serde_json::to_vec(&manifest).expect("serializable");
-    let sealed_manifest = super::seal(
-        &staging.join(MANIFEST),
-        &identity,
-        &mut json.as_slice(),
-        super::MAX_MANIFEST_BYTES,
-    )?;
-    super::sync_dir(staging)?;
-    let completion = Completion {
-        schema_version: SCHEMA_VERSION,
-        set_id: set_id.to_owned(),
-        encryption,
-        manifest: ObjectRef {
-            object: MANIFEST.into(),
-            ciphertext_bytes: sealed_manifest.ciphertext_bytes,
-            ciphertext_sha256: sealed_manifest.ciphertext_sha256,
-        },
-        whole_assistant: manifest.coverage.whole_assistant,
-    };
-    Ok((manifest, completion))
+    }
+}
+
+impl Coverage {
+    /// What a set with these bot entries covers. A coordinated capture
+    /// (computers and a checkpoint) recovers the whole assistant only when
+    /// no active bot lacks its computer or project directory, every
+    /// desktop browser was checkpointed, no host artifact is missing, and
+    /// the shared MCPs are included.
+    fn derive(coordinated: bool, bots: &[BotEntry], missing_files: usize, mcp: bool) -> Self {
+        let lacking = |bot: &BotEntry| {
+            let active = bot.status == BotStatus::Active;
+            bot.vm == VmState::Missing
+                || (active && bot.vm == VmState::Omitted)
+                || (active && !matches!(bot.project, ProjectState::Included | ProjectState::None))
+                || bot.computer.as_ref().is_some_and(|c| {
+                    c.desktop_port.is_some() && c.browser_checkpoint.as_deref() != Some("ok")
+                })
+        };
+        let whole = coordinated && mcp && missing_files == 0 && !bots.iter().any(lacking);
+        let projects = if bots.iter().any(|b| b.project == ProjectState::Partial) {
+            Covered::Partial
+        } else if bots.iter().any(|b| {
+            !matches!(
+                b.project,
+                ProjectState::Omitted | ProjectState::OmittedDeletedBot
+            )
+        }) {
+            Covered::Included
+        } else {
+            Covered::Omitted
+        };
+        let mcp = if mcp {
+            Covered::Included
+        } else {
+            Covered::Omitted
+        };
+        if coordinated {
+            return Self {
+                database: Covered::Included,
+                vm: if whole {
+                    Covered::Included
+                } else {
+                    Covered::Partial
+                },
+                projects,
+                mcp,
+                provider_state: ProviderState::OmittedReauthRequired,
+                whole_assistant: whole,
+                note: if whole {
+                    "Whole assistant: the database, every active bot's computer (disk archives; \
+                     each image is stored once, in the first archive that uses it, which a restore \
+                     imports first), every bot's project directory (without node_modules, which a \
+                     reinstall restores), and the shared MCP skills, documentation and config. \
+                     Native provider sessions are not included: conversations are rebuilt from \
+                     SQLite and providers may need a fresh login."
+                        .into()
+                } else {
+                    format!(
+                        "Partial: a bot's computer is missing from the runtime, a desktop browser was \
+                         not checkpointed, a project directory was not captured whole, or host \
+                         artifacts are missing ({missing_files}), or the shared MCP library was not captured, \
+                         so this set does not recover the whole assistant."
+                    )
+                },
+            };
+        }
+        let note = match (projects, mcp) {
+            (_, Covered::Included) => format!(
+                "The database{} and shared MCP skills, documentation and config are included. \
+                 Bot computers and native provider sessions are not included. Restoring this set \
+                 does not recover the whole assistant.",
+                if projects == Covered::Omitted {
+                    ""
+                } else {
+                    ", bot project directories"
+                }
+            ),
+            (Covered::Omitted, _) => super::database_only_coverage().note,
+            _ => "The database and the bots' project directories only: bot computers \
+                  (files, browser profiles, running jobs) and native provider sessions are not \
+                  included. Restoring this set does not recover the whole assistant."
+                .into(),
+        };
+        Self {
+            projects,
+            mcp,
+            note,
+            ..super::database_only_coverage()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bot(status: BotStatus, vm: VmState, project: ProjectState) -> BotEntry {
+        BotEntry {
+            id: Uuid::new_v4(),
+            name: "Bot".into(),
+            status,
+            vm,
+            computer: None,
+            provider_state: ProviderState::OmittedReauthRequired,
+            provider_sessions: Vec::new(),
+            project,
+        }
+    }
+
+    #[test]
+    fn a_coordinated_set_is_whole_only_when_nothing_is_missing() {
+        let active = bot(BotStatus::Active, VmState::Included, ProjectState::Included);
+        let deleted = bot(
+            BotStatus::Deleted,
+            VmState::OmittedDeletedBot,
+            ProjectState::OmittedDeletedBot,
+        );
+        let whole = Coverage::derive(true, &[active.clone(), deleted.clone()], 0, true);
+        assert!(whole.whole_assistant);
+        assert_eq!(
+            (whole.vm, whole.projects, whole.mcp),
+            (Covered::Included, Covered::Included, Covered::Included)
+        );
+        for (bots, missing_files, mcp, why) in [
+            (
+                vec![bot(
+                    BotStatus::Active,
+                    VmState::Omitted,
+                    ProjectState::Included,
+                )],
+                0,
+                true,
+                "an active bot's computer was not captured",
+            ),
+            (
+                vec![bot(
+                    BotStatus::Active,
+                    VmState::Missing,
+                    ProjectState::Included,
+                )],
+                0,
+                true,
+                "a computer is gone from the runtime",
+            ),
+            (
+                vec![bot(
+                    BotStatus::Active,
+                    VmState::Included,
+                    ProjectState::Partial,
+                )],
+                0,
+                true,
+                "a project directory was read in part",
+            ),
+            (vec![active.clone()], 1, true, "a host artifact is missing"),
+            (
+                vec![active.clone()],
+                0,
+                false,
+                "the shared MCPs are missing",
+            ),
+        ] {
+            let partial = Coverage::derive(true, &bots, missing_files, mcp);
+            assert!(!partial.whole_assistant, "{why}");
+            assert_eq!(partial.vm, Covered::Partial, "{why}");
+        }
+        assert!(
+            !Coverage::derive(false, &[active], 0, true).whole_assistant,
+            "an uncoordinated set never recovers the whole assistant"
+        );
+    }
+
+    #[test]
+    fn an_uncoordinated_set_names_what_it_holds() {
+        let with_project = bot(BotStatus::Active, VmState::None, ProjectState::Included);
+        let without = bot(BotStatus::Active, VmState::None, ProjectState::Omitted);
+        assert_eq!(
+            Coverage::derive(false, std::slice::from_ref(&without), 0, false),
+            super::super::database_only_coverage()
+        );
+        let projects = Coverage::derive(false, std::slice::from_ref(&with_project), 0, false);
+        assert_eq!(
+            (projects.vm, projects.projects, projects.mcp),
+            (Covered::Omitted, Covered::Included, Covered::Omitted)
+        );
+        assert!(
+            projects
+                .note
+                .starts_with("The database and the bots' project directories only")
+        );
+        let mcp = Coverage::derive(false, &[with_project], 0, true);
+        assert_eq!(mcp.mcp, Covered::Included);
+        assert!(
+            mcp.note
+                .starts_with("The database, bot project directories and shared MCP skills")
+        );
+        let mcp_only = Coverage::derive(false, &[without], 0, true);
+        assert!(
+            mcp_only
+                .note
+                .starts_with("The database and shared MCP skills")
+        );
+    }
 }

@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::BackupError;
 use super::capture::{BackupConfig, Cadence, Coordinator};
 use super::replicate::{RemoteState, Replicator};
 use super::runs::LocalStatus;
@@ -20,7 +21,6 @@ use super::settings::{
     Settings, Update,
 };
 use super::worker::BackupWorker;
-use super::{BackupError, DatabaseParams};
 use crate::config::Config;
 use crate::credentials::SecretKey;
 
@@ -155,7 +155,6 @@ enum Command {
 
 struct Engine {
     pool: SqlitePool,
-    params: DatabaseParams,
     key: Arc<SecretKey>,
     config: BackupConfig,
     coordinator: Coordinator,
@@ -217,13 +216,9 @@ impl Engine {
     }
 
     fn worker(&self, settings: &Settings, with_remote: bool) -> Result<BackupWorker, Error> {
-        let mut worker = BackupWorker::new(
-            self.pool.clone(),
-            self.params.clone(),
-            self.key.clone(),
-            self.config(settings),
-        )
-        .with_coordinator(self.coordinator.clone());
+        let mut worker =
+            BackupWorker::new(self.pool.clone(), self.key.clone(), self.config(settings))
+                .with_coordinator(self.coordinator.clone());
         if with_remote && let Some(destination) = &settings.destination {
             let s3 = S3::new(destination.s3_config())
                 .map_err(|_| Error::Invalid("The saved backup destination is invalid."))?;
@@ -272,12 +267,8 @@ impl Engine {
         match self.config.cadence {
             Cadence::Off => None,
             Cadence::Every(interval) => {
-                let worker = BackupWorker::new(
-                    self.pool.clone(),
-                    self.params.clone(),
-                    self.key.clone(),
-                    self.config(settings),
-                );
+                let worker =
+                    BackupWorker::new(self.pool.clone(), self.key.clone(), self.config(settings));
                 Some(Instant::now() + worker.next_due(interval).unwrap_or(FIRST_RETRY))
             }
             Cadence::Daily => settings
@@ -405,8 +396,6 @@ impl Backups {
         cancel: CancellationToken,
     ) -> Result<(Self, JoinHandle<()>), Error> {
         let settings = settings::load_or_seed(&pool, &key, config).await?;
-        let params =
-            DatabaseParams::parse(config.database_url.expose()).map_err(|_| Error::Unavailable)?;
         let (pages, page_size) = tokio::join!(
             sqlx::query_scalar::<_, i64>("PRAGMA page_count").fetch_one(&pool),
             sqlx::query_scalar::<_, i64>("PRAGMA page_size").fetch_one(&pool),
@@ -425,7 +414,6 @@ impl Backups {
         .map_err(|_| Error::Unavailable)?;
         let engine = Engine {
             pool: pool.clone(),
-            params,
             key,
             config: config.backup.clone(),
             coordinator,

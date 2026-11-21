@@ -270,7 +270,6 @@ async fn setup_image(projects: bool, image: &str) -> Setup {
 fn worker(s: &Setup, drain: Duration) -> BackupWorker {
     BackupWorker::new(
         s.app.db.pool.clone(),
-        DatabaseParams::parse(s.app.db.url.expose()).unwrap(),
         Arc::new(key()),
         BackupConfig {
             dir: s.dir.path().join("backups"),

@@ -10,13 +10,12 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
+use super::BackupError;
 use super::capture::{BackupConfig, Coordinator, SetSummary, create_set};
-use super::{BackupError, DatabaseParams};
 use crate::credentials::SecretKey;
 
 pub struct BackupWorker {
     pool: SqlitePool,
-    params: DatabaseParams,
     key: Arc<SecretKey>,
     pub config: BackupConfig,
     coordinator: Coordinator,
@@ -24,15 +23,9 @@ pub struct BackupWorker {
 }
 
 impl BackupWorker {
-    pub fn new(
-        pool: SqlitePool,
-        params: DatabaseParams,
-        key: Arc<SecretKey>,
-        config: BackupConfig,
-    ) -> Self {
+    pub fn new(pool: SqlitePool, key: Arc<SecretKey>, config: BackupConfig) -> Self {
         Self {
             pool,
-            params,
             key,
             config,
             coordinator: Coordinator::default(),
@@ -123,7 +116,7 @@ impl BackupWorker {
     /// is tried again on the next run.
     async fn adopt_sets(&self, lock: &Arc<super::DirLock>) -> Result<(), BackupError> {
         let (dir, key, lock) = (self.config.dir.clone(), self.key.clone(), lock.clone());
-        tokio::task::spawn_blocking(move || {
+        super::blocking(move || {
             let _lock = lock;
             for set in super::completed_sets(&dir)? {
                 if let Err(err) = super::store::adopt(&dir.join(&set), &key) {
@@ -133,7 +126,6 @@ impl BackupWorker {
             Ok(())
         })
         .await
-        .map_err(|e| BackupError::Io(e.to_string()))?
     }
 
     /// Blocking work that removes sets or chunks holds `lock` itself, so a
@@ -152,7 +144,7 @@ impl BackupWorker {
         let newest = newest.to_owned();
         let key = self.key.clone();
         let lock = lock.clone();
-        let (removed, swept) = tokio::task::spawn_blocking(move || {
+        let (removed, swept) = super::blocking(move || {
             let _lock = lock;
             let removed = super::apply_retention_protecting(&dir, keep, &newest, &awaiting)?;
             // The published set is fine either way; unused chunks wait for
@@ -163,8 +155,7 @@ impl BackupWorker {
             });
             Ok::<_, BackupError>((removed, swept))
         })
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
+        .await?;
         if !removed.is_empty() || swept > 0 {
             tracing::info!(
                 removed = removed.len(),
@@ -180,7 +171,6 @@ impl BackupWorker {
         let run = super::runs::start(&self.pool, &set_id).await?;
         let result = create_set(
             &self.pool,
-            &self.params,
             &self.key,
             &self.config,
             &set_id,
@@ -236,13 +226,11 @@ impl BackupWorker {
 
     async fn recover_locked(&self, lock: &Arc<super::DirLock>) -> Result<usize, BackupError> {
         let dir = self.config.dir.clone();
-        let published = tokio::task::spawn_blocking(move || super::completed_sets(&dir))
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))??;
+        let published = super::blocking(move || super::completed_sets(&dir)).await?;
         super::runs::recover(&self.pool, &published).await?;
         let dir = self.config.dir.clone();
         let (key, lock) = (self.key.clone(), lock.clone());
-        tokio::task::spawn_blocking(move || {
+        super::blocking(move || {
             let _lock = lock;
             let removed = super::clean_incomplete(&dir)?;
             // Chunks an interrupted capture left could hold the space the
@@ -253,6 +241,5 @@ impl BackupWorker {
             Ok(removed)
         })
         .await
-        .map_err(|e| BackupError::Io(e.to_string()))?
     }
 }

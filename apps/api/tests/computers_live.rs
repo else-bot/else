@@ -949,7 +949,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let params = DatabaseParams::parse(db.url.expose()).unwrap();
     let worker = else_api::backup::worker::BackupWorker::new(
         db.pool.clone(),
-        params.clone(),
         Arc::new(
             else_api::credentials::SecretKey::parse(&{
                 use base64::Engine;

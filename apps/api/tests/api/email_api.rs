@@ -1651,7 +1651,6 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         let key = app.state.secret_key.clone();
         let worker = BackupWorker::new(
             app.db.pool.clone(),
-            params.clone(),
             key.clone(),
             BackupConfig {
                 dir: dir.path().join("backups"),

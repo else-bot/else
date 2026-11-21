@@ -50,12 +50,7 @@ fn config(dir: &Path) -> BackupConfig {
 }
 
 fn worker(app: &TestApp, key: SecretKey, config: BackupConfig) -> BackupWorker {
-    BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key),
-        config,
-    )
+    BackupWorker::new(app.db.pool.clone(), Arc::new(key), config)
 }
 
 struct Target {
@@ -466,7 +461,6 @@ async fn a_set_id_collision_keeps_the_existing_set() {
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
-    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
     let coordinator = else_api::backup::capture::Coordinator::default();
     let set_id = backup::new_set_id();
@@ -474,7 +468,6 @@ async fn a_set_id_collision_keeps_the_existing_set() {
     let create = || {
         else_api::backup::capture::create_set(
             &app.db.pool,
-            &params,
             &key,
             &cfg,
             &set_id,
@@ -1234,14 +1227,12 @@ async fn whole_sets_move_into_the_chunk_store_and_a_damaged_one_stays_whole() {
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
-    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
     let coordinator = else_api::backup::capture::Coordinator::default();
     let mut whole = Vec::new();
     for _ in 0..2 {
         let set = else_api::backup::capture::create_set(
             &app.db.pool,
-            &params,
             &key(1),
             &cfg,
             &backup::new_set_id(),

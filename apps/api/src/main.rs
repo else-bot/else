@@ -230,14 +230,14 @@ fn run_backup(database_only: bool) -> anyhow::Result<()> {
     let config = load_config()?;
     let _lock = lock(&config)
         .context("the API is running; it backs up on its schedule (or stop it first)")?;
-    let (params, key) = backup_parts(&config)?;
+    let (_, key) = backup_parts(&config)?;
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         if database_only {
             let mut backup = config.backup.clone();
             backup.dir = backup.dir.join(else_api::backup::BEFORE_UPDATE_DIR);
             backup.keep = else_api::backup::BEFORE_UPDATE_KEEP;
-            let summary = else_api::backup::worker::BackupWorker::new(pool, params, key, backup)
+            let summary = else_api::backup::worker::BackupWorker::new(pool, key, backup)
                 .with_coordinator(else_api::backup::capture::Coordinator {
                     exclusive: true,
                     ..Default::default()
@@ -254,7 +254,6 @@ fn run_backup(database_only: bool) -> anyhow::Result<()> {
             .cloned();
         let mut worker = else_api::backup::worker::BackupWorker::new(
             pool.clone(),
-            params,
             key.clone(),
             config.backup.clone(),
         )
