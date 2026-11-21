@@ -119,7 +119,7 @@ pub(super) fn message(text: String, color: Hsla, theme: &Theme) -> Div {
 impl View {
     pub(super) fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(snapshot) = &self.snapshot else {
+        let Some(snapshot) = self.snapshot.value() else {
             return v_flex()
                 .p_8()
                 .gap_5()
@@ -132,12 +132,12 @@ impl View {
                     div().text_sm().text_color(theme.muted_foreground).child(
                         self.error
                             .clone()
-                            .or_else(|| self.poll_error.clone())
+                            .or_else(|| self.snapshot.error().cloned())
                             .unwrap_or_else(|| "Loading backup settings…".into()),
                     ),
                 )
                 .when(
-                    self.error.is_some() || self.poll_error.is_some(),
+                    self.error.is_some() || self.snapshot.error().is_some(),
                     |content| {
                         content.child(
                             Button::new("backups-retry")
@@ -505,7 +505,7 @@ impl View {
             );
         }
         content = content.when(self.editor.is_none(), |content| content.child(history))
-            .when_some(self.poll_error.clone(), |content, err| {
+            .when_some(self.snapshot.error().cloned(), |content, err| {
                 content.child(message(err, theme.warning, &theme))
             })
             .child(h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground).child(Icon::new(IconName::Lock).size_3()).child("Backups are encrypted before upload. Keep your installation's recovery key safe."));
