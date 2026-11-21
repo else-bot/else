@@ -322,11 +322,6 @@ pub struct QuestionSettlement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NoticeEnvelope<T> {
-    pub notice: T,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Permission {
     pub scope: String,
     pub granted_at: DateTime<Utc>,

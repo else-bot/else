@@ -4,7 +4,8 @@ use uuid::Uuid;
 use super::reply::Quoted;
 use crate::api::SendRequest;
 use crate::attachments::MessagePart;
-use crate::model::{DraftAttachment, Reaction};
+use crate::model::Reaction;
+use crate::model::outgoing::DraftAttachment;
 
 /// An owner message the server has not yet confirmed, frozen under one request ID.
 #[derive(Debug, Clone)]

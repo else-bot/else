@@ -9,7 +9,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use else_wire::questions::{NoticeEnvelope, QuestionAnswer};
+use else_wire::notices::{NoticeResponse, OwnerNotice};
+use else_wire::outgoing::{DraftResponse, OutgoingDraft};
+use else_wire::questions::QuestionAnswer;
 use else_wire::routines::{Routine, RoutineEnvelope};
 use else_wire::rules::RulesFile;
 use else_wire::settings::{
@@ -60,7 +62,7 @@ pub struct SendRequest {
     pub provider_id: Option<String>,
     pub reaction: Option<Reaction>,
     pub parts: Vec<crate::attachments::MessagePart>,
-    pub open_draft: Option<crate::model::DraftAttachment>,
+    pub open_draft: Option<crate::model::outgoing::DraftAttachment>,
     /// The owner ask this message replies to.
     pub answers_notice: Option<Uuid>,
 }
@@ -476,9 +478,9 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-        edit: crate::model::DraftEdit,
+        edit: crate::model::outgoing::DraftEdit,
         always: bool,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         let mut body = json!(edit);
         if always {
             body["always"] = json!(true);
@@ -491,7 +493,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         self.draft_action(Method::DELETE, bot, draft, "always", None)
             .await
     }
@@ -500,7 +502,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+    ) -> Result<OutgoingDraft, ClientError> {
         self.draft_action(Method::POST, bot, draft, "discard", None)
             .await
     }
@@ -512,12 +514,8 @@ impl Client {
         draft: Uuid,
         action: &str,
         body: Option<serde_json::Value>,
-    ) -> Result<crate::model::OutgoingDraft, ClientError> {
-        #[derive(Deserialize)]
-        struct Envelope {
-            draft: crate::model::OutgoingDraft,
-        }
-        self.call::<Envelope>(
+    ) -> Result<OutgoingDraft, ClientError> {
+        self.call::<DraftResponse>(
             method,
             format!("/v1/bots/{bot}/outgoing-drafts/{draft}/{action}"),
             body,
@@ -600,8 +598,8 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         notice: Uuid,
-    ) -> Result<crate::model::OwnerNotice, ClientError> {
-        self.call::<NoticeEnvelope<crate::model::OwnerNotice>>(
+    ) -> Result<OwnerNotice, ClientError> {
+        self.call::<NoticeResponse>(
             Method::POST,
             format!("/v1/bots/{bot}/owner-notices/{notice}/dismiss"),
             None,
@@ -1194,7 +1192,7 @@ pub(crate) mod tests {
                     .approve_draft(
                         bot,
                         draft,
-                        crate::model::DraftEdit {
+                        crate::model::outgoing::DraftEdit {
                             version: 7,
                             subject: None,
                             body: "See flyer.".into(),

@@ -3,6 +3,10 @@
 //! checkpoints, native session IDs, profiles, and credentials never appear.
 
 use else_wire as wire;
+use else_wire::delegations::Delegation;
+use else_wire::notices::OwnerNotice;
+use else_wire::outgoing::OutgoingDraft;
+use else_wire::waits::{ComputerJobWait, McpWait};
 use serde_json::{Value, json};
 
 use crate::db::bots::{BotRecord, BotStatus};
@@ -132,12 +136,12 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "questions": turn.questions.iter().map(else_wire::questions::Question::from).collect::<Vec<_>>(),
         "routine": turn.routine,
         "mail": turn.mail,
-        "outgoing_drafts": turn.outgoing_drafts,
-        "delegations": turn.delegations,
-        "mcp_waits": turn.mcp_waits,
-        "computer_job_waits": turn.computer_job_waits,
+        "outgoing_drafts": turn.outgoing_drafts.iter().map(OutgoingDraft::from).collect::<Vec<_>>(),
+        "delegations": turn.delegations.iter().map(Delegation::from).collect::<Vec<_>>(),
+        "mcp_waits": turn.mcp_waits.iter().map(McpWait::from).collect::<Vec<_>>(),
+        "computer_job_waits": turn.computer_job_waits.iter().map(ComputerJobWait::from).collect::<Vec<_>>(),
         "computer_handoffs": turn.computer_handoffs,
-        "owner_notices": turn.owner_notices,
+        "owner_notices": turn.owner_notices.iter().map(OwnerNotice::from).collect::<Vec<_>>(),
     })
 }
 

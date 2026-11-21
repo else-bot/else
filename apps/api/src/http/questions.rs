@@ -8,7 +8,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use else_wire::questions::{NoticeEnvelope, Permissions, QuestionSettlement};
+use else_wire::notices::NoticeResponse;
+use else_wire::questions::{Permissions, QuestionSettlement};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -49,11 +50,13 @@ pub fn routes() -> Routes {
 async fn dismiss_notice(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, notice_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<NoticeResponse>, ApiError> {
     use crate::db::owner_notices::{self, DismissError};
     active_bot(&state, bot_id).await?;
     match owner_notices::dismiss(&state.db, bot_id, notice_id).await {
-        Ok(notice) => Ok(Json(json!(NoticeEnvelope { notice }))),
+        Ok(notice) => Ok(Json(NoticeResponse {
+            notice: (&notice).into(),
+        })),
         Err(DismissError::NotFound) => Err(ApiError::not_found()),
         Err(DismissError::Settled(status)) => Err(ApiError::new(
             StatusCode::CONFLICT,

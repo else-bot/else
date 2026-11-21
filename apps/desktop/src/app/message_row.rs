@@ -9,6 +9,7 @@ use crate::controls::{Control as _, Scale, Tier};
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use else_wire::items::ItemKind;
+use else_wire::outgoing::DraftStatus;
 use else_wire::routines::RoutineRun;
 use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
@@ -1003,7 +1004,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             if turn
                 .outgoing_drafts
                 .iter()
-                .any(|d| d.status == crate::model::DraftStatus::Pending) =>
+                .any(|d| d.status == DraftStatus::Pending) =>
         {
             ("Waiting for your approval…".into(), false)
         }

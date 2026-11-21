@@ -1,7 +1,7 @@
 use super::{Connection, ElseApp};
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
+use else_wire::notices::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::Button;
@@ -90,6 +90,7 @@ impl ElseApp {
             OwnerNoticeStatus::Pending | OwnerNoticeStatus::Superseded => None,
             OwnerNoticeStatus::Replied => Some("You replied"),
             OwnerNoticeStatus::Dismissed => Some("Handled"),
+            OwnerNoticeStatus::Other(_) => Some("Notice status unavailable"),
         };
         if let Some(label) = settled {
             return div()
@@ -105,6 +106,7 @@ impl ElseApp {
         let title = match notice.kind {
             OwnerNoticeKind::Blocked => format!("{name} is blocked and needs you"),
             OwnerNoticeKind::Decision => format!("{name} needs a decision from you"),
+            OwnerNoticeKind::Other(_) => format!("{name} needs you"),
         };
         let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
         let connected = self.connection == Connection::Connected;

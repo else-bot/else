@@ -273,24 +273,7 @@ pub struct BotReply {
     /// The owner notices of the task and of the tasks it delegated, oldest
     /// first, read live so settling one shows in every chat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<ExchangeAsk>,
-}
-
-/// An owner notice shown on an exchange, with the name of the bot asking.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExchangeAsk {
-    pub id: Uuid,
-    pub bot_id: Uuid,
-    pub bot_name: String,
-    pub turn_id: Uuid,
-    pub kind: String,
-    pub summary: String,
-    #[serde(default)]
-    pub tried: Option<String>,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
+    pub asks: Vec<else_wire::notices::ExchangeAsk>,
 }
 
 /// Whose conversation it is, as stored in `conversations.kind`.

@@ -2,8 +2,10 @@ use super::ElseApp;
 use super::task_reply::state::format_elapsed;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{ComputerJobWait, Delegation, DelegationStatus, McpWait, Wait};
+use crate::model::Wait;
 use chrono::{DateTime, Utc};
+use else_wire::delegations::{Delegation, DelegationStatus};
+use else_wire::waits::{ComputerJobWait, JobStatus, McpWait};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -70,7 +72,13 @@ fn job_status(wait: &Wait<'_>) -> Option<String> {
             let parts: Vec<String> = checks.into_iter().chain(wait.last_status.clone()).collect();
             (!parts.is_empty()).then(|| parts.join(" · "))
         }
-        Wait::Job(job) => Some(job.job_status.clone().unwrap_or_else(|| "running".into())),
+        Wait::Job(job) => Some(
+            job.job_status
+                .as_ref()
+                .unwrap_or(&JobStatus::Running)
+                .as_str()
+                .to_owned(),
+        ),
         Wait::Task(_) => None,
     }
 }
@@ -451,6 +459,7 @@ impl ElseApp {
             DelegationStatus::Completed => ("Replied", theme.success),
             DelegationStatus::Failed => ("Failed", theme.danger),
             DelegationStatus::Cancelled => ("Stopped", theme.muted_foreground),
+            DelegationStatus::Unknown => ("Status unavailable", theme.muted_foreground),
         };
         let end = d.finished_at.filter(|_| d.status.settled()).unwrap_or(now);
         let elapsed = format_elapsed((end - d.created_at).num_seconds().max(0));
@@ -595,7 +604,7 @@ fn mcp_details(wait: &McpWait) -> Vec<Detail> {
             false,
         ));
     }
-    if let Some(deadline) = wait.deadline_at {
+    if let Some(deadline) = wait.deadline_at.as_deref().and_then(|at| at.parse().ok()) {
         details.push(("Gives up", super::message_row::short_stamp(deadline), false));
     }
     if let Some(result) = wait.last_result.as_deref() {
@@ -624,7 +633,8 @@ fn job_details(job: &ComputerJobWait) -> Vec<Detail> {
 #[cfg(test)]
 mod tests {
     use super::{first_line, first_link, job_status, wait_title, waiting_summary};
-    use crate::model::{ComputerJobWait, McpWait, Wait};
+    use crate::model::Wait;
+    use else_wire::waits::{ComputerJobWait, McpWait};
     use uuid::Uuid;
 
     fn mcp(purpose: &str, checks: i64, status: Option<&str>) -> McpWait {

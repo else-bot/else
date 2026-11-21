@@ -9,7 +9,10 @@ mod skills;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use else_wire::delegations::Delegation;
 use else_wire::items::ItemKind;
+use else_wire::notices::{ExchangeAsk, OwnerNotice, OwnerNoticeStatus};
+use else_wire::outgoing::{DraftKind, DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::routines::{Routine, RoutineRun, Watcher, Webhook};
 use else_wire::rules::RulesUpdate;
@@ -19,6 +22,7 @@ use else_wire::secrets::SecretRequestStatus;
 use else_wire::skills::{SkillInstall, SkillInstallStatus};
 use else_wire::turns::TurnError;
 use else_wire::turns::TurnStatus;
+use else_wire::waits::{ComputerJobWait, McpWait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,8 +31,7 @@ use crate::api::socials::Trigger;
 use else_wire::bots::Activity;
 use else_wire::bots::Bot;
 
-mod outgoing;
-pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
+pub(crate) mod outgoing;
 
 /// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,14 +169,6 @@ impl From<DeclaredNeed> for Declared {
     }
 }
 
-/// An owner notice shown on an exchange, with the name of the bot asking.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ExchangeAsk {
-    #[serde(flatten)]
-    pub notice: OwnerNotice,
-    pub bot_name: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BotReplyStatus {
@@ -234,36 +229,6 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
 pub const APPROVE_TASK: &str = "approve_task";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerNoticeKind {
-    Blocked,
-    Decision,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerNoticeStatus {
-    Pending,
-    Replied,
-    Dismissed,
-    /// A card on the same turn asks the owner instead.
-    Superseded,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct OwnerNotice {
-    pub id: Uuid,
-    pub bot_id: Uuid,
-    pub turn_id: Uuid,
-    pub kind: OwnerNoticeKind,
-    pub summary: String,
-    pub tried: Option<String>,
-    pub status: OwnerNoticeStatus,
-    pub created_at: DateTime<Utc>,
-    pub settled_at: Option<DateTime<Utc>>,
-}
 
 /// How often the attempt limit cut a turn that continued, of how many
 /// continuations a request may take.
@@ -388,52 +353,6 @@ impl MailLocation {
     }
 }
 
-/// A job in an installed MCP that a waiting turn rechecks until it ends.
-/// A pending wait is the only hold of its attempt. The details are absent
-/// from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct McpWait {
-    pub id: Uuid,
-    pub mcp_id: String,
-    #[serde(default)]
-    pub tool: String,
-    /// What the bot waits for, in its own words.
-    #[serde(default)]
-    pub purpose: String,
-    #[serde(default)]
-    pub interval_seconds: i64,
-    #[serde(default)]
-    pub deadline_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub checks: i64,
-    /// The job's status in the last check, when it was readable.
-    #[serde(default)]
-    pub last_status: Option<String>,
-    #[serde(default)]
-    pub last_result: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-}
-
-/// A background job in the bot's computer that a waiting turn continues
-/// after. A pending wait is the only hold of its attempt. The details are
-/// absent from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ComputerJobWait {
-    pub id: Uuid,
-    pub job_id: Uuid,
-    #[serde(default)]
-    pub command: String,
-    /// What the bot said the job is for. Absent for jobs started without
-    /// one and from older servers.
-    #[serde(default)]
-    pub purpose: Option<String>,
-    #[serde(default)]
-    pub job_status: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-}
-
 /// One thing a bot waits on, as the owner sees it above the composer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Wait<'a> {
@@ -454,8 +373,8 @@ impl Wait<'_> {
 
     pub fn created_at(&self) -> Option<DateTime<Utc>> {
         match self {
-            Self::Mcp(wait) => wait.created_at,
-            Self::Job(wait) => wait.created_at,
+            Self::Mcp(wait) => wait.created_at.as_deref().and_then(|at| at.parse().ok()),
+            Self::Job(wait) => wait.created_at.as_deref().and_then(|at| at.parse().ok()),
             Self::Task(task) => Some(task.created_at),
         }
     }
@@ -513,54 +432,6 @@ impl Turn {
     }
 }
 
-/// A task a turn handed to another bot. Its settled reply is the item
-/// with the same ID.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Delegation {
-    pub id: Uuid,
-    /// The provider attempt that sent it; a council's tasks share one.
-    pub attempt: i64,
-    pub target_bot_id: Uuid,
-    pub target_name: String,
-    pub task: String,
-    pub status: DelegationStatus,
-    pub created_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    /// The delegating turn has read the outcome. Absent from older servers.
-    #[serde(default)]
-    pub seen: bool,
-    /// Messages the task has written so far.
-    #[serde(default)]
-    pub updates: i64,
-    /// While the task runs, the start of its latest message.
-    #[serde(default)]
-    pub progress: Option<String>,
-}
-
-impl Delegation {
-    /// Tasks one provider attempt sent share a handoff. A task carried over
-    /// from an earlier owner message has attempt 0 and stands alone.
-    pub fn shares_handoff(&self, other: &Delegation) -> bool {
-        self.attempt == other.attempt && (self.attempt > 0 || self.id == other.id)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegationStatus {
-    Queued,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl DelegationStatus {
-    pub fn settled(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct Snapshot {
     pub selected_provider_id: Option<String>,
@@ -584,7 +455,7 @@ pub struct Snapshot {
     pub watchers: Vec<Watcher>,
     /// The kinds of drafts the owner approves always.
     #[serde(default)]
-    pub draft_grants: Vec<serde_json::Value>,
+    pub draft_grants: Vec<DraftKind>,
     /// Absent from servers without rules.
     #[serde(default)]
     pub rules_version: i64,
@@ -663,7 +534,7 @@ pub struct Conversation {
     mail_triggers: Vec<MailTrigger>,
     webhooks: Vec<Webhook>,
     watchers: Vec<Watcher>,
-    draft_grants: Vec<serde_json::Value>,
+    draft_grants: Vec<DraftKind>,
     rules_version: i64,
     /// Read from the page saved on disk, so possibly behind the server.
     saved: bool,
@@ -1318,6 +1189,7 @@ impl Conversation {
 
 #[cfg(test)]
 mod tests {
+    use super::outgoing::OutgoingDraftEdit as _;
     use super::*;
     use else_wire::routines::{RunStatus, WatcherStatus};
     use else_wire::rules::{DiffOp, RuleChange, RulesFile};
@@ -1556,6 +1428,69 @@ mod tests {
         assert_eq!(
             c.owner_notice(Uuid::from_u128(400)).unwrap().status,
             OwnerNoticeStatus::Replied
+        );
+    }
+
+    #[test]
+    fn conversation_loads_with_new_states_in_turn_cards() {
+        let turn = Uuid::from_u128(900);
+        let mut data = snapshot_json(1, vec![], None);
+        data["turns"] = json!([{
+            "id": turn, "request_id": Uuid::from_u128(901), "turn_no": 1,
+            "provider_id": "codex", "status": "waiting", "effect_uncertain": false,
+            "outgoing_drafts": [{
+                "id": Uuid::from_u128(700), "lineage_id": Uuid::from_u128(700), "revision": 1,
+                "content": {"channel":"message", "platform":"matrix", "body":"Hi"},
+                "version": 1, "status": "reviewing", "can_approve": false,
+                "approval_source": "automation", "updated_at": "2026-11-01T00:00:00Z"
+            }],
+            "delegations": [{
+                "id": Uuid::from_u128(600), "attempt": 1, "target_bot_id": bot(),
+                "target_name": "Scout", "task": "Check it", "status": "paused",
+                "created_at": "2026-11-01T00:00:00Z"
+            }],
+            "owner_notices": [{
+                "id": Uuid::from_u128(400), "bot_id": bot(), "turn_id": turn,
+                "kind": "question", "summary": "Choose a bot", "status": "acknowledged",
+                "created_at": "2026-11-01T00:00:00Z"
+            }],
+            "computer_job_waits": [{
+                "id": Uuid::from_u128(200), "job_id": Uuid::from_u128(201), "job_status": "paused"
+            }]
+        }]);
+        let conversation =
+            Conversation::from_snapshot(serde_json::from_value(data).unwrap()).unwrap();
+        let shown = conversation.turn(turn).unwrap();
+        assert_eq!(shown.outgoing_drafts[0].status, DraftStatus::Unknown);
+        assert_eq!(shown.outgoing_drafts[0].content.label(), "matrix");
+        assert_eq!(
+            shown.delegations[0].status,
+            else_wire::delegations::DelegationStatus::Unknown
+        );
+        assert_eq!(shown.owner_notices[0].status.as_str(), "acknowledged");
+        assert_eq!(
+            shown.computer_job_waits[0]
+                .job_status
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "paused"
+        );
+    }
+
+    #[test]
+    fn malformed_wait_timestamps_reject_the_turn_update() {
+        let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let update = json!({"turn": {
+            "id": Uuid::from_u128(900), "request_id": Uuid::from_u128(901), "turn_no": 1,
+            "provider_id": "codex", "status": "waiting", "effect_uncertain": false,
+            "mcp_waits": [{
+                "id": Uuid::from_u128(200), "mcp_id": "t3-code", "deadline_at": "tomorrow"
+            }]
+        }});
+        assert_eq!(
+            conversation.apply(&frame(2, "turn.updated", update)),
+            Err(Reset::Malformed)
         );
     }
 

@@ -8,8 +8,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, post, put};
 use axum::{Json, Router};
+use else_wire::outgoing::DraftResponse;
 use serde::Deserialize;
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
@@ -101,11 +101,14 @@ pub(super) fn draft_error(err: DraftError) -> ApiError {
     }
 }
 
-fn settled(state: &AppState, settled: Settled) -> Json<Value> {
+fn settled(state: &AppState, settled: Settled) -> Json<DraftResponse> {
     if settled.requeued {
         state.scheduler.wake();
     }
-    Json(json!({ "draft": settled.draft, "requeued": settled.requeued }))
+    Json(DraftResponse {
+        draft: (&settled.draft).into(),
+        requeued: settled.requeued,
+    })
 }
 
 /// Save the owner's edits to a pending draft they saw at `version`.
@@ -113,7 +116,7 @@ async fn edit(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DraftResponse>, ApiError> {
     if body.always {
         return Err(ApiError::bad_request(
             "invalid_draft",
@@ -133,7 +136,7 @@ async fn approve(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DraftResponse>, ApiError> {
     let done = outgoing_drafts::approve(
         &state.db,
         bot_id,
@@ -151,7 +154,7 @@ async fn approve(
 async fn stop_always(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DraftResponse>, ApiError> {
     let done = outgoing_drafts::stop_always(&state.db, bot_id, draft_id)
         .await
         .map_err(draft_error)?;
@@ -161,7 +164,7 @@ async fn stop_always(
 async fn discard(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DraftResponse>, ApiError> {
     let done = outgoing_drafts::discard(&state.db, bot_id, draft_id)
         .await
         .map_err(draft_error)?;

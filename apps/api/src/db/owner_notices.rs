@@ -102,7 +102,7 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub id: Uuid,
     pub bot_id: Uuid,
@@ -113,6 +113,42 @@ pub struct Notice {
     pub status: Status,
     pub created_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl From<&Notice> for else_wire::notices::OwnerNotice {
+    fn from(row: &Notice) -> Self {
+        Self {
+            id: row.id,
+            bot_id: row.bot_id,
+            turn_id: row.turn_id,
+            kind: row.kind.into(),
+            summary: row.summary.clone(),
+            tried: row.tried.clone(),
+            status: row.status.into(),
+            created_at: row.created_at,
+            settled_at: row.settled_at,
+        }
+    }
+}
+
+impl From<Kind> for else_wire::notices::OwnerNoticeKind {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::Blocked => Self::Blocked,
+            Kind::Decision => Self::Decision,
+        }
+    }
+}
+
+impl From<Status> for else_wire::notices::OwnerNoticeStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Pending => Self::Pending,
+            Status::Replied => Self::Replied,
+            Status::Dismissed => Self::Dismissed,
+            Status::Superseded => Self::Superseded,
+        }
+    }
 }
 
 type Row = (

@@ -339,10 +339,9 @@ pub use crate::app::providers::McpWaitInProgress as InProgress;
 const SHOWN_RESULT: usize = 2048;
 
 /// A wait still checking its job, as the owner's turn view shows it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
     pub id: Uuid,
-    #[serde(skip)]
     pub turn_id: Uuid,
     pub mcp_id: String,
     pub tool: String,
@@ -355,6 +354,23 @@ pub struct Pending {
     /// The start of the last status result.
     pub last_result: Option<String>,
     pub created_at: String,
+}
+
+impl From<&Pending> for else_wire::waits::McpWait {
+    fn from(row: &Pending) -> Self {
+        Self {
+            id: row.id,
+            mcp_id: row.mcp_id.clone(),
+            tool: row.tool.clone(),
+            purpose: row.purpose.clone(),
+            interval_seconds: row.interval_seconds,
+            deadline_at: Some(row.deadline_at.clone()),
+            checks: row.checks,
+            last_status: row.last_status.clone(),
+            last_result: row.last_result.clone(),
+            created_at: Some(row.created_at.clone()),
+        }
+    }
 }
 
 /// The status a tool result reports at `pointer`: from structuredContent,

@@ -28,7 +28,7 @@ pub struct Snapshot {
     /// The bot's mail triggers, at the same snapshot.
     pub mail_triggers: Vec<crate::connectors::types::MailTrigger>,
     /// The kinds of drafts the owner approves always.
-    pub draft_grants: Vec<crate::app::outgoing::DraftKind>,
+    pub draft_grants: Vec<else_wire::outgoing::DraftKind>,
     /// The bot's webhooks, at the same snapshot.
     pub webhooks: Vec<super::webhooks::Webhook>,
     /// The bot's active watchers, at the same snapshot.

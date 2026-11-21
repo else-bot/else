@@ -3,8 +3,8 @@ use super::task_reply::state::format_elapsed;
 use super::transcript::RowKey;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;
+use else_wire::delegations::{Delegation, DelegationStatus};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -143,6 +143,7 @@ impl ElseApp {
                     DelegationStatus::Completed => "Replied",
                     DelegationStatus::Failed => "Failed",
                     DelegationStatus::Cancelled => "Stopped",
+                    DelegationStatus::Unknown => "Status unavailable",
                 };
                 details = details.child(
                     v_flex()

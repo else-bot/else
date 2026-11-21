@@ -8,6 +8,7 @@ use super::{ElseApp, RowKey};
 use crate::ambient::looping;
 use crate::avatar::bot_avatar;
 use chrono::{DateTime, Utc};
+use else_wire::notices::OwnerNoticeStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
@@ -509,7 +510,7 @@ fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
             || turn
                 .owner_notices
                 .iter()
-                .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending))
+                .any(|notice| notice.status == OwnerNoticeStatus::Pending))
 }
 
 /// Whether a task row shows only its bot's name: the turn waits on the

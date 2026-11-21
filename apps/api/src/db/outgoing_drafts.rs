@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use else_wire::outgoing::DraftKind;
 use serde::Serialize;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -29,7 +30,7 @@ use super::events;
 use super::turns;
 use crate::app::outgoing::send::{self, Approved, FileChanged};
 use crate::app::outgoing::{
-    self, ApprovalSource, Channels, Content, Delivery, DraftKind, Edits, Outcome, Status,
+    self, ApprovalSource, Channels, Content, Delivery, Edits, Outcome, Status,
 };
 use crate::db::in_ids;
 use crate::grants::policy::GrantReach;
@@ -38,7 +39,7 @@ use crate::grants::policy::GrantReach;
 pub const MAX_PER_TURN: i64 = 8;
 
 /// A draft revision as shown to the owner and recorded in events.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct OutgoingDraft {
     pub id: Uuid,
     /// Shared by every revision of the same email, message, or post.
@@ -70,16 +71,40 @@ pub struct OutgoingDraft {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
     pub send_turn_id: Option<Uuid>,
-    #[serde(skip)]
     pub context_turn_id: Option<Uuid>,
-    #[serde(skip)]
     pub context_version: Option<i64>,
     /// The action of the connected send this approval claimed. Settling the
     /// draft keeps it, while `delivery` may come to name an earlier send.
-    #[serde(skip)]
     pub claim_action_id: Option<Uuid>,
+}
+
+impl From<&OutgoingDraft> for else_wire::outgoing::OutgoingDraft {
+    fn from(draft: &OutgoingDraft) -> Self {
+        Self {
+            id: draft.id,
+            lineage_id: draft.lineage_id,
+            revision: draft.revision,
+            bot_id: Some(draft.bot_id),
+            turn_id: Some(draft.turn_id),
+            content: (&draft.content.0).into(),
+            version: draft.version,
+            status: draft.status.into(),
+            can_approve: draft.can_approve,
+            in_reply: draft.in_reply,
+            approval_source: draft.approval_source.map(Into::into),
+            approved_version: draft.approved_version,
+            approved_item_id: draft.approved_item_id,
+            approved_at: draft.approved_at,
+            delivery: draft.delivery.as_deref().map(Into::into),
+            result_detail: draft.result_detail.clone(),
+            superseded_by: draft.superseded_by,
+            kind: draft.kind.as_deref().cloned(),
+            created_at: Some(draft.created_at),
+            updated_at: draft.updated_at,
+            settled_at: draft.settled_at,
+        }
+    }
 }
 
 /// The [`DraftKind`] of draft `d` as JSON, or NULL when it has none: the one

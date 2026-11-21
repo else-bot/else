@@ -3,12 +3,14 @@ use super::pending_send::PendingSend;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource};
 use super::task_reply::state::{TaskReply, place_cards, task_replies};
-use crate::model::{
-    Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, OwnerNotice,
-};
+use crate::model::{Conversation, GapSize, HandoffStatus};
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use else_wire::bots::ReplyPosition;
+use else_wire::delegations::DelegationStatus;
 use else_wire::items::ItemKind;
+use else_wire::notices::OwnerNotice;
+use else_wire::notices::OwnerNoticeStatus;
+use else_wire::outgoing::DraftStatus;
 use else_wire::questions::QuestionStatus;
 use else_wire::secrets::SecretRequestStatus;
 use else_wire::skills::SkillInstallStatus;
@@ -483,16 +485,13 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
                 .chain(
                     turn.owner_notices
                         .iter()
-                        .filter(|notice| {
-                            notice.status != crate::model::OwnerNoticeStatus::Superseded
-                        })
+                        .filter(|notice| notice.status != OwnerNoticeStatus::Superseded)
                         // A settled notice of a turn outside the loaded page
                         // would otherwise land below newer messages.
                         .filter_map(move |notice| {
                             let anchor = c.question_anchor(turn.id, None);
-                            (notice.status == crate::model::OwnerNoticeStatus::Pending
-                                || anchor.is_some())
-                            .then_some((CardKey::OwnerNotice(notice.id), anchor))
+                            (notice.status == OwnerNoticeStatus::Pending || anchor.is_some())
+                                .then_some((CardKey::OwnerNotice(notice.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
@@ -504,7 +503,7 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
                 .chain(
                     turn.outgoing_drafts
                         .iter()
-                        .filter(|d| d.status != crate::model::DraftStatus::Superseded)
+                        .filter(|d| d.status != DraftStatus::Superseded)
                         .filter_map(move |draft| {
                             let anchor = c.question_anchor(turn.id, draft.settled_at);
                             (draft.settled_at.is_none() || anchor.is_some())
