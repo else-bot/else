@@ -1211,10 +1211,10 @@ fn gated_probe(
     })
 }
 
-/// Rechecks made while a probe runs wait for it and share its answer; the
-/// next recheck probes again.
+/// Rechecks made while a probe runs wait for it, then share one new probe,
+/// since the running one may have read the state from before they asked.
 #[tokio::test(flavor = "current_thread")]
-async fn rechecks_during_a_probe_share_it() {
+async fn rechecks_during_a_probe_share_the_next_one() {
     use std::sync::atomic::Ordering;
     let probes = std::sync::Arc::default();
     let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
@@ -1237,21 +1237,17 @@ async fn rechecks_during_a_probe_share_it() {
         tokio::task::yield_now().await;
     }
     drop(held);
-    for recheck in std::iter::once(first).chain(others) {
+    first.await.unwrap();
+    for recheck in others {
         assert_eq!(
             recheck.await.unwrap(),
-            Availability::Unavailable("signed out (2)".into())
+            Availability::Unavailable("signed out (3)".into())
         );
     }
     assert_eq!(
         probes.load(Ordering::SeqCst),
-        2,
-        "three rechecks, one probe"
-    );
-
-    assert_eq!(
-        claude.reprobe().await,
-        Availability::Unavailable("signed out (3)".into())
+        3,
+        "two rechecks that arrived mid-probe, one new probe"
     );
 }
 

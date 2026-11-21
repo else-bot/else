@@ -253,21 +253,23 @@ struct Readiness<L> {
     ready: watch::Sender<Result<Arc<Ready<L>>, String>>,
     probe: Option<Probe<L>>,
     probing: tokio::sync::Mutex<()>,
-    /// Probes that finished, so a recheck that waited on one shares it.
-    probes: AtomicU64,
+    /// Probes started. A caller shares only a probe that started after it
+    /// arrived, since an earlier one may have read a login from before.
+    started: AtomicU64,
 }
 
 impl<L: Send + Sync + 'static> Readiness<L> {
     async fn reprobe(self: Arc<Self>) {
         let Some(probe) = &self.probe else { return };
-        let seen = self.probes.load(Ordering::Acquire);
+        let arrived = self.started.load(Ordering::Acquire);
         let _probing = self.probing.lock().await;
-        if self.probes.load(Ordering::Acquire) == seen {
-            let ready = probe().await;
-            self.ready
-                .send_modify(|current| *current = ready.map(Arc::new));
-            self.probes.fetch_add(1, Ordering::Release);
+        if self.started.load(Ordering::Acquire) != arrived {
+            return;
         }
+        self.started.fetch_add(1, Ordering::Release);
+        let ready = probe().await;
+        self.ready
+            .send_modify(|current| *current = ready.map(Arc::new));
     }
 }
 
@@ -288,7 +290,7 @@ impl<A: Adapter> Cli<A> {
                 ready: watch::Sender::new(ready.map(Arc::new)),
                 probe: None,
                 probing: tokio::sync::Mutex::new(()),
-                probes: AtomicU64::new(0),
+                started: AtomicU64::new(0),
             }),
             tool_url: None,
         }
@@ -572,10 +574,7 @@ impl<A: Adapter> Provider for Cli<A> {
         // shows as unavailable from now on, not only in this turn. Claude
         // reports an expired login as a failed API call.
         if let TurnOutcome::Failed {
-            code:
-                FailureCode::ProviderUnavailable
-                | FailureCode::ProviderFailed
-                | FailureCode::StartFailed,
+            code: FailureCode::ProviderUnavailable | FailureCode::ProviderFailed,
             ..
         } = &outcome
         {

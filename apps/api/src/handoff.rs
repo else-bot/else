@@ -54,7 +54,10 @@ pub async fn prepare(
             None,
             Some(format!("the {source} provider is not configured")),
         ),
-        Some(provider) => match provider.availability() {
+        Some(provider) => match tokio::select! {
+            availability = crate::providers::availability_now(provider.as_ref()) => availability,
+            () = cancel.cancelled() => provider.availability(),
+        } {
             Availability::Unavailable(why) => {
                 (None, Some(format!("{source} is unavailable: {why}")))
             }

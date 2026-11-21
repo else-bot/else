@@ -372,7 +372,9 @@ pub(super) async fn resolve(
     ) else {
         return Err("no provider here offers a model choice".to_owned());
     };
-    if let Availability::Unavailable(why) = provider.availability() {
+    if let Availability::Unavailable(why) =
+        crate::providers::availability_now(provider.as_ref()).await
+    {
         return Err(format!("{} is unavailable: {why}", provider.label()));
     }
     let saved = match state.db.acquire().await {

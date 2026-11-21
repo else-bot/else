@@ -729,7 +729,8 @@ pub trait Provider: Send + Sync {
     }
     fn availability(&self) -> Availability;
     /// Check readiness again, such as after the owner logs in on the host.
-    /// A call made while a check runs waits for it and shares its answer.
+    /// A call made while a check runs waits for the next one, since the
+    /// running check may predate the fix; calls that wait together share it.
     async fn reprobe(&self) -> Availability {
         self.availability()
     }

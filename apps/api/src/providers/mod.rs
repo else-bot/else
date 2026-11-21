@@ -82,6 +82,28 @@ pub async fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
 /// the desktop's 15-second request deadline.
 pub const RECHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// `provider`'s availability, checked again first when it was not
+/// available: the owner may have fixed its CLI since, such as by logging in
+/// again on the host. Waits at most [`RECHECK_WAIT`] for the check.
+pub async fn availability_now(provider: &dyn Provider) -> Availability {
+    if provider.availability() != Availability::Available {
+        let _ = tokio::time::timeout(RECHECK_WAIT, provider.reprobe()).await;
+    }
+    provider.availability()
+}
+
+/// Check every unavailable provider again, concurrently, as
+/// [`availability_now`] does.
+pub async fn recheck_unavailable(registry: &Registry) {
+    futures_util::future::join_all(
+        registry
+            .all()
+            .iter()
+            .map(|provider| availability_now(provider.as_ref())),
+    )
+    .await;
+}
+
 /// How long an outgoing provider may take to produce a checkpoint.
 pub const CHECKPOINT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Byte cap for a checkpoint's text.

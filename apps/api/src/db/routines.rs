@@ -879,6 +879,7 @@ pub async fn run_now(
     id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(Routine, bool), RoutineError> {
+    crate::providers::recheck_unavailable(registry).await;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let (bot_id, request_id) = match by {
         RunNow::Turn(caller) => {
@@ -1089,6 +1090,9 @@ pub async fn review_ended(
         .await?;
         if ended.is_empty() {
             return Ok(retried);
+        }
+        if tried.is_empty() {
+            crate::providers::recheck_unavailable(registry).await;
         }
         for (id, failures) in ended {
             tried.push(id);
@@ -1599,6 +1603,9 @@ pub async fn admit_due(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    if !due.is_empty() {
+        crate::providers::recheck_unavailable(registry).await;
+    }
     let mut admitted = Admitted::default();
     for id in due {
         match admit(pool, registry, computers, id, now).await? {

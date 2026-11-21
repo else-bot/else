@@ -135,6 +135,9 @@ pub async fn settle_checks(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    if !ended.is_empty() {
+        crate::providers::recheck_unavailable(registry).await;
+    }
     let mut queued = 0;
     for id in ended {
         if settle_check(pool, registry, id).await? {
