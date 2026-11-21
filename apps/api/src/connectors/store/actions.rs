@@ -37,7 +37,7 @@ pub async fn authorize_in(
     turn_id: Uuid,
     command: &MailCommand,
 ) -> Result<(), StoreError> {
-    let turn: Option<(Uuid, TurnStatus, String)> = sqlx::query_as(
+    let turn: Option<(Uuid, TurnStatus, crate::db::bots::BotStatus)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, b.status FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
     )
     .bind(turn_id)
@@ -49,7 +49,7 @@ pub async fn authorize_in(
     if owner != bot_id {
         return Err(StoreError::Forbidden);
     }
-    if !status.serves_tools() || bot_status != "active" {
+    if !status.serves_tools() || !bot_status.is_active() {
         return Err(StoreError::NotRunning);
     }
     // The grant comes first, so a bot without access learns nothing about
