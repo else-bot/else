@@ -13,6 +13,8 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
     sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
         .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
     let turn = turn(&db, bot, ItemKind::User).await;
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id,status,turn_id,settled_at) VALUES(?1,'delivered',?2,?3,'100','2','delivered',?4,'2026-01-01T00:00:00.000+00:00')")
+        .bind(c.id).bind(bot).bind(trigger).bind(turn).execute(&db.pool).await.unwrap();
     let action = Uuid::new_v4();
     let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
     store::begin_action(
@@ -29,6 +31,24 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
     )
     .await
     .unwrap();
+    let finished = Uuid::new_v4();
+    store::begin_action(
+        &db.pool,
+        &c,
+        store::Action {
+            bot,
+            turn,
+            id: finished,
+            destination: Some("100"),
+            payload: &json!({"operation":"delete","destination":"100","message_id":"2"}),
+            send: false,
+        },
+    )
+    .await
+    .unwrap();
+    let settled = store::finish_action(&db.pool, c.id, finished, &Ok(json!({"deleted":true})))
+        .await
+        .unwrap();
     store::restore_passive(&mut db.pool.acquire().await.unwrap())
         .await
         .unwrap();
@@ -42,6 +62,23 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
     .await
     .unwrap();
     assert_eq!(delivery, ("cancelled".into(), true));
+    let delivered: (String, String) = sqlx::query_as(
+        "SELECT status, settled_at FROM social_deliveries WHERE event_id='delivered'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        delivered,
+        ("delivered".into(), "2026-01-01T00:00:00.000+00:00".into())
+    );
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, finished)
+            .await
+            .unwrap(),
+        Some(settled)
+    );
     assert_eq!(
         store::ACTIONS
             .receipt(&db.pool, c.id, bot, action)
