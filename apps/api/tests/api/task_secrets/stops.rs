@@ -139,12 +139,14 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
             )
             .await;
         assert!(stop.status.is_success());
+        if bot == &slow {
+            common::until(
+                "the slow bot's kill to stall",
+                script.kill_stalled.notified(),
+            )
+            .await;
+        }
     }
-    common::until(
-        "the slow bot's kill to stall",
-        script.kill_stalled.notified(),
-    )
-    .await;
     let pass = {
         let manager = manager.clone();
         tokio::spawn(async move { manager.end_orphaned_commands().await })

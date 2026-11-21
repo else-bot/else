@@ -174,8 +174,9 @@ impl Turn {
     }
 }
 
-/// Seed a `kind` item for seeded `turn` as the next item of the turn's
-/// conversation, as a provider records a message the turn wrote.
+/// Seed a `kind` item for seeded `turn` as the next item of its bot's owner
+/// conversation, where the turn sink records every turn's messages, a
+/// task's included.
 pub async fn item<'c>(
     db: impl Acquire<'c, Database = Sqlite>,
     turn: Uuid,
@@ -186,7 +187,7 @@ pub async fn item<'c>(
     let mut tx = db.begin().await.unwrap();
     let conversation: Uuid = sqlx::query_scalar(
         "UPDATE conversations SET last_item_seq = last_item_seq + 1
-         WHERE id = (SELECT conversation_id FROM turns WHERE id = ?1)
+         WHERE kind = 'owner' AND bot_id = (SELECT bot_id FROM turns WHERE id = ?1)
          RETURNING id",
     )
     .bind(turn)

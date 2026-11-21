@@ -208,9 +208,9 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
         .unwrap();
     send(&mut socket, json!({"type":"mode","mode":"control"})).await;
     common::never(
-        "control to be granted while the writer blocks the lease lookup",
+        "a reply to the control request while the writer blocks the lease lookup",
         Duration::from_millis(300),
-        wait_mode(&mut socket, "control"),
+        next_json(&mut socket),
     )
     .await;
 
