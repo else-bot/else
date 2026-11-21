@@ -878,7 +878,7 @@ pub async fn claim_connected(
 ) -> Result<Claim, DraftError> {
     // Read and hash the files outside the write lock: a message may carry
     // up to 100 MiB. The claim sends exactly the bytes checked here.
-    let (files, checked) = {
+    let (files, checked, observed) = {
         let mut conn = pool.acquire().await?;
         let snapshot: OutgoingDraft =
             sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE d.id = ?1")))
@@ -887,13 +887,17 @@ pub async fn claim_connected(
                 .await?
                 .ok_or(DraftError::NotFound)?;
         let checked = send::approved(&mut conn, &snapshot).await;
-        (snapshot.content.files().to_vec(), checked)
+        let observed = snapshot.claim_action_id;
+        (snapshot.content.files().to_vec(), checked, observed)
     };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
-    // An approval since the read changed which files it carries.
-    if draft.content.files() != files.as_slice() {
+    // An approval since the read changed which files it carries, or ended
+    // the claim this call found and began another, whose outcome is not this
+    // call's to report.
+    let reclaimed = observed.is_some() && observed != draft.claim_action_id;
+    if reclaimed || draft.content.files() != files.as_slice() {
         return Err(DraftError::Changed(draft.version));
     }
     let account_id = draft.content.account().ok_or(DraftError::NotConnected)?;

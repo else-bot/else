@@ -3273,8 +3273,9 @@ async fn a_refused_mail_send_fails_and_a_queued_copy_never_goes_out() {
             Some(action_id),
             email.send_command(Vec::new(), Some(email.message_id(id))),
         )
-        .await;
-    assert!(queued.is_err(), "{queued:?}");
+        .await
+        .unwrap_err();
+    assert_eq!(queued.code, MailErrorCode::MailActionConflict, "{queued:?}");
     assert!(mail.sends().is_empty(), "the queued copy never went out");
 }
 
@@ -3320,8 +3321,9 @@ async fn a_send_its_stopped_request_failed_is_never_admitted_after_the_request_r
             Some(claimed.action_id),
             email.send_command(Vec::new(), Some(email.message_id(id))),
         )
-        .await;
-    assert!(queued.is_err(), "{queued:?}");
+        .await
+        .unwrap_err();
+    assert_eq!(queued.code, MailErrorCode::MailActionConflict, "{queued:?}");
     assert!(mail.sends().is_empty(), "the queued copy never went out");
 }
 

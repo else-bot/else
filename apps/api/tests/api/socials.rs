@@ -1001,6 +1001,36 @@ async fn a_send_given_up_before_its_worker_admits_it_fails_and_is_never_delivere
 }
 
 #[tokio::test]
+async fn a_stopped_request_fails_a_message_its_worker_never_started() {
+    let fake = Arc::new(Fake::default());
+    let db = Arc::new(TestDb::migrated().await);
+    let h = harness(TestApp::builder().db(db.clone()).social(fake.clone())).await;
+    let c = account(&db, "stopped").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let (turn, draft) = approved_social_draft(&h, bot, c.id).await;
+    else_api::db::outgoing_drafts::claim_connected(&db.pool, turn, draft, SOCIAL)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = ?1")
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, detail): (String, String) =
+        sqlx::query_as("SELECT status, result_detail FROM outgoing_drafts WHERE id = ?1")
+            .bind(draft)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(
+        detail,
+        "The request ended before the connection started sending it. Nothing was sent."
+    );
+}
+
+#[tokio::test]
 async fn a_send_its_worker_admitted_before_the_caller_gave_up_settles_by_its_receipt() {
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
