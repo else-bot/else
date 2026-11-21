@@ -26,6 +26,9 @@ pub(super) struct RulesCache {
     loading: Option<i64>,
     restoring: bool,
     problem: Option<String>,
+    /// Kept in step with `file`, `problem` and the version last seen by
+    /// [`ElseApp::summarize_rules`], so drawing does not count rules.
+    summary: RulesSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -297,6 +300,7 @@ impl ElseApp {
                     }
                     Err(err) => cache.problem = Some(format!("Could not load rules: {err}")),
                 }
+                app.summarize_rules(bot);
                 cx.notify();
             });
         })
@@ -397,6 +401,7 @@ impl ElseApp {
     fn mark_rules_seen(&mut self, bot: Uuid, cx: &mut Context<Self>) {
         if let Some(version) = self.rules_file(bot).map(|file| file.version) {
             self.preferences.rules_seen.insert(bot, version);
+            self.summarize_rules(bot);
             self.save_preferences(cx);
         }
     }
@@ -434,6 +439,7 @@ impl ElseApp {
         }
         cache.restoring = true;
         cache.problem = None;
+        self.summarize_rules(bot);
         let request = self.client.clone().restore_rules(bot, version, expected);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -444,6 +450,7 @@ impl ElseApp {
                 if let Err(err) = result {
                     cache.problem = Some(format!("Could not restore: {err}"));
                 }
+                app.summarize_rules(bot);
                 cx.notify();
             });
         })
@@ -471,10 +478,17 @@ impl ElseApp {
     }
 
     pub(super) fn rules_summary(&self, bot: Uuid) -> RulesSummary {
-        summarize(
-            self.rules.get(&bot),
-            self.preferences.rules_seen.get(&bot).copied(),
-        )
+        self.rules
+            .get(&bot)
+            .map(|cache| cache.summary.clone())
+            .unwrap_or_default()
+    }
+
+    fn summarize_rules(&mut self, bot: Uuid) {
+        let seen = self.preferences.rules_seen.get(&bot).copied();
+        if let Some(cache) = self.rules.get_mut(&bot) {
+            cache.summary = summarize(Some(cache), seen);
+        }
     }
 
     fn render_rules_dialog(

@@ -405,7 +405,7 @@ impl ElseApp {
                         }
                         let listed = app.bots.iter().any(|b| b.id == bot.id);
                         if !listed {
-                            app.bots.push(bot.clone());
+                            app.bots = app.bots.iter().cloned().chain([bot.clone()]).collect();
                             app.refresh_now(window, cx);
                         }
                         if closing || !listed {

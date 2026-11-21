@@ -347,7 +347,7 @@ pub struct ElseApp {
     client: Arc<Client>,
     connection: Connection,
     caps: Option<Arc<Capabilities>>,
-    bots: Vec<Bot>,
+    bots: Arc<[Bot]>,
     /// When a bot list last arrived, if one has since the last connection
     /// event. The live stream reports a connection before its first list, so
     /// `bots` can be stale.
@@ -469,7 +469,7 @@ impl ElseApp {
             client,
             connection: Connection::Connecting,
             caps: None,
-            bots: Vec::new(),
+            bots: Arc::default(),
             listed_at: None,
             requested: None,
             mention_bots: Default::default(),
@@ -676,7 +676,7 @@ impl ElseApp {
 
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
-        self.bots = list.bots;
+        self.bots = list.bots.into();
         self.listed_at = Some(std::time::Instant::now());
         let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
         if *self.mention_bots != mention_bots {

@@ -42,13 +42,14 @@ impl Unread {
     }
 }
 
-/// What the transcript reads from the window. The window pushes it after
-/// each of its notifies, and the view redraws only when it changed.
+/// What the transcript reads from the window. The window builds it after
+/// each of its notifies, and the view redraws only when it changed, so each
+/// field stays cheap to clone and compare.
 #[derive(Clone, Default, PartialEq)]
 pub(super) struct TranscriptInputs {
     pub(super) connected: bool,
     pub(super) hidden: bool,
-    pub(super) bots: Vec<Bot>,
+    pub(super) bots: Arc<[Bot]>,
     pub(super) mention_bots: Arc<MentionRegistry>,
     pub(super) pending: Vec<PendingSend>,
     pub(super) quotes: Vec<Quote>,
@@ -439,7 +440,9 @@ impl ElseApp {
                         if activity.as_ref().is_some_and(|a| a.phase == Phase::Idle) {
                             self.stopping.remove(&bot);
                         }
-                        if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot)
+                        if let Some(entry) = Arc::make_mut(&mut self.bots)
+                            .iter_mut()
+                            .find(|b| b.id == bot)
                             && activity.is_some()
                         {
                             entry.activity = activity;
@@ -510,34 +513,19 @@ impl ElseApp {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let current = view.read(cx);
-        let bot = current.bot_id;
-        let current = &current.inputs;
-        if current.connected == (self.connection == super::Connection::Connected)
-            && current.hidden == self.hidden
-            && current.bots == self.bots
-            && current.mention_bots == self.mention_bots
-            && current.pending[..] == *self.pending.get(&bot).map_or(&[][..], Vec::as_slice)
-            && current.quotes[..] == *self.quotes_of(bot)
-            && current.restoring_rules == self.restoring_rules(bot)
-        {
-            return;
+        let inputs = self.transcript_inputs(view.read(cx).bot_id);
+        if view.read(cx).inputs != inputs {
+            view.update(cx, |view, cx| view.set_inputs(inputs, window, cx));
         }
-        let inputs = self.transcript_inputs(bot);
-        view.update(cx, |view, cx| view.set_inputs(inputs, window, cx));
     }
 
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let bot = view.read(cx).bot_id;
-        self.prune_pending(bot, cx);
-        let inputs = self.transcript_inputs(bot);
-        view.update(cx, |view, cx| {
-            view.set_inputs(inputs, window, cx);
-            view.sync_rows(window, cx);
-        });
+        self.prune_pending(view.read(cx).bot_id, cx);
+        self.sync_view_inputs(window, cx);
+        view.update(cx, |view, cx| view.sync_rows(window, cx));
         cx.notify();
     }
 }
@@ -584,9 +572,6 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.inputs == inputs {
-            return;
-        }
         let reach = |inputs: &TranscriptInputs| (inputs.connected, inputs.hidden);
         let reached = reach(&self.inputs) != reach(&inputs);
         let quoted = self.inputs.quotes != inputs.quotes;

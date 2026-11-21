@@ -13,7 +13,6 @@ use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use crate::api::Client;
 use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
-use crate::model::Conversation;
 use else_wire::bots::Bot;
 use else_wire::conversation::BotExtras;
 use else_wire::routines::Routine;
@@ -69,7 +68,7 @@ pub(super) struct PanelInputs {
     pub(super) caps: Option<Arc<Capabilities>>,
     /// The bot's routines, watchers and triggers, while its conversation
     /// is open.
-    pub(super) automations: Option<BotExtras>,
+    pub(super) automations: Option<Arc<BotExtras>>,
     pub(super) rules: RulesSummary,
     /// The tab on screen, while the panel shows this bot.
     pub(super) shown: Option<DetailsTab>,
@@ -245,7 +244,7 @@ impl BotPanel {
     }
 
     fn automations(&self) -> Option<&BotExtras> {
-        self.inputs.automations.as_ref()
+        self.inputs.automations.as_deref()
     }
 
     pub(super) fn rules(&self) -> &RulesSummary {
@@ -393,7 +392,7 @@ impl ElseApp {
         let bots = &self.bots;
         self.panels
             .retain(|id, _| bots.iter().any(|b| b.id == *id && b.is_active()));
-        for bot in &self.bots {
+        for bot in self.bots.iter() {
             if let Some(slot) = self.panels.get(&bot.id) {
                 slot.panel
                     .update(cx, |panel, cx| panel.sync_bot(bot, window, cx));
@@ -412,10 +411,15 @@ impl ElseApp {
     fn panel_inputs(&self, bot: Uuid, cx: &App) -> PanelInputs {
         let shown =
             (self.selected == Some(bot) && self.settings_shown()).then(|| self.details.tab());
+        let automations = self
+            .shown(cx)
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+            .map(|conversation| conversation.extras().clone());
         PanelInputs {
             connected: self.connection == Connection::Connected,
             caps: self.caps.clone(),
-            automations: self.automations(bot, cx).cloned(),
+            automations,
             rules: self.rules_summary(bot),
             shown,
             computer: shown.and(self.details.computer().cloned()),
@@ -423,35 +427,16 @@ impl ElseApp {
         }
     }
 
-    fn automations<'a>(&self, bot: Uuid, cx: &'a App) -> Option<&'a BotExtras> {
-        self.shown(cx)
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())
-            .map(Conversation::extras)
-    }
-
     /// Pushes what changed to each panel. It runs after each notify of the
     /// window, so a change to what the panels read must notify it; a notify
     /// during drawing calls it directly.
     pub(super) fn sync_panel_inputs(&mut self, cx: &mut Context<Self>) {
         for (&bot, slot) in &self.panels {
-            let current = &slot.panel.read(cx).inputs;
-            let shown =
-                (self.selected == Some(bot) && self.settings_shown()).then(|| self.details.tab());
-            let rules = self.rules_summary(bot);
-            if current.connected == (self.connection == Connection::Connected)
-                && current.caps == self.caps
-                && current.automations.as_ref() == self.automations(bot, cx)
-                && current.rules == rules
-                && current.shown == shown
-                && current.computer.as_ref() == shown.and(self.details.computer())
-                && current.width == self.details_body_width()
-            {
-                continue;
-            }
             let inputs = self.panel_inputs(bot, cx);
-            slot.panel
-                .update(cx, |panel, cx| panel.set_inputs(inputs, cx));
+            if slot.panel.read(cx).inputs != inputs {
+                slot.panel
+                    .update(cx, |panel, cx| panel.set_inputs(inputs, cx));
+            }
         }
     }
 
