@@ -4,7 +4,22 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use else_wire::questions as wire;
-pub use else_wire::questions::{QuestionAnswer as Answer, QuestionChoice as Choice};
+pub use else_wire::questions::QuestionAnswer as Answer;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    pub id: String,
+    pub label: String,
+}
+
+impl From<&Choice> for wire::QuestionChoice {
+    fn from(value: &Choice) -> Self {
+        Self {
+            id: value.id.clone(),
+            label: value.label.clone(),
+        }
+    }
+}
 
 /// The owner's answer to a question or approval request: which question
 /// (its kind, title, and bound action) and the choices the owner made, or

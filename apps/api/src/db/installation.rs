@@ -5,6 +5,8 @@
 //! seeds bots, recreates a deleted default, or overwrites saved settings.
 
 use else_wire::settings::Shared;
+use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
@@ -12,6 +14,7 @@ use uuid::Uuid;
 use super::DbError;
 use crate::app::bots::{Avatar, BotName, MAIN_BOT_NAME, welcome_message};
 use crate::app::providers::default_profiles;
+use crate::app::server_icon::{ServerIcon, StoredIcon};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MainBot {
@@ -252,6 +255,38 @@ pub async fn set_server_name(
     .map(Option::flatten)
 }
 
+#[derive(Deserialize)]
+#[serde(from = "Value")]
+enum IconDocument {
+    Unset,
+    Known(StoredIcon),
+    Preserved(Value),
+}
+
+impl From<Value> for IconDocument {
+    fn from(value: Value) -> Self {
+        if value.is_null() {
+            return Self::Unset;
+        }
+        match serde_json::from_value::<StoredIcon>(value.clone()) {
+            Ok(icon) if serde_json::to_value(&icon).is_ok_and(|encoded| encoded == value) => {
+                Self::Known(icon)
+            }
+            _ => Self::Preserved(value),
+        }
+    }
+}
+
+impl From<IconDocument> for Shared {
+    fn from(document: IconDocument) -> Self {
+        match document {
+            IconDocument::Unset => Self::Unset,
+            IconDocument::Known(icon) => Self::Set(icon.into()),
+            IconDocument::Preserved(value) => Self::Preserved(value),
+        }
+    }
+}
+
 /// The icon capabilities advertise.
 pub async fn server_icon(pool: &SqlitePool) -> Result<Shared, sqlx::Error> {
     let text: Option<String> = sqlx::query_scalar("SELECT server_icon FROM installation")
@@ -259,8 +294,8 @@ pub async fn server_icon(pool: &SqlitePool) -> Result<Shared, sqlx::Error> {
         .await?
         .flatten();
     Ok(text
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .map_or(Shared::Unset, Shared::from_persisted))
+        .and_then(|text| serde_json::from_str::<IconDocument>(&text).ok())
+        .map_or(Shared::Unset, Shared::from))
 }
 
 /// The advertised icon with its picture, read together.
@@ -273,7 +308,7 @@ pub async fn server_icon_with_picture(
             .await?;
     Ok(row.and_then(|(text, picture)| {
         Some((
-            Shared::from_persisted(serde_json::from_str(&text?).ok()?),
+            Shared::from(serde_json::from_str::<IconDocument>(&text?).ok()?),
             picture,
         ))
     }))
@@ -283,7 +318,7 @@ pub async fn server_icon_with_picture(
 /// one yet with `only_if_unset`. Returns the icon the server keeps.
 pub async fn set_server_icon(
     pool: &SqlitePool,
-    icon: &crate::app::server_icon::ServerIcon,
+    icon: &ServerIcon,
     only_if_unset: bool,
 ) -> Result<Shared, sqlx::Error> {
     let kept: Option<String> = sqlx::query_scalar(
@@ -292,15 +327,15 @@ pub async fn set_server_icon(
              server_picture = CASE WHEN ?3 AND server_icon IS NOT NULL THEN server_picture ELSE ?2 END
          RETURNING server_icon",
     )
-    .bind(serde_json::json!(icon.advertised).to_string())
+    .bind(serde_json::json!(icon.stored).to_string())
     .bind(icon.picture.as_deref())
     .bind(only_if_unset)
     .fetch_optional(pool)
     .await?
     .flatten();
     Ok(kept
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .map_or(Shared::Unset, Shared::from_persisted))
+        .and_then(|text| serde_json::from_str::<IconDocument>(&text).ok())
+        .map_or(Shared::Unset, Shared::from))
 }
 
 /// Record the owner's time zone; writes only when it changed.
@@ -310,4 +345,39 @@ pub async fn set_owner_timezone(pool: &SqlitePool, timezone: &str) -> Result<(),
         .execute(pool)
         .await
         .map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installation_icon_reads_existing_json() {
+        use else_wire::settings::{LetterStyle, Stored};
+
+        let json = r#"{"kind":"letters","style":"monogram","letters":"EB","hue":90}"#;
+        let document: IconDocument = serde_json::from_str(json).unwrap();
+        let wire = Shared::from(document);
+        let icon = Stored::Letters {
+            style: LetterStyle::Monogram,
+            letters: Some("EB".into()),
+            hue: Some(90),
+        };
+        assert_eq!(wire, Shared::Set(icon));
+    }
+
+    #[test]
+    fn installation_icon_relays_unrecognized_json() {
+        for json in [
+            r#"{"kind":"image_url","url":"https://example.org/icon.png"}"#,
+            r#"{"kind":"pattern","hue":90,"seed":"waves"}"#,
+            r#"{"kind":"letters","style":"neon"}"#,
+        ] {
+            let expected: Value = serde_json::from_str(json).unwrap();
+            let document: IconDocument = serde_json::from_str(json).unwrap();
+            let wire = Shared::from(document);
+            assert_eq!(wire, Shared::Preserved(expected.clone()));
+            assert_eq!(serde_json::to_value(wire).unwrap(), expected);
+        }
+    }
 }

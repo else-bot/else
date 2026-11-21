@@ -4,7 +4,10 @@
 //!
 //! The desktop must keep reading older and newer servers. Fields a server
 //! may omit keep `#[serde(default)]`, no type denies unknown fields, and
-//! states a newer server may extend decode through `wire_state!`.
+//! states a newer server may extend decode through `wire_state!` or an
+//! `Unknown` variant. A type the desktop also sends stays strict and its
+//! received fields fall back instead, so the desktop never sends a value it
+//! could not read.
 
 #[macro_use]
 mod state;

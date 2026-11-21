@@ -518,7 +518,7 @@ impl Backups {
             enabled: settings.enabled,
             interval_secs: settings.interval_secs,
             keep: settings.keep,
-            destination: settings.destination.map(|d| d.view),
+            destination: settings.destination.map(|d| d.config.into()),
             running: view.running,
             next_backup_at: view.next_backup_at,
             estimate: Some(estimate),

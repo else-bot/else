@@ -110,6 +110,7 @@ async fn invalid_icons_are_refused_and_change_nothing() {
         json!({ "icon": { "kind": "pattern" }, "picture": png(128) }),
         json!({ "icon": { "kind": "picture", "digest": "00" }, "picture": png(128) }),
         json!({ "icon": { "kind": "sticker" } }),
+        json!({ "icon": { "kind": "letters", "style": "neon" } }),
         json!({ "icon": { "kind": "default", "hue": 3 } }),
     ];
     for body in refused {

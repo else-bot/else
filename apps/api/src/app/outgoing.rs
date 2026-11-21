@@ -1,5 +1,5 @@
 use else_wire::outgoing::{
-    DraftContent, DraftDelivery, DraftEmailReplyTo, DraftFile, DraftPlatform, DraftStatus,
+    DraftContent, DraftDelivery, DraftEmailReplyTo, DraftPlatform, DraftStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -184,7 +184,7 @@ pub enum ApprovalSource {
     /// An owner message sent while the draft was open, which the bot read
     /// as approval of that exact version.
     Message,
-    /// The owner approved its kind always ([`else_wire::outgoing::DraftKind`]); it was approved
+    /// The owner approved its kind always ([`DraftKind`]); it was approved
     /// as proposed.
     Standing,
 }
@@ -380,6 +380,70 @@ impl From<Platform> for DraftPlatform {
     }
 }
 
+/// The kind of message an owner can approve always.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftKind {
+    pub platform: GrantPlatform,
+    pub account_id: Option<Uuid>,
+    pub account: Option<String>,
+    pub destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GrantPlatform {
+    Known(Platform),
+    Other(String),
+}
+
+impl From<DraftKind> for else_wire::outgoing::DraftKind {
+    fn from(kind: DraftKind) -> Self {
+        Self {
+            platform: match kind.platform {
+                GrantPlatform::Known(platform) => platform.into(),
+                GrantPlatform::Other(platform) => DraftPlatform::Other(platform),
+            },
+            account_id: kind.account_id,
+            account: kind.account,
+            destination: kind.destination,
+            task: kind.task,
+        }
+    }
+}
+
+/// A snapshot of a file the owner approves with a draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftFile {
+    pub id: Uuid,
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl DraftFile {
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    }
+}
+
+impl From<&DraftFile> for else_wire::outgoing::DraftFile {
+    fn from(file: &DraftFile) -> Self {
+        Self {
+            id: file.id,
+            name: file.name.clone(),
+            media_type: file.media_type.clone(),
+            size: file.size,
+            sha256: file.sha256.clone(),
+        }
+    }
+}
+
 /// An email: headers, subject, and plain-text body. With `account_id` it
 /// goes from that connected account (`from` is its address) through the
 /// API, optionally in the thread of `reply_to`; without, the bot sends it
@@ -468,7 +532,7 @@ impl From<&Content> for DraftContent {
                     uid_validity: reply.uid_validity,
                     uid: reply.uid,
                 }),
-                attachments: email.attachments.clone(),
+                attachments: email.attachments.iter().map(Into::into).collect(),
             },
             Content::Message(message) => Self::Message {
                 platform: message.platform.into(),
@@ -478,7 +542,7 @@ impl From<&Content> for DraftContent {
                 destination: message.destination.clone(),
                 task: message.task.clone(),
                 body: message.body.clone(),
-                attachments: message.attachments.clone(),
+                attachments: message.attachments.iter().map(Into::into).collect(),
             },
         }
     }

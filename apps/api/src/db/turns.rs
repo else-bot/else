@@ -108,6 +108,101 @@ pub const ENDED_STATUSES: &str = "('completed', 'interrupted', 'failed', 'uncert
 pub const UNFINISHED_STATUSES: &str =
     "('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')";
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RoutineRun {
+    routine_id: Uuid,
+    name: String,
+    due_at: DateTime<Utc>,
+    reminder: bool,
+    quiet: bool,
+    no_news: bool,
+}
+
+impl From<&RoutineRun> for else_wire::routines::RoutineRun {
+    fn from(value: &RoutineRun) -> Self {
+        Self {
+            routine_id: value.routine_id,
+            name: value.name.clone(),
+            due_at: value.due_at,
+            reminder: value.reminder,
+            quiet: value.quiet,
+            no_news: value.no_news,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TurnMail {
+    account_id: Uuid,
+    message: crate::connectors::types::MessageRef,
+    subject: Option<String>,
+    sender: Option<String>,
+    location: MailLocation,
+}
+
+impl From<&TurnMail> for else_wire::email::TurnMail {
+    fn from(mail: &TurnMail) -> Self {
+        Self {
+            account_id: mail.account_id,
+            message: (&mail.message).into(),
+            subject: mail.subject.clone(),
+            sender: mail.sender.clone(),
+            location: (&mail.location).into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum MailLocation {
+    Arrived,
+    Archived(MailMove),
+    Trashed(MailMove),
+    Moved(MailMove),
+    Deleted(MailChange),
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct MailMove {
+    folder: String,
+    #[serde(flatten)]
+    change: MailChange,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct MailChange {
+    by_bot_id: Option<Uuid>,
+    by_turn_id: Option<Uuid>,
+    at: String,
+}
+
+impl From<&MailLocation> for else_wire::email::MailLocation {
+    fn from(location: &MailLocation) -> Self {
+        match location {
+            MailLocation::Arrived => Self::Arrived,
+            MailLocation::Archived(moved) => Self::Archived(moved.into()),
+            MailLocation::Trashed(moved) => Self::Trashed(moved.into()),
+            MailLocation::Moved(moved) => Self::Moved(moved.into()),
+            MailLocation::Deleted(change) => Self::Deleted(else_wire::email::MailDeletion {
+                by_bot_id: change.by_bot_id,
+                by_turn_id: change.by_turn_id,
+                at: change.at.clone(),
+            }),
+        }
+    }
+}
+
+impl From<&MailMove> for else_wire::email::MailMove {
+    fn from(moved: &MailMove) -> Self {
+        Self {
+            folder: moved.folder.clone(),
+            by_bot_id: moved.change.by_bot_id,
+            by_turn_id: moved.change.by_turn_id,
+            at: moved.change.at.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TurnRecord {
     pub id: Uuid,
@@ -148,9 +243,9 @@ pub struct TurnRecord {
     /// The bot's questions and approval requests to the owner during this turn.
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
-    pub routine: Option<Json<else_wire::routines::RoutineRun>>,
+    pub routine: Option<Json<RoutineRun>>,
     /// The emails whose arrival started this turn, oldest first.
-    pub mail: Json<Vec<else_wire::email::TurnMail>>,
+    pub mail: Json<Vec<TurnMail>>,
     /// The outgoing draft revisions shown under this turn.
     #[sqlx(skip)]
     pub outgoing_drafts: Vec<crate::db::outgoing_drafts::OutgoingDraft>,
@@ -271,9 +366,9 @@ pub struct ItemRecord {
     pub reaction: Option<Json<Reaction>>,
     pub bot_task: Option<Json<else_wire::items::BotTask>>,
     pub bot_reply: Option<Json<else_wire::items::BotReply>>,
-    pub routine_update: Option<Json<else_wire::items::RoutineUpdate>>,
-    pub bot_created: Option<Json<else_wire::items::BotCreated>>,
-    pub rules_update: Option<Json<else_wire::rules::RulesUpdate>>,
+    pub routine_update: Option<Json<super::routines::StoredRoutineUpdate>>,
+    pub bot_created: Option<Json<super::bots::StoredBotCreated>>,
+    pub rules_update: Option<Json<super::rules::StoredRulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
     /// The provider attempt that wrote an assistant item.

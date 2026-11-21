@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::IntoDeserializer as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::notices::ExchangeAsk;
@@ -31,7 +32,7 @@ pub struct Item {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     /// Set on the owner's feedback message sent as a reaction.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_reaction")]
     pub reaction: Option<Reaction>,
     #[serde(default)]
     pub bot_task: Option<BotTask>,
@@ -43,7 +44,7 @@ pub struct Item {
     pub bot_created: Option<BotCreated>,
     #[serde(default)]
     pub rules_update: Option<RulesUpdate>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_parts")]
     pub parts: Vec<MessagePart>,
     /// The provider attempt that wrote an assistant item. Absent from older servers.
     #[serde(default)]
@@ -72,6 +73,50 @@ impl Attachment {
 pub enum MessagePart {
     Text { text: String },
     File { file: Attachment },
+}
+
+/// Reads a reaction a newer server added as none; the reacting message's
+/// text still says it. [`ReactionKind`] stays strict, so a desktop sends
+/// only the reactions it knows.
+pub(crate) fn known_reaction<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Reaction>, D::Error> {
+    #[derive(Deserialize)]
+    struct Received {
+        item_id: Uuid,
+        kind: String,
+    }
+    let Some(Received { item_id, kind }) = Option::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let kind: Result<ReactionKind, serde::de::value::Error> =
+        ReactionKind::deserialize(kind.into_deserializer());
+    Ok(kind.ok().map(|kind| Reaction { item_id, kind }))
+}
+
+/// Reads a message holding a part a newer server added as plain text: the
+/// item's `text` carries every part, and the desktop's offsets into it hold
+/// only when it knows each part's length. [`MessagePart`] stays strict, so
+/// a desktop sends only the parts it knows.
+fn known_parts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<MessagePart>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Tag {
+        Text,
+        File,
+        #[serde(other)]
+        Other,
+    }
+    let mut unknown = false;
+    let mut known = Vec::new();
+    for part in Vec::<serde_json::Value>::deserialize(deserializer)? {
+        if matches!(Tag::deserialize(&part), Ok(Tag::Other)) {
+            unknown = true;
+        } else {
+            known.push(MessagePart::deserialize(part).map_err(serde::de::Error::custom)?);
+        }
+    }
+    Ok(if unknown { Vec::new() } else { known })
 }
 
 /// The owner's reaction to one of the bot's messages.
@@ -199,5 +244,21 @@ impl<'a> OwnerNeed<'a> {
             (NeedKind::Blocked, _) => Some(Self::Blocked),
             (NeedKind::Fyi, None) | (NeedKind::Other(_), _) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_known_part_that_does_not_parse_fails_the_item_even_beside_an_unknown_one() {
+        let item = json!({
+            "id": Uuid::nil(), "seq": 1, "turn_id": Uuid::nil(), "request_id": null,
+            "kind": "user", "text": "hi", "provider_id": null,
+            "parts": [{ "type": "poll" }, { "type": "file" }],
+        });
+        assert!(Item::deserialize(&item).is_err());
     }
 }

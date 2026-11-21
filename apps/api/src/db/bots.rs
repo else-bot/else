@@ -22,6 +22,61 @@ mod sidebar;
 
 pub use impact::{Impact, impact};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct StoredBotCreated {
+    bot_id: Uuid,
+    name: String,
+    creator_bot_id: Uuid,
+    creator_name: String,
+    purpose: String,
+}
+
+impl From<&StoredBotCreated> for else_wire::items::BotCreated {
+    fn from(value: &StoredBotCreated) -> Self {
+        Self {
+            bot_id: value.bot_id,
+            name: value.name.clone(),
+            creator_bot_id: value.creator_bot_id,
+            creator_name: value.creator_name.clone(),
+            purpose: value.purpose.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct WaitingBot {
+    id: Uuid,
+    name: String,
+    tasks: u32,
+}
+
+impl From<&WaitingBot> for else_wire::bots::WaitingBot {
+    fn from(value: &WaitingBot) -> Self {
+        Self {
+            id: value.id,
+            name: value.name.clone(),
+            tasks: value.tasks,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WaitingOn {
+    since: DateTime<Utc>,
+    bots: Vec<WaitingBot>,
+    jobs: u32,
+}
+
+impl From<&WaitingOn> for else_wire::bots::WaitingOn {
+    fn from(waiting: &WaitingOn) -> Self {
+        Self {
+            since: waiting.since,
+            bots: waiting.bots.iter().map(Into::into).collect(),
+            jobs: waiting.jobs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -90,7 +145,7 @@ pub struct BotRecord {
     pub sidebar: sidebar::SidebarRow,
     /// Set while its active turn is parked on tasks it handed to other bots
     /// or on its own MCP and computer jobs.
-    pub waiting_on: Option<Json<else_wire::bots::WaitingOn>>,
+    pub waiting_on: Option<Json<WaitingOn>>,
 }
 
 impl BotRecord {
@@ -542,7 +597,7 @@ async fn creation_receipt(
     .bind(seq)
     .bind(receipt_turn)
     .bind(text)
-    .bind(sqlx::types::Json(else_wire::items::BotCreated {
+    .bind(sqlx::types::Json(StoredBotCreated {
         bot_id,
         name: name.as_str().to_owned(),
         creator_bot_id: creator,
@@ -817,4 +872,27 @@ pub async fn delete(pool: &SqlitePool, bot_id: Uuid) -> Result<Deleted, BotError
     tx.commit().await?;
     let bot = find(pool, bot_id).await?.ok_or(BotError::NotFound)?;
     Ok(Deleted { bot, interrupt })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bot_created_reads_existing_json() {
+        let json = r#"{"bot_id":"56b67ab9-d0ef-4229-bd12-68e2b27d19ad","name":"Scout","creator_bot_id":"2a2b49c4-0905-4782-b685-c2d75db76d0e","creator_name":"Main","purpose":"Find open tasks."}"#;
+        let stored: StoredBotCreated = serde_json::from_str(json).unwrap();
+        let wire: else_wire::items::BotCreated = (&stored).into();
+        assert_eq!(
+            wire,
+            else_wire::items::BotCreated {
+                bot_id: "56b67ab9-d0ef-4229-bd12-68e2b27d19ad".parse().unwrap(),
+                name: "Scout".into(),
+                creator_bot_id: "2a2b49c4-0905-4782-b685-c2d75db76d0e".parse().unwrap(),
+                creator_name: "Main".into(),
+                purpose: "Find open tasks.".into(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+    }
 }

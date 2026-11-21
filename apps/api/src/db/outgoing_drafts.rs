@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use else_wire::outgoing::DraftKind;
 use serde::Serialize;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -30,7 +29,7 @@ use super::events;
 use super::turns;
 use crate::app::outgoing::send::{self, Approved, FileChanged};
 use crate::app::outgoing::{
-    self, ApprovalSource, Channels, Content, Delivery, Edits, Outcome, Status,
+    self, ApprovalSource, Channels, Content, Delivery, DraftKind, Edits, Outcome, Status,
 };
 use crate::db::in_ids;
 use crate::grants::policy::GrantReach;
@@ -99,7 +98,7 @@ impl From<&OutgoingDraft> for else_wire::outgoing::OutgoingDraft {
             delivery: draft.delivery.as_deref().map(Into::into),
             result_detail: draft.result_detail.clone(),
             superseded_by: draft.superseded_by,
-            kind: draft.kind.as_deref().cloned(),
+            kind: draft.kind.as_deref().cloned().map(Into::into),
             created_at: Some(draft.created_at),
             updated_at: draft.updated_at,
             settled_at: draft.settled_at,
@@ -1514,4 +1513,61 @@ pub async fn notes(
                 && matches!(row.status, Status::Approved | Status::Discarded),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_grant_kind_reads_existing_json() {
+        for (json, task, destination) in [
+            (
+                r#"{"platform":"telegram","account_id":null,"account":"helper","destination":null,"task":"daily brief"}"#,
+                Some("daily brief"),
+                None,
+            ),
+            (
+                r#"{"platform":"telegram","account_id":null,"account":"helper","destination":"family"}"#,
+                None,
+                Some("family"),
+            ),
+        ] {
+            let stored: DraftKind = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+            let wire: else_wire::outgoing::DraftKind = stored.into();
+            assert_eq!(
+                wire,
+                else_wire::outgoing::DraftKind {
+                    platform: else_wire::outgoing::DraftPlatform::Telegram,
+                    account_id: None,
+                    account: Some("helper".into()),
+                    destination: destination.map(str::to_owned),
+                    task: task.map(str::to_owned),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn outgoing_draft_content_reads_a_stored_attachment() {
+        let json = r#"{"channel":"email","from":"bot@example.org","to":["owner@example.org"],"cc":[],"bcc":[],"subject":"Brief","body":"Here it is.","attachments":[{"id":"cebfa944-17e7-4469-808d-2d4eb9aaafec","name":"brief.txt","media_type":"text/plain","size":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]}"#;
+        let content: Content = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&content).unwrap(), json);
+
+        let wire: else_wire::outgoing::DraftContent = (&content).into();
+        let else_wire::outgoing::DraftContent::Email { attachments, .. } = wire else {
+            panic!("expected an email");
+        };
+        assert_eq!(
+            attachments,
+            [else_wire::outgoing::DraftFile {
+                id: "cebfa944-17e7-4469-808d-2d4eb9aaafec".parse().unwrap(),
+                name: "brief.txt".into(),
+                media_type: "text/plain".into(),
+                size: 5,
+                sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+            }]
+        );
+    }
 }

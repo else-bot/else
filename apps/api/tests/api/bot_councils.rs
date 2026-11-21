@@ -471,14 +471,14 @@ async fn earlier_creation_notices_gain_their_card_on_upgrade() {
         .unwrap();
     }
     else_api::db::MIGRATOR.run(&db.pool).await.unwrap();
-    let card: sqlx::types::Json<else_wire::items::BotCreated> =
+    let card: sqlx::types::Json<serde_json::Value> =
         sqlx::query_scalar("SELECT bot_created FROM items WHERE id = ?1")
             .bind(notice)
             .fetch_one(&db.pool)
             .await
             .unwrap();
     assert_eq!(
-        serde_json::to_value(&card.0).unwrap(),
+        card.0,
         json!({"bot_id": created, "name": "Auto", "creator_bot_id": creator,
             "creator_name": "Tech (bot_id backup)\nPurpose: Manager", "purpose": "Own the routines.\nKeep approvals."})
     );

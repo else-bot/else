@@ -1,5 +1,5 @@
 use else_wire::backups::{BackupDestination, BackupService};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use zeroize::Zeroizing;
 
@@ -38,15 +38,69 @@ pub struct DestinationInput {
     pub secret_access_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, strum::EnumString)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+enum KnownService {
+    R2,
+    S3,
+    Compatible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Service {
+    Known(KnownService),
+    Other(String),
+}
+
+impl From<Service> for BackupService {
+    fn from(service: Service) -> Self {
+        match service {
+            Service::Known(KnownService::R2) => Self::R2,
+            Service::Known(KnownService::S3) => Self::S3,
+            Service::Known(KnownService::Compatible) => Self::Compatible,
+            Service::Other(service) => Self::Other(service),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct StoredDestination {
+    service: Service,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    path_style: bool,
+    has_secret: bool,
+}
+
+impl From<StoredDestination> for BackupDestination {
+    fn from(value: StoredDestination) -> Self {
+        Self {
+            service: value.service.into(),
+            endpoint: value.endpoint,
+            region: value.region,
+            bucket: value.bucket,
+            prefix: value.prefix,
+            access_key_id: value.access_key_id,
+            path_style: value.path_style,
+            has_secret: value.has_secret,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Destination {
-    pub view: BackupDestination,
+    pub(super) config: StoredDestination,
     secret: Zeroizing<String>,
 }
 
 impl Destination {
     pub fn s3_config(&self) -> S3Config {
-        let v = &self.view;
+        let v = &self.config;
         S3Config {
             endpoint: v.endpoint.clone(),
             region: v.region.clone(),
@@ -79,10 +133,10 @@ impl Destination {
                 "The endpoint must be an HTTP or HTTPS origin without a path or credentials.",
             ));
         }
-        let service = BackupService::from(input.service);
-        if matches!(service, BackupService::Other(_)) {
-            return Err(Error::Invalid("Choose R2, S3, or S3 compatible storage."));
-        }
+        let service = input
+            .service
+            .parse::<KnownService>()
+            .map_err(|_| Error::Invalid("Choose R2, S3, or S3 compatible storage."))?;
         let region = input.region.trim().to_owned();
         let bucket = input.bucket.trim().to_owned();
         let access_key_id = input.access_key_id.trim().to_owned();
@@ -112,8 +166,8 @@ impl Destination {
             prefix.push('/');
         }
         Ok(Self {
-            view: BackupDestination {
-                service,
+            config: StoredDestination {
+                service: Service::Known(service),
                 endpoint,
                 region,
                 bucket,
@@ -306,7 +360,7 @@ pub async fn save(pool: &SqlitePool, key: &SecretKey, settings: &Settings) -> Re
             let sealed = crate::sealed::seal(key, &purpose(settings.revision), d.secret.as_bytes())
                 .map_err(|_| Error::Crypto)?;
             (
-                Some(serde_json::to_string(&d.view).map_err(|_| Error::Crypto)?),
+                Some(serde_json::to_string(&d.config).map_err(|_| Error::Crypto)?),
                 Some(sealed.salt.to_vec()),
                 Some(sealed.cipher),
             )
@@ -334,14 +388,14 @@ pub async fn load(pool: &SqlitePool, key: &SecretKey) -> Result<Option<Settings>
     let destination = match row.get::<Option<String>, _>("destination") {
         None => None,
         Some(value) => {
-            let view = serde_json::from_str(&value).map_err(|_| Error::Crypto)?;
+            let config = serde_json::from_str(&value).map_err(|_| Error::Crypto)?;
             let salt: Vec<u8> = row.get("secret_salt");
             let cipher: Vec<u8> = row.get("secret_cipher");
             let plain = crate::sealed::open(key, &purpose(revision), &salt, &cipher)
                 .map_err(|_| Error::Crypto)?;
             let secret =
                 Zeroizing::new(String::from_utf8(plain.to_vec()).map_err(|_| Error::Crypto)?);
-            Some(Destination { view, secret })
+            Some(Destination { config, secret })
         }
     };
     Ok(Some(Settings {
@@ -396,6 +450,45 @@ pub async fn load_or_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_destination_on_an_unknown_service_is_refused() {
+        let input = DestinationInput {
+            service: "gcs".into(),
+            endpoint: "https://storage.example.org".into(),
+            region: "auto".into(),
+            bucket: "vault".into(),
+            prefix: String::new(),
+            access_key_id: "key-1".into(),
+            path_style: false,
+            secret_access_key: Some("secret".into()),
+        };
+        assert!(matches!(
+            Destination::resolve(input, None),
+            Err(Error::Invalid("Choose R2, S3, or S3 compatible storage."))
+        ));
+    }
+
+    #[test]
+    fn backup_destination_reads_existing_json() {
+        let json = r#"{"service":"r2","endpoint":"https://backups.example.org","region":"auto","bucket":"vault","prefix":"else/","access_key_id":"key-1","path_style":false,"has_secret":true}"#;
+        let stored: StoredDestination = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+        let wire: BackupDestination = stored.into();
+        assert_eq!(
+            wire,
+            BackupDestination {
+                service: BackupService::R2,
+                endpoint: "https://backups.example.org".into(),
+                region: "auto".into(),
+                bucket: "vault".into(),
+                prefix: "else/".into(),
+                access_key_id: "key-1".into(),
+                path_style: false,
+                has_secret: true,
+            }
+        );
+    }
 
     fn settings() -> Settings {
         Settings {

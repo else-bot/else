@@ -98,7 +98,7 @@ pub async fn bot_extras(
         routines: Some(routines.iter().map(Into::into).collect()),
         social_triggers: social_triggers.iter().map(Into::into).collect(),
         mail_triggers: mail_triggers.iter().map(Into::into).collect(),
-        draft_grants,
+        draft_grants: draft_grants.into_iter().map(Into::into).collect(),
         webhooks: webhooks.iter().map(Into::into).collect(),
         watchers: watchers.iter().map(Into::into).collect(),
         rules_version: Some(rules_version),

@@ -5,7 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use else_wire::rules::{DiffLine, DiffOp, RuleChange, RuleSection};
+use else_wire::rules::{self as wire, RuleChange, RuleSection};
+use serde::{Deserialize, Serialize};
 use similar::{Algorithm, ChangeTag};
 
 pub const MAX_TITLE_CHARS: usize = 80;
@@ -55,7 +56,8 @@ pub struct Rules {
     pub sections: Vec<RuleSection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ChangeKind {
     Added,
@@ -77,6 +79,36 @@ impl From<ChangeKind> for RuleChange {
             ChangeKind::Changed => Self::Changed,
             ChangeKind::Removed => Self::Removed,
             ChangeKind::Restored => Self::Restored,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffOp {
+    Same,
+    Add,
+    Remove,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub op: DiffOp,
+    pub text: String,
+}
+
+impl From<&DiffLine> for wire::DiffLine {
+    fn from(line: &DiffLine) -> Self {
+        Self {
+            op: match line.op {
+                DiffOp::Same => wire::DiffOp::Same,
+                DiffOp::Add => wire::DiffOp::Add,
+                DiffOp::Remove => wire::DiffOp::Remove,
+                DiffOp::Unknown => wire::DiffOp::Unknown,
+            },
+            text: line.text.clone(),
         }
     }
 }

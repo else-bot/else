@@ -8,9 +8,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use else_wire::outgoing::DraftFile;
-
-use super::{Channels, Platform, Status};
+use super::{Channels, DraftFile, Platform, Status};
 use crate::connectors::types::{MailCommand, MailError, OutgoingAttachment};
 use crate::db::outgoing_drafts::{
     self, Claim, Claimed, DraftError, MailSend, OutgoingDraft, Payload, SentCheck,

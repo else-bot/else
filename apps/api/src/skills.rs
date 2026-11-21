@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use else_wire::skills::{SkillFile, SkillSource};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -32,6 +31,42 @@ impl Default for Sources {
         Self {
             api: Url::parse("https://api.github.com/").expect("static URL"),
             raw: Url::parse("https://raw.githubusercontent.com/").expect("static URL"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSource {
+    pub url: String,
+    pub repo: String,
+    pub path: String,
+    pub commit: String,
+}
+
+impl From<&SkillSource> for else_wire::skills::SkillSource {
+    fn from(value: &SkillSource) -> Self {
+        Self {
+            url: value.url.clone(),
+            repo: value.repo.clone(),
+            path: value.path.clone(),
+            commit: value.commit.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillFile {
+    pub path: String,
+    pub size: u64,
+    pub script: bool,
+}
+
+impl From<&SkillFile> for else_wire::skills::SkillFile {
+    fn from(value: &SkillFile) -> Self {
+        Self {
+            path: value.path.clone(),
+            size: value.size,
+            script: value.script,
         }
     }
 }
