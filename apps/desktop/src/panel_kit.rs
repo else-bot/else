@@ -1,9 +1,16 @@
 //! Small layout pieces shared by the Details panel, the Settings sheet and
-//! its pages: soft scroll edges and one grouped-list style.
+//! its pages: soft scroll edges, one grouped-list style and one
+//! confirmation dialog.
 
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::controls::{Control as _, Scale, Tier};
 
 /// How far each fade reaches into the scroll container.
 pub(crate) const FADE: Pixels = px(24.);
@@ -179,4 +186,60 @@ pub(crate) fn hugging(
     segment: gpui_kit::component::button::Button,
 ) -> gpui_kit::component::button::Button {
     segment.flex_none().flex_basis(Length::Auto).px_4()
+}
+
+/// Asks before an action the owner cannot take back. Cancel takes focus when
+/// the dialog opens; `on_confirm` runs after it closes.
+pub(crate) fn confirm_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    confirm_label: impl Into<SharedString>,
+    tier: Tier,
+    on_confirm: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let (title, body, confirm_label) = (title.into(), body.into(), confirm_label.into());
+    let on_confirm = Rc::new(on_confirm);
+    let cancel = cx.focus_handle();
+    let focus_once = Cell::new(true);
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if focus_once.replace(false) {
+            cancel.focus(window, cx);
+        }
+        let on_confirm = on_confirm.clone();
+        dialog
+            .w(px(440.))
+            .title(title.clone())
+            .close_button(false)
+            .on_ok(|_, _, _| false)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(body.clone()),
+            )
+            .footer(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("confirm-dialog-cancel")
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
+                            .label("Cancel")
+                            .track_focus(&cancel)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("confirm-dialog-confirm")
+                            .control(tier, Scale::Standard, false, cx)
+                            .label(confirm_label.clone())
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                on_confirm(window, cx);
+                            }),
+                    ),
+            )
+    });
 }

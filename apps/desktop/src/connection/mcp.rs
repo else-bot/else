@@ -7,7 +7,7 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex};
 use std::time::Duration;
 
-use super::loaded::Loaded;
+use super::loaded::{Guard, Loaded};
 use super::pane::PaneEvent;
 
 /// Favicons by MCP origin: `None` while loading or when the service has
@@ -20,7 +20,7 @@ pub(super) struct View {
     icons: Icons,
     _icon_loads: Vec<Task<()>>,
     search: Entity<InputState>,
-    removing: Option<String>,
+    removing: Option<Guard>,
     error: Option<String>,
     _search: Subscription,
     _poll: Task<()>,
@@ -38,29 +38,22 @@ impl View {
                 cx.notify();
             }
         });
-        let poll = cx.spawn_in(window, async move |this, cx| {
-            // A removal outdates the list, so no fetch starts while one runs.
-            while let Ok(attempt) = this.update(cx, |view, _| {
-                view.removing.is_none().then(|| view.entries.begin())
-            }) {
-                if let Some(attempt) = attempt {
-                    let result = poll_client.clone().installed_mcps().await;
-                    let open = this.update(cx, |view, cx| {
-                        if view
-                            .entries
-                            .settle(attempt, result.map_err(|error| error.to_string()))
-                        {
-                            view.load_icons(cx);
-                            cx.notify();
-                        }
-                    });
-                    if open.is_err() {
-                        break;
-                    }
+        let poll = Loaded::poll(
+            window,
+            cx,
+            |view: &mut Self| &mut view.entries,
+            |_| Duration::from_secs(5),
+            move || poll_client.clone().installed_mcps(),
+            |view, attempt, result, _, cx| {
+                if view
+                    .entries
+                    .settle(attempt, result.map_err(|error| error.to_string()))
+                {
+                    view.load_icons(cx);
+                    cx.notify();
                 }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-            }
-        });
+            },
+        );
         Self {
             client,
             entries: Loaded::default(),
@@ -111,58 +104,25 @@ impl View {
             return;
         }
         let view = cx.weak_entity();
-        let cancel = cx.focus_handle();
-        let focus_once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if focus_once.replace(false) {
-                cancel.focus(window, cx);
-            }
-            let view = view.clone();
-            let id = entry.id.clone();
-            dialog
-                .w(px(440.))
-                .title(format!("Remove {} for every bot?", entry.name))
-                .close_button(false)
-                .on_ok(|_, _, _| false)
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("This removes its shared skill, documentation and config. Every bot will lose access to this MCP through the shared library."),
-                )
-                .footer(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("mcp-remove-cancel")
-                                .control(Tier::Secondary, Scale::Standard, false, cx)
-                                .label("Cancel")
-                                .track_focus(&cancel)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("mcp-remove-confirm")
-                                .control(Tier::Danger, Scale::Standard, false, cx)
-                                .label("Remove for all bots")
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = view.update(cx, |view, cx| {
-                                        view.remove(id.clone(), window, cx);
-                                    });
-                                }),
-                        ),
-                )
-        });
+        let id = entry.id;
+        crate::panel_kit::confirm_dialog(
+            window,
+            cx,
+            format!("Remove {} for every bot?", entry.name),
+            "This removes its shared skill, documentation and config. Every bot will lose access to this MCP through the shared library.",
+            "Remove for all bots",
+            Tier::Danger,
+            move |window, cx| {
+                let _ = view.update(cx, |view, cx| view.remove(id.clone(), window, cx));
+            },
+        );
     }
 
     fn remove(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.removing.is_some() {
             return;
         }
-        self.removing = Some(id.clone());
-        self.entries.supersede();
+        self.removing = Some(self.entries.operate());
         self.error = None;
         let client = self.client.clone();
         self._remove = Some(cx.spawn_in(window, async move |this, cx| {

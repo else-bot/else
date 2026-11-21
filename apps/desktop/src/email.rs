@@ -9,8 +9,8 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _,
-    WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::*;
 use uuid::Uuid;
@@ -261,49 +261,17 @@ impl EmailSettings {
             return;
         };
         let view = cx.weak_entity();
-        let cancel = cx.focus_handle();
-        let focus_once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if focus_once.replace(false) {
-                cancel.focus(window, cx);
-            }
-            let view = view.clone();
-            dialog
-                .w(px(440.))
-                .title(format!("Remove {address}?"))
-                .close_button(false)
-                .on_ok(|_, _, _| false)
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(REMOVAL_NOTICE),
-                )
-                .footer(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("email-remove-cancel")
-                                .control(Tier::Secondary, Scale::Standard, false, cx)
-                                .label("Cancel")
-                                .track_focus(&cancel)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("email-remove-confirm")
-                                .control(Tier::Danger, Scale::Standard, false, cx)
-                                .label("Remove account")
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = view.update(cx, |view, cx| {
-                                        view.remove(account, window, cx);
-                                    });
-                                }),
-                        ),
-                )
-        });
+        crate::panel_kit::confirm_dialog(
+            window,
+            cx,
+            format!("Remove {address}?"),
+            REMOVAL_NOTICE,
+            "Remove account",
+            Tier::Danger,
+            move |window, cx| {
+                let _ = view.update(cx, |view, cx| view.remove(account, window, cx));
+            },
+        );
     }
 
     fn remove(&mut self, account: Uuid, window: &mut Window, cx: &mut Context<Self>) {
