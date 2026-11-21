@@ -8,9 +8,6 @@ pub(super) fn hairline(cx: &App) -> Hsla {
     cx.theme().foreground.opacity(0.06)
 }
 
-/// How far a clickable row's hover fill reaches past the text column.
-pub(super) const ROW_BLEED: Pixels = px(8.);
-
 /// A titled group of rows in the Details panel: no box, just a label, 16 px
 /// of padding and one full-width rule under the group. Rows inside never
 /// draw their own rules.
@@ -33,11 +30,6 @@ pub(super) fn section(title: &'static str, cx: &App) -> Div {
 /// A section's rows, 12 px apart.
 pub(super) fn list_rows(rows: Vec<AnyElement>) -> Div {
     v_flex().w_full().gap(ROW_GAP).children(rows)
-}
-
-pub(super) fn watching_label(count: usize) -> String {
-    let noun = if count == 1 { "thing" } else { "things" };
-    format!("Watching {count} {noun}")
 }
 
 /// Secondary text in a row: a schedule, a model, a trigger's details. It

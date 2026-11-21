@@ -129,14 +129,7 @@ impl ElseApp {
                 match result {
                     Ok(saved) => {
                         entry.routines.remove(&routine);
-                        if let Some(conversation) = app
-                            .view
-                            .as_mut()
-                            .filter(|view| view.bot_id == bot)
-                            .and_then(|view| view.conversation.as_mut())
-                        {
-                            conversation.apply_routine(saved);
-                        }
+                        app.apply_routine(bot, saved);
                     }
                     Err(err) => {
                         let text = if retrying {

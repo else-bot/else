@@ -3,7 +3,7 @@ mod editor;
 pub(in crate::app) use editor::ModelDialog;
 
 use crate::api::{BotProfile, Capabilities, ModelInfo, ProfileChoice};
-use crate::app::panel::{ROW_BLEED, alert, item_name, meta, muted, note, section};
+use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -14,6 +14,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use uuid::Uuid;
+
+/// How far a clickable row's hover fill reaches past the text column.
+const ROW_BLEED: Pixels = px(8.);
 
 pub(super) enum ModelState {
     Loading(Uuid),

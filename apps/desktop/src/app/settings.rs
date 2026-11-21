@@ -31,7 +31,7 @@ pub(super) struct BotSettings {
     revision: Option<i64>,
     model: ModelState,
     routines: HashMap<Uuid, RoutineSave>,
-    /// Trigger changes by source ID.
+    /// Trigger changes by `TriggerSource::key`.
     triggers: HashMap<Uuid, TriggerSave>,
     watcher_stops: HashMap<Uuid, WatcherStop>,
     open_watcher_log: Option<Uuid>,
@@ -43,6 +43,17 @@ impl ElseApp {
             .as_ref()
             .filter(|view| view.bot_id == bot)
             .and_then(|view| view.conversation.as_ref())
+    }
+
+    fn apply_routine(&mut self, bot: Uuid, saved: crate::model::Routine) {
+        if let Some(conversation) = self
+            .view
+            .as_mut()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_mut())
+        {
+            conversation.apply_routine(saved);
+        }
     }
 
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {

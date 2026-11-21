@@ -358,14 +358,7 @@ impl ElseApp {
                                 }
                             }
                             SavedModel::Routine(saved) => {
-                                if let Some(conversation) = app
-                                    .view
-                                    .as_mut()
-                                    .filter(|view| view.bot_id == bot)
-                                    .and_then(|view| view.conversation.as_mut())
-                                {
-                                    conversation.apply_routine(*saved);
-                                }
+                                app.apply_routine(bot, *saved);
                             }
                         }
                         if app.model_dialog.as_ref() == Some(&holder) {
