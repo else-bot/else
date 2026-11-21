@@ -29,6 +29,27 @@ pub(in crate::app) enum Request<Op> {
     },
 }
 
+/// What settling an attempt did, and so whether its caller goes on to
+/// handle the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub(in crate::app) enum Settle {
+    /// The attempt is not the request in flight; nothing changed.
+    Stale,
+    /// The owner token was rejected. The request is idle again, or still
+    /// unconfirmed after a resend the server never handled, and the window
+    /// handles the rejection.
+    Rejected,
+    Settled,
+}
+
+impl Settle {
+    /// Whether the caller goes on to handle the result.
+    pub(in crate::app) fn settled(self) -> bool {
+        self == Self::Settled
+    }
+}
+
 impl<Op> Request<Op> {
     /// Whether the controls stay locked: sent and not yet failed.
     pub(in crate::app) fn busy(&self) -> bool {
@@ -103,13 +124,13 @@ impl<Op> Request<Op> {
         }
     }
 
-    /// Settles `attempt` with `result`. Returns false, changing nothing,
-    /// when `attempt` is not the request in flight.
+    /// Settles `attempt` with `result`, changing nothing when `attempt` is
+    /// not the request in flight.
     pub(in crate::app) fn settle<T>(
         &mut self,
         attempt: Uuid,
         result: &Result<T, ClientError>,
-    ) -> bool {
+    ) -> Settle {
         self.settle_as(attempt, result, ToString::to_string)
     }
 
@@ -121,7 +142,7 @@ impl<Op> Request<Op> {
         attempt: Uuid,
         result: &Result<T, ClientError>,
         message: impl FnOnce(&ClientError) -> String,
-    ) -> bool {
+    ) -> Settle {
         let (op, resent) = match std::mem::take(self) {
             Self::Sending {
                 attempt: current,
@@ -133,7 +154,7 @@ impl<Op> Request<Op> {
             } if current == attempt => (op, true),
             other => {
                 *self = other;
-                return false;
+                return Settle::Stale;
             }
         };
         *self = match result {
@@ -148,9 +169,14 @@ impl<Op> Request<Op> {
                     error: message(err),
                 }
             }
+            Err(ClientError::Unauthorized) => Self::Idle,
             Err(err) => Self::Failed(message(err)),
         };
-        true
+        if matches!(result, Err(ClientError::Unauthorized)) {
+            Settle::Rejected
+        } else {
+            Settle::Settled
+        }
     }
 
     /// Fails `attempt` with `message`, for results that are not a
@@ -173,7 +199,7 @@ impl<Op> Request<Op> {
 
 #[cfg(test)]
 mod tests {
-    use super::Request;
+    use super::{Request, Settle};
     use crate::api::ClientError;
     use uuid::Uuid;
 
@@ -199,7 +225,10 @@ mod tests {
         let attempt = request.begin("approve").unwrap();
         assert!(request.busy());
         assert_eq!(request.pending(), Some(&"approve"));
-        assert!(request.settle(attempt, &Err::<(), _>(api(422, "invalid"))));
+        assert_eq!(
+            request.settle(attempt, &Err::<(), _>(api(422, "invalid"))),
+            Settle::Settled
+        );
         assert_eq!(request, Request::Failed("Nope.".into()));
         assert!(!request.busy());
         assert_eq!(request.error(), Some("Nope."));
@@ -209,7 +238,10 @@ mod tests {
     fn an_accepted_request_stays_locked_and_keeps_its_op() {
         let mut request = Request::Idle;
         let attempt = request.begin(true).unwrap();
-        assert!(request.settle(attempt, &Ok::<_, ClientError>(())));
+        assert_eq!(
+            request.settle(attempt, &Ok::<_, ClientError>(())),
+            Settle::Settled
+        );
         assert_eq!(request, Request::Accepted(true));
         assert!(request.busy());
         assert_eq!(request.pending(), Some(&true));
@@ -229,12 +261,18 @@ mod tests {
         let mut request = Request::Idle;
         let attempt = request.begin(1).unwrap();
         let stale = Uuid::new_v4();
-        assert!(!request.settle(stale, &Err::<(), _>(api(422, "invalid"))));
+        assert_eq!(
+            request.settle(stale, &Err::<(), _>(api(422, "invalid"))),
+            Settle::Stale
+        );
         assert!(!request.fail(stale, "late".into()));
         assert_eq!(request, Request::Sending { attempt, op: 1 });
 
         let mut failed = Request::<i32>::Failed("first".into());
-        assert!(!failed.settle(attempt, &Ok::<_, ClientError>(())));
+        assert_eq!(
+            failed.settle(attempt, &Ok::<_, ClientError>(())),
+            Settle::Stale
+        );
         assert_eq!(failed, Request::Failed("first".into()));
     }
 
@@ -247,7 +285,10 @@ mod tests {
         ] {
             let mut request = Request::Idle;
             let attempt = request.begin("discard").unwrap();
-            assert!(request.settle(attempt, &Err::<(), _>(error)));
+            assert_eq!(
+                request.settle(attempt, &Err::<(), _>(error)),
+                Settle::Settled
+            );
             assert!(request.unconfirmed());
             assert!(!request.busy());
             let (retry, op) = request.retry().unwrap();
@@ -267,7 +308,10 @@ mod tests {
     fn a_rejected_token_unlocks_without_an_error() {
         let mut request = Request::Idle;
         let attempt = request.begin(()).unwrap();
-        assert!(request.settle(attempt, &Err::<(), _>(ClientError::Unauthorized)));
+        assert_eq!(
+            request.settle(attempt, &Err::<(), _>(ClientError::Unauthorized)),
+            Settle::Rejected
+        );
         assert_eq!(request, Request::Idle);
         assert_eq!(request.error(), None);
         assert!(
@@ -284,9 +328,14 @@ mod tests {
         ] {
             let mut request = Request::Idle;
             let first = request.begin("create").unwrap();
-            assert!(request.settle(first, &Err::<(), _>(unreachable())));
+            assert_eq!(
+                request.settle(first, &Err::<(), _>(unreachable())),
+                Settle::Settled
+            );
             let (resend, _) = request.retry().unwrap();
-            assert!(request.settle(resend, &Err::<(), _>(error)));
+            let rejected = matches!(error, ClientError::Unauthorized);
+            let settled = request.settle(resend, &Err::<(), _>(error));
+            assert_eq!(settled == Settle::Rejected, rejected);
             assert!(request.unconfirmed());
             assert_eq!(request.retry().unwrap().1, "create");
         }
@@ -296,9 +345,15 @@ mod tests {
     fn a_resend_the_server_rejects_fails() {
         let mut request = Request::Idle;
         let first = request.begin("create").unwrap();
-        assert!(request.settle(first, &Err::<(), _>(unreachable())));
+        assert_eq!(
+            request.settle(first, &Err::<(), _>(unreachable())),
+            Settle::Settled
+        );
         let (resend, _) = request.retry().unwrap();
-        assert!(request.settle(resend, &Err::<(), _>(api(422, "invalid_bot"))));
+        assert_eq!(
+            request.settle(resend, &Err::<(), _>(api(422, "invalid_bot"))),
+            Settle::Settled
+        );
         assert_eq!(request, Request::Failed("Nope.".into()));
     }
 
@@ -315,7 +370,7 @@ mod tests {
     fn settle_as_describes_the_failure() {
         let mut request = Request::Idle;
         let attempt = request.begin(()).unwrap();
-        request.settle_as(attempt, &Err::<(), _>(api(422, "invalid")), |err| {
+        let _ = request.settle_as(attempt, &Err::<(), _>(api(422, "invalid")), |err| {
             format!("Couldn't save. {err}")
         });
         assert_eq!(request.error(), Some("Couldn't save. Nope."));

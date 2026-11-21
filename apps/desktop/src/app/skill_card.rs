@@ -9,7 +9,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::request::Request;
+use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
 use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
@@ -185,7 +185,7 @@ impl ConversationView {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_skill_install(bot, id, approval).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |app, window, cx| {
                 app.skill_answered(id, attempt, result, window, cx)
@@ -203,14 +203,12 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(result, Err(ClientError::Unauthorized)) {
-            return;
-        }
         // A card rebuilt after a disconnect no longer knows the attempt; it
         // still shows the result.
         if let Some(card) = self.cards.skills.get_mut(&id) {
-            if !card.request.settle(attempt, &result)
+            if card.request.settle(attempt, &result) == Settle::Stale
                 && let Err(err) = &result
+                && !matches!(err, ClientError::Unauthorized)
             {
                 card.request.reject(err.to_string());
             }

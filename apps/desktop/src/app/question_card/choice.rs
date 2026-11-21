@@ -664,7 +664,8 @@ mod tests {
         };
         let attempt = form.state.begin(()).unwrap();
         assert_eq!(settled(&pending, Some(&form), None).outcome, "Sending…");
-        form.state
+        let _ = form
+            .state
             .settle(attempt, &Ok::<_, crate::api::ClientError>(()));
         assert_eq!(
             settled(&pending, Some(&form), None).outcome,

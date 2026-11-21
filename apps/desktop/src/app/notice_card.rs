@@ -21,7 +21,7 @@ impl ConversationView {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.dismiss_owner_notice(bot, notice).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |view, window, cx| {
                 match result {

@@ -651,9 +651,10 @@ impl ElseApp {
         cx.notify();
     }
 
-    /// On a rejected owner token, marks the connection invalid and clears
-    /// every credential form. Returns whether `err` was that rejection, so
-    /// the caller stops handling the result.
+    /// On a rejected owner token, marks the connection invalid; the views
+    /// clear their credential forms and re-sync their cards when they see
+    /// it. Returns whether `err` was that rejection, so the caller stops
+    /// handling the result.
     pub(super) fn unauthorized(&mut self, err: &ClientError, cx: &mut Context<Self>) -> bool {
         if !matches!(err, ClientError::Unauthorized) {
             return false;
@@ -1207,6 +1208,20 @@ fn without_prefix(
         }
         _ => parts.to_vec(),
     }
+}
+
+/// Hands a rejected owner token to the window, even after the view that
+/// sent the request is gone. Returns whether `err` was that rejection.
+fn report_unauthorized(
+    app: &WeakEntity<ElseApp>,
+    err: &ClientError,
+    cx: &mut AsyncWindowContext,
+) -> bool {
+    if !matches!(err, ClientError::Unauthorized) {
+        return false;
+    }
+    let _ = app.update(cx, |app, cx| app.unauthorized(err, cx));
+    true
 }
 
 #[cfg(test)]

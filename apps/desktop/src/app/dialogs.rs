@@ -1,5 +1,5 @@
 use super::delete_dialog::{DeleteTarget, open_delete_confirmation};
-use super::request::Request;
+use super::request::{Request, Settle};
 use super::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::profile_picker::ProfilePicker;
@@ -83,12 +83,13 @@ impl ElseApp {
                 Err(_) => None,
             };
             let _ = this.update_in(cx, |app, window, cx| {
-                let settled = app
-                    .welcome
-                    .as_mut()
-                    .is_some_and(|welcome| welcome.request.settle(attempt, &result));
-                let rejected = result.as_ref().is_err_and(|err| app.unauthorized(err, cx));
-                if rejected || !settled {
+                let outcome = app.welcome.as_mut().map_or(Settle::Stale, |welcome| {
+                    welcome.request.settle(attempt, &result)
+                });
+                if let Err(err) = &result {
+                    app.unauthorized(err, cx);
+                }
+                if !outcome.settled() {
                     return;
                 }
                 if let Ok(main) = result {

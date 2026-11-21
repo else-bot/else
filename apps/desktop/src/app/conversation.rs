@@ -2,9 +2,10 @@ use super::ElseApp;
 use super::bot_mention::MentionRegistry;
 use super::pending_send::PendingSend;
 use super::reply::{Author, Quote};
+use super::request::Settle;
 use super::row_text::{RowHost, RowText};
 use super::task_reply::state::ReplyState;
-use super::transcript::{self, Folds, RowKey, Transcript, TranscriptRow, group_open};
+use super::transcript::{self, CardKey, Folds, RowKey, Transcript, TranscriptRow, group_open};
 use crate::api::{Client, ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation};
 use chrono::Local;
@@ -611,19 +612,18 @@ impl ConversationView {
         on_app(&self.app, f)
     }
 
-    /// Hands a rejected owner token to the window once this update ends.
-    /// Returns whether `err` was that rejection.
-    pub(super) fn unauthorized(&self, err: &ClientError, cx: &mut Context<Self>) -> bool {
-        if !matches!(err, ClientError::Unauthorized) {
-            return false;
-        }
-        let app = self.app.clone();
-        cx.defer(move |cx| {
-            let _ = app.update(cx, |app, cx| {
-                app.unauthorized(&ClientError::Unauthorized, cx)
-            });
-        });
-        true
+    /// Redraws card `key` after its request settled, and returns whether
+    /// the caller goes on to handle the result. The view is drawn cached, so
+    /// a result that arrives once the connection already dropped is drawn
+    /// only through this notify.
+    pub(super) fn settle_card(
+        &self,
+        key: CardKey,
+        outcome: Settle,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.remeasure_row(RowKey::Card(key), cx);
+        outcome.settled()
     }
 
     /// Shows `notice` under the composer once this update ends.

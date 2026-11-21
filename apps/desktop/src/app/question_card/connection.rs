@@ -94,10 +94,16 @@ impl ConversationView {
         hint: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        // A rejected token still ends the step, as a failed check the owner
-        // can repeat once the token is fixed.
-        if let Err(err) = &result {
-            self.unauthorized(err, cx);
+        // Unlike the other cards, a rejected token still ends the step, as
+        // a failed check the owner can repeat once the token is fixed: the
+        // step has no idle state to return to.
+        if matches!(result, Err(ClientError::Unauthorized)) {
+            let app = self.app.clone();
+            cx.defer(move |cx| {
+                let _ = app.update(cx, |app, cx| {
+                    app.unauthorized(&ClientError::Unauthorized, cx)
+                });
+            });
         }
         let Some(form) = self.cards.connection_mut(flow.question) else {
             return;

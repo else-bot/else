@@ -1,9 +1,9 @@
 mod card;
 
 use super::schedule_text::local_time;
-use super::{BotPanel, PanelEvent, automation_section, report_unauthorized};
+use super::{BotPanel, PanelEvent, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
-use crate::app::request::Request;
+use crate::app::request::{Request, Settle};
 use else_wire::routines::PausedReason;
 use else_wire::routines::RunStatus;
 use else_wire::routines::SkipReason;
@@ -96,19 +96,19 @@ impl BotPanel {
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             if let Err(err) = &result {
-                report_unauthorized(&app, err, cx);
+                crate::app::report_unauthorized(&app, err, cx);
             }
             let _ = this.update(cx, |panel, cx| {
-                if !panel.settle_routine_change(routine, attempt, &result, |err| {
+                let outcome = panel.settle_routine_change(routine, attempt, &result, |err| {
                     if retrying {
                         retry_failure(err)
                     } else {
                         format!("Couldn't save. {err}")
                     }
-                }) {
-                    return;
-                }
-                if let Ok(saved) = result {
+                });
+                if outcome.settled()
+                    && let Ok(saved) = result
+                {
                     // The row shows the routine as the server returned it.
                     panel.routines.remove(&routine);
                     cx.emit(PanelEvent::RoutineSaved(Box::new(saved)));
@@ -144,18 +144,18 @@ impl BotPanel {
         self.routines.entry(routine).or_default().begin(change)
     }
 
-    /// Settles a routine change. Returns false when `attempt` is no longer
-    /// the change in flight.
     fn settle_routine_change<T>(
         &mut self,
         routine: Uuid,
         attempt: Uuid,
         result: &Result<T, crate::api::ClientError>,
         message: impl FnOnce(&crate::api::ClientError) -> String,
-    ) -> bool {
+    ) -> Settle {
         self.routines
             .get_mut(&routine)
-            .is_some_and(|save| save.settle_as(attempt, result, message))
+            .map_or(Settle::Stale, |save| {
+                save.settle_as(attempt, result, message)
+            })
     }
 
     /// Settles a change the model dialog sent; a saved routine shows as
@@ -167,9 +167,12 @@ impl BotPanel {
         result: &Result<T, crate::api::ClientError>,
         cx: &mut Context<Self>,
     ) {
-        if self.settle_routine_change(routine, attempt, result, |err| {
-            format!("Couldn't save. {err}")
-        }) && result.is_ok()
+        if self
+            .settle_routine_change(routine, attempt, result, |err| {
+                format!("Couldn't save. {err}")
+            })
+            .settled()
+            && result.is_ok()
         {
             self.routines.remove(&routine);
         }
@@ -203,13 +206,13 @@ impl BotPanel {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_routine(bot, routine).await;
             if let Err(err) = &result {
-                report_unauthorized(&app, err, cx);
+                crate::app::report_unauthorized(&app, err, cx);
             }
             let _ = this.update(cx, |panel, cx| {
-                let settled = panel.settle_routine_change(routine, attempt, &result, |err| {
+                let outcome = panel.settle_routine_change(routine, attempt, &result, |err| {
                     format!("Couldn't delete. {err}")
                 });
-                if settled && result.is_ok() {
+                if outcome.settled() && result.is_ok() {
                     panel.expanded_routine_problems.remove(&routine);
                 }
                 cx.notify();
