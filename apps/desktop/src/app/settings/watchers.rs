@@ -41,11 +41,7 @@ impl BotSettings {
 
 impl ElseApp {
     fn watchers(&self, bot: Uuid) -> &[Watcher] {
-        self.view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())
-            .map_or(&[], Conversation::watchers)
+        self.automations(bot).map_or(&[], Conversation::watchers)
     }
 
     pub(in crate::app) fn sync_watcher_clock(&mut self, cx: &mut Context<Self>) {

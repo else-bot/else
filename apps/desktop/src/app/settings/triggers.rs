@@ -1,6 +1,6 @@
-use super::BotSettings;
+use super::{BotSettings, automation_section};
 use crate::api::socials::Provider;
-use crate::app::panel::{alert, item_name, list_rows, meta, meta_line, muted, section};
+use crate::app::panel::{alert, item_name, meta, meta_line};
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::controls::toggle;
 use crate::model::Conversation;
@@ -57,11 +57,7 @@ impl ElseApp {
         {
             return None;
         }
-        let conversation = self
-            .view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())?;
+        let conversation = self.automations(bot)?;
         trigger_cards(conversation)
             .into_iter()
             .find(|card| card.source == source)
@@ -160,35 +156,24 @@ impl ElseApp {
         entry: &BotSettings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body = section("Triggers", cx);
-        let Some(conversation) = self
-            .view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())
-        else {
-            return body.child(muted("Loading…", cx)).into_any_element();
-        };
-        let cards = trigger_cards(conversation);
-        if cards.is_empty() {
-            return body
-                .child(muted(
-                    "No triggers yet. Ask the bot in chat to react to something, for example \
-                     \"wake up when new mail arrives from my accountant\", \"answer mentions in \
-                     our Telegram group\", or \"give me a webhook for failed deploys\". Its \
-                     triggers appear here.",
-                    cx,
-                ))
-                .into_any_element();
-        }
-        let rows = cards
-            .into_iter()
-            .map(|card| {
-                let save = entry.triggers.get(&card.source.key());
-                self.render_trigger(bot, card, save, cx)
-            })
-            .collect::<Vec<_>>();
-        body.child(list_rows(rows)).into_any_element()
+        let rows = self.automations(bot).map(|conversation| {
+            trigger_cards(conversation)
+                .into_iter()
+                .map(|card| {
+                    let save = entry.triggers.get(&card.source.key());
+                    self.render_trigger(bot, card, save, cx)
+                })
+                .collect()
+        });
+        automation_section(
+            "Triggers",
+            "No triggers yet. Ask the bot in chat to react to something, for example \
+             \"wake up when new mail arrives from my accountant\", \"answer mentions in \
+             our Telegram group\", or \"give me a webhook for failed deploys\". Its \
+             triggers appear here.",
+            rows,
+            cx,
+        )
     }
 
     fn render_trigger(

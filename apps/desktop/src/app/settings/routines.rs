@@ -1,8 +1,7 @@
 mod card;
 
-use super::BotSettings;
 use super::schedule_text::local_time;
-use crate::app::panel::{list_rows, muted, section};
+use super::{BotSettings, automation_section};
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::model::{LastRun, PausedReason, Routine, RunStatus, SkipReason};
 use gpui_kit::*;
@@ -166,10 +165,7 @@ impl ElseApp {
         if entry.routines.get(&routine).is_some_and(RoutineSave::busy) {
             return None;
         }
-        self.view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())?
+        self.automations(bot)?
             .routines()
             .iter()
             .find(|r| r.id == routine)
@@ -255,38 +251,25 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body = section("Routines", cx);
-        let Some(conversation) = self
-            .view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())
-        else {
-            return body.child(muted("Loading…", cx)).into_any_element();
-        };
-        let routines: Vec<&Routine> = conversation
-            .routines()
-            .iter()
-            .filter(|routine| routine.run_at.is_none())
-            .collect();
-        if routines.is_empty() {
-            return body
-                .child(muted(
-                    "No routines yet. Ask the bot in chat to do something on a schedule, for \
-                     example \"every weekday at 9, summarize my unread mail\". Its routines \
-                     appear here.",
-                    cx,
-                ))
-                .into_any_element();
-        }
-        let connected = self.connection == Connection::Connected;
-        let rows = routines
-            .into_iter()
-            .map(|routine| {
-                self.render_routine(bot, routine, saves.get(&routine.id), connected, window, cx)
-            })
-            .collect::<Vec<_>>();
-        body.child(list_rows(rows)).into_any_element()
+        let rows = self.automations(bot).map(|conversation| {
+            let connected = self.connection == Connection::Connected;
+            conversation
+                .routines()
+                .iter()
+                .filter(|routine| routine.run_at.is_none())
+                .map(|routine| {
+                    self.render_routine(bot, routine, saves.get(&routine.id), connected, window, cx)
+                })
+                .collect()
+        });
+        automation_section(
+            "Routines",
+            "No routines yet. Ask the bot in chat to do something on a schedule, for \
+             example \"every weekday at 9, summarize my unread mail\". Its routines \
+             appear here.",
+            rows,
+            cx,
+        )
     }
 
     pub(super) fn render_reminders(
@@ -296,45 +279,35 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body = section("Reminders", cx);
-        let Some(conversation) = self
-            .view
-            .as_ref()
-            .filter(|view| view.bot_id == bot)
-            .and_then(|view| view.conversation.as_ref())
-        else {
-            return body.child(muted("Loading…", cx)).into_any_element();
-        };
-        let mut reminders: Vec<&Routine> = conversation
-            .routines()
-            .iter()
-            .filter(|routine| routine.run_at.is_some())
-            .collect();
-        if reminders.is_empty() {
-            return body
-                .child(muted(
-                    "No reminders. Ask the bot to do something once, later, for example \
-                     \"in 6 hours, check how Scout is doing\". It appears here until it runs.",
-                    cx,
-                ))
-                .into_any_element();
-        }
-        reminders.sort_by_key(|reminder| (reminder.run_at, reminder.id));
-        let connected = self.connection == Connection::Connected;
-        let rows = reminders
-            .into_iter()
-            .map(|reminder| {
-                self.render_routine(
-                    bot,
-                    reminder,
-                    saves.get(&reminder.id),
-                    connected,
-                    window,
-                    cx,
-                )
-            })
-            .collect::<Vec<_>>();
-        body.child(list_rows(rows)).into_any_element()
+        let rows = self.automations(bot).map(|conversation| {
+            let mut reminders: Vec<&Routine> = conversation
+                .routines()
+                .iter()
+                .filter(|routine| routine.run_at.is_some())
+                .collect();
+            reminders.sort_by_key(|reminder| (reminder.run_at, reminder.id));
+            let connected = self.connection == Connection::Connected;
+            reminders
+                .into_iter()
+                .map(|reminder| {
+                    self.render_routine(
+                        bot,
+                        reminder,
+                        saves.get(&reminder.id),
+                        connected,
+                        window,
+                        cx,
+                    )
+                })
+                .collect()
+        });
+        automation_section(
+            "Reminders",
+            "No reminders. Ask the bot to do something once, later, for example \
+             \"in 6 hours, check how Scout is doing\". It appears here until it runs.",
+            rows,
+            cx,
+        )
     }
 }
 

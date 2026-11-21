@@ -1,35 +1,28 @@
-use super::panel::{hairline, muted};
-
 mod identity;
 pub(super) mod model;
-
-use model::ModelState;
 pub(super) mod routines;
 mod schedule_text;
-
-use routines::RoutineSave;
 mod triggers;
 mod watchers;
 
-use triggers::TriggerSave;
-
-use watchers::WatcherStop;
-
-use identity::Details;
-
+use super::panel::{hairline, list_rows, muted, section};
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
-use crate::controls::{segment, segment_track};
-use gpui_kit::component::FocusableExt as _;
-use std::collections::HashMap;
-
 use crate::api::Bot;
+use crate::controls::{segment, segment_track};
+use crate::model::Conversation;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use identity::Details;
+use model::ModelState;
+use routines::RoutineSave;
+use std::collections::HashMap;
+use triggers::TriggerSave;
 use uuid::Uuid;
+use watchers::WatcherStop;
 
 pub(super) struct BotSettings {
     details: Details,
@@ -45,6 +38,13 @@ pub(super) struct BotSettings {
 }
 
 impl ElseApp {
+    fn automations(&self, bot: Uuid) -> Option<&Conversation> {
+        self.view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+    }
+
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open.toggle();
         if self.settings_open {
@@ -295,4 +295,18 @@ impl ElseApp {
         }
         panel.into_any_element()
     }
+}
+
+fn automation_section(
+    title: &'static str,
+    empty: &'static str,
+    rows: Option<Vec<AnyElement>>,
+    cx: &App,
+) -> AnyElement {
+    let content = match rows {
+        None => muted("Loading…", cx),
+        Some(rows) if rows.is_empty() => muted(empty, cx),
+        Some(rows) => list_rows(rows),
+    };
+    section(title, cx).child(content).into_any_element()
 }
