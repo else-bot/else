@@ -36,6 +36,6 @@ Incoming social turns have restricted grants, read only their triggering destina
 
 ## Verify the behavior
 
-Extend `apps/api/tests/api/socials.rs` with provider-specific cases alongside the shared owner/woken-turn isolation, encrypted identity, trigger matching, approval, duplicate action, cancellation, cursor, and passive-restore checks. Verify that an ordinary write grant cannot bypass sending restrictions for an operation that creates a message.
+Add provider-specific cases to the topic modules in `apps/api/tests/api/socials/`, with shared fakes in `socials.rs`, alongside the shared owner/woken-turn isolation, encrypted identity, trigger matching, approval, duplicate action, cancellation, cursor, and passive-restore checks. Verify that an ordinary write grant cannot bypass sending restrictions for an operation that creates a message.
 
 Drive the native setup card and Settings → Socials through the repository's isolated UI workflow. Check private input clearing on submission, navigation, and disconnect, plus stale responses and the connected receipt. Use disposable platform accounts for the final live check.
