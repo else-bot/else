@@ -625,7 +625,10 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
 /// Stage the files of an unconnected draft this call just claimed for the
 /// bot's own send; nothing was sent if that fails.
 async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Refusal> {
-    let approved = match send::approved(&state.db, row).await {
+    let mut conn = state.db.acquire().await.map_err(DraftError::from)?;
+    let approved = send::approved(&mut conn, row).await;
+    drop(conn);
+    let approved = match approved {
         Ok(approved) => approved,
         Err(changed) => {
             outgoing_drafts::fail_unsent(&state.db, row.id, &changed.to_string()).await?;

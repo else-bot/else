@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use super::*;
-use crate::app::outgoing::{Content, Edits, Message, Status};
+use crate::app::outgoing::{Content, Edits, Email, Message, Status};
 
 #[derive(Debug, Clone, PartialEq)]
 struct SocialSend {
@@ -101,6 +101,44 @@ impl Approval {
 /// text A" and approved by the owner as "Owner-approved text B", with one
 /// file holding `file` when given.
 async fn approved_message(file: Option<(Uuid, &[u8])>) -> Approval {
+    approved(file, |account, attachments| {
+        Content::Message(Message {
+            platform: Platform::Telegram,
+            account_id: Some(account),
+            account: None,
+            destination: Some("100".into()),
+            task: None,
+            reply_to: Some("42".into()),
+            body: "Provisional text A".into(),
+            attachments,
+        })
+    })
+    .await
+}
+
+/// An email from its connected account to ana@example.com, approved by the
+/// owner as "Owner-approved text B".
+async fn approved_email() -> Approval {
+    approved(None, |account, attachments| {
+        Content::Email(Email {
+            from: "owner@example.com".into(),
+            to: vec!["ana@example.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Update".into(),
+            body: "Provisional text A".into(),
+            account_id: Some(account),
+            reply_to: None,
+            attachments,
+        })
+    })
+    .await
+}
+
+async fn approved(
+    file: Option<(Uuid, &[u8])>,
+    content: impl FnOnce(Uuid, Vec<DraftFile>) -> Content,
+) -> Approval {
     let db = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -152,16 +190,7 @@ async fn approved_message(file: Option<(Uuid, &[u8])>) -> Approval {
         });
     }
     let account = Uuid::new_v4();
-    let content = Content::Message(Message {
-        platform: Platform::Telegram,
-        account_id: Some(account),
-        account: None,
-        destination: Some("100".into()),
-        task: None,
-        reply_to: Some("42".into()),
-        body: "Provisional text A".into(),
-        attachments,
-    });
+    let content = content(account, attachments);
     let draft = outgoing_drafts::propose(&db, turn, &content, None)
         .await
         .unwrap();
@@ -308,4 +337,77 @@ async fn a_file_change_never_fails_a_send_already_in_flight() {
         .unwrap_err();
     assert!(matches!(refused, DraftError::Connected), "{refused:?}");
     assert_eq!(approval.status().await, Status::Sending);
+}
+
+/// The request's first call claims the email and records its send; a retry
+/// resumes that claim.
+async fn resumed_mail_claim(approval: &Approval) {
+    let first = outgoing_drafts::claim_connected(&approval.db, approval.turn, approval.draft, BOTH)
+        .await
+        .unwrap();
+    assert!(matches!(first, Claim::Fresh(_)), "{first:?}");
+    let dispatch = outgoing_drafts::next_mail_send(
+        &approval.db,
+        approval.turn,
+        approval.draft,
+        "draft@example.com",
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(dispatch, MailSend::Dispatch { .. }),
+        "{dispatch:?}"
+    );
+    let resumed =
+        outgoing_drafts::claim_connected(&approval.db, approval.turn, approval.draft, BOTH)
+            .await
+            .unwrap();
+    assert!(matches!(resumed, Claim::Resumed(_)), "{resumed:?}");
+}
+
+async fn settle(approval: &Approval, status: &str) {
+    sqlx::query("UPDATE outgoing_drafts SET status = ?2 WHERE id = ?1")
+        .bind(approval.draft)
+        .bind(status)
+        .execute(&approval.db)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_resumed_mail_retry_returns_the_receipt_the_first_send_recorded() {
+    let approval = approved_email().await;
+    resumed_mail_claim(&approval).await;
+    settle(&approval, "sent").await;
+    let next = outgoing_drafts::next_mail_send(
+        &approval.db,
+        approval.turn,
+        approval.draft,
+        "draft@example.com",
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&next, MailSend::Settled(draft) if draft.status == Status::Sent),
+        "{next:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_mail_retry_of_a_discarded_draft_is_refused() {
+    let approval = approved_email().await;
+    resumed_mail_claim(&approval).await;
+    settle(&approval, "discarded").await;
+    let refused = outgoing_drafts::next_mail_send(
+        &approval.db,
+        approval.turn,
+        approval.draft,
+        "draft@example.com",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(refused, DraftError::Settled(Status::Discarded)),
+        "{refused:?}"
+    );
 }

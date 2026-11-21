@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::{Channels, DraftFile, Platform};
@@ -67,31 +67,25 @@ pub async fn send_connected(
     channels: Channels,
     via: &dyn Connected,
 ) -> Result<OutgoingDraft, SendError> {
-    let (claimed, files) =
-        match outgoing_drafts::claim_connected(db, turn_id, draft_id, channels).await? {
-            Claim::Settled(draft) => return Ok(draft),
-            Claim::Fresh(claimed) => match approved(db, &claimed.draft).await {
-                Ok(files) => (claimed, files),
-                Err(changed) => {
-                    outgoing_drafts::fail_unsent(db, draft_id, &changed.to_string()).await?;
-                    return Err(SendError::FileChanged(changed));
-                }
-            },
-            Claim::Resumed(claimed) => match approved(db, &claimed.draft).await {
-                Ok(files) => (claimed, files),
-                Err(changed) => return Err(SendError::FileChangedAfterClaim(changed)),
-            },
-        };
+    let claimed = match outgoing_drafts::claim_connected(db, turn_id, draft_id, channels).await? {
+        Claim::Fresh(claimed) | Claim::Resumed(claimed) => claimed,
+        Claim::Settled(draft) => return Ok(draft),
+        Claim::FailedUnsent(changed) => return Err(SendError::FileChanged(changed)),
+        Claim::FileChangedAfterClaim(changed) => {
+            return Err(SendError::FileChangedAfterClaim(changed));
+        }
+    };
     let Claimed {
         draft,
         account_id,
         action_id,
         payload,
+        files,
     } = claimed;
     Ok(match payload {
         Payload::Mail(email) => {
-            match outgoing_drafts::next_mail_send(db, draft_id, &email.message_id(draft.id)).await?
-            {
+            let message_id = email.message_id(draft.id);
+            match outgoing_drafts::next_mail_send(db, turn_id, draft_id, &message_id).await? {
                 MailSend::Dispatch { message_id } => {
                     let attachments = files.iter().map(mail_file).collect();
                     let command = email.send_command(attachments, Some(message_id));
@@ -99,7 +93,7 @@ pub async fn send_connected(
                     let refused = result.err().map(|error| error.code.as_str());
                     outgoing_drafts::after_mail_send(db, draft_id, refused).await?
                 }
-                MailSend::Sent(draft) => *draft,
+                MailSend::Settled(draft) => *draft,
                 MailSend::CheckSent {
                     message_id,
                     earlier,
@@ -143,6 +137,7 @@ pub async fn send_connected(
 }
 
 /// A draft file's approved bytes.
+#[derive(Debug)]
 pub struct Approved {
     pub file: DraftFile,
     pub data: Vec<u8>,
@@ -155,13 +150,13 @@ pub struct FileChanged(pub String);
 /// The approved bytes of every file `draft` carries, in order, or the name
 /// of the first one missing or changed since approval.
 pub async fn approved(
-    db: &SqlitePool,
+    conn: &mut SqliteConnection,
     draft: &OutgoingDraft,
 ) -> Result<Vec<Approved>, FileChanged> {
     let files = draft.content.files();
     let mut out = Vec::with_capacity(files.len());
     for file in files {
-        let read = crate::db::attachments::read(db, draft.bot_id, file.id)
+        let read = crate::db::attachments::read(&mut *conn, draft.bot_id, file.id)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "reading a draft attachment failed");

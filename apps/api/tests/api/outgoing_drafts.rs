@@ -3160,22 +3160,22 @@ async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
     outgoing_drafts::claim_connected(&app.db.pool, second, id, MAIL)
         .await
         .unwrap();
-    let failed = outgoing_drafts::fail_unsent(
-        &app.db.pool,
-        id,
-        "An approved file changed. Nothing was sent.",
-    )
-    .await
-    .unwrap();
-    assert_eq!(failed.status.as_str(), "uncertain");
+    h.release(second).await;
+    app.wait_turn(second, &["completed"]).await;
+    let (status, detail, delivery): (String, String, String) =
+        sqlx::query_as("SELECT status, result_detail, delivery FROM outgoing_drafts WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "uncertain");
     assert_eq!(
-        failed.result_detail.as_deref(),
-        Some(
-            "An approved file changed. Nothing was sent. An earlier send of it may have gone out."
-        )
+        detail,
+        "The request ended before the mail connector sent it. Nothing was sent. An earlier send \
+         of it may have gone out."
     );
     assert_eq!(
-        json!(failed.delivery.unwrap().0)["action_id"],
+        serde_json::from_str::<Value>(&delivery).unwrap()["action_id"],
         earlier,
         "the draft names the send that may have gone out"
     );
