@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 pub mod guest;
+pub mod live;
 pub mod recorder;
 pub mod seed;
 pub mod steer;
