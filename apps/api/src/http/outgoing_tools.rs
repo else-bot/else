@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::tool_defs::Call;
 use crate::app::outgoing::send::{self, Connected, SendError};
 use crate::app::outgoing::{
     self, ApprovalSource, Channels, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
@@ -278,36 +277,15 @@ fn only(args: &Value, allowed: &[&str]) -> Result<(), Refusal> {
     }
 }
 
-/// The draft tools, each bound to its name in `tool_defs`.
-#[derive(Clone, Copy)]
-pub(super) enum Op {
-    DraftEmail,
-    DraftMessage,
-    ConfirmApproval,
-    StartSend,
-    Send,
-    ReportSend,
+pub(super) async fn draft_email(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let account = sender(state, grant, args).await?;
+    let email = Email::parse(args, account.as_deref()).map(Content::Email);
+    draft(state, grant, args, email).await
 }
 
-pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
-    let Call {
-        state, grant, args, ..
-    } = c;
-    match op {
-        Op::DraftEmail => {
-            let account = sender(state, grant, args).await?;
-            let email = Email::parse(args, account.as_deref()).map(Content::Email);
-            draft(state, grant, args, email).await
-        }
-        Op::DraftMessage => {
-            let content = social_destination(state, grant, Message::parse(args)).await?;
-            draft(state, grant, args, content).await
-        }
-        Op::ConfirmApproval => confirm(state, grant, args).await,
-        Op::StartSend => start(state, grant, args).await,
-        Op::Send => send(state, grant, args).await,
-        Op::ReportSend => report(state, grant, args).await,
-    }
+pub(super) async fn draft_message(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let content = social_destination(state, grant, Message::parse(args)).await?;
+    draft(state, grant, args, content).await
 }
 
 /// A native social draft names its chat by ID, so the owner approves the
@@ -459,7 +437,7 @@ fn send_next(row: &OutgoingDraft) -> String {
     }
 }
 
-async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id", "always"])?;
     let id = id_arg(args, "draft_id")?;
     let always = match &args["always"] {
@@ -494,7 +472,7 @@ async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     Ok(Done::json(result).logged(log))
 }
 
-async fn start(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn start(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host).await?;
@@ -606,7 +584,7 @@ impl From<SendError> for Refusal {
     }
 }
 
-async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
     let channels = Channels {
@@ -675,7 +653,7 @@ async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Refu
     Ok(())
 }
 
-async fn report(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn report(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id", "status", "detail"])?;
     let id = id_arg(args, "draft_id")?;
     let outcome = args["status"]

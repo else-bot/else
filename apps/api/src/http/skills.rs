@@ -188,7 +188,7 @@ pub(super) async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolR
         .as_u64()
         .and_then(|o| usize::try_from(o).ok())
         .unwrap_or(0);
-    let (from, part) = super::mcp::slice(content, offset, MAX_READ);
+    let (from, part) = super::tool_result::slice(content, offset, MAX_READ);
     let end = from + part.len();
     let mut result = json!({
         "id": skill.id,

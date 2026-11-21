@@ -177,6 +177,25 @@ pub(crate) fn render(result: ToolResult) -> (Value, Option<String>) {
     (value, log)
 }
 
+/// The bytes `value` takes as an MCP text result.
+pub(crate) fn wire_size(value: &Value) -> usize {
+    text_result(value.clone()).to_string().len()
+}
+
+/// At most `max` bytes of `text` from `start`, both moved back to a
+/// character boundary, and where the slice begins.
+pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
+    let mut from = start.min(text.len());
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = from.saturating_add(max).min(text.len());
+    while !text.is_char_boundary(to) {
+        to -= 1;
+    }
+    (from, &text[from..to])
+}
+
 /// A JSON value as an MCP text result.
 pub(crate) fn text_result(value: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": value.to_string() }] })

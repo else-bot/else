@@ -383,14 +383,14 @@ const TOOLS: &[ToolDef] = &[
         "draft_email",
         Tool::DraftEmail,
         outgoing_tools::email_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::DraftEmail)),
+        |c| Box::pin(outgoing_tools::draft_email(c.state, c.grant, c.args)),
     )
     .parking(),
     ToolDef::listed(
         "draft_message",
         Tool::AskOwner,
         outgoing_tools::message_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::DraftMessage)),
+        |c| Box::pin(outgoing_tools::draft_message(c.state, c.grant, c.args)),
     )
     .parking(),
     ToolDef::listed(
@@ -662,26 +662,26 @@ const TOOLS: &[ToolDef] = &[
         "confirm_draft_approval",
         Tool::AskOwner,
         outgoing_tools::confirm_approval_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::ConfirmApproval)),
+        |c| Box::pin(outgoing_tools::confirm(c.state, c.grant, c.args)),
     ),
     ToolDef::deferred(
         "start_draft_send",
         Tool::AskOwner,
         outgoing_tools::start_send_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::StartSend)),
+        |c| Box::pin(outgoing_tools::start(c.state, c.grant, c.args)),
     ),
     // Sending also needs the draft's channel: Mail or Social.
     ToolDef::deferred(
         "send_draft",
         Tool::DraftEmail,
         outgoing_tools::send_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::Send)),
+        |c| Box::pin(outgoing_tools::send(c.state, c.grant, c.args)),
     ),
     ToolDef::deferred(
         "report_draft_send",
         Tool::AskOwner,
         outgoing_tools::report_send_schema,
-        |c| Box::pin(outgoing_tools::call(c, outgoing_tools::Op::ReportSend)),
+        |c| Box::pin(outgoing_tools::report(c.state, c.grant, c.args)),
     ),
     ToolDef::deferred(
         "routine_create",

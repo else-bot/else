@@ -491,7 +491,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     };
     let title = format!("Replace the {} MCP", existing.manifest.name);
     let context = existing.replacement(&input);
-    let context = super::mcp::slice(&context, 0, crate::app::questions::MAX_CONTEXT)
+    let context = super::tool_result::slice(&context, 0, crate::app::questions::MAX_CONTEXT)
         .1
         .to_owned();
     // Replacing changes where every bot's MCP data and sign-ins go, an access

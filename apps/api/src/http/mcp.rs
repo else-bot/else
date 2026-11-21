@@ -179,22 +179,6 @@ fn refused(message: impl Into<String>) -> Value {
     tool_result::render(Err(Refusal::text(message))).0
 }
 
-pub(crate) fn wire_size(value: &Value) -> usize {
-    text_result(value.clone()).to_string().len()
-}
-
-pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
-    let mut from = start.min(text.len());
-    while !text.is_char_boundary(from) {
-        from -= 1;
-    }
-    let mut to = from.saturating_add(max).min(text.len());
-    while !text.is_char_boundary(to) {
-        to -= 1;
-    }
-    (from, &text[from..to])
-}
-
 async fn call(state: &AppState, grant: &Grant, tool: &'static ToolDef, args: &Value) -> Value {
     use crate::db::owner_questions::{self, UseOutcome};
     let name = tool.name;

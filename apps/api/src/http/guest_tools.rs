@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{slice, wire_size};
+use super::tool_result::{slice, wire_size};
 use crate::app::tools::summarize_input;
 use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;

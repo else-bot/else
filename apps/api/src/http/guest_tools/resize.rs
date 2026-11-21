@@ -58,7 +58,7 @@ fn card(sizes: &MemorySizes, memory_mib: u32, reason: &str, rerun: Option<&Rerun
     );
     if let Some(rerun) = rerun {
         let room = crate::app::questions::MAX_CONTEXT.saturating_sub(context.len() + 64);
-        let command = crate::http::mcp::slice(&rerun.command, 0, room).1;
+        let command = crate::http::tool_result::slice(&rerun.command, 0, room).1;
         context.push_str(&format!("\nRe-runs this job after the restart:\n{command}"));
         if rerun.command.len() > command.len() {
             context.push('…');
