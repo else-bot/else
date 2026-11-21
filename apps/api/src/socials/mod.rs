@@ -5,7 +5,7 @@ pub mod store;
 pub mod types;
 
 use crate::connector_core::actions::Start;
-use crate::connector_core::workers::{Inbox, Worker, Workers};
+use crate::connector_core::workers::{Inbox, Refused, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -130,7 +130,10 @@ impl Manager {
             .get_or_spawn(id, move |inbox| manager.worker_loop(id, inbox))
             .await
             .map(|(worker, _)| worker)
-            .map_err(|_| Error::Busy)
+            .map_err(|refused| match refused {
+                Refused::Full => Error::Busy,
+                Refused::ShutDown => Error::Inactive,
+            })
     }
     pub async fn changed(self: &Arc<Self>, id: Uuid) {
         if let Ok(w) = self.worker(id).await {
