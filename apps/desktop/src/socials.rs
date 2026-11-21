@@ -234,7 +234,7 @@ impl SocialsView {
                 }
                 view.busy = false;
                 view.receipt = Some(match result {
-                    Ok(detail) => Receipt::Ready(Box::new(detail.connection)),
+                    Ok(detail) => Receipt::Ready(Box::new(detail)),
                     Err(error) => {
                         view.error = Some(error.to_string());
                         Receipt::Unavailable {
@@ -447,7 +447,7 @@ impl SocialsView {
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = if let Some(id) = replacing {
                 match client.clone().replace_social_token(id, token).await {
-                    Ok(()) => client.social_connection(id).await.map(|d| d.connection),
+                    Ok(()) => client.social_connection(id).await,
                     Err(error) => Err(error),
                 }
             } else {

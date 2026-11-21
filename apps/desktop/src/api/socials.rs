@@ -37,16 +37,14 @@ impl Client {
         .map(|r| r.connections)
     }
 
-    pub async fn social_connection(
-        self: Arc<Self>,
-        id: Uuid,
-    ) -> Result<ConnectionEnvelope, ClientError> {
-        self.call(
+    pub async fn social_connection(self: Arc<Self>, id: Uuid) -> Result<Connection, ClientError> {
+        self.call::<ConnectionEnvelope>(
             Method::GET,
             format!("/v1/connectors/socials/connections/{id}"),
             None,
         )
         .await
+        .map(|r| r.connection)
     }
 
     pub async fn connect_social(
