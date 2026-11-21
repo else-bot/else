@@ -7,7 +7,7 @@
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, FieldsChanged, Form};
-use else_wire::secrets::SecretRequestStatus;
+use else_wire::secrets::{SecretRequest, SecretRequestStatus};
 use gpui_kit::assets::IconName;
 
 use gpui_kit::component::button::Button;
@@ -20,7 +20,6 @@ use uuid::Uuid;
 use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::SecretRequest;
 
 pub(super) struct SecretForm {
     fields: Entity<CredentialFields>,

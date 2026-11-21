@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use else_wire::questions::{NoticeEnvelope, QuestionAnswer};
 use else_wire::routines::{Routine, RoutineEnvelope};
 use else_wire::rules::RulesFile;
 use else_wire::settings::{
@@ -29,8 +30,6 @@ pub use computers::*;
 mod usage;
 mod vault;
 pub use vault::*;
-mod skills;
-pub use skills::*;
 mod mcp;
 pub use mcp::*;
 mod email;
@@ -38,6 +37,7 @@ pub use email::*;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
+mod skills;
 pub mod socials;
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
@@ -601,11 +601,7 @@ impl Client {
         bot: Uuid,
         notice: Uuid,
     ) -> Result<crate::model::OwnerNotice, ClientError> {
-        #[derive(Deserialize)]
-        struct Envelope {
-            notice: crate::model::OwnerNotice,
-        }
-        self.call::<Envelope>(
+        self.call::<NoticeEnvelope<crate::model::OwnerNotice>>(
             Method::POST,
             format!("/v1/bots/{bot}/owner-notices/{notice}/dismiss"),
             None,
@@ -620,12 +616,14 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         question: Uuid,
-        answer: crate::model::QuestionAnswer,
+        answer: QuestionAnswer,
     ) -> Result<(), ClientError> {
         let path = format!("/v1/bots/{bot}/questions/{question}/answer");
         let body = match answer {
-            crate::model::QuestionAnswer::Single(choice) => json!({ "choice": choice }),
-            crate::model::QuestionAnswer::Multiple(choices) => json!({ "choices": choices }),
+            QuestionAnswer::Single(choice) => json!({ "choice": choice }),
+            QuestionAnswer::Multiple(choices) => {
+                json!({ "choices": choices })
+            }
         };
         self.call::<serde_json::Value>(Method::POST, path, Some(body))
             .await

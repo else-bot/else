@@ -299,13 +299,6 @@ mod icon_tests {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct McpConsent {
-    pub id: String,
-    pub provider: Option<String>,
-    pub scopes: Vec<String>,
-}
-
 #[derive(Deserialize)]
 pub struct McpAuthorization {
     pub request_id: uuid::Uuid,

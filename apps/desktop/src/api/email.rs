@@ -1,52 +1,11 @@
 use super::{Client, ClientError};
 use else_wire::email::{AccountHealth, AccountState};
+use else_wire::questions::EmailProvider;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmailProvider {
-    Gmail,
-    Microsoft,
-    Yahoo,
-    Icloud,
-    Imap,
-}
-
-impl EmailProvider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Gmail => "Gmail",
-            Self::Microsoft => "Microsoft 365",
-            Self::Yahoo => "Yahoo",
-            Self::Icloud => "iCloud",
-            Self::Imap => "Other email",
-        }
-    }
-
-    /// Where the owner makes an app password for this provider, shown on a
-    /// card that asks for one.
-    pub fn app_password_help(self) -> Option<AppPasswordHelp> {
-        match self {
-            Self::Icloud => Some(AppPasswordHelp {
-                note: "Use an app-specific password, not your Apple Account password. \
-                       Two-factor authentication must be on.",
-                link: "Open account.apple.com",
-                url: "https://account.apple.com/",
-            }),
-            _ => None,
-        }
-    }
-}
-
-pub struct AppPasswordHelp {
-    pub note: &'static str,
-    pub link: &'static str,
-    pub url: &'static str,
-}
 
 /// Where a message lives in a mailbox.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -179,13 +138,6 @@ pub fn preset_config(
     config.address = address.to_owned();
     config.username = address.to_owned();
     Some(config)
-}
-
-/// The inbox a bot asked the owner to sign in to from a chat card.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct EmailConsent {
-    pub provider: EmailProvider,
-    pub address: String,
 }
 
 #[derive(Deserialize)]

@@ -3,35 +3,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// One option of an owner question, by its stable id and shown label.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Choice {
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Answer {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-impl Answer {
-    pub fn single(&self) -> Option<&str> {
-        match self {
-            Self::Single(id) => Some(id),
-            Self::Multiple(_) => None,
-        }
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        match self {
-            Self::Single(chosen) => chosen == id,
-            Self::Multiple(chosen) => chosen.iter().any(|chosen| chosen == id),
-        }
-    }
-}
+use else_wire::questions as wire;
+pub use else_wire::questions::{QuestionAnswer as Answer, QuestionChoice as Choice};
 
 /// The owner's answer to a question or approval request: which question
 /// (its kind, title, and bound action) and the choices the owner made, or
@@ -1041,6 +1014,163 @@ impl Spec {
                 },
                 hash: hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()]),
             }),
+        }
+    }
+}
+
+impl From<Kind> for wire::QuestionKind {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::Choice => Self::Choice,
+            Kind::Destructive => Self::Destructive,
+            Kind::External => Self::External,
+        }
+    }
+}
+
+impl From<Status> for wire::QuestionStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Pending => Self::Pending,
+            Status::Answered => Self::Answered,
+            Status::Skipped => Self::Skipped,
+            Status::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<&Action> for wire::QuestionAction {
+    fn from(action: &Action) -> Self {
+        match action {
+            Action::McpConnection { mcp_connection } => Self::McpConnection {
+                mcp_connection: wire::McpConsent {
+                    id: mcp_connection.id.clone().into(),
+                    provider: mcp_connection.provider.clone(),
+                    scopes: mcp_connection.scopes.clone(),
+                },
+            },
+            Action::EmailConnection { email_connection } => {
+                use crate::connectors::types::Provider;
+                Self::EmailConnection {
+                    email_connection: wire::EmailConsent {
+                        provider: match email_connection.provider {
+                            Provider::Gmail => wire::EmailProvider::Gmail,
+                            Provider::Microsoft => wire::EmailProvider::Microsoft,
+                            Provider::Yahoo => wire::EmailProvider::Yahoo,
+                            Provider::Icloud => wire::EmailProvider::Icloud,
+                            Provider::Imap => wire::EmailProvider::Imap,
+                        },
+                        address: email_connection.address.clone(),
+                        replaces: email_connection.replaces,
+                    },
+                }
+            }
+            Action::Tool {
+                tool,
+                args,
+                task_scope,
+            } => Self::Tool {
+                tool: tool.clone(),
+                args: args.clone(),
+                task_scope: task_scope.as_ref().map(Into::into),
+            },
+            Action::Host { host, task_scope } => Self::Host {
+                host: host.clone(),
+                task_scope: task_scope.as_ref().map(Into::into),
+            },
+            Action::Permission { permission } => Self::Permission {
+                permission: permission.into(),
+            },
+            Action::BotDeletion { bot_deletion } => Self::BotDeletion {
+                bot_deletion: wire::BotDeletion {
+                    bot_id: Some(bot_deletion.bot_id),
+                    name: bot_deletion.name.clone(),
+                    avatar: serde_json::json!(bot_deletion.avatar),
+                    model: bot_deletion.model.clone(),
+                    category: bot_deletion.category.clone(),
+                },
+            },
+            Action::EmailRemoval { email_removal } => Self::EmailRemoval {
+                email_removal: wire::EmailRemoval {
+                    account_id: email_removal.account_id,
+                    address: email_removal.address.clone(),
+                },
+            },
+            Action::MailAttachments { mail_attachments } => Self::MailAttachments {
+                mail_attachments: wire::MailAttachments {
+                    account_id: Some(mail_attachments.account_id),
+                    address: mail_attachments.address.clone(),
+                    message: Some(wire::MailMessageRef {
+                        folder: mail_attachments.message.folder.clone(),
+                        uid_validity: mail_attachments.message.uid_validity,
+                        uid: mail_attachments.message.uid,
+                    }),
+                    subject: mail_attachments.subject.clone(),
+                    from: mail_attachments.from.clone(),
+                    files: mail_attachments
+                        .files
+                        .iter()
+                        .map(|file| wire::MailFile {
+                            part: Some(file.part),
+                            name: file.name.clone(),
+                            media_type: file.media_type.clone(),
+                            size: file.size,
+                        })
+                        .collect(),
+                },
+            },
+        }
+    }
+}
+
+impl From<&TaskScope> for wire::TaskScope {
+    fn from(scope: &TaskScope) -> Self {
+        Self {
+            task: scope.task.clone(),
+            target: scope.target.clone(),
+        }
+    }
+}
+
+impl From<&PermissionTarget> for wire::QuestionPermission {
+    fn from(target: &PermissionTarget) -> Self {
+        match target {
+            PermissionTarget::Bot => Self::Bot,
+            PermissionTarget::Routine {
+                routine_id,
+                prompt_revision,
+                kind,
+            } => Self::Routine {
+                routine_id: *routine_id,
+                prompt_revision: *prompt_revision,
+                kind: (*kind).into(),
+            },
+            PermissionTarget::McpTool { mcp_id, tool, kind } => Self::McpTool {
+                mcp_id: mcp_id.clone().into(),
+                tool: tool.clone(),
+                kind: Some((*kind).into()),
+            },
+            PermissionTarget::ComputerTool { tool, kind } => Self::ComputerTool {
+                tool: tool.clone(),
+                kind: (*kind).into(),
+            },
+            PermissionTarget::Task {
+                task,
+                target,
+                kind,
+                covers,
+            } => Self::Task {
+                task_scope: wire::TaskScope {
+                    task: task.clone(),
+                    target: target.clone(),
+                },
+                kind: Some((*kind).into()),
+                covers: Some(match covers {
+                    Covers::Host => wire::TaskCoverage::Host,
+                    Covers::Computer => wire::TaskCoverage::Computer,
+                    Covers::Both => wire::TaskCoverage::Both,
+                }),
+            },
         }
     }
 }

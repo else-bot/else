@@ -7,8 +7,7 @@
 
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
-use else_wire::questions::QuestionKind;
-use else_wire::questions::QuestionStatus;
+use else_wire::questions::{Question, QuestionAnswer, QuestionKind, QuestionStatus, QuestionUse};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
@@ -27,10 +26,7 @@ use super::message_row::CardPlacement;
 use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY, Question,
-    QuestionAnswer, QuestionUse,
-};
+use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY};
 
 mod approval;
 pub(super) mod choice;
@@ -78,7 +74,7 @@ fn outcome(question: &Question, bot_name: &str) -> String {
                 stamp(at)
             )
         }
-        None => decision,
+        Some(QuestionUse::Unknown) | None => decision,
     }
 }
 
@@ -679,7 +675,8 @@ mod tests {
             "a short card counts when whole"
         );
     }
-    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionUse};
+    use crate::model::{APPROVE, DENY};
+    use else_wire::questions::{Question, QuestionAnswer, QuestionChoice, QuestionUse};
     use else_wire::questions::{QuestionKind, QuestionStatus};
     use uuid::Uuid;
 
@@ -708,6 +705,9 @@ mod tests {
             ]
         };
         Question {
+            bot_id: None,
+            turn_id: None,
+            created_at: None,
             id: Uuid::nil(),
             kind,
             title: "t".into(),

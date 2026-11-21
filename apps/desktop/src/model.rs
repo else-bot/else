@@ -3,18 +3,22 @@
 //! mismatch, an unknown kind) asks the caller to reload a snapshot rather than
 //! guessing, so a bubble is never duplicated or corrupted.
 
+#[cfg(test)]
 mod skills;
-pub use skills::*;
 
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use else_wire::items::ItemKind;
-use else_wire::questions::{QuestionKind, QuestionStatus};
+use else_wire::questions::{Question, QuestionStatus};
 use else_wire::routines::{Routine, RoutineRun, Watcher, Webhook};
 use else_wire::rules::RulesUpdate;
+use else_wire::secrets::SecretRequest;
+#[cfg(test)]
 use else_wire::secrets::SecretRequestStatus;
-use else_wire::turns::{TurnError, TurnStatus};
+use else_wire::skills::{SkillInstall, SkillInstallStatus};
+use else_wire::turns::TurnError;
+use else_wire::turns::TurnStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -192,24 +196,6 @@ pub enum ReactionKind {
     ThumbsDown,
 }
 
-/// A bot's request for credentials: metadata only, never a value.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SecretRequest {
-    pub description: Option<String>,
-    pub website: Option<String>,
-    pub id: Uuid,
-    pub name: String,
-    pub reason: String,
-    pub env: Vec<String>,
-    pub status: SecretRequestStatus,
-}
-
-impl SecretRequest {
-    pub fn is_pending(&self) -> bool {
-        self.status == SecretRequestStatus::Pending
-    }
-}
-
 /// A bot's request that the owner take over its computer. Its turn waits
 /// until the owner hands the computer back or declines.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -248,213 +234,6 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
 pub const APPROVE_TASK: &str = "approve_task";
-
-/// One option of a bot's question, by its stable id and shown label.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct QuestionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum QuestionAnswer {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-impl QuestionAnswer {
-    pub fn single(&self) -> Option<&str> {
-        match self {
-            Self::Single(id) => Some(id),
-            Self::Multiple(_) => None,
-        }
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        match self {
-            Self::Single(chosen) => chosen == id,
-            Self::Multiple(chosen) => chosen.iter().any(|chosen| chosen == id),
-        }
-    }
-}
-
-/// A bot's question to the owner: a choice between options, or approval of
-/// one destructive or external action. Answered by choosing on its card.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Question {
-    pub id: Uuid,
-    pub kind: QuestionKind,
-    pub title: String,
-    #[serde(default)]
-    pub action: Option<QuestionAction>,
-    #[serde(default)]
-    pub context: Option<String>,
-    pub choices: Vec<QuestionChoice>,
-    #[serde(default)]
-    pub multiple: bool,
-    pub status: QuestionStatus,
-    /// The selected option id or ids once answered.
-    #[serde(default)]
-    pub answer: Option<QuestionAnswer>,
-    #[serde(default)]
-    pub settled_at: Option<DateTime<Utc>>,
-    /// What became of the approved tool call once it was let run.
-    #[serde(default)]
-    pub used: Option<QuestionUse>,
-}
-
-/// An approved tool call the server let run, and what its tool returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "outcome", rename_all = "lowercase")]
-pub enum QuestionUse {
-    /// No result recorded yet: still running, or lost.
-    Started {
-        at: DateTime<Utc>,
-    },
-    Completed {
-        at: DateTime<Utc>,
-    },
-    Error {
-        at: DateTime<Utc>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct QuestionAction {
-    #[serde(default)]
-    pub tool: Option<String>,
-    #[serde(default)]
-    pub args: serde_json::Value,
-    #[serde(default)]
-    pub mcp_connection: Option<crate::api::McpConsent>,
-    #[serde(default)]
-    pub email_connection: Option<crate::api::EmailConsent>,
-    #[serde(default)]
-    pub task_scope: Option<TaskScope>,
-    #[serde(default)]
-    pub permission: Option<QuestionPermission>,
-    #[serde(default)]
-    pub bot_deletion: Option<BotDeletion>,
-    #[serde(default)]
-    pub mail_attachments: Option<MailAttachments>,
-}
-
-/// Email attachments a bot asks to read, as the card lists them.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MailAttachments {
-    pub address: String,
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub from: Vec<String>,
-    pub files: Vec<MailFile>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MailFile {
-    pub name: String,
-    pub media_type: String,
-    pub size: u64,
-}
-
-impl MailFile {
-    /// The file's kind as people name it: PDF, HTML, or its subtype.
-    pub fn kind(&self) -> String {
-        match self.media_type.as_str() {
-            "application/pdf" => "PDF".into(),
-            "text/html" | "application/xhtml+xml" => "HTML".into(),
-            "text/plain" => "Text".into(),
-            other => other
-                .rsplit('/')
-                .next()
-                .unwrap_or(other)
-                .to_ascii_uppercase(),
-        }
-    }
-}
-
-/// The bot a deletion card would delete, as it was when the card was made.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotDeletion {
-    pub name: String,
-    #[serde(default)]
-    pub avatar: else_wire::bots::Avatar,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct TaskScope {
-    pub task: String,
-    pub target: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "scope", rename_all = "lowercase")]
-pub enum QuestionPermission {
-    #[serde(rename = "mcp_tool")]
-    McpTool { mcp_id: String, tool: String },
-    Task {
-        #[serde(flatten)]
-        task_scope: TaskScope,
-    },
-    #[serde(other)]
-    Other,
-}
-
-impl Question {
-    pub fn mcp_tool_scope(&self) -> Option<(&str, &str)> {
-        let action = self.action.as_ref()?;
-        if action.tool.as_deref() == Some("mcp_request") {
-            return Some((action.args["id"].as_str()?, action.args["tool"].as_str()?));
-        }
-        match &action.permission {
-            Some(QuestionPermission::McpTool { mcp_id, tool }) => Some((mcp_id, tool)),
-            _ => None,
-        }
-    }
-
-    pub fn task_scope(&self) -> Option<&TaskScope> {
-        let action = self.action.as_ref()?;
-        action.task_scope.as_ref().or(match &action.permission {
-            Some(QuestionPermission::Task { task_scope }) => Some(task_scope),
-            _ => None,
-        })
-    }
-
-    pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
-        self.action.as_ref()?.mcp_connection.as_ref()
-    }
-
-    pub fn mail_attachments(&self) -> Option<&MailAttachments> {
-        self.action.as_ref()?.mail_attachments.as_ref()
-    }
-
-    pub fn bot_deletion(&self) -> Option<&BotDeletion> {
-        self.action.as_ref()?.bot_deletion.as_ref()
-    }
-
-    pub fn email_connection(&self) -> Option<&crate::api::EmailConsent> {
-        self.action.as_ref()?.email_connection.as_ref()
-    }
-
-    pub fn is_pending(&self) -> bool {
-        self.status == QuestionStatus::Pending
-    }
-
-    /// An approval card, as opposed to a plain choice.
-    pub fn is_approval(&self) -> bool {
-        self.kind != QuestionKind::Choice
-    }
-
-    pub fn chosen(&self) -> Option<&QuestionChoice> {
-        let answer = self.answer.as_ref()?.single()?;
-        self.choices.iter().find(|c| c.id == answer)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2743,7 +2522,7 @@ mod tests {
 
 #[cfg(test)]
 mod vault_request_tests {
-    use super::SecretRequest;
+    use else_wire::secrets::SecretRequest;
     #[test]
     fn vault_requests_read_optional_metadata_and_older_payloads() {
         let mut data = serde_json::json!({"id": uuid::Uuid::nil(), "name": "x_login", "reason": "Sign in", "env": ["USERNAME", "PASSWORD"], "status": "pending"});

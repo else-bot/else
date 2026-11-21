@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use else_wire::skills::{Answer, InstallReview, Library, SkillContents};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -236,7 +237,13 @@ pub fn routes() -> Routes {
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({ "skills": skills::list(&state.db).await? })))
+    Ok(Json(json!(Library {
+        skills: skills::list(&state.db)
+            .await?
+            .iter()
+            .map(Into::into)
+            .collect()
+    })))
 }
 
 async fn show(
@@ -246,7 +253,10 @@ async fn show(
     let (skill, contents) = skills::get(&state.db, &id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "skill": skill, "contents": contents })))
+    Ok(Json(json!(SkillContents {
+        skill: (&skill).into(),
+        contents
+    })))
 }
 
 async fn remove(
@@ -286,7 +296,10 @@ fn settled(state: &AppState, settled: Settled) -> Json<Value> {
     if settled.requeued {
         state.scheduler.wake();
     }
-    Json(json!({ "install": settled.install, "requeued": settled.requeued }))
+    Json(json!(Answer {
+        install: (&settled.install).into(),
+        requeued: settled.requeued
+    }))
 }
 
 async fn review(
@@ -296,7 +309,10 @@ async fn review(
     let (install, contents) = skills::review(&state.db, bot_id, id)
         .await
         .map_err(settle_error)?;
-    Ok(Json(json!({ "install": install, "contents": contents })))
+    Ok(Json(json!(InstallReview {
+        install: (&install).into(),
+        contents
+    })))
 }
 
 #[derive(Deserialize)]

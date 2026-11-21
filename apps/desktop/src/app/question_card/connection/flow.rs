@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::api::{Client, ClientError, EmailConsent, McpConnectionStatus, McpConsent, McpState};
+use crate::api::{Client, ClientError, McpConnectionStatus, McpState};
 use crate::email::oauth;
-use crate::model::{APPROVE, DENY, Question, QuestionAnswer};
+use crate::model::{APPROVE, DENY};
+use else_wire::questions::{EmailConsent, EmailProvider, McpConsent, Question, QuestionAnswer};
 
 #[derive(Clone)]
 pub(super) struct Flow {
@@ -27,7 +28,13 @@ impl Consent {
             .mcp_connection()
             .cloned()
             .map(Self::Mcp)
-            .or_else(|| question.email_connection().cloned().map(Self::Email))
+            .or_else(|| {
+                question
+                    .email_connection()
+                    .filter(|consent| consent.provider != EmailProvider::Unknown)
+                    .cloned()
+                    .map(Self::Email)
+            })
     }
 }
 

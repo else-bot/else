@@ -1,10 +1,10 @@
 mod view;
 
 use super::*;
-use crate::api::InstalledSkill;
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::model::SkillScope;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
+use else_wire::skills::InstalledSkill;
+use else_wire::skills::SkillScope;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;

@@ -928,7 +928,7 @@ fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
-    use crate::model::QuestionUse;
+    use else_wire::questions::QuestionUse;
     let (label, error) = status_label(turn);
     if !turn.status.is_unsuccessful() {
         return (label, error);
@@ -991,7 +991,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             if turn
                 .skill_installs
                 .iter()
-                .any(|r| r.status == crate::model::SkillInstallStatus::Pending) =>
+                .any(|r| r.status == else_wire::skills::SkillInstallStatus::Pending) =>
         {
             ("Waiting for your skill approval…".into(), false)
         }

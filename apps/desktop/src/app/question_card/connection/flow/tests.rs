@@ -202,9 +202,10 @@ async fn a_removed_package_leaves_the_card_cancellable() {
 }
 
 fn inbox(address: &str) -> Consent {
-    Consent::Email(crate::api::EmailConsent {
-        provider: crate::api::EmailProvider::Gmail,
+    Consent::Email(EmailConsent {
+        provider: else_wire::questions::EmailProvider::Gmail,
         address: address.into(),
+        replaces: None,
     })
 }
 
@@ -293,9 +294,10 @@ async fn mail_server(
         client,
         bot: Uuid::new_v4(),
         question: Uuid::new_v4(),
-        consent: Consent::Email(crate::api::EmailConsent {
-            provider: crate::api::EmailProvider::Icloud,
+        consent: Consent::Email(EmailConsent {
+            provider: else_wire::questions::EmailProvider::Icloud,
             address: "owner@icloud.com".into(),
+            replaces: None,
         }),
     };
     (flow, task)

@@ -133,16 +133,15 @@ pub enum Use {
     Browser,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastUse {
     pub bot_id: Uuid,
     pub bot_name: Option<String>,
-    #[serde(rename = "use")]
     pub kind: Use,
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretInfo {
     pub name: String,
     pub description: String,
@@ -150,6 +149,38 @@ pub struct SecretInfo {
     pub env: Vec<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub last_used: Option<LastUse>,
+}
+
+impl From<&SecretInfo> for else_wire::secrets::VaultEntry {
+    fn from(info: &SecretInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            description: info.description.clone(),
+            website: info
+                .website
+                .as_ref()
+                .map(|website| website.as_str().to_owned()),
+            env: info.env.clone(),
+            updated_at: info.updated_at,
+            last_used: info.last_used.as_ref().map(Into::into),
+        }
+    }
+}
+
+impl From<&LastUse> for else_wire::secrets::VaultUse {
+    fn from(last: &LastUse) -> Self {
+        use else_wire::secrets::VaultUseKind;
+        Self {
+            bot_id: last.bot_id,
+            bot_name: last.bot_name.clone(),
+            r#use: match last.kind {
+                Use::Command => VaultUseKind::Command,
+                Use::Job => VaultUseKind::Job,
+                Use::Browser => VaultUseKind::Browser,
+            },
+            at: last.at,
+        }
+    }
 }
 
 impl SecretInfo {

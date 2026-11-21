@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use else_wire::skills::{SkillFile, SkillSource};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -35,40 +36,23 @@ impl Default for Sources {
     }
 }
 
-/// Where a skill came from, pinned to the commit its files were read at.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Source {
-    pub url: String,
-    pub repo: String,
-    pub path: String,
-    pub commit: String,
-}
-
 /// A fetched skill, ready for the owner's approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Package {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub source: Source,
+    pub source: SkillSource,
     /// Every file by its path relative to the skill directory.
     pub files: BTreeMap<String, String>,
 }
 
-/// One file as cards and lists show it, without its content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileInfo {
-    pub path: String,
-    pub size: usize,
-    pub script: bool,
-}
-
-pub fn file_infos(files: &BTreeMap<String, String>) -> Vec<FileInfo> {
+pub fn file_infos(files: &BTreeMap<String, String>) -> Vec<SkillFile> {
     files
         .iter()
-        .map(|(path, content)| FileInfo {
+        .map(|(path, content)| SkillFile {
             path: path.clone(),
-            size: content.len(),
+            size: content.len() as u64,
             script: is_script(path, content),
         })
         .collect()
@@ -439,7 +423,7 @@ pub async fn fetch(sources: &Sources, url: &str) -> Result<Package, FetchError> 
         name: id.clone(),
         id,
         description,
-        source: Source {
+        source: SkillSource {
             url: url.trim().to_owned(),
             repo,
             path: at.path,

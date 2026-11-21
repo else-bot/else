@@ -1,73 +1,9 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillScope {
-    #[default]
-    All,
-    Bot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillInstallStatus {
-    Pending,
-    Installed,
-    Declined,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SkillSource {
-    pub url: String,
-    pub repo: String,
-    pub path: String,
-    pub commit: String,
-}
-
-impl SkillSource {
-    pub fn label(&self) -> String {
-        format!(
-            "{} / {} @ {}",
-            self.repo,
-            self.path,
-            self.commit.chars().take(7).collect::<String>()
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SkillFile {
-    pub path: String,
-    pub size: u64,
-    pub script: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SkillInstall {
-    pub id: Uuid,
-    pub skill_id: String,
-    pub name: String,
-    pub description: String,
-    pub reason: String,
-    pub source: SkillSource,
-    pub files: Vec<SkillFile>,
-    pub env: Vec<String>,
-    pub secret: String,
-    pub status: SkillInstallStatus,
-    pub scope: Option<SkillScope>,
-    pub key_stored: bool,
-    pub created_at: DateTime<Utc>,
-    pub settled_at: Option<DateTime<Utc>>,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::model::Turn;
+    use else_wire::skills::{SkillInstallStatus, SkillScope};
     use serde_json::{Value, json};
+    use uuid::Uuid;
 
     fn turn() -> Value {
         json!({"id": Uuid::from_u128(1), "request_id": Uuid::from_u128(2),
@@ -108,6 +44,18 @@ mod tests {
             "example/repo / skills/growth @ a41c9e2"
         );
         assert!(!install.key_stored);
+    }
+
+    #[test]
+    fn a_future_install_status_keeps_the_card() {
+        let mut card = install();
+        card["status"] = json!("superseded");
+        let mut payload = turn();
+        payload["skill_installs"] = json!([card]);
+
+        let turn: Turn = serde_json::from_value(payload).unwrap();
+        assert_eq!(turn.skill_installs[0].status, SkillInstallStatus::Unknown);
+        assert_eq!(turn.skill_installs[0].skill_id, "rea-growth");
     }
 
     #[test]

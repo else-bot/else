@@ -1,7 +1,8 @@
 use super::*;
-use crate::api::{ClientError, EmailConfig, EmailEndpoint, EmailProvider};
+use crate::api::{ClientError, EmailConfig, EmailEndpoint};
 use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track, text_field};
 use else_wire::bots::Bot;
+use else_wire::questions::EmailProvider;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;

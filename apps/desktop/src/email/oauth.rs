@@ -1,8 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
+use else_wire::questions::EmailProvider;
 use url::Url;
 
-use crate::api::{Client, ClientError, EmailAccount, EmailAuthorization, EmailProvider};
+use crate::api::{Client, ClientError, EmailAccount, EmailAuthorization};
 use crate::oauth_callback::{self, Outcome, WaitError};
 
 const GOOGLE_REGISTRATION: Option<(&str, &str)> =
