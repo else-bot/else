@@ -1004,7 +1004,8 @@ pub struct Claimed {
 /// the waiting turn's continuation queues behind them by turn number. Its
 /// holds stay on it. An owner message joins it and continues it at once
 /// ([`crate::db::steers::place`]), so no owner request waits for its
-/// holds. The claimed turn moves to
+/// holds. A turn behind a routine run that ended unreviewed waits for its
+/// review, so it reads the run's failure notice. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
 /// again, so a later failure never strands an already committed claim. A
 /// turn in `busy` still has a task finishing its previous attempt, whose
@@ -1033,7 +1034,7 @@ pub async fn claim_next(
                                           AND i.kind = 'user') DESC,
                                 t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
-            WHERE t.status = 'queued' AND NOT t.deferred AND NOT {STEERED}
+            WHERE t.status = 'queued' AND NOT t.deferred AND NOT {STEERED} AND NOT {behind}
               AND b.status = 'active' AND NOT b.cancel_pending
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
@@ -1048,7 +1049,10 @@ pub async fn claim_next(
                                      AND {})))
          ) oldest WHERE queue_rank = 1
            AND NOT ({})
-         ORDER BY created_at, id LIMIT 8", in_ids("q.id", "?1"), in_ids("id", "?1")
+         ORDER BY created_at, id LIMIT 8",
+        in_ids("q.id", "?1"),
+        in_ids("id", "?1"),
+        behind = crate::db::routines::behind_unreviewed_run()
     )))
     .bind(sqlx::types::Json(busy))
     .bind(background)

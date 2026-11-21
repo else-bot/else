@@ -1022,6 +1022,18 @@ pub async fn run_of(
 /// Ended routine runs reviewed per scheduler scan.
 pub const REVIEW_BATCH: i64 = 8;
 
+/// SQL condition on `turns t`: an earlier turn of its conversation ran a
+/// routine that ended and is not reviewed yet. The review writes the
+/// failure notice and session rewind `t` must read, so `t` is not claimed
+/// until it runs.
+pub(crate) fn behind_unreviewed_run() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM routine_runs rr JOIN turns u ON u.id = rr.turn_id
+                 WHERE u.conversation_id = t.conversation_id AND u.turn_no < t.turn_no
+                   AND NOT rr.reviewed AND u.status IN {ENDED_STATUSES})"
+    )
+}
+
 /// Handle up to `limit` routine runs whose turns have ended, per
 /// [`routine_failures::react`]: forget failures after a success, switch a
 /// paused routine back on after the owner's retry succeeds, retry a
@@ -1329,9 +1341,9 @@ async fn review(
     Ok(false)
 }
 
-/// Review ended routine runs. The scheduler runs this before each claim
-/// pass, so a run that ended before the pass has its failure notice and
-/// session rewind before the conversation's next turn starts.
+/// Review ended routine runs. The conversation's next turn is not claimed
+/// until its earlier runs are reviewed ([`behind_unreviewed_run`]), so it
+/// reads their failure notices.
 pub async fn pump_review(tick: &Tick<'_>) {
     if let Err(err) = review_ended(tick.pool, tick.registry, tick.now, REVIEW_BATCH).await {
         tracing::warn!(error = %err, "reviewing ended routine runs failed");

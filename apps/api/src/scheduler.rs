@@ -250,8 +250,7 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        if let Some(admission) = self.gate.enter() {
-            let launch = |check| self.launch_check(&admission, check);
+        if let Some(_admission) = self.gate.enter() {
             match turns::settle_deferred(&self.pool).await {
                 Ok((0, _)) => {}
                 Ok((_, woken)) => {
@@ -262,7 +261,6 @@ impl Scheduler {
                 }
                 Err(err) => tracing::warn!(error = %err, "settling deferred messages failed"),
             }
-            pump::before_claim(&self.tick(&launch)).await;
         }
         loop {
             let Some(_admission) = self.gate.enter() else {
