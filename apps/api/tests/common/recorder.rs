@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use else_api::app::providers::{
-    Availability, CheckpointRequest, Fenced, Profile, Provider, Selection, SessionState, TurnInput,
-    TurnOutcome, TurnSink, Usage,
+    Availability, CheckpointRequest, Fenced, LimitWindow, Profile, Provider, Selection,
+    SessionState, TurnInput, TurnOutcome, TurnSink, Usage,
 };
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
@@ -206,6 +206,9 @@ impl TurnSink for Gated<'_> {
     async fn usage(&self, usage: Usage) {
         self.inner.usage(usage).await
     }
+    async fn limits(&self, windows: Vec<LimitWindow>) {
+        self.inner.limits(windows).await
+    }
     async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
         self.inner.session(state).await
     }
@@ -251,13 +254,6 @@ impl Provider for Recorder {
         sink: &dyn TurnSink,
         stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
-        let forgotten = input
-            .session
-            .as_ref()
-            .is_some_and(|s| self.forgotten.borrow().contains(&s.native_id));
-        if forgotten {
-            input.session = None;
-        }
         let opening = input.attempt == 1 && input.text.contains(GATE_AFTER_OPENING);
         let gated = input.text.contains(GATE_EVERY_ATTEMPT)
             || opening
@@ -273,6 +269,13 @@ impl Provider for Recorder {
             })
             .await
             .unwrap();
+        let forgotten = input
+            .session
+            .as_ref()
+            .is_some_and(|s| self.forgotten.borrow().contains(&s.native_id));
+        if forgotten {
+            input.session = None;
+        }
         let sink = Gated {
             inner: sink,
             gate: gated.then_some((self, input.turn_id)),
@@ -281,7 +284,7 @@ impl Provider for Recorder {
             stop: stop.clone(),
         };
         let outcome = self.inner.run(input, &sink, stop.clone()).await;
-        if hang && stop.token().is_cancelled() {
+        if hang && matches!(outcome, TurnOutcome::Interrupted) && stop.token().is_cancelled() {
             let _ = self.hangs_held.subscribe().wait_for(|held| !held).await;
         }
         // A reply that ended inside its opening still reaches the turn.

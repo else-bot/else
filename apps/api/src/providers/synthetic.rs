@@ -61,7 +61,8 @@ impl Synthetic {
         }
     }
 
-    /// The last 256 packets this provider was sent, oldest first.
+    /// The last 256 packets this provider was sent, oldest first (fixture
+    /// API).
     pub async fn packets(&self) -> Vec<String> {
         self.packets
             .call(|packets| packets.iter().cloned().collect())

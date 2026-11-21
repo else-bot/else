@@ -357,11 +357,12 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn copies_continue_while_a_summary_runs() {
+async fn copies_continue_while_one_summary_runs() {
     let app = app(4).await;
     recipe(&app, 64).await;
     let slow: Uuid = app.create_bot("Slow").await.parse().unwrap();
     let quick: Uuid = app.create_bot("Quick").await.parse().unwrap();
+    let second: Uuid = app.create_bot("Second").await.parse().unwrap();
     add(&app, slow, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     *fake.delay.lock().unwrap() = Duration::from_secs(2);
@@ -376,9 +377,21 @@ async fn copies_continue_while_a_summary_runs() {
     }
     assert!(started);
     add(&app, quick, "q", "quick one").await;
+    add(&app, second, "long", &"y".repeat(200)).await;
     for _ in 0..10 {
         worker.step(&never).await.unwrap();
     }
+    let waiting: String = sqlx::query_scalar(
+        "SELECT blocked_reason FROM memory_job WHERE bot_id = ?1 AND span = 1 AND start_seq = 0",
+    )
+    .bind(second)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        waiting, "waiting_for_summary",
+        "a second summary waits while one runs, even with free provider slots"
+    );
     assert_eq!(
         memory_tree::load_view(&app.db.pool, quick)
             .await
@@ -396,6 +409,13 @@ async fn copies_continue_while_a_summary_runs() {
     worker.drain().await.unwrap();
     assert_eq!(
         memory_tree::load_view(&app.db.pool, slow)
+            .await
+            .unwrap()
+            .published_seq,
+        0
+    );
+    assert_eq!(
+        memory_tree::load_view(&app.db.pool, second)
             .await
             .unwrap()
             .published_seq,

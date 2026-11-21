@@ -124,8 +124,8 @@ impl Compactor {
             .await;
     }
 
-    /// Claim and process one job. A summary is not started once `cancel`
-    /// fires, and a started one stops when it does.
+    /// Claim and process one job. A summary started here stops when `cancel`
+    /// fires; once it has fired, the job is deferred instead.
     pub async fn step(&self, cancel: &CancellationToken) -> Result<Step, sqlx::Error> {
         let pool = &self.pool;
         let Some(job) = store::claim(pool, LEASE).await? else {

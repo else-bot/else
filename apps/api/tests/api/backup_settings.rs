@@ -768,6 +768,13 @@ async fn remote_error_documents_do_not_reach_client_errors() {
         .put("workspace/test", b"fixture".to_vec(), false)
         .await
         .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            else_api::backup::s3::S3Error::Status { status: 403, .. }
+        ),
+        "{error:?}"
+    );
     assert!(!error.to_string().contains(SECRET));
     assert!(!format!("{error:?}").contains(SECRET));
 }
