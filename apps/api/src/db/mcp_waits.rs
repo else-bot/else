@@ -93,7 +93,8 @@ pub enum Check {
 pub enum Created {
     Waiting(Uuid),
     /// A pending wait from an earlier attempt of the turn already checks
-    /// the same status; the turn keeps it after this attempt ends.
+    /// the same status; the turn keeps it after this attempt ends. This
+    /// attempt holds nothing, so it is not parked.
     Carried(Uuid),
 }
 
@@ -167,11 +168,11 @@ pub async fn create(
             Err(CreateError::AttemptParked)
         };
     }
-    if let Some(carried) = waits.iter().find(same) {
-        return Ok(Created::Carried(carried.0));
-    }
     if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
         return Err(CreateError::AttemptParked);
+    }
+    if let Some(carried) = waits.iter().find(same) {
+        return Ok(Created::Carried(carried.0));
     }
     let id = Uuid::new_v4();
     sqlx::query(

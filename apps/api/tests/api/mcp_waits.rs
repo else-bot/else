@@ -1064,6 +1064,7 @@ async fn a_follow_up_that_waits_again_on_the_same_job_keeps_the_one_wait() {
     let again = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(again.result["status"], "already_waiting", "{}", again.body);
     assert_eq!(again.result["wait_id"], parked.result["wait_id"]);
+    assert_eq!(again.result["parked"], false, "{}", again.body);
     h.release(first).await;
     rests_after(
         app,

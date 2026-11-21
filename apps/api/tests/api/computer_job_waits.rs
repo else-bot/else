@@ -460,6 +460,26 @@ async fn a_joined_reply_that_waits_again_on_its_job_keeps_the_one_wait() {
     assert!(!again.error, "{}", again.body);
     assert_eq!(again.result["wait_id"], first["wait_id"], "{}", again.body);
     assert_eq!(again.result["status"], "already_waiting", "{}", again.body);
+    assert_eq!(again.result["parked"], false, "{}", again.body);
+    let asked = tool(
+        app,
+        &token,
+        "ask_owner",
+        json!({ "question": "Keep crawling?", "choices": ["Yes", "No"] }),
+    )
+    .await;
+    assert!(
+        !asked.error,
+        "the attempt holds nothing yet: {}",
+        asked.body
+    );
+    let question = asked.result["question_id"].as_str().unwrap().to_owned();
+    use else_api::db::computer_job_waits::{CreateError, create};
+    assert_eq!(
+        create(&app.db.pool, turn, 2, crawl).await,
+        Err(CreateError::AttemptParked),
+        "an attempt that asked the owner cannot claim the carried wait"
+    );
     assert_eq!(waits(app, turn).await, vec![(1, "pending".into(), None)]);
     assert_eq!(
         shown_waits(app, &bot, turn).await.as_array().unwrap().len(),
@@ -472,6 +492,14 @@ async fn a_joined_reply_that_waits_again_on_its_job_keeps_the_one_wait() {
         .cancel_job(bot.parse().unwrap(), crawl)
         .await
         .unwrap();
+    let chosen = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/questions/{question}/answer"),
+            Some(json!({ "choice": "a" })),
+        )
+        .await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
     h.continued(turn, &token).await;
     h.release(turn).await;
     app.wait_turn(turn, &["completed"]).await;

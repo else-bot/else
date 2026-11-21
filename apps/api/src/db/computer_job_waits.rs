@@ -41,7 +41,8 @@ pub enum Status {
 pub enum Created {
     Waiting(Uuid),
     /// A pending wait from an earlier attempt of the turn already watches
-    /// the job; the turn keeps it after this attempt ends.
+    /// the job; the turn keeps it after this attempt ends. This attempt
+    /// holds nothing, so it is not parked.
     Carried(Uuid),
     /// The job had already ended, so nothing waits.
     Ended,
@@ -106,6 +107,9 @@ pub async fn create(
             Err(CreateError::AttemptParked)
         };
     }
+    if super::turns::attempt_parked(&mut tx, turn_id, attempt).await? {
+        return Err(CreateError::AttemptParked);
+    }
     let carried: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM computer_job_waits
          WHERE turn_id = ?1 AND job_id = ?2 AND status = 'pending'",
@@ -116,9 +120,6 @@ pub async fn create(
     .await?;
     if let Some(id) = carried {
         return Ok(Created::Carried(id));
-    }
-    if super::turns::attempt_parked(&mut tx, turn_id, attempt).await? {
-        return Err(CreateError::AttemptParked);
     }
     let id = Uuid::new_v4();
     sqlx::query(

@@ -367,10 +367,13 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
             ),
             Err(error) => return refused(error, &log),
         };
-    state.grants.park(grant.turn_id).await;
+    let parked = status == "waiting";
+    if parked {
+        state.grants.park(grant.turn_id).await;
+    }
     Ok(Done::json(json!({
         "status": status,
-        "parked": true,
+        "parked": parked,
         "wait_id": wait_id,
         "next": next,
     }))

@@ -86,10 +86,13 @@ pub(super) async fn wait_job(
             }
             Err(error) => return refused(error),
         };
-    state.grants.park(grant.turn_id).await;
+    let parked = status == "waiting";
+    if parked {
+        state.grants.park(grant.turn_id).await;
+    }
     Ok(Done::json(json!({
         "status": status,
-        "parked": true,
+        "parked": parked,
         "job_id": id,
         "wait_id": wait_id,
         "next": next,
