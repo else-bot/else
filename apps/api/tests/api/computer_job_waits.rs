@@ -429,3 +429,82 @@ async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks()
     assert_eq!(attempts(app, turn).await, 3);
     assert_eq!(waits(app, turn).await, vec![(1, "settled".into(), Some(3))]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joined_reply_that_waits_again_on_its_job_keeps_the_one_wait() {
+    let Setup { h, manager, .. } = setup().await;
+    let app = &h.app;
+    let bot = app.create_bot("Scout").await;
+    let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
+    let crawl = start_job(app, &token).await;
+    let first = tool(
+        app,
+        &token,
+        "computer_job",
+        json!({ "job_id": crawl, "wait": true }),
+    )
+    .await
+    .result;
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+
+    let next = joined(app, &bot, turn, "Is the crawl done yet?", 2).await;
+    let token = h.continued(turn, &token).await;
+    let again = tool(
+        app,
+        &token,
+        "computer_job",
+        json!({ "job_id": crawl, "wait": true }),
+    )
+    .await;
+    assert!(!again.error, "{}", again.body);
+    assert_eq!(again.result["wait_id"], first["wait_id"], "{}", again.body);
+    assert_eq!(again.result["status"], "already_waiting", "{}", again.body);
+    assert_eq!(waits(app, turn).await, vec![(1, "pending".into(), None)]);
+    assert_eq!(
+        shown_waits(app, &bot, turn).await.as_array().unwrap().len(),
+        1
+    );
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+
+    manager
+        .cancel_job(bot.parse().unwrap(), crawl)
+        .await
+        .unwrap();
+    h.continued(turn, &token).await;
+    h.release(turn).await;
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
+    assert_eq!(waits(app, turn).await, vec![(1, "settled".into(), Some(3))]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joined_reply_can_wait_on_another_job_beside_its_first() {
+    let Setup { h, .. } = setup().await;
+    let app = &h.app;
+    let bot = app.create_bot("Scout").await;
+    let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
+    let crawl = start_job(app, &token).await;
+    let index = start_job(app, &token).await;
+    wait_job(app, &token, crawl).await;
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+
+    joined(app, &bot, turn, "Index the archive too.", 2).await;
+    let token = h.continued(turn, &token).await;
+    let waited = tool(
+        app,
+        &token,
+        "computer_job",
+        json!({ "job_id": index, "wait": true }),
+    )
+    .await;
+    assert_eq!(waited.result["status"], "waiting", "{}", waited.body);
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+    assert_eq!(
+        waits(app, turn).await,
+        vec![(1, "pending".into(), None), (2, "pending".into(), None)]
+    );
+}
