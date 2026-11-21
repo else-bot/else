@@ -39,7 +39,9 @@
 //! API shutdown signals streams with `server_stopping` and waits for input,
 //! control, and lease cleanup within the configured shutdown grace period.
 
-use std::collections::BTreeSet;
+mod control;
+
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -52,7 +54,6 @@ use else_wire::computers::{DesktopMode, ServerEvent};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -60,6 +61,7 @@ use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::{TaskTrackerToken, TaskTrackerWaitFuture};
 use uuid::Uuid;
 
+use self::control::{Control, ControlClaim, Controlling, close, control_failed, write_guest};
 use super::AppState;
 use super::error::{ApiError, ApiPath};
 use crate::computers::cursors;
@@ -76,9 +78,7 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
 const WRITE_LIMIT: Duration = Duration::from_secs(30);
 const CLOSE_LIMIT: Duration = Duration::from_secs(2);
-const MAX_HELD_KEYS: usize = 32;
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
-const GUEST_WRITE_LIMIT: Duration = Duration::from_secs(5);
 const STOPPING: &str = "else.bot is stopping; reconnect in a moment.";
 
 #[derive(Default)]
@@ -159,11 +159,37 @@ struct End {
     message: String,
 }
 
-fn end(code: &'static str, message: impl Into<String>) -> Option<End> {
-    Some(End {
+fn end(code: &'static str, message: impl Into<String>) -> End {
+    End {
         code,
         message: message.into(),
-    })
+    }
+}
+
+fn stopping() -> End {
+    end("server_stopping", STOPPING)
+}
+
+fn disconnected() -> End {
+    end("desktop_disconnected", "The desktop connection closed.")
+}
+
+fn unavailable() -> End {
+    end("computer_unavailable", "The computer is not available now.")
+}
+
+fn lease_end(lease: ViewerLease) -> Option<End> {
+    match lease {
+        ViewerLease::Live => None,
+        ViewerLease::OwnerStopped => {
+            Some(end("computer_stopped", "The owner stopped this computer."))
+        }
+        ViewerLease::BotInactive => Some(end("bot_deleted", "This bot was deleted.")),
+        ViewerLease::NotRunning => {
+            Some(end("computer_not_running", "The computer stopped running."))
+        }
+        ViewerLease::Ended => Some(end("lease_ended", "The desktop session ended.")),
+    }
 }
 
 fn event_message(event: ServerEvent) -> Message {
@@ -200,7 +226,7 @@ async fn session(
     let ended = match viewer {
         None => {
             release_abandoned(&computers, &db, &holder).await;
-            end("server_stopping", STOPPING)
+            Some(stopping())
         }
         Some(Ok(Ok(target))) => {
             let lease = target.lease_id;
@@ -215,7 +241,7 @@ async fn session(
                 params.cursor,
                 stop.clone(),
             );
-            let ended = session.run(params.mode, &mut incoming).await;
+            let Err(ended) = session.run(params.mode, &mut incoming).await;
             session.shutdown().await;
             let ended = session.reason(ended).await;
             if let Err(err) = computers.release(lease).await {
@@ -226,7 +252,7 @@ async fn session(
         Some(Ok(Err(refusal))) => Some(refused(refusal)),
         Some(Err(err)) => {
             tracing::warn!(bot = %bot, error = %err, "desktop viewer");
-            end("computer_unavailable", "The computer is not available now.")
+            Some(unavailable())
         }
     };
     if let Some(End { code, message }) = ended
@@ -342,26 +368,18 @@ struct View {
     bridge: JoinHandle<()>,
 }
 
-struct Control {
-    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    events: mpsc::Receiver<Event>,
-    reader: JoinHandle<Result<(), viewer::ViewerError>>,
-    bridge: JoinHandle<()>,
-    connected: Instant,
-    clipboard_utf8: bool,
+enum Mode {
+    Watch,
+    Control(Controlling),
 }
 
-async fn close(
-    mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    reader: JoinHandle<Result<(), viewer::ViewerError>>,
-    bridge: JoinHandle<()>,
-) {
-    let _ = tokio::time::timeout(GUEST_WRITE_LIMIT, writer.shutdown()).await;
-    drop(writer);
-    if !bridge.is_finished() {
-        let _ = tokio::time::timeout(CLOSE_LIMIT, bridge).await;
+impl Mode {
+    fn wire(&self) -> DesktopMode {
+        match self {
+            Mode::Watch => DesktopMode::Watch,
+            Mode::Control(_) => DesktopMode::Control,
+        }
     }
-    reader.abort();
 }
 
 struct Session {
@@ -376,20 +394,17 @@ struct Session {
     cursor_shapes: bool,
     cursor_style: Option<&'static str>,
     cursor_unsent: bool,
-    mode: DesktopMode,
-    control_lease: Option<Uuid>,
-    watch_server: Option<bool>,
+    mode: Mode,
+    /// Set once the guest's watch server turned out to be an older image's
+    /// controlling server, which only control mode may use.
+    watch_unsupported: bool,
     view: Option<View>,
-    control: Option<Control>,
     fb: Framebuffer,
     sent_size: Option<(u16, u16)>,
     dirty: bool,
     requested: bool,
     full: bool,
     encoding: Option<JoinHandle<Vec<u8>>>,
-    held_keys: BTreeSet<u32>,
-    buttons: u8,
-    pointer: (u16, u16),
     stop: CancellationToken,
 }
 
@@ -418,29 +433,24 @@ impl Session {
             cursor_shapes: false,
             cursor_style: None,
             cursor_unsent: false,
-            mode: DesktopMode::Watch,
-            control_lease: None,
-            watch_server: None,
+            mode: Mode::Watch,
+            watch_unsupported: false,
             view: None,
-            control: None,
             fb: Framebuffer::new(1, 1),
             sent_size: None,
             dirty: false,
             requested: false,
             full: true,
             encoding: None,
-            held_keys: BTreeSet::new(),
-            buttons: 0,
-            pointer: (0, 0),
             stop,
         }
     }
 
-    async fn send(&self, message: Message) -> Option<End> {
+    async fn send(&self, message: Message) -> Result<(), End> {
         match self.stop.run_until_cancelled(self.out.send(message)).await {
-            Some(Ok(())) => None,
-            Some(Err(_)) => end("client_gone", ""),
-            None => end("server_stopping", STOPPING),
+            Some(Ok(())) => Ok(()),
+            Some(Err(_)) => Err(end("client_gone", "")),
+            None => Err(stopping()),
         }
     }
 
@@ -451,47 +461,52 @@ impl Session {
             .map(|state| state.map_err(|err| err.to_string()))
     }
 
-    async fn reason(&self, ended: Option<End>) -> Option<End> {
-        if self.stop.is_cancelled() {
-            return end("server_stopping", STOPPING);
-        }
-        match self.lease_state(false).await {
-            None => end("server_stopping", STOPPING),
-            Some(Ok(ViewerLease::OwnerStopped)) => {
-                end("computer_stopped", "The owner stopped this computer.")
+    async fn check_lease(&self, renew: bool) -> Result<(), End> {
+        match self.lease_state(renew).await {
+            None => Err(stopping()),
+            Some(Ok(lease)) => lease_end(lease).map_or(Ok(()), Err),
+            Some(Err(err)) => {
+                tracing::warn!(bot = %self.bot, error = %err, "checking a desktop viewer lease");
+                Err(unavailable())
             }
-            Some(Ok(ViewerLease::BotInactive)) => end("bot_deleted", "This bot was deleted."),
-            Some(Ok(ViewerLease::NotRunning)) => {
-                end("computer_not_running", "The computer stopped running.")
-            }
-            _ => ended.filter(|end| end.code != "client_gone"),
         }
     }
 
-    async fn send_mode(&self) -> Option<End> {
-        self.send(event_message(ServerEvent::Mode { mode: self.mode }))
-            .await
+    async fn reason(&self, ended: End) -> Option<End> {
+        if self.stop.is_cancelled() {
+            return Some(stopping());
+        }
+        match self.lease_state(false).await {
+            None => Some(stopping()),
+            Some(Ok(
+                lease @ (ViewerLease::OwnerStopped
+                | ViewerLease::BotInactive
+                | ViewerLease::NotRunning),
+            )) => lease_end(lease),
+            _ => Some(ended).filter(|end| end.code != "client_gone"),
+        }
+    }
+
+    async fn send_mode(&self) -> Result<(), End> {
+        self.send(event_message(ServerEvent::Mode {
+            mode: self.mode.wire(),
+        }))
+        .await
     }
 
     async fn run(
         &mut self,
         mode: DesktopMode,
         incoming: &mut futures_util::stream::SplitStream<WebSocket>,
-    ) -> Option<End> {
-        if let Some(end) = self.sync_view().await {
-            return Some(end);
+    ) -> Result<Infallible, End> {
+        self.sync_view().await?;
+        if mode == DesktopMode::Control {
+            self.enter_control().await?;
         }
-        if mode == DesktopMode::Control
-            && let Some(end) = self.enter_control().await
-        {
-            return Some(end);
+        if matches!(self.mode, Mode::Watch) && self.watch_unsupported {
+            return Err(unsupported());
         }
-        if self.mode == DesktopMode::Watch && self.watch_server == Some(false) {
-            return unsupported();
-        }
-        if let Some(end) = self.send_mode().await {
-            return Some(end);
-        }
+        self.send_mode().await?;
         let mut lease_tick = tokio::time::interval(LEASE_CHECK);
         lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let renew_every = self.computers.config().lease_ttl / 3;
@@ -501,32 +516,31 @@ impl Session {
         let stop = self.stop.clone();
         let frame_slot = self.frame_slot.clone();
         loop {
-            let ended = tokio::select! {
-                _ = stop.cancelled() => end("server_stopping", STOPPING),
+            tokio::select! {
+                _ = stop.cancelled() => return Err(stopping()),
                 message = incoming.next() => {
                     seen = Instant::now();
                     match message {
-                        Some(Ok(Message::Text(text))) => self.client(&text).await,
+                        Some(Ok(Message::Text(text))) => self.client(&text).await?,
                         Some(Ok(Message::Binary(_))) => {
-                            self.send(error_message("invalid_message", "Messages are JSON text.")).await
+                            self.send(error_message("invalid_message", "Messages are JSON text.")).await?;
                         }
-                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => None,
-                        Some(Ok(Message::Close(_)) | Err(_)) | None => end("client_gone", ""),
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(end("client_gone", "")),
                     }
                 }
                 event = next_event(&mut self.view) => match event {
-                    Some(event) => self.apply(event).await,
-                    None => end("desktop_disconnected", "The desktop connection closed."),
+                    Some(event) => self.apply(event).await?,
+                    None => return Err(disconnected()),
                 },
-                update = control_update(&mut self.control) => match update {
+                update = control_update(&mut self.mode) => match update {
                     Some(Event::ClipboardUtf8) => {
-                        if let Some(control) = &mut self.control {
-                            control.clipboard_utf8 = true;
+                        if let Mode::Control(controlling) = &mut self.mode {
+                            controlling.link.clipboard_utf8 = true;
                         }
-                        None
                     }
-                    Some(_) => None,
-                    None => end("desktop_disconnected", "The desktop connection closed."),
+                    Some(_) => {}
+                    None => return Err(disconnected()),
                 },
                 png = encoded(&mut self.encoding) => {
                     match png {
@@ -541,78 +555,35 @@ impl Session {
                         }
                         None => self.dirty = true,
                     }
-                    None
                 }
                 _ = frame_slot.written.notified() => {
                     self.send_cursor();
                     self.encode();
-                    None
                 }
                 _ = lease_tick.tick() => {
                     if seen.elapsed() > IDLE_LIMIT {
-                        end("client_gone", "")
-                    } else {
-                        let renew = renewed.elapsed() >= renew_every;
-                        let checked = match self.lease_state(renew).await {
-                            None => end("server_stopping", STOPPING),
-                            Some(Ok(ViewerLease::Live)) => {
-                                if renew {
-                                    renewed = Instant::now();
-                                    if let Some(lease) = self.control_lease {
-                                        let renewal = self.computers.renew(lease);
-                                        let _ = self.stop.run_until_cancelled(renewal).await;
-                                    }
-                                }
-                                None
-                            }
-                            Some(Ok(ViewerLease::OwnerStopped)) => {
-                                end("computer_stopped", "The owner stopped this computer.")
-                            }
-                            Some(Ok(ViewerLease::BotInactive)) => end("bot_deleted", "This bot was deleted."),
-                            Some(Ok(ViewerLease::NotRunning)) => {
-                                end("computer_not_running", "The computer stopped running.")
-                            }
-                            Some(Ok(ViewerLease::Ended)) => end("lease_ended", "The desktop session ended."),
-                            Some(Err(err)) => {
-                                tracing::warn!(bot = %self.bot, error = %err, "checking a desktop viewer lease");
-                                end("computer_unavailable", "The computer is not available now.")
-                            }
-                        };
-                        if checked.is_none() && pinged.elapsed() >= PING_EVERY {
-                            pinged = Instant::now();
-                            self.send(Message::Ping(Vec::new().into())).await
-                        } else {
-                            checked
+                        return Err(end("client_gone", ""));
+                    }
+                    let renew = renewed.elapsed() >= renew_every;
+                    self.check_lease(renew).await?;
+                    if renew {
+                        renewed = Instant::now();
+                        if let Mode::Control(controlling) = &self.mode {
+                            let renewal = self.computers.renew(controlling.claim.lease);
+                            let _ = self.stop.run_until_cancelled(renewal).await;
                         }
                     }
+                    if pinged.elapsed() >= PING_EVERY {
+                        pinged = Instant::now();
+                        self.send(Message::Ping(Vec::new().into())).await?;
+                    }
                 }
-            };
-            if ended.is_some() {
-                return ended;
             }
         }
     }
 
-    async fn client(&mut self, text: &str) -> Option<End> {
-        match self.lease_state(false).await {
-            None => return end("server_stopping", STOPPING),
-            Some(Ok(ViewerLease::Live)) => {}
-            Some(Ok(ViewerLease::OwnerStopped)) => {
-                return end("computer_stopped", "The owner stopped this computer.");
-            }
-            Some(Ok(ViewerLease::BotInactive)) => {
-                return end("bot_deleted", "This bot was deleted.");
-            }
-            Some(Ok(ViewerLease::NotRunning)) => {
-                return end("computer_not_running", "The computer stopped running.");
-            }
-            Some(Ok(ViewerLease::Ended)) => {
-                return end("lease_ended", "The desktop session ended.");
-            }
-            Some(Err(_)) => {
-                return end("computer_unavailable", "The computer is not available now.");
-            }
-        }
+    async fn client(&mut self, text: &str) -> Result<(), End> {
+        self.check_lease(false).await?;
         let Ok(message) = serde_json::from_str::<ClientMessage>(text) else {
             return self
                 .send(error_message(
@@ -625,64 +596,51 @@ impl Session {
             ClientMessage::Mode {
                 mode: DesktopMode::Control,
             } => {
-                if self.mode == DesktopMode::Watch
-                    && let Some(end) = self.enter_control().await
-                {
-                    return Some(end);
+                if matches!(self.mode, Mode::Watch) {
+                    self.enter_control().await?;
                 }
                 self.send_mode().await
             }
             ClientMessage::Mode {
                 mode: DesktopMode::Watch,
             } => {
-                if self.mode == DesktopMode::Control {
+                if matches!(self.mode, Mode::Control(_)) {
                     self.leave_control().await;
-                    if let Some(end) = self.sync_view().await {
-                        return Some(end);
-                    }
-                    if let Some(end) = self.sync_cursor().await {
-                        return Some(end);
-                    }
-                    if self.watch_server == Some(false)
-                        && let Some(end) = self.send(unsupported_message()).await
-                    {
-                        return Some(end);
+                    self.sync_view().await?;
+                    self.sync_cursor().await?;
+                    if self.watch_unsupported {
+                        self.send(unsupported_message()).await?;
                     }
                 }
                 self.send_mode().await
             }
             ClientMessage::Pointer { x, y, buttons } => {
-                let Some(control) = &mut self.control else {
-                    return None;
+                let Mode::Control(controlling) = &mut self.mode else {
+                    return Ok(());
                 };
                 let x = x.min(self.fb.width.saturating_sub(1));
                 let y = y.min(self.fb.height.saturating_sub(1));
-                self.buttons = buttons;
-                self.pointer = (x, y);
-                input(control, &viewer::pointer_event(buttons, x, y)).await
+                controlling.pointer(x, y, buttons).await
             }
             ClientMessage::Key { key, down } => {
-                let Some(control) = &mut self.control else {
-                    return None;
+                let Mode::Control(controlling) = &mut self.mode else {
+                    return Ok(());
                 };
-                if down {
-                    if self.held_keys.len() >= MAX_HELD_KEYS && !self.held_keys.contains(&key) {
-                        return None;
-                    }
-                    self.held_keys.insert(key);
-                } else {
-                    self.held_keys.remove(&key);
-                }
-                input(control, &viewer::key_event(key, down)).await
+                controlling.key(key, down).await
             }
-            ClientMessage::Release => self.release_input().await,
+            ClientMessage::Release => {
+                let Mode::Control(controlling) = &mut self.mode else {
+                    return Ok(());
+                };
+                controlling.release_input().await
+            }
             ClientMessage::Clipboard { text } => self.paste(&text).await,
         }
     }
 
-    async fn paste(&mut self, text: &str) -> Option<End> {
-        let Some(control) = &mut self.control else {
-            return None;
+    async fn paste(&mut self, text: &str) -> Result<(), End> {
+        let Mode::Control(controlling) = &mut self.mode else {
+            return Ok(());
         };
         let text = text.replace("\r\n", "\n");
         if text.len() > viewer::MAX_CLIPBOARD_BYTES {
@@ -693,20 +651,18 @@ impl Session {
                 ))
                 .await;
         }
+        let link = &mut controlling.link;
         let latin1 = viewer::clipboard_latin1(&text);
-        if latin1.is_none() && !control.clipboard_utf8 {
+        if latin1.is_none() && !link.clipboard_utf8 {
             let waiting = tokio::time::timeout_at(
-                (control.connected + CLIPBOARD_CAPS_WAIT).into(),
-                wait_for_utf8(control),
+                (link.connected + CLIPBOARD_CAPS_WAIT).into(),
+                link.wait_for_utf8(),
             );
             if self.stop.run_until_cancelled(waiting).await.is_none() {
-                return end("server_stopping", STOPPING);
+                return Err(stopping());
             }
         }
-        let Some(control) = &mut self.control else {
-            return None;
-        };
-        let message = if control.clipboard_utf8 {
+        let message = if link.clipboard_utf8 {
             viewer::clipboard_utf8(&text)
         } else if let Some(latin1) = latin1 {
             latin1
@@ -718,139 +674,64 @@ impl Session {
                 ))
                 .await;
         };
-        input(control, &message).await
+        link.input(&message).await
     }
 
-    async fn enter_control(&mut self) -> Option<End> {
-        let claim = self.computers.claim_control(self.bot, self.stream_id);
-        let Some(claimed) = self.stop.run_until_cancelled(claim).await else {
-            return end("server_stopping", STOPPING);
+    async fn enter_control(&mut self) -> Result<(), End> {
+        let taken = ControlClaim::take(
+            &self.computers,
+            &self.db,
+            self.bot,
+            self.stream_id,
+            &self.stop,
+        )
+        .await?;
+        let claim = match taken {
+            Ok(claim) => claim,
+            Err(notice) => return self.send(notice).await,
         };
-        if !claimed {
-            return self
-                .send(error_message(
-                    "control_in_use",
-                    "Another window controls this desktop.",
-                ))
-                .await;
-        }
-        let holder = format!("desktop-control:{}:{}", self.bot, self.stream_id);
-        let attach = self.computers.control_lease(self.bot, &holder);
-        let lease = match self.stop.run_until_cancelled(attach).await {
-            None => {
-                release_abandoned(&self.computers, &self.db, &holder).await;
-                return end("server_stopping", STOPPING);
-            }
-            Some(Ok(Ok(lease))) => lease,
-            Some(Ok(Err(refusal))) => {
-                self.computers.end_control(self.bot, self.stream_id).await;
-                return Some(refused(refusal));
-            }
-            Some(Err(err)) => {
-                tracing::warn!(bot = %self.bot, error = %err, "desktop control lease");
-                self.computers.end_control(self.bot, self.stream_id).await;
-                return self
-                    .send(error_message(
-                        "control_failed",
-                        "Could not take over the desktop now.",
-                    ))
-                    .await;
-            }
-        };
-        self.control_lease = Some(lease);
-        match connect(&self.target, Target::Control, &self.stop).await {
-            Ok(connection) => {
-                let (tx, events) = mpsc::channel(4);
-                let reader = tokio::spawn(viewer::read_events(
-                    connection.reader,
-                    connection.width,
-                    connection.height,
-                    Some(tx),
-                ));
-                self.control = Some(Control {
-                    writer: connection.writer,
-                    events,
-                    reader,
-                    bridge: connection.bridge,
-                    connected: Instant::now(),
-                    clipboard_utf8: false,
-                });
-                self.mode = DesktopMode::Control;
-                if let Some(end) = self.sync_view().await {
-                    return Some(end);
-                }
-                self.sync_cursor().await
-            }
+        let link = match connect(&self.target, Target::Control, &self.stop).await {
+            Ok(connection) => Control::open(connection),
             Err(err) => {
                 tracing::warn!(bot = %self.bot, error = %err, "desktop control connection");
-                self.end_control_lease().await;
-                self.computers.end_control(self.bot, self.stream_id).await;
-                self.send(error_message(
-                    "control_failed",
-                    "Could not take over the desktop now.",
-                ))
-                .await
+                claim.release(&self.computers).await;
+                return self.send(control_failed()).await;
             }
-        }
+        };
+        self.mode = Mode::Control(Controlling::new(claim, link));
+        self.sync_view().await?;
+        self.sync_cursor().await
     }
 
     async fn leave_control(&mut self) {
-        let _ = self.release_input().await;
-        if let Some(control) = self.control.take() {
-            close(control.writer, control.reader, control.bridge).await;
-        }
-        self.held_keys.clear();
-        self.buttons = 0;
-        self.mode = DesktopMode::Watch;
-        self.end_control_lease().await;
-        self.computers.end_control(self.bot, self.stream_id).await;
-    }
-
-    async fn end_control_lease(&mut self) {
-        if let Some(lease) = self.control_lease.take()
-            && let Err(err) = self.computers.release(lease).await
-        {
-            tracing::warn!(bot = %self.bot, error = %err, "releasing a desktop control lease");
+        if let Mode::Control(controlling) = std::mem::replace(&mut self.mode, Mode::Watch) {
+            controlling.end(&self.computers).await;
         }
     }
 
-    async fn release_input(&mut self) -> Option<End> {
-        let Some(control) = &mut self.control else {
-            return None;
-        };
-        let mut bytes = Vec::new();
-        for key in std::mem::take(&mut self.held_keys) {
-            bytes.extend_from_slice(&viewer::key_event(key, false));
-        }
-        if self.buttons != 0 {
-            let (x, y) = self.pointer;
-            bytes.extend_from_slice(&viewer::pointer_event(0, x, y));
-            self.buttons = 0;
-        }
-        if bytes.is_empty() {
-            return None;
-        }
-        input(control, &bytes).await
-    }
-
-    async fn sync_view(&mut self) -> Option<End> {
-        let wanted = match (self.watch_server, self.mode) {
-            (Some(false), DesktopMode::Watch) => None,
-            (Some(false), DesktopMode::Control) => Some(Target::Control),
-            _ => Some(Target::Watch),
+    async fn sync_view(&mut self) -> Result<(), End> {
+        let wanted = match (self.watch_unsupported, &self.mode) {
+            (true, Mode::Watch) => None,
+            (true, Mode::Control(_)) => Some(Target::Control),
+            (false, _) => Some(Target::Watch),
         };
         if self.view.as_ref().map(|v| v.target) == wanted {
-            return None;
+            return Ok(());
         }
         if let Some(view) = self.view.take() {
             close(view.writer, view.reader, view.bridge).await;
         }
-        let target = wanted?;
+        let Some(target) = wanted else {
+            return Ok(());
+        };
         let connection = match connect(&self.target, target, &self.stop).await {
             Ok(connection) => connection,
             Err(err) => {
                 tracing::warn!(bot = %self.bot, error = %err, "desktop viewer connection");
-                return end("desktop_disconnected", "Could not connect to the desktop.");
+                return Err(end(
+                    "desktop_disconnected",
+                    "Could not connect to the desktop.",
+                ));
             }
         };
         if target == Target::Watch && connection.name != viewer::WATCH_NAME {
@@ -860,11 +741,8 @@ impl Session {
                 connection.bridge,
             )
             .await;
-            self.watch_server = Some(false);
+            self.watch_unsupported = true;
             return Box::pin(self.sync_view()).await;
-        }
-        if target == Target::Watch {
-            self.watch_server = Some(true);
         }
         let (tx, events) = mpsc::channel(8);
         let reader = tokio::spawn(viewer::read_events(
@@ -886,24 +764,20 @@ impl Session {
         self.cursor_shapes = false;
         self.cursor_style = None;
         self.cursor_unsent = false;
-        if let Some(end) = self.sync_cursor().await {
-            return Some(end);
-        }
-        if let Some(end) = self.frame_request().await {
-            return Some(end);
-        }
+        self.sync_cursor().await?;
+        self.frame_request().await?;
         self.send_size().await
     }
 
     /// Asks the view for cursor shapes exactly while a native-cursor owner
     /// controls; otherwise the server paints the cursor into the frames.
-    async fn sync_cursor(&mut self) -> Option<End> {
-        let wanted = self.cursor == CursorMode::Native && self.mode == DesktopMode::Control;
+    async fn sync_cursor(&mut self) -> Result<(), End> {
+        let wanted = self.cursor == CursorMode::Native && matches!(self.mode, Mode::Control(_));
         let Some(view) = &mut self.view else {
-            return None;
+            return Ok(());
         };
         if wanted == self.cursor_shapes {
-            return None;
+            return Ok(());
         }
         let mut encodings = viewer::set_encodings(wanted, view.target == Target::Control);
         if !wanted {
@@ -917,14 +791,14 @@ impl Session {
         }
         let written = write_guest(&mut view.writer, &encodings);
         match self.stop.run_until_cancelled(written).await {
-            None => return end("server_stopping", STOPPING),
-            Some(false) => return end("desktop_disconnected", "The desktop connection closed."),
+            None => return Err(stopping()),
+            Some(false) => return Err(disconnected()),
             Some(true) => {}
         }
         self.cursor_shapes = wanted;
         self.cursor_style = None;
         self.cursor_unsent = false;
-        None
+        Ok(())
     }
 
     /// Sends the latest cursor style without waiting on a busy socket; the
@@ -944,10 +818,10 @@ impl Session {
         }
     }
 
-    async fn send_size(&mut self) -> Option<End> {
+    async fn send_size(&mut self) -> Result<(), End> {
         let size = (self.fb.width, self.fb.height);
         if self.sent_size == Some(size) {
-            return None;
+            return Ok(());
         }
         self.sent_size = Some(size);
         self.send(event_message(ServerEvent::Size {
@@ -957,7 +831,7 @@ impl Session {
         .await
     }
 
-    async fn apply(&mut self, event: Event) -> Option<End> {
+    async fn apply(&mut self, event: Event) -> Result<(), End> {
         self.fb.apply(&event);
         match event {
             Event::Cursor {
@@ -969,12 +843,12 @@ impl Session {
             } => {
                 let style = cursors::style((hotspot_x, hotspot_y), (width, height), &mask);
                 if !self.cursor_shapes || self.cursor_style == Some(style) {
-                    return None;
+                    return Ok(());
                 }
                 self.cursor_style = Some(style);
                 self.cursor_unsent = true;
                 self.send_cursor();
-                None
+                Ok(())
             }
             Event::Resize { .. } => {
                 if let Some(encoding) = self.encoding.take() {
@@ -991,28 +865,28 @@ impl Session {
             }
             _ => {
                 self.dirty = true;
-                None
+                Ok(())
             }
         }
     }
 
-    async fn frame_request(&mut self) -> Option<End> {
+    async fn frame_request(&mut self) -> Result<(), End> {
         let Some(view) = &mut self.view else {
-            return None;
+            return Ok(());
         };
         if self.requested {
-            return None;
+            return Ok(());
         }
         let request = viewer::update_request(!self.full, self.fb.width, self.fb.height);
         let written = write_guest(&mut view.writer, &request);
         match self.stop.run_until_cancelled(written).await {
-            None => return end("server_stopping", STOPPING),
-            Some(false) => return end("desktop_disconnected", "The desktop connection closed."),
+            None => return Err(stopping()),
+            Some(false) => return Err(disconnected()),
             Some(true) => {}
         }
         self.requested = true;
         self.full = false;
-        None
+        Ok(())
     }
 
     fn encode(&mut self) {
@@ -1035,25 +909,14 @@ impl Session {
     }
 }
 
+const UNSUPPORTED: &str = "Upgrade this computer to else-guest:3 to watch its desktop in the app.";
+
 fn unsupported_message() -> Message {
-    error_message(
-        "desktop_watch_unsupported",
-        "Upgrade this computer to else-guest:3 to watch its desktop in the app.",
-    )
+    error_message("desktop_watch_unsupported", UNSUPPORTED)
 }
 
-fn unsupported() -> Option<End> {
-    end(
-        "desktop_watch_unsupported",
-        "Upgrade this computer to else-guest:3 to watch its desktop in the app.",
-    )
-}
-
-async fn input(control: &mut Control, bytes: &[u8]) -> Option<End> {
-    if !write_guest(&mut control.writer, bytes).await {
-        return end("desktop_disconnected", "The desktop connection closed.");
-    }
-    None
+fn unsupported() -> End {
+    end("desktop_watch_unsupported", UNSUPPORTED)
 }
 
 async fn next_event(view: &mut Option<View>) -> Option<Event> {
@@ -1063,29 +926,11 @@ async fn next_event(view: &mut Option<View>) -> Option<Event> {
     }
 }
 
-/// The next event the control connection announces on its own (it requests
-/// no screen updates), or `None` once the connection closed.
-async fn control_update(control: &mut Option<Control>) -> Option<Event> {
-    let Some(control) = control else {
-        return std::future::pending().await;
-    };
-    if control.bridge.is_finished() {
-        return None;
+async fn control_update(mode: &mut Mode) -> Option<Event> {
+    match mode {
+        Mode::Control(controlling) => controlling.link.update().await,
+        Mode::Watch => std::future::pending().await,
     }
-    tokio::select! {
-        Some(event) = control.events.recv() => Some(event),
-        _ = &mut control.bridge => None,
-    }
-}
-
-async fn wait_for_utf8(control: &mut Control) {
-    while let Some(event) = control.events.recv().await {
-        if matches!(event, Event::ClipboardUtf8) {
-            control.clipboard_utf8 = true;
-            return;
-        }
-    }
-    std::future::pending().await
 }
 
 async fn encoded(task: &mut Option<JoinHandle<Vec<u8>>>) -> Option<Vec<u8>> {
@@ -1121,14 +966,4 @@ async fn connect(
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err("timed out".into()),
     }
-}
-
-async fn write_guest(
-    writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    bytes: &[u8],
-) -> bool {
-    matches!(
-        tokio::time::timeout(GUEST_WRITE_LIMIT, writer.write_all(bytes)).await,
-        Ok(Ok(()))
-    )
 }
