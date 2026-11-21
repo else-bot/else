@@ -1125,15 +1125,18 @@ async fn mail_event(
         arrivals: vec![],
         more: false,
     };
-    store::record_scan(
-        &h.app.db.pool,
-        account.id,
-        account.generation,
-        None,
-        &initial,
-    )
-    .await
-    .unwrap();
+    assert!(
+        store::record_scan(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            None,
+            &initial,
+        )
+        .await
+        .unwrap(),
+        "no watch recorded a scan first"
+    );
     // Before the arrival: the scheduler may admit it on its next scan.
     sqlx::query("UPDATE connector_grants SET wake_instructions = ?1")
         .bind(instructions)
@@ -1159,15 +1162,17 @@ async fn mail_event(
         }],
         more: false,
     };
-    store::record_scan(
-        &h.app.db.pool,
-        account.id,
-        account.generation,
-        Some(&initial.cursor),
-        &arrival,
-    )
-    .await
-    .unwrap();
+    assert!(
+        store::record_scan(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            Some(&initial.cursor),
+            &arrival,
+        )
+        .await
+        .unwrap()
+    );
     else_api::connectors::delivery::admit_pending(&h.app.db.pool, &h.app.state.registry, 32)
         .await
         .unwrap();

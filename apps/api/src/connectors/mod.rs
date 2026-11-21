@@ -553,16 +553,22 @@ impl ConnectorManager {
         }
     }
 
-    pub async fn run(self: Arc<Self>, stop: CancellationToken) {
-        loop {
-            if let Ok(accounts) = store::accounts(&self.db).await {
-                for account in accounts {
-                    if account.state == AccountState::Active {
-                        let _ = self.worker(account.id).await;
-                    }
+    /// Starts a worker for each active account that has none. Startup awaits
+    /// the first pass, so it never races an account created afterwards.
+    pub(crate) async fn start_workers(self: &Arc<Self>) {
+        if let Ok(accounts) = store::accounts(&self.db).await {
+            for account in accounts {
+                if account.state == AccountState::Active {
+                    let _ = self.worker(account.id).await;
                 }
             }
+        }
+    }
+
+    pub async fn run(self: Arc<Self>, stop: CancellationToken) {
+        loop {
             tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(30)) => {} }
+            self.start_workers().await;
         }
         self.workers.shutdown().await;
     }
