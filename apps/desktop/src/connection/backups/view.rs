@@ -549,7 +549,7 @@ impl View {
                 Button::new("backup-cancel-edit")
                     .control(Tier::Secondary, Scale::Standard, busy, cx)
                     .label("Cancel")
-                    .on_click(cx.listener(|view, _, _, cx| view.cancel_edit(cx))),
+                    .on_click(cx.listener(|view, _, window, cx| view.cancel_edit(window, cx))),
             );
             footer = Some(bar);
         }

@@ -73,6 +73,14 @@ const REMOVAL_NOTICE: &str = "Your bots lose access to this inbox, and their mai
 impl EventEmitter<OpenBot> for EmailSettings {}
 
 impl EmailSettings {
+    /// Drops the form, wiping its typed app password first. The last drawn
+    /// frame still holds the field, and a hidden window draws no other.
+    pub(crate) fn close(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(mut form) = self.form.take() {
+            form.clear_secrets(window, cx);
+        }
+    }
+
     pub(crate) fn has_unsaved_work(&self, cx: &App) -> bool {
         self.busy
             || self
@@ -231,10 +239,7 @@ impl EmailSettings {
             "{} is connected. Every bot can use it when you ask.",
             account.config.address
         ));
-        if let Some(form) = &mut self.form {
-            form.clear_secrets(window, cx);
-        }
-        self.form = None;
+        self.close(window, cx);
         self.introduction = bot.map(|bot| Introduction {
             account: account.id,
             bot,

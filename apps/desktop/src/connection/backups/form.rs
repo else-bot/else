@@ -12,6 +12,17 @@ pub(super) enum Editor {
     Policy(PolicyForm),
 }
 
+impl Editor {
+    /// Wipes the typed secret access key. The last drawn frame still holds
+    /// the field, and a hidden window draws no other.
+    pub fn close(self, window: &mut Window, cx: &mut App) {
+        if let Self::Destination(form) = self {
+            form.secret
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+    }
+}
+
 pub(super) struct DestinationForm {
     pub base_revision: i64,
     pub verified: bool,

@@ -72,7 +72,7 @@ impl Shell {
             },
         );
         if let Some(settings) = self.front.settings_mut() {
-            settings.email = Some((view, subscription));
+            settings.set_email(Some((view, subscription)), window, cx);
         }
         cx.notify();
     }
@@ -174,7 +174,7 @@ impl Shell {
         let (backups, email) = self
             .front
             .settings()
-            .map(|settings| (settings.backups.is_some(), settings.email.is_some()))
+            .map(|settings| (settings.backups().is_some(), settings.email().is_some()))
             .unwrap_or_default();
         if section == SettingsSection::Backups && !backups {
             self.open_backups(window, cx);
@@ -342,7 +342,7 @@ impl Shell {
         let body = match section {
             SettingsSection::Server => self.render_server_settings(settings.servers(), window, cx),
             SettingsSection::Email => div()
-                .children(settings.email.as_ref().map(|(view, _)| view.clone()))
+                .children(settings.email().map(|(view, _)| view.clone()))
                 .into_any_element(),
             SettingsSection::Vault if settings.pane().section().is_none() => div()
                 .child("Reconnect to the server to open the Vault.")
@@ -353,7 +353,7 @@ impl Shell {
             | SettingsSection::Vault
             | SettingsSection::Usage
             | SettingsSection::Computers => settings.pane().element(),
-            SettingsSection::Backups => match &settings.backups {
+            SettingsSection::Backups => match settings.backups() {
                 Some(pane) => pane.view.clone().into_any_element(),
                 None => div()
                     .p_8()
