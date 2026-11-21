@@ -7,258 +7,14 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const IMAGE: &str = "else-guest:2";
+use common::live::{
+    self, Api, IMAGE, Install, bounded, clear, finish, guest, listed, messages, msb, note,
+    runtime_name, turn_activity,
+};
+
 const FIXTURE: &str = include_str!("fixtures/smtp_capture.py");
 const SEARCH_SITE: &str = include_str!("fixtures/cdp_site.py");
 const VISUAL_SITE: &str = include_str!("fixtures/input_site.py");
-
-fn live() -> bool {
-    std::env::var("ELSE_LIVE_MILESTONE").as_deref() == Ok("1")
-}
-
-fn msb() -> String {
-    format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap())
-}
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-fn note(text: &str) {
-    eprintln!("{text}");
-    if let Some(path) = LOG.get() {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(file, "[milestone] {text}").unwrap();
-    }
-}
-
-fn bounded(
-    command: std::process::Command,
-    limit: Duration,
-) -> Result<std::process::Output, String> {
-    bounded_with(command, None, limit)
-}
-
-fn bounded_with(
-    mut command: std::process::Command,
-    input: Option<&str>,
-    limit: Duration,
-) -> Result<std::process::Output, String> {
-    use std::io::{Read, Write};
-    let what = format!("{:?}", command.get_args().take(4).collect::<Vec<_>>());
-    let mut child = command
-        .stdin(if input.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{what}: {e}"))?;
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            bytes
-        })
-    };
-    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-        let input = input.to_owned();
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(input.as_bytes());
-        });
-    }
-    let stdout = read(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let stderr = read(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| format!("{what}: {e}"))? {
-            break status;
-        }
-        if started.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("{what} did not finish within {limit:?}; killed"));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
-struct Install {
-    data: PathBuf,
-    database_url: String,
-    log: PathBuf,
-}
-
-impl Install {
-    fn command(&self, args: &[&str]) -> std::process::Command {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"));
-        command
-            .current_dir(common::without_dotenv(self.data.parent().unwrap()))
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap())
-            .env("DATABASE_URL", &self.database_url)
-            .env("ELSE_DATA_DIR", &self.data)
-            .env("ELSE_MAX_ACTIVE_TURNS", "1")
-            .env("ELSE_MSB_BIN", msb())
-            .env("ELSE_VM_IMAGE", IMAGE)
-            .env("ELSE_VM_DESKTOP", "1")
-            .env("ELSE_BACKUP_INTERVAL_SECS", "0")
-            .env("ELSE_BACKUP_DIR", self.data.join("backups"))
-            .env("RUST_LOG", "info,sqlx=warn")
-            .args(args);
-        command
-    }
-
-    fn run(&self, args: &[&str]) {
-        let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
-        assert!(
-            out.status.success(),
-            "else-api {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn run_output(&self, args: &[&str]) -> String {
-        let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.status.success(), "else-api {args:?}: {text}");
-        text
-    }
-
-    async fn serve(&self) -> Api {
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log)
-            .unwrap();
-        let child = self
-            .command(&["serve"])
-            .env("ELSE_API_BIND", "127.0.0.1:0")
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let token = std::fs::read_to_string(self.data.join("owner-token"))
-            .unwrap()
-            .trim()
-            .to_owned();
-        let Some(base) = common::ready_url(&self.data, &child, common::SETTLE).await else {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the API did not start; see {}", self.log.display());
-        };
-        Api {
-            child: Some(child),
-            base,
-            token,
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .unwrap(),
-        }
-    }
-}
-
-struct Api {
-    child: Option<std::process::Child>,
-    base: String,
-    token: String,
-    http: reqwest::Client,
-}
-
-impl Api {
-    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> (u16, Value) {
-        let mut request = self
-            .http
-            .request(method, format!("{}{path}", self.base))
-            .bearer_auth(&self.token);
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request.send().await.unwrap();
-        let status = response.status().as_u16();
-        (status, response.json().await.unwrap_or(Value::Null))
-    }
-
-    async fn send(&self, bot: &str, provider: &str, text: &str) -> Uuid {
-        let (status, body) = self
-            .call(
-                reqwest::Method::POST,
-                &format!("/v1/bots/{bot}/turns"),
-                Some(
-                    json!({ "request_id": Uuid::new_v4(), "text": text, "provider_id": provider }),
-                ),
-            )
-            .await;
-        assert!(status < 300, "send: {status} {body}");
-        body["turn"]["id"].as_str().unwrap().parse().unwrap()
-    }
-
-    fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            // SAFETY: signalling our own child.
-            unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-            let started = Instant::now();
-            let status = loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    break status;
-                }
-                if started.elapsed() > common::SETTLE {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("the API did not stop within 60 s of SIGTERM; killed");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            };
-            assert!(status.success(), "the API exited with {status}");
-        }
-    }
-
-    fn kill(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-impl Drop for Api {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
 
 struct Cleanup {
     homes: Vec<PathBuf>,
@@ -268,27 +24,6 @@ struct Cleanup {
     done: std::sync::atomic::AtomicBool,
 }
 
-fn listed(home: &Path) -> Result<Vec<String>, String> {
-    let mut command = std::process::Command::new(msb());
-    command
-        .env("MSB_HOME", home)
-        .args(["list", "--format", "json"]);
-    let out = bounded(command, Duration::from_secs(60))?;
-    if !out.status.success() {
-        return Err(format!(
-            "msb list in {}: {}",
-            home.display(),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let list: Vec<Value> = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("msb list in {}: {e}", home.display()))?;
-    Ok(list
-        .iter()
-        .filter_map(|l| l["name"].as_str().map(str::to_owned))
-        .collect())
-}
-
 impl Cleanup {
     fn clean(&self) -> Vec<String> {
         let mut problems = Vec::new();
@@ -296,20 +31,7 @@ impl Cleanup {
             if !home.exists() {
                 continue;
             }
-            match listed(home) {
-                Err(e) => problems.push(e),
-                Ok(names) => {
-                    for name in names {
-                        for args in [["stop", "--force"].as_slice(), ["rm"].as_slice()] {
-                            let mut command = std::process::Command::new(msb());
-                            command.env("MSB_HOME", home).args(args).arg(&name);
-                            if let Err(e) = bounded(command, Duration::from_secs(120)) {
-                                problems.push(e);
-                            }
-                        }
-                    }
-                }
-            }
+            problems.extend(clear(home));
             match listed(home) {
                 Ok(left) if left.is_empty() => {}
                 Ok(left) => problems.push(format!("{} still lists {left:?}", home.display())),
@@ -376,114 +98,6 @@ impl Drop for Cleanup {
     }
 }
 
-async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
-    let started = Instant::now();
-    let mut last_status = String::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let (status, error): (String, Option<String>) =
-                sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
-                    .bind(turn)
-                    .fetch_one(db)
-                    .await
-                    .unwrap();
-            if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
-                let text: String = sqlx::query_scalar(
-                    "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = ?1 AND kind = 'assistant'",
-                )
-                .bind(turn)
-                .fetch_one(db)
-                .await
-                .unwrap();
-                note(&format!(
-                    "  -> {status} {error:?} after {:?}: {}",
-                    started.elapsed(),
-                    text.chars().take(600).collect::<String>()
-                ));
-                return (status, text);
-            }
-            last_status = status;
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("turn {turn} still {last_status}"))
-}
-
-fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
-    let mut command = std::process::Command::new(msb());
-    command
-        .env("MSB_HOME", home)
-        .args(["exec", "--timeout", "120s", name, "--"]);
-    if root {
-        command.args(["/bin/sh", "-c", script]);
-    } else {
-        command.args([
-            "/usr/sbin/runuser",
-            "-u",
-            "elsebot",
-            "--",
-            "/bin/sh",
-            "-c",
-            script,
-        ]);
-    }
-    let out = bounded_with(command, input, Duration::from_secs(150)).unwrap();
-    assert!(
-        out.status.success(),
-        "guest {script}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
-    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = ?1")
-        .bind(bot.parse::<Uuid>().unwrap())
-        .fetch_one(db)
-        .await
-        .unwrap()
-}
-
-fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
-    let text = guest(
-        home,
-        name,
-        "cat /home/elsebot/.capture/messages.jsonl 2>/dev/null || true",
-        None,
-        false,
-    );
-    text.lines()
-        .map(|l| serde_json::from_str::<Value>(l).unwrap())
-        .filter(|e| e["event"] == "message")
-        .map(|e| {
-            (
-                e["to"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|t| t.as_str().unwrap().to_owned())
-                    .collect(),
-                e["from"].as_str().unwrap_or_default().to_owned(),
-                e["data"].as_str().unwrap_or_default().to_owned(),
-            )
-        })
-        .collect()
-}
-
-async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
-           AND source->>'turn_id' = ?2 ORDER BY seq",
-    )
-    .bind(bot.parse::<Uuid>().unwrap())
-    .bind(turn.to_string())
-    .fetch_all(db)
-    .await
-    .unwrap()
-}
-
 fn version(program: &str) -> String {
     let mut command = std::process::Command::new(program);
     command.arg("--version");
@@ -519,18 +133,14 @@ async fn ask(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
-    if !live() {
+    if !live::enabled("ELSE_LIVE_MILESTONE") {
         eprintln!("SKIPPED: set ELSE_LIVE_MILESTONE=1 for the POC-032 acceptance run");
         return;
     }
     let run_started = Instant::now();
-    let evidence = root().join("target/acceptance");
-    std::fs::create_dir_all(&evidence).unwrap();
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
     let tmp = dir.path().to_path_buf();
-    let log = evidence.join("milestone.log");
-    let _ = std::fs::remove_file(&log);
-    LOG.set(log.clone()).unwrap();
+    let log = live::log_to("milestone");
     let db = common::TestDb::empty().await;
     let params = else_api::backup::DatabaseParams::parse(db.url.expose()).unwrap();
     let data = tmp.as_path().join("installation");
@@ -548,26 +158,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         dir: std::sync::Mutex::new(Some(dir)),
         done: std::sync::atomic::AtomicBool::new(false),
     };
-    let tar = tmp.as_path().join("guest.tar");
-    let mut save = std::process::Command::new("docker");
-    save.args(["save", IMAGE, "-o"]).arg(&tar);
-    assert!(
-        bounded(save, Duration::from_secs(600))
-            .unwrap()
-            .status
-            .success()
-    );
-    let mut load = std::process::Command::new(msb());
-    load.env("MSB_HOME", &home)
-        .args(["load", "-q", "-t", IMAGE, "-i"])
-        .arg(&tar);
-    assert!(
-        bounded(load, Duration::from_secs(600))
-            .unwrap()
-            .status
-            .success()
-    );
-    std::fs::remove_file(&tar).unwrap();
+    live::load_image(&home, tmp.as_path());
     let mut inspect = std::process::Command::new("docker");
     inspect.args(["image", "inspect", "--format", "{{.Id}} {{.Size}}", IMAGE]);
     let image_id = bounded(inspect, Duration::from_secs(60)).unwrap();
