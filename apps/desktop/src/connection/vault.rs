@@ -56,11 +56,21 @@ impl View {
         let search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search by title, slug, website or field")
         });
-        let subscription = cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::Change) {
+        // A filter can hide the revealed row and its Hide button, so a new
+        // query hides the values instead of keeping them for when it clears.
+        let subscription = cx.subscribe_in(
+            &search,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                if matches!(this.phase, Phase::Revealing(_) | Phase::Revealed { .. }) {
+                    this.clear(window, cx);
+                }
                 cx.notify();
-            }
-        });
+            },
+        );
         let mut this = Self {
             client,
             entries: None,
@@ -535,52 +545,61 @@ impl View {
                 .icon(icon)
                 .accessibility_label(label)
                 .disabled(blocked)
+                .when(revealed.is_none(), |button| {
+                    button
+                        .opacity(0.)
+                        .group_hover("vault-row", |style| style.opacity(1.))
+                        .focus(|style| style.opacity(1.))
+                })
         };
-        let actions = h_flex()
-            .flex_none()
-            .gap_1()
-            .when(revealed.is_none(), |row| {
-                row.opacity(0.)
-                    .group_hover("vault-row", |style| style.opacity(1.))
-                    .focus(|style| style.opacity(1.))
-            })
-            .child(
-                action("edit", IconName::PencilLine, format!("Edit {}", entry.name)).on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        this.edit(Some(edit.clone()), window, cx)
-                    }),
-                ),
-            )
-            .child(
-                action(
-                    "reveal",
-                    if revealed.is_some() {
-                        IconName::EyeOff
-                    } else {
-                        IconName::Eye
-                    },
-                    format!(
-                        "{} {}",
-                        if revealed.is_some() { "Hide" } else { "Reveal" },
-                        entry.name
+        let actions =
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .child(
+                    action("edit", IconName::PencilLine, format!("Edit {}", entry.name)).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.edit(Some(edit.clone()), window, cx)
+                        }),
                     ),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if matches!(&this.phase, Phase::Revealed { name, .. } if name == &reveal) {
-                        this.clear(window, cx);
-                    } else {
-                        this.confirm(reveal.clone(), true, window, cx);
-                    }
-                })),
-            )
-            .child(div().w_px().h_4().mx_1().bg(theme.border))
-            .child(
-                action("delete", IconName::Trash, format!("Delete {}", entry.name))
-                    .text_color(theme.danger)
+                .child(
+                    action(
+                        "reveal",
+                        if revealed.is_some() {
+                            IconName::EyeOff
+                        } else {
+                            IconName::Eye
+                        },
+                        format!(
+                            "{} {}",
+                            if revealed.is_some() { "Hide" } else { "Reveal" },
+                            entry.name
+                        ),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.confirm(delete.clone(), false, window, cx)
+                        if matches!(&this.phase, Phase::Revealed { name, .. } if name == &reveal) {
+                            this.clear(window, cx);
+                        } else {
+                            this.confirm(reveal.clone(), true, window, cx);
+                        }
                     })),
-            );
+                )
+                .child(div().w_px().h_4().mx_1().bg(theme.border).when(
+                    revealed.is_none(),
+                    |divider| {
+                        divider
+                            .opacity(0.)
+                            .group_hover("vault-row", |style| style.opacity(1.))
+                    },
+                ))
+                .child(
+                    action("delete", IconName::Trash, format!("Delete {}", entry.name))
+                        .text_color(theme.danger)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm(delete.clone(), false, window, cx)
+                        })),
+                );
         let title = if entry.description.is_empty() {
             &entry.name
         } else {
@@ -598,7 +617,7 @@ impl View {
                 .py_1p5()
                 .child(
                     div()
-                        .flex_shrink_0()
+                        .min_w_0()
                         .max_w(px(260.))
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
