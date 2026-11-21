@@ -666,7 +666,8 @@ pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     sqlx::query("UPDATE social_deliveries SET status='cancelled' WHERE status='pending'")
         .execute(&mut *conn)
         .await?;
-    crate::db::turns::lifecycle::end_restored_social(conn).await
+    crate::db::turns::lifecycle::end_restored(conn, crate::db::turns::lifecycle::Restored::Social)
+        .await
 }
 
 /// Where a bot's setup card is, as stored in `social_setups.status`.

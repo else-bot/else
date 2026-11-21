@@ -499,7 +499,11 @@ async fn load_and_check(
     crate::connectors::store::restore_passive(&mut conn)
         .await
         .map_err(|e| BackupError::Invalid(format!("connector restore: {e}")))?;
-    crate::db::turns::lifecycle::end_restored_mail(&mut conn).await?;
+    crate::db::turns::lifecycle::end_restored(
+        &mut conn,
+        crate::db::turns::lifecycle::Restored::Mail,
+    )
+    .await?;
     crate::socials::store::restore_passive(&mut conn)
         .await
         .map_err(|e| BackupError::Invalid(format!("social restore: {e}")))?;
