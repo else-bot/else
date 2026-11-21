@@ -1094,7 +1094,7 @@ pub struct MailAttempt {
     pub action_id: Uuid,
     /// The action's status; none when the connector refused it before
     /// recording it, so nothing was sent.
-    pub status: Option<String>,
+    pub status: Option<crate::connector_core::actions::Status>,
     pub phase: Option<String>,
     pub reason: Option<String>,
     pub message_id: Option<String>,

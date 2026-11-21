@@ -9,7 +9,7 @@ use crate::socials::types::Provider;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SidebarRow {
-    question_kind: Option<String>,
+    question_kind: Option<crate::app::questions::Kind>,
     question_title: Option<String>,
     question_at: Option<DateTime<Utc>>,
     handoff_reason: Option<String>,
@@ -74,11 +74,13 @@ impl SidebarRow {
         let preview = |text: &str| super::super::reads::preview(text);
         if let (Some(title), Some(since)) = (&self.question_title, self.question_at) {
             let preview = preview(title);
-            return Some(if self.question_kind.as_deref() == Some("choice") {
-                SidebarStatus::WaitingForAnswer { preview, since }
-            } else {
-                SidebarStatus::NeedsApproval { preview, since }
-            });
+            return Some(
+                if self.question_kind == Some(crate::app::questions::Kind::Choice) {
+                    SidebarStatus::WaitingForAnswer { preview, since }
+                } else {
+                    SidebarStatus::NeedsApproval { preview, since }
+                },
+            );
         }
         if let (Some(reason), Some(since)) = (&self.handoff_reason, self.handoff_at) {
             return Some(SidebarStatus::NeedsTakeover {
