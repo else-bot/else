@@ -1,9 +1,10 @@
 //! A small S3 client for backup replication: AWS Signature V4 over
 //! HTTP(S), with only the operations the emulator probe verified so the
 //! behavior on R2 stays predictable: `PutObject` (optionally with
-//! `If-None-Match: *`), multipart create, upload, complete, list, and abort,
-//! `HeadObject`, `GetObject`, `ListObjectsV2`, and `DeleteObject`. The
-//! endpoint, region, bucket, prefix, and path-style addressing come from
+//! `If-None-Match: *`), `HeadObject`, `GetObject`, `ListObjectsV2`,
+//! `DeleteObject`, reading lifecycle rules, and listing and aborting the
+//! multipart uploads that builds up to 0.0.45 left behind. The endpoint,
+//! region, bucket, prefix, and path-style addressing come from
 //! configuration; no AWS endpoint is assumed. Credentials are never logged.
 
 use std::time::Duration;

@@ -10,7 +10,7 @@
 
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteRow;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{Encode, FromRow, Sqlite, SqliteConnection, SqlitePool, Type};
 use uuid::Uuid;
 
 use crate::app::messages::MAX_QUEUED_TURNS;
@@ -35,24 +35,11 @@ const SCAN: i64 = 128;
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')";
 
-/// A delivery's event ID, as its table stores it.
-pub enum EventId<'a> {
-    Uuid(Uuid),
-    Text(&'a str),
-}
-
-impl EventId<'_> {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Uuid(id) => id.as_bytes(),
-            Self::Text(id) => id.as_bytes(),
-        }
-    }
-}
-
 /// One kind of connected account whose events become turns. SQL fragments
 /// bind `?1` to the bot and `?2` to the account.
 pub trait Source {
+    /// A delivery's event ID, as its table stores it.
+    type Event: AsRef<[u8]> + for<'q> Encode<'q, Sqlite> + Type<Sqlite> + Sync;
     /// A pending delivery with what its notice lists.
     type Pending: for<'r> FromRow<'r, SqliteRow> + Send + Unpin;
     /// The deliveries table.
@@ -65,18 +52,23 @@ pub trait Source {
     const REVOKED: &'static str;
     /// The account's label, from the accounts table as `a`.
     const LABEL: &'static str;
-    /// The owner's instructions for this bot's trigger, or `NULL`.
-    const INSTRUCTIONS: &'static str;
     /// Up to `?3` pending deliveries, oldest first.
     const PENDING: &'static str;
 
-    fn event_id(pending: &Self::Pending) -> EventId<'_>;
-    fn notice(
-        label: &str,
-        account: Uuid,
-        instructions: Option<&str>,
-        pending: &[Self::Pending],
-    ) -> String;
+    fn event_id(pending: &Self::Pending) -> &Self::Event;
+    fn notice(label: &str, account: Uuid, pending: &[Self::Pending]) -> String;
+}
+
+/// Cancel every pending delivery, as on a restored database.
+pub async fn cancel_pending<S: Source>(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {} SET status = ?1, settled_at = {NOW} WHERE status = 'pending'",
+        S::DELIVERIES
+    )))
+    .bind(DeliveryStatus::Cancelled)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Queue turns for up to `limit` bot and account pairs with pending events.
@@ -138,20 +130,18 @@ async fn admit<S: Source>(
     .bind(DeliveryStatus::Revoked)
     .execute(&mut *tx)
     .await?;
-    let target: Option<(Uuid, i64, i64, String, Option<String>)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT c.id, c.last_turn_no, c.last_item_seq, {}, {}
-             FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
-             JOIN {accounts} a ON a.id = ?2
-             WHERE b.id = ?1 AND b.status = 'active' AND NOT b.cancel_pending AND a.state = 'active'",
-            S::LABEL,
-            S::INSTRUCTIONS
-        )))
-        .bind(bot_id)
-        .bind(account_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((conversation_id, last_turn_no, last_item_seq, label, instructions)) = target else {
+    let target: Option<(Uuid, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT c.id, c.last_turn_no, c.last_item_seq, {}
+         FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
+         JOIN {accounts} a ON a.id = ?2
+         WHERE b.id = ?1 AND b.status = 'active' AND NOT b.cancel_pending AND a.state = 'active'",
+        S::LABEL
+    )))
+    .bind(bot_id)
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((conversation_id, last_turn_no, last_item_seq, label)) = target else {
         tx.commit().await?;
         return Ok(false);
     };
@@ -197,7 +187,7 @@ async fn admit<S: Source>(
     let mut hasher = Sha256::new();
     hasher.update(b"connector-delivery\0");
     for p in &pending {
-        hasher.update(S::event_id(p).bytes());
+        hasher.update(S::event_id(p).as_ref());
     }
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
@@ -224,12 +214,7 @@ async fn admit<S: Source>(
     .bind(conversation_id)
     .bind(seq)
     .bind(turn_id)
-    .bind(S::notice(
-        &label,
-        account_id,
-        instructions.as_deref(),
-        &pending,
-    ))
+    .bind(S::notice(&label, account_id, &pending))
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
@@ -239,21 +224,17 @@ async fn admit<S: Source>(
         .execute(&mut *tx)
         .await?;
     for p in &pending {
-        let delivered = sqlx::query(sqlx::AssertSqlSafe(format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE {deliveries} SET status = ?5, turn_id = ?3, settled_at = {NOW}
              WHERE event_id = ?1 AND bot_id = ?2 AND {key} = ?4 AND status = 'pending'"
-        )));
-        let delivered = match S::event_id(p) {
-            EventId::Uuid(id) => delivered.bind(id),
-            EventId::Text(id) => delivered.bind(id),
-        };
-        delivered
-            .bind(bot_id)
-            .bind(turn_id)
-            .bind(account_id)
-            .bind(DeliveryStatus::Delivered)
-            .execute(&mut *tx)
-            .await?;
+        )))
+        .bind(S::event_id(p))
+        .bind(bot_id)
+        .bind(turn_id)
+        .bind(account_id)
+        .bind(DeliveryStatus::Delivered)
+        .execute(&mut *tx)
+        .await?;
     }
     events::turn_accepted(&mut tx, bot_id, turn_id).await?;
     tx.commit().await?;

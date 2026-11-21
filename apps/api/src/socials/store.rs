@@ -1,7 +1,9 @@
 use super::types::*;
 use crate::connector_core::actions::{BeginError, Column, Columns, Ledger, Outcome, Start};
+use crate::connector_core::inbound;
 use crate::credentials::SecretKey;
 use crate::db::in_ids;
+use crate::socials::delivery::Social;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool, types::Json};
@@ -670,9 +672,8 @@ pub async fn recover(pool: &SqlitePool) -> Result<(), Error> {
 }
 pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE social_connections SET state='paused',health='restored',generation=generation+1 WHERE state<>'removed'").execute(&mut *conn).await?;
-    sqlx::query("UPDATE social_deliveries SET status='cancelled' WHERE status='pending'")
-        .execute(&mut *conn)
-        .await?;
+    inbound::cancel_pending::<Social>(&mut *conn).await?;
+    ACTIONS.recover(&mut *conn).await?;
     crate::db::turns::lifecycle::end_restored(conn, crate::db::turns::lifecycle::Restored::Social)
         .await
 }

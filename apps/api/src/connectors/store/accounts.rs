@@ -1,6 +1,8 @@
 //! Mail accounts: their encrypted credentials, state, health and generation.
 
 use super::*;
+use crate::connector_core::inbound;
+use crate::connectors::delivery::Mail;
 
 #[derive(Clone, Copy)]
 struct Binding {
@@ -467,12 +469,7 @@ pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     )))
     .execute(&mut *tx)
     .await?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_deliveries SET status = ?1, settled_at = {NOW} WHERE status = 'pending'"
-    )))
-    .bind(DeliveryStatus::Cancelled)
-    .execute(&mut *tx)
-    .await?;
+    inbound::cancel_pending::<Mail>(&mut tx).await?;
     ACTIONS.recover(&mut tx).await?;
     tx.commit().await
 }

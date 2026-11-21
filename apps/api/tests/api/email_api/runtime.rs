@@ -329,9 +329,13 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         )
         .await
         .unwrap();
-        else_api::connectors::delivery::admit_pending(&app.db.pool, &app.state.registry, 32)
-            .await
-            .unwrap();
+        else_api::connector_core::inbound::admit_pending::<else_api::connectors::delivery::Mail>(
+            &app.db.pool,
+            &app.state.registry,
+            32,
+        )
+        .await
+        .unwrap();
         let mail_turn: Uuid = sqlx::query_scalar(
             "SELECT turn_id FROM connector_deliveries WHERE turn_id IS NOT NULL LIMIT 1",
         )
@@ -434,10 +438,31 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
                 .wake
         );
         assert_eq!(
-            else_api::connectors::delivery::admit_pending(&restored, &app.state.registry, 32)
+            else_api::connector_core::inbound::admit_pending::<else_api::connectors::delivery::Mail>(&restored, &app.state.registry, 32)
                 .await
                 .unwrap(),
             0
         );
     }
+}
+
+#[tokio::test]
+async fn a_mail_call_after_shutdown_reports_the_account_unavailable() {
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
+    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
+    let (turn, _) = h.running(&bot.to_string(), GATE).await;
+    let account = account(&h.app).await;
+    store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    let manager = h.app.state.connectors.clone();
+    let stop = CancellationToken::new();
+    stop.cancel();
+    manager.clone().run(stop).await;
+    let refused = manager
+        .execute(account.id, bot, turn, None, MailCommand::Folders)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, MailErrorCode::MailAccountUnavailable);
 }

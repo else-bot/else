@@ -174,7 +174,9 @@ impl Store {
                     .into_bytes();
                 } else if method == "GET" && key.is_empty() {
                     if url.query_pairs().any(|(k, _)| k == "uploads") {
-                        body = b"<ListMultipartUploadsResult/>".to_vec();
+                        // A least-privilege token may not list multipart uploads.
+                        status = "403 Forbidden";
+                        body = b"<Error><Code>AccessDenied</Code></Error>".to_vec();
                     } else {
                         let prefix = url
                             .query_pairs()

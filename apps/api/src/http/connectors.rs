@@ -999,16 +999,13 @@ async fn tool_call(
             store::bot_accounts(&state.db, grant.bot_id),
             store::event_account(&state.db, grant.turn_id)
         );
-        let accounts = accounts.map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
-        let source = source.map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
+        let (accounts, source) = (accounts?, source?);
         let visible = accounts.into_iter().filter_map(|(account,p)| {
             (p.read && source.is_none_or(|id| id == account.id)).then(|| json!({"id":account.id,"address":account.config.address,"provider":account.config.provider,"state":account.state,"health":account.health,"permissions":p}))
         }).collect::<Vec<_>>();
         return Ok(json!({"accounts":visible}));
     }
-    let source = store::event_account(&state.db, grant.turn_id)
-        .await
-        .map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
+    let source = store::event_account(&state.db, grant.turn_id).await?;
     let in_scope = |account_id: Uuid| source.is_none_or(|id| id == account_id);
     if matches!(op, Op::ActionStatus) {
         let request: StatusRequest = serde_json::from_value(args.clone())
@@ -1017,8 +1014,7 @@ async fn tool_call(
             return Err(MailError::new(MailErrorCode::MailForbidden));
         }
         if store::permissions(&state.db, request.account_id, grant.bot_id)
-            .await
-            .map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?
+            .await?
             .is_none_or(|p| !p.read)
         {
             return Err(MailError::new(MailErrorCode::MailForbidden));

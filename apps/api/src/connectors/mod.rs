@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::connector_core::actions::{Outcome, Start};
-use crate::connector_core::workers::{Inbox, Worker, Workers};
+use crate::connector_core::workers::{Inbox, Refused, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey, maintenance::Gate, scheduler::Scheduler};
 use store::Whereabouts;
 use types::*;
@@ -205,7 +205,10 @@ impl ConnectorManager {
         self.workers
             .get_or_spawn(id, move |inbox| manager.account_loop(id, inbox))
             .await
-            .map_err(|_| MailError::new(MailErrorCode::ConnectorLimit))
+            .map_err(|refused| match refused {
+                Refused::Full => MailError::new(MailErrorCode::ConnectorLimit),
+                Refused::ShutDown => MailError::new(MailErrorCode::MailAccountUnavailable),
+            })
     }
 
     /// Drops what the owner's reader kept for the account, so a paused,
@@ -748,7 +751,10 @@ impl ConnectorManager {
         store::ACTIONS
             .finish(&self.db, id, action_id, outcome, fields)
             .await
-            .map_err(|_| MailError::new(MailErrorCode::MailReceiptUnavailable))
+            .map_err(|error| {
+                tracing::warn!(account_id = %id, %action_id, %error, "could not record a mail action's receipt");
+                MailError::new(MailErrorCode::MailReceiptUnavailable)
+            })
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {

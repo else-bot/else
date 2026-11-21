@@ -7,12 +7,85 @@ use super::*;
 async fn restored_connections_are_passive_and_credentials_are_removed_on_disconnect() {
     let db = TestDb::migrated().await;
     let c = account(&db, "restore").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let trigger = trigger_row(&db, c.id, bot, Some("100"), "all").await;
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
+        .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
+    let turn = turn(&db, bot, ItemKind::User).await;
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id,status,turn_id,settled_at) VALUES(?1,'delivered',?2,?3,'100','2','delivered',?4,'2026-01-01T00:00:00.000+00:00')")
+        .bind(c.id).bind(bot).bind(trigger).bind(turn).execute(&db.pool).await.unwrap();
+    let action = Uuid::new_v4();
+    let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
+    store::begin_action(
+        &db.pool,
+        &c,
+        store::Action {
+            bot,
+            turn,
+            id: action,
+            destination: Some("100"),
+            payload: &payload,
+            send: false,
+        },
+    )
+    .await
+    .unwrap();
+    let finished = Uuid::new_v4();
+    store::begin_action(
+        &db.pool,
+        &c,
+        store::Action {
+            bot,
+            turn,
+            id: finished,
+            destination: Some("100"),
+            payload: &json!({"operation":"delete","destination":"100","message_id":"2"}),
+            send: false,
+        },
+    )
+    .await
+    .unwrap();
+    let settled = store::finish_action(&db.pool, c.id, finished, &Ok(json!({"deleted":true})))
+        .await
+        .unwrap();
     store::restore_passive(&mut db.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let restored = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(restored.state, ConnectionState::Paused);
     assert!(restored.generation > c.generation);
+    let delivery: (String, bool) = sqlx::query_as(
+        "SELECT status, settled_at IS NOT NULL FROM social_deliveries WHERE event_id='pending'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(delivery, ("cancelled".into(), true));
+    let delivered: (String, String) = sqlx::query_as(
+        "SELECT status, settled_at FROM social_deliveries WHERE event_id='delivered'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        delivered,
+        ("delivered".into(), "2026-01-01T00:00:00.000+00:00".into())
+    );
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, finished)
+            .await
+            .unwrap(),
+        Some(settled)
+    );
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, action)
+            .await
+            .unwrap(),
+        Some(json!({"action_id": action, "status": "uncertain"}))
+    );
     store::set_state(&db.pool, c.id, ConnectionState::Removed)
         .await
         .unwrap();
@@ -273,9 +346,13 @@ async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_mess
         .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
     let unavailable = else_api::providers::Registry::new(vec![]);
     assert_eq!(
-        else_api::socials::delivery::admit_pending(&db.pool, &unavailable, 1)
-            .await
-            .unwrap(),
+        else_api::connector_core::inbound::admit_pending::<else_api::socials::delivery::Social>(
+            &db.pool,
+            &unavailable,
+            1
+        )
+        .await
+        .unwrap(),
         0
     );
     let event = Incoming {
@@ -309,9 +386,11 @@ async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_mess
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
     assert_eq!(
-        else_api::socials::delivery::admit_pending(&db.pool, &registry, 1)
-            .await
-            .unwrap(),
+        else_api::connector_core::inbound::admit_pending::<else_api::socials::delivery::Social>(
+            &db.pool, &registry, 1
+        )
+        .await
+        .unwrap(),
         1
     );
 }
