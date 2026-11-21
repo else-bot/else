@@ -21,20 +21,9 @@ pub struct Snapshot {
     pub turns: Vec<TurnRecord>,
     /// Pass as `before_seq` to load the previous page; `None` at the start.
     pub older_before_seq: Option<i64>,
-    /// The bot's routines, at the same snapshot.
-    pub routines: Vec<super::routines::Routine>,
-    /// The bot's social triggers, at the same snapshot.
-    pub social_triggers: Vec<crate::socials::types::Trigger>,
-    /// The bot's mail triggers, at the same snapshot.
-    pub mail_triggers: Vec<crate::connectors::types::MailTrigger>,
-    /// The kinds of drafts the owner approves always.
-    pub draft_grants: Vec<else_wire::outgoing::DraftKind>,
-    /// The bot's webhooks, at the same snapshot.
-    pub webhooks: Vec<super::webhooks::Webhook>,
-    /// The bot's active watchers, at the same snapshot.
-    pub watchers: Vec<super::watchers::Watcher>,
-    /// The bot's current rules version, at the same snapshot.
-    pub rules_version: i64,
+    /// The bot's routines, triggers, webhooks, watchers, draft grants and
+    /// rules version, at the same snapshot.
+    pub extras: else_wire::conversation::BotExtras,
 }
 
 /// Read history, turns, routines, and the event cursor at one database snapshot, so a
@@ -81,13 +70,7 @@ pub async fn snapshot(
     .fetch_all(&mut *tx)
     .await?;
     super::turns::attach_owner_requests(&mut tx, &mut turns).await?;
-    let routines = super::routines::list(&mut tx, bot_id).await?;
-    let social_triggers = crate::socials::store::triggers(&mut tx, bot_id).await?;
-    let mail_triggers = crate::connectors::store::mail_triggers(&mut tx, bot_id).await?;
-    let webhooks = super::webhooks::list(&mut tx, bot_id).await?;
-    let watchers = super::watchers::list_active(&mut tx, bot_id).await?;
-    let draft_grants = super::outgoing_drafts::always_approved(&mut tx, bot_id).await?;
-    let rules_version = super::rules::version(&mut tx, bot_id).await?;
+    let extras = bot_extras(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
         bot,
@@ -95,14 +78,31 @@ pub async fn snapshot(
         items,
         turns,
         older_before_seq,
-        routines,
-        social_triggers,
-        mail_triggers,
-        draft_grants,
-        webhooks,
-        watchers,
-        rules_version,
+        extras,
     }))
+}
+
+/// The per-bot lists a snapshot and each `bot.updated` carry.
+pub async fn bot_extras(
+    conn: &mut sqlx::SqliteConnection,
+    bot_id: Uuid,
+) -> Result<else_wire::conversation::BotExtras, sqlx::Error> {
+    let routines = super::routines::list(conn, bot_id).await?;
+    let social_triggers = crate::socials::store::triggers(conn, bot_id).await?;
+    let mail_triggers = crate::connectors::store::mail_triggers(conn, bot_id).await?;
+    let webhooks = super::webhooks::list(conn, bot_id).await?;
+    let watchers = super::watchers::list_active(conn, bot_id).await?;
+    let draft_grants = super::outgoing_drafts::always_approved(conn, bot_id).await?;
+    let rules_version = super::rules::version(conn, bot_id).await?;
+    Ok(else_wire::conversation::BotExtras {
+        routines: Some(routines.iter().map(Into::into).collect()),
+        social_triggers: social_triggers.iter().map(Into::into).collect(),
+        mail_triggers: mail_triggers.iter().map(Into::into).collect(),
+        draft_grants,
+        webhooks: webhooks.iter().map(Into::into).collect(),
+        watchers: watchers.iter().map(Into::into).collect(),
+        rules_version: Some(rules_version),
+    })
 }
 
 /// The owner conversation of `bot_id` and the bot's status, without the

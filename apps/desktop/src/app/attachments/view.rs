@@ -1,7 +1,8 @@
 use super::{DraftFile, UploadState};
 use crate::app::ElseApp;
-use crate::attachments::{Attachment, byte_size};
+use crate::attachments::byte_size;
 use crate::controls::{Control as _, Scale, Tier};
+use else_wire::items::Attachment;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InlineTokenContext};

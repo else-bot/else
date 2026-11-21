@@ -200,44 +200,6 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
            FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
            WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotTask {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    /// The delegating bot's short name for the task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// What the task declared it needs from the owner; absent until it does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_need: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_line: Option<String>,
-}
-
-/// A delegated bot's settled reply, shown in the delegating bot's
-/// conversation. The item's ID is the delegation's.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotReply {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    pub status: String,
-    /// Why a failed task failed, apart from the progress it wrote.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_need: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_line: Option<String>,
-    /// The owner notices of the task and of the tasks it delegated, oldest
-    /// first, read live so settling one shows in every chat.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<else_wire::notices::ExchangeAsk>,
-}
-
 /// Whose conversation it is, as stored in `conversations.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -246,6 +208,35 @@ pub enum ConversationKind {
     Owner,
     /// A delegated task's conversation.
     Task,
+}
+
+impl From<TurnStatus> for else_wire::turns::TurnStatus {
+    fn from(status: TurnStatus) -> Self {
+        match status {
+            TurnStatus::Queued => Self::Queued,
+            TurnStatus::Preparing => Self::Preparing,
+            TurnStatus::Sending => Self::Sending,
+            TurnStatus::Running => Self::Running,
+            TurnStatus::Cancelling => Self::Cancelling,
+            TurnStatus::Waiting => Self::Waiting,
+            TurnStatus::Completed => Self::Completed,
+            TurnStatus::Interrupted => Self::Interrupted,
+            TurnStatus::Failed => Self::Failed,
+            TurnStatus::Uncertain => Self::Uncertain,
+        }
+    }
+}
+
+impl From<ItemKind> for else_wire::items::ItemKind {
+    fn from(kind: ItemKind) -> Self {
+        match kind {
+            ItemKind::User => Self::User,
+            ItemKind::Assistant => Self::Assistant,
+            ItemKind::Status => Self::Status,
+            ItemKind::Routine => Self::Routine,
+            ItemKind::Connector => Self::Connector,
+        }
+    }
 }
 
 /// What a conversation item is, as stored in `items.kind`.
@@ -278,31 +269,15 @@ pub struct ItemRecord {
     pub request_id: Option<Uuid>,
     /// Set for an owner's message sent as a reaction to an assistant message.
     pub reaction: Option<Json<Reaction>>,
-    pub bot_task: Option<Json<BotTask>>,
-    pub bot_reply: Option<Json<BotReply>>,
-    pub routine_update: Option<Json<RoutineUpdate>>,
-    pub bot_created: Option<Json<BotCreated>>,
+    pub bot_task: Option<Json<else_wire::items::BotTask>>,
+    pub bot_reply: Option<Json<else_wire::items::BotReply>>,
+    pub routine_update: Option<Json<else_wire::items::RoutineUpdate>>,
+    pub bot_created: Option<Json<else_wire::items::BotCreated>>,
     pub rules_update: Option<Json<else_wire::rules::RulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
     /// The provider attempt that wrote an assistant item.
     pub attempt: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RoutineUpdate {
-    pub routine_id: Uuid,
-    pub name: String,
-}
-
-/// The main bot's notice that `creator_bot_id` created `bot_id`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BotCreated {
-    pub bot_id: Uuid,
-    pub name: String,
-    pub creator_bot_id: Uuid,
-    pub creator_name: String,
-    pub purpose: String,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,

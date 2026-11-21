@@ -14,8 +14,10 @@ use super::message_row::{CardPlacement, short_stamp};
 use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::attachments::{Attachment, MessagePart, byte_size};
+use crate::attachments::byte_size;
 use crate::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
+use else_wire::items::Attachment;
+use else_wire::items::MessagePart;
 
 #[derive(Clone, Copy)]
 enum Choice {

@@ -542,7 +542,7 @@ async fn creation_receipt(
     .bind(seq)
     .bind(receipt_turn)
     .bind(text)
-    .bind(sqlx::types::Json(super::turns::BotCreated {
+    .bind(sqlx::types::Json(else_wire::items::BotCreated {
         bot_id,
         name: name.as_str().to_owned(),
         creator_bot_id: creator,

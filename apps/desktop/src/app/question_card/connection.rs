@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn a_future_action_leaves_the_question_available() {
-        let turn: crate::model::Turn = serde_json::from_value(json!({
+        let turn: else_wire::turns::Turn = serde_json::from_value(json!({
             "id": Uuid::nil(), "request_id": Uuid::nil(), "turn_no": 1,
             "provider_id": "test", "status": "waiting", "effect_uncertain": false,
             "questions": [{

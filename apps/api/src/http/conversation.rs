@@ -4,9 +4,8 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use else_plain_text::find::Needle;
-use else_wire::routines::{Routine, Watcher, Webhook};
+use else_wire as wire;
 use serde::Deserialize;
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath};
@@ -14,7 +13,6 @@ use super::turns::bot_deleted;
 use super::{AppState, Routes};
 use crate::db::bots::BotStatus;
 use crate::db::conversation::{self, WindowQuery};
-use crate::views::{item_json, turn_json};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -54,7 +52,7 @@ async fn snapshot(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     query: Result<Query<SnapshotQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::conversation::Snapshot>, ApiError> {
     let Query(query) = query.map_err(|_| {
         ApiError::bad_request(
             "invalid_query",
@@ -75,23 +73,17 @@ async fn snapshot(
         return Err(bot_deleted());
     }
     let bot = &snapshot.bot;
-    Ok(Json(json!({
-        "conversation_id": bot.conversation_id,
-        "bot_id": bot.id,
-        "selected_provider_id": bot.selected_provider_id,
-        "event_cursor": encode_cursor(state.server_instance_id, bot.id, snapshot.last_event_seq),
-        "items": snapshot.items.iter().map(item_json).collect::<Vec<_>>(),
-        "turns": snapshot.turns.iter().map(turn_json).collect::<Vec<_>>(),
-        "activity": else_wire::bots::Activity::from(bot),
-        "older_before_seq": snapshot.older_before_seq,
-        "routines": snapshot.routines.iter().map(Routine::from).collect::<Vec<_>>(),
-        "social_triggers": snapshot.social_triggers.iter().map(else_wire::socials::Trigger::from).collect::<Vec<_>>(),
-        "mail_triggers": snapshot.mail_triggers.iter().map(else_wire::email::MailTrigger::from).collect::<Vec<_>>(),
-        "draft_grants": snapshot.draft_grants,
-        "webhooks": snapshot.webhooks.iter().map(Webhook::from).collect::<Vec<_>>(),
-        "watchers": snapshot.watchers.iter().map(Watcher::from).collect::<Vec<_>>(),
-        "rules_version": snapshot.rules_version,
-    })))
+    Ok(Json(wire::conversation::Snapshot {
+        conversation_id: Some(bot.conversation_id),
+        bot_id: Some(bot.id),
+        selected_provider_id: bot.selected_provider_id.clone(),
+        event_cursor: encode_cursor(state.server_instance_id, bot.id, snapshot.last_event_seq),
+        items: snapshot.items.iter().map(Into::into).collect(),
+        turns: snapshot.turns.iter().map(Into::into).collect(),
+        activity: bot.into(),
+        older_before_seq: snapshot.older_before_seq,
+        extras: snapshot.extras,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -106,7 +98,7 @@ async fn search(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     query: Result<Query<SearchQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::conversation::SearchHits>, ApiError> {
     let Query(query) =
         query.map_err(|_| ApiError::bad_request("invalid_query", "Pass the search text as q."))?;
     if query.q.chars().count() > MAX_QUERY_CHARS {
@@ -127,13 +119,17 @@ async fn search(
         Some(needle) => conversation::search(&state.db, conversation_id, needle).await?,
         None => Vec::new(),
     };
-    Ok(Json(json!({
-        "total": hits.iter().map(|hit| hit.count).sum::<usize>(),
-        "hits": hits
+    Ok(Json(wire::conversation::SearchHits {
+        total: hits.iter().map(|hit| hit.count).sum(),
+        hits: hits
             .iter()
-            .map(|hit| json!({ "item_id": hit.item_id, "seq": hit.seq, "count": hit.count }))
-            .collect::<Vec<_>>(),
-    })))
+            .map(|hit| wire::conversation::SearchHit {
+                item_id: hit.item_id,
+                seq: hit.seq,
+                count: hit.count,
+            })
+            .collect(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -153,7 +149,7 @@ async fn window(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     query: Result<Query<WindowParams>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::conversation::Window>, ApiError> {
     let invalid = || {
         ApiError::bad_request(
             "invalid_query",
@@ -189,12 +185,12 @@ async fn window(
     if window.status != BotStatus::Active {
         return Err(bot_deleted());
     }
-    Ok(Json(json!({
-        "items": window.items.iter().map(item_json).collect::<Vec<_>>(),
-        "turns": window.turns.iter().map(turn_json).collect::<Vec<_>>(),
-        "older_gap": window.older_gap,
-        "newer_gap": window.newer_gap,
-    })))
+    Ok(Json(wire::conversation::Window {
+        items: window.items.iter().map(Into::into).collect(),
+        turns: window.turns.iter().map(Into::into).collect(),
+        older_gap: window.older_gap,
+        newer_gap: window.newer_gap,
+    }))
 }
 
 pub async fn bot_is_active(

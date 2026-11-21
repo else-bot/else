@@ -9,187 +9,48 @@ mod skills;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use else_wire::bots::Activity;
 use else_wire::computers::ComputerHandoff;
+use else_wire::conversation::{BotExtras, BotUpdated, Event, EventKind, Snapshot, Window};
 use else_wire::delegations::Delegation;
-use else_wire::email::{MailTrigger, TurnMail};
-use else_wire::items::ItemKind;
-use else_wire::notices::{ExchangeAsk, OwnerNotice, OwnerNoticeStatus};
-use else_wire::outgoing::{DraftKind, DraftStatus, OutgoingDraft};
+use else_wire::email::MailTrigger;
+use else_wire::items::{Item, ItemKind, MessagePart, ReactionKind};
+use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
+use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
-use else_wire::routines::{Routine, RoutineRun, Watcher, Webhook};
-use else_wire::rules::RulesUpdate;
+use else_wire::routines::{Routine, Watcher, Webhook};
 use else_wire::secrets::SecretRequest;
-#[cfg(test)]
-use else_wire::secrets::SecretRequestStatus;
 use else_wire::skills::{SkillInstall, SkillInstallStatus};
 use else_wire::socials::{SocialSetup, Trigger};
-use else_wire::turns::TurnError;
-use else_wire::turns::TurnStatus;
+use else_wire::turns::Turn;
 use else_wire::waits::{ComputerJobWait, McpWait};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
-
-use else_wire::bots::Activity;
-use else_wire::bots::Bot;
 
 pub(crate) mod outgoing;
 
-/// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One event of a `bot:<id>` channel: its cursor and its event, decoded
+/// once. An event this build does not know, or one whose data does not
+/// parse, waits for `apply` to ask for a snapshot.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub id: Option<String>,
-    pub event: String,
-    pub data: String,
+    pub event: Result<Event, Reset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Item {
-    pub id: Uuid,
-    pub seq: i64,
-    pub turn_id: Uuid,
-    pub request_id: Option<Uuid>,
-    pub kind: ItemKind,
-    pub text: String,
-    #[serde(default)]
-    pub parts: Vec<crate::attachments::MessagePart>,
-    pub provider_id: Option<String>,
-    /// Absent from older servers.
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-    /// Set on the owner's feedback message sent as a reaction.
-    #[serde(default)]
-    pub reaction: Option<Reaction>,
-    #[serde(default)]
-    pub bot_task: Option<BotTask>,
-    #[serde(default)]
-    pub bot_reply: Option<BotReply>,
-    #[serde(default)]
-    pub routine_update: Option<RoutineUpdate>,
-    #[serde(default)]
-    pub bot_created: Option<BotCreated>,
-    #[serde(default)]
-    pub rules_update: Option<RulesUpdate>,
-    /// The provider attempt that wrote an assistant item. Absent from older servers.
-    #[serde(default)]
-    pub attempt: Option<i64>,
-}
-
-/// How far a joined message got into the reply it joined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SteerStatus {
-    Pending,
-    Sending,
-    /// The reply took it and answers it.
-    Delivered,
-}
-
-/// The main bot's notice that `creator_bot_id` created `bot_id`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotCreated {
-    pub bot_id: Uuid,
-    pub name: String,
-    pub creator_bot_id: Uuid,
-    pub creator_name: String,
-    pub purpose: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct RoutineUpdate {
-    pub routine_id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotTask {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    /// The delegating bot's short name for the task. Absent from older
-    /// servers and older tasks.
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(flatten)]
-    pub declared: Declared,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct BotReply {
-    pub sender_bot_id: Uuid,
-    pub sender_name: String,
-    pub prompt: String,
-    pub status: BotReplyStatus,
-    /// Why a failed task failed, apart from the progress it wrote. Absent
-    /// from older servers.
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(flatten)]
-    pub declared: Declared,
-    /// The owner notices of the task and of the tasks it delegated, oldest
-    /// first.
-    #[serde(default)]
-    pub asks: Vec<ExchangeAsk>,
-}
-
-/// What a delegated task declared it needs from the owner. The bot's
-/// judgment, shown as its words, never an approval.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnerNeed {
-    Nothing,
-    /// Done, with the bot's one line for the owner.
-    Fyi(String),
-    Decision,
-    Blocked,
-}
-
-/// A task's declared need. `None` when it declared nothing: an older
-/// server or task, or a bot that forgot. Never read as "nothing".
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(from = "DeclaredNeed")]
-pub struct Declared(pub Option<OwnerNeed>);
-
-#[derive(Deserialize)]
-struct DeclaredNeed {
-    #[serde(default)]
-    owner_need: Option<String>,
-    #[serde(default)]
-    owner_line: Option<String>,
-}
-
-impl From<DeclaredNeed> for Declared {
-    fn from(raw: DeclaredNeed) -> Self {
-        Self(match (raw.owner_need.as_deref(), raw.owner_line) {
-            (Some("nothing"), _) => Some(OwnerNeed::Nothing),
-            (Some("fyi"), Some(line)) => Some(OwnerNeed::Fyi(line)),
-            (Some("decision"), _) => Some(OwnerNeed::Decision),
-            (Some("blocked"), _) => Some(OwnerNeed::Blocked),
-            _ => None,
-        })
+impl Frame {
+    /// Decode a channel message's `event` and `data`.
+    pub fn decode(id: Option<String>, message: &serde_json::Value) -> Self {
+        let event = Event::deserialize(message).map_err(|_| {
+            match EventKind::deserialize(&message["event"]) {
+                Ok(EventKind::Unknown) | Err(_) => {
+                    Reset::UnknownKind(message["event"].as_str().unwrap_or_default().to_owned())
+                }
+                Ok(_) => Reset::Malformed,
+            }
+        });
+        Self { id, event }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BotReplyStatus {
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-/// The owner's reaction to one of the bot's messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reaction {
-    pub item_id: Uuid,
-    pub kind: ReactionKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReactionKind {
-    ThumbsUp,
-    ThumbsDown,
 }
 
 pub const APPROVE: &str = "approve";
@@ -198,75 +59,6 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
 pub const APPROVE_TASK: &str = "approve_task";
-
-/// How often the attempt limit cut a turn that continued, of how many
-/// continuations a request may take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct LimitContinued {
-    pub count: i64,
-    pub max: i64,
-    pub minutes: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Turn {
-    pub id: Uuid,
-    pub request_id: Uuid,
-    pub turn_no: i64,
-    /// The turn's latest provider attempt. Absent from older servers.
-    #[serde(default)]
-    pub attempt: Option<i64>,
-    /// Set once the attempt limit cut the turn and it continued. Absent
-    /// from older servers.
-    #[serde(default)]
-    pub limit_continued: Option<LimitContinued>,
-    pub provider_id: String,
-    pub status: TurnStatus,
-    pub error: Option<TurnError>,
-    pub effect_uncertain: bool,
-    #[serde(default)]
-    pub started_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub finished_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub reaction: Option<Reaction>,
-    /// The running reply this message joined. Absent from older servers.
-    #[serde(default)]
-    pub steered_into: Option<Uuid>,
-    /// How far this message got into that reply.
-    #[serde(default)]
-    pub steer_status: Option<SteerStatus>,
-    #[serde(default)]
-    pub secret_requests: Vec<SecretRequest>,
-    #[serde(default)]
-    pub skill_installs: Vec<SkillInstall>,
-    /// Absent from servers without owner questions.
-    #[serde(default)]
-    pub questions: Vec<Question>,
-    #[serde(default)]
-    pub routine: Option<RoutineRun>,
-    /// The emails whose arrival started this turn. Absent from older servers.
-    #[serde(default)]
-    pub mail: Vec<TurnMail>,
-    #[serde(default)]
-    pub outgoing_drafts: Vec<OutgoingDraft>,
-    #[serde(default)]
-    pub social_setups: Vec<SocialSetup>,
-    /// Tasks this turn handed to other bots. Absent from older servers.
-    #[serde(default)]
-    pub delegations: Vec<Delegation>,
-    /// MCP jobs this turn waits on. Absent from older servers.
-    #[serde(default)]
-    pub mcp_waits: Vec<McpWait>,
-    /// Background computer jobs this turn waits on. Absent from older servers.
-    #[serde(default)]
-    pub computer_job_waits: Vec<ComputerJobWait>,
-    /// Requests that the owner take over the computer. Absent from older servers.
-    #[serde(default)]
-    pub computer_handoffs: Vec<ComputerHandoff>,
-    #[serde(default)]
-    pub owner_notices: Vec<OwnerNotice>,
-}
 
 /// One thing a bot waits on, as the owner sees it above the composer.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,106 +94,6 @@ impl Wait<'_> {
             Self::Task(task) => !task.status.settled(),
         }
     }
-}
-
-impl Turn {
-    /// The reply this message joined took it, so that reply answers it.
-    pub fn taken_by_reply(&self) -> bool {
-        self.steer_status == Some(SteerStatus::Delivered)
-    }
-
-    /// Whether the turn waits on work of its own rather than on the owner.
-    pub fn waits_on_job(&self) -> bool {
-        !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()
-    }
-
-    /// The tasks it handed to other bots that have not ended.
-    pub fn open_delegations(&self) -> Vec<&Delegation> {
-        self.delegations
-            .iter()
-            .filter(|d| !d.status.settled())
-            .collect()
-    }
-
-    /// Whether the owner holds it: a pending skill install, secret, draft,
-    /// question, or account setup.
-    pub fn waits_on_owner(&self) -> bool {
-        self.skill_installs
-            .iter()
-            .any(|r| r.status == SkillInstallStatus::Pending)
-            || self.secret_requests.iter().any(|r| r.is_pending())
-            || self
-                .outgoing_drafts
-                .iter()
-                .any(|d| d.status == DraftStatus::Pending)
-            || self.questions.iter().any(|q| q.is_pending())
-            || self.social_setups.iter().any(|setup| setup.is_pending())
-    }
-
-    /// Parked only on tasks it handed to other bots.
-    pub fn waits_on_bots(&self) -> bool {
-        self.status == TurnStatus::Waiting
-            && !self.waits_on_job()
-            && !self.waits_on_owner()
-            && !self.open_delegations().is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Snapshot {
-    pub selected_provider_id: Option<String>,
-    pub event_cursor: String,
-    pub items: Vec<Item>,
-    pub turns: Vec<Turn>,
-    pub activity: Activity,
-    pub older_before_seq: Option<i64>,
-    /// Absent from servers without routines.
-    #[serde(default)]
-    pub routines: Vec<Routine>,
-    #[serde(default)]
-    pub social_triggers: Vec<Trigger>,
-    /// Absent from servers without email wake-ups.
-    #[serde(default)]
-    pub mail_triggers: Vec<MailTrigger>,
-    /// Absent from servers that don't list webhooks in the snapshot.
-    #[serde(default)]
-    pub webhooks: Vec<Webhook>,
-    #[serde(default)]
-    pub watchers: Vec<Watcher>,
-    /// The kinds of drafts the owner approves always.
-    #[serde(default)]
-    pub draft_grants: Vec<DraftKind>,
-    /// Absent from servers without rules.
-    #[serde(default)]
-    pub rules_version: i64,
-}
-
-/// Shown items loaded around one message, between two the owner already
-/// has.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Window {
-    pub items: Vec<Item>,
-    pub turns: Vec<Turn>,
-    /// Shown items still missing below the first item.
-    pub older_gap: i64,
-    /// Shown items still missing above the last item.
-    pub newer_gap: i64,
-}
-
-/// The messages a search found, newest first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SearchHits {
-    /// Matches in all of them.
-    pub total: usize,
-    pub hits: Vec<SearchHit>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct SearchHit {
-    pub item_id: Uuid,
-    pub seq: i64,
-    /// Matches in this message.
-    pub count: usize,
 }
 
 /// How many shown items an unloaded stretch holds.
@@ -444,13 +136,7 @@ pub struct Conversation {
     gaps: BTreeMap<i64, GapSize>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
-    routines: Vec<Routine>,
-    social_triggers: Vec<Trigger>,
-    mail_triggers: Vec<MailTrigger>,
-    webhooks: Vec<Webhook>,
-    watchers: Vec<Watcher>,
-    draft_grants: Vec<DraftKind>,
-    rules_version: i64,
+    extras: BotExtras,
     /// Read from the page saved on disk, so possibly behind the server.
     saved: bool,
 }
@@ -473,13 +159,7 @@ impl Conversation {
             gaps: BTreeMap::new(),
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
-            routines: snapshot.routines,
-            social_triggers: snapshot.social_triggers,
-            mail_triggers: snapshot.mail_triggers,
-            webhooks: snapshot.webhooks,
-            watchers: snapshot.watchers,
-            draft_grants: snapshot.draft_grants,
-            rules_version: snapshot.rules_version,
+            extras: snapshot.extras,
             saved: false,
         };
         for item in snapshot.items {
@@ -537,81 +217,34 @@ impl Conversation {
                 got: seq,
             });
         }
-        let data: serde_json::Value =
-            serde_json::from_str(&frame.data).map_err(|_| Reset::Malformed)?;
-        match frame.event.as_str() {
-            "item.upsert" => {
-                let item: Item =
-                    serde_json::from_value(data["item"].clone()).map_err(|_| Reset::Malformed)?;
+        match frame.event.clone()? {
+            Event::ItemUpsert(upsert) => {
+                let item = upsert.item;
                 if self.seq_of.contains_key(&item.id) {
                     self.upsert_item(item);
                 } else {
                     self.insert_unseen(item);
                 }
             }
-            "item.delta" => {
-                let item_id: Uuid = serde_json::from_value(data["item_id"].clone())
-                    .map_err(|_| Reset::Malformed)?;
-                let offset = data["offset_utf8"].as_u64().ok_or(Reset::Malformed)? as usize;
-                let text = data["text"].as_str().ok_or(Reset::Malformed)?;
-                let seq_of_item = *self.seq_of.get(&item_id).ok_or(Reset::UnknownItem)?;
+            Event::ItemDelta(delta) => {
+                let seq_of_item = *self.seq_of.get(&delta.item_id).ok_or(Reset::UnknownItem)?;
                 let item = self.items.get_mut(&seq_of_item).ok_or(Reset::UnknownItem)?;
-                if item.text.len() != offset {
+                if item.text.len() as u64 != delta.offset_utf8 {
                     return Err(Reset::OffsetMismatch);
                 }
-                item.text.push_str(text);
+                item.text.push_str(&delta.text);
             }
-            "turn.updated" => {
-                let turn: Turn =
-                    serde_json::from_value(data["turn"].clone()).map_err(|_| Reset::Malformed)?;
-                self.turns.insert(turn.id, turn);
+            Event::TurnUpdated(update) => {
+                self.turns.insert(update.turn.id, update.turn);
             }
-            "bot.updated" => {
-                let bot: Bot =
-                    serde_json::from_value(data["bot"].clone()).map_err(|_| Reset::Malformed)?;
+            Event::BotUpdated(update) => {
+                let BotUpdated { bot, extras, .. } = *update;
                 self.activity = bot.activity;
                 if bot.selected_provider_id.is_some() {
                     self.selected_provider_id = bot.selected_provider_id;
                 }
-                if let Some(routines) = data.get("routines") {
-                    self.routines =
-                        serde_json::from_value(routines.clone()).map_err(|_| Reset::Malformed)?;
-                }
-                if let Some(version) = data.get("rules_version").and_then(|v| v.as_i64()) {
-                    self.rules_version = version;
-                }
-                self.social_triggers = data
-                    .get("social_triggers")
-                    .map(|triggers| serde_json::from_value(triggers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.mail_triggers = data
-                    .get("mail_triggers")
-                    .map(|triggers| serde_json::from_value(triggers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.webhooks = data
-                    .get("webhooks")
-                    .map(|webhooks| serde_json::from_value(webhooks.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.watchers = data
-                    .get("watchers")
-                    .map(|watchers| serde_json::from_value(watchers.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
-                self.draft_grants = data
-                    .get("draft_grants")
-                    .map(|grants| serde_json::from_value(grants.clone()))
-                    .transpose()
-                    .map_err(|_| Reset::Malformed)?
-                    .unwrap_or_default();
+                self.extras.update(extras);
             }
-            other => return Err(Reset::UnknownKind(other.to_owned())),
         }
         self.applied = seq;
         Ok(Applied::Changed)
@@ -919,7 +552,7 @@ impl Conversation {
         draft
             .kind
             .as_ref()
-            .is_some_and(|kind| self.draft_grants.contains(kind))
+            .is_some_and(|kind| self.extras.draft_grants.contains(kind))
     }
 
     pub fn update_draft(&mut self, draft: OutgoingDraft) {
@@ -988,33 +621,38 @@ impl Conversation {
     }
 
     pub fn social_triggers(&self) -> &[Trigger] {
-        &self.social_triggers
+        &self.extras.social_triggers
     }
 
     pub fn mail_triggers(&self) -> &[MailTrigger] {
-        &self.mail_triggers
+        &self.extras.mail_triggers
     }
 
     pub fn webhooks(&self) -> &[Webhook] {
-        &self.webhooks
+        &self.extras.webhooks
     }
 
     pub fn watchers(&self) -> &[Watcher] {
-        &self.watchers
+        &self.extras.watchers
     }
 
     pub fn routines(&self) -> &[Routine] {
-        &self.routines
+        self.extras.routines.as_deref().unwrap_or_default()
     }
 
     pub fn rules_version(&self) -> i64 {
-        self.rules_version
+        self.extras.rules_version.unwrap_or_default()
     }
 
     /// A routine from a change response. Only a newer version replaces the
     /// one the stream delivered, so a late response never undoes an event.
     pub fn apply_routine(&mut self, routine: Routine) {
-        if let Some(current) = self.routines.iter_mut().find(|r| r.id == routine.id)
+        if let Some(current) = self
+            .extras
+            .routines
+            .iter_mut()
+            .flatten()
+            .find(|r| r.id == routine.id)
             && routine.updated_at > current.updated_at
         {
             *current = routine;
@@ -1069,7 +707,7 @@ impl Conversation {
                     || item
                         .parts
                         .iter()
-                        .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+                        .any(|part| matches!(part, MessagePart::File { .. }))
             })
             .map(|(_, item)| item)
             .collect()
@@ -1092,7 +730,7 @@ impl Conversation {
             && !item
                 .parts
                 .iter()
-                .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+                .any(|part| matches!(part, MessagePart::File { .. }))
     }
 
     pub fn has_request(&self, request_id: Uuid) -> bool {
@@ -1106,8 +744,14 @@ impl Conversation {
 mod tests {
     use super::outgoing::OutgoingDraftEdit as _;
     use super::*;
+    use else_wire::bots::Bot;
+    use else_wire::items::BotReplyStatus;
+    use else_wire::routines::RoutineRun;
     use else_wire::routines::{RunStatus, WatcherStatus};
+    use else_wire::rules::RulesUpdate;
     use else_wire::rules::{DiffOp, RuleChange, RulesFile};
+    use else_wire::secrets::SecretRequestStatus;
+    use else_wire::turns::TurnStatus;
     use serde_json::json;
 
     const PREFIX: &str =
@@ -1143,11 +787,10 @@ mod tests {
     }
 
     fn frame(seq: i64, event: &str, data: serde_json::Value) -> Frame {
-        Frame {
-            id: Some(format!("{PREFIX}:{seq}")),
-            event: event.into(),
-            data: data.to_string(),
-        }
+        Frame::decode(
+            Some(format!("{PREFIX}:{seq}")),
+            &json!({ "event": event, "data": data }),
+        )
     }
 
     fn delta(seq: i64, id: u128, offset: usize, text: &str) -> Frame {
@@ -1542,8 +1185,8 @@ mod tests {
             assert!(!c.is_feedback_acknowledgement(&useful));
         }
         let mut file: Item = serde_json::from_value(reply.clone()).unwrap();
-        file.parts.push(crate::attachments::MessagePart::File {
-            file: crate::attachments::Attachment {
+        file.parts.push(else_wire::items::MessagePart::File {
+            file: else_wire::items::Attachment {
                 id: Uuid::new_v4(),
                 name: "report.txt".into(),
                 media_type: "text/plain".into(),
@@ -1714,6 +1357,10 @@ mod tests {
             c.apply(&frame(2, "mystery", json!({}))),
             Err(Reset::UnknownKind("mystery".into()))
         );
+        assert_eq!(
+            c.apply(&frame(2, "item.delta", json!({ "item_id": "x" }))),
+            Err(Reset::Malformed)
+        );
         let mut other = delta(2, 2, 2, "c");
         other.id = Some(
             "33333333-3333-3333-3333-333333333333:22222222-2222-2222-2222-222222222222:2".into(),
@@ -1832,8 +1479,9 @@ mod tests {
     #[test]
     fn routines_come_from_the_snapshot_and_each_bot_update() {
         let mut first = snapshot(1, vec![], Some(5));
-        first.routines =
-            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        first.extras.routines = Some(vec![
+            serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap(),
+        ]);
         let mut c = Conversation::from_snapshot(first).unwrap();
         assert_eq!(c.routines().len(), 1);
         assert!(c.routines()[0].enabled);
@@ -1865,7 +1513,7 @@ mod tests {
     #[test]
     fn the_rules_version_follows_the_snapshot_and_bot_updates() {
         let mut first = snapshot(1, vec![], None);
-        first.rules_version = 2;
+        first.extras.rules_version = Some(2);
         let mut c = Conversation::from_snapshot(first).unwrap();
         assert_eq!(c.rules_version(), 2);
         c.apply(&bot_updated(2, None)).unwrap();
@@ -1970,7 +1618,7 @@ mod tests {
             "Discord"
         );
         let mut older = snapshot(1, vec![], None);
-        older.social_triggers =
+        older.extras.social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.merge_older(older);
         assert!(
@@ -2042,7 +1690,7 @@ mod tests {
             })
         };
         let mut first = snapshot(1, vec![], None);
-        first.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
+        first.extras.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
         let mut conversation = Conversation::from_snapshot(first).unwrap();
         let listed = &conversation.webhooks()[0];
         assert_eq!(listed.name, "Deploys");
@@ -2134,7 +1782,7 @@ mod tests {
     fn older_servers_without_social_triggers_use_an_empty_list() {
         let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
         assert!(conversation.social_triggers().is_empty());
-        conversation.social_triggers =
+        conversation.extras.social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.apply(&bot_updated(2, None)).unwrap();
         assert!(conversation.social_triggers().is_empty());
@@ -2143,8 +1791,9 @@ mod tests {
     #[test]
     fn a_late_change_response_never_undoes_a_newer_event() {
         let mut first = snapshot(1, vec![], None);
-        first.routines =
-            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        first.extras.routines = Some(vec![
+            serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap(),
+        ]);
         let mut c = Conversation::from_snapshot(first).unwrap();
         let paused: Routine =
             serde_json::from_value(routine(false, "2026-11-02T00:00:00Z", None)).unwrap();

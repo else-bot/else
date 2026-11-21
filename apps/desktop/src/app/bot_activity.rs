@@ -8,9 +8,13 @@ use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
 use super::conversation::{ReplyLayout, Reveal, Spot};
 use super::transcript::TranscriptRow;
 use super::{ElseApp, RowKey};
-use crate::attachments::MessagePart;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{BotCreated, BotReplyStatus, Conversation, Item, OwnerNeed};
+use crate::model::Conversation;
+use else_wire::items::BotCreated;
+use else_wire::items::BotReplyStatus;
+use else_wire::items::Item;
+use else_wire::items::MessagePart;
+use else_wire::items::OwnerNeed;
 use else_wire::notices::{ExchangeAsk, OwnerNotice, OwnerNoticeStatus};
 use else_wire::turns::TurnStatus;
 use gpui_kit::base::ElementExt as _;
@@ -43,7 +47,7 @@ impl BotActivity {
 /// received task takes it from the turn that ran it.
 fn outcome(item: &Item, conversation: &Conversation) -> Option<BotReplyStatus> {
     if let Some(reply) = &item.bot_reply {
-        return Some(reply.status);
+        return Some(reply.status.clone());
     }
     item.bot_task.as_ref()?;
     match conversation.turn(item.turn_id)?.status {
@@ -77,13 +81,12 @@ fn has_pending_ask(item: &Item) -> bool {
 }
 
 /// What the task behind `item` declared it needs from the owner.
-fn declared_need(item: &Item) -> Option<&OwnerNeed> {
-    item.bot_reply
-        .as_ref()
-        .map(|reply| &reply.declared)
-        .or_else(|| item.bot_task.as_ref().map(|task| &task.declared))?
-        .0
-        .as_ref()
+fn declared_need(item: &Item) -> Option<OwnerNeed<'_>> {
+    match (&item.bot_reply, &item.bot_task) {
+        (Some(reply), _) => reply.declared(),
+        (None, Some(task)) => task.declared(),
+        (None, None) => None,
+    }
 }
 
 fn task_title(item: &Item) -> Option<&str> {
@@ -370,7 +373,7 @@ impl<'a> Block<'a> {
 
     fn owner_line(&self) -> Option<&'a str> {
         match declared_need(self.item)? {
-            OwnerNeed::Fyi(line) => Some(line.as_str()),
+            OwnerNeed::Fyi(line) => Some(line),
             _ => None,
         }
     }
@@ -1120,8 +1123,9 @@ mod tests {
         ActivityStatus, Block, Fold, Side, block_status, excerpt, excerpt_message, exchange_asks,
         task_title,
     };
-    use crate::attachments::{Attachment, MessagePart};
     use crate::model::Conversation;
+    use else_wire::items::Attachment;
+    use else_wire::items::MessagePart;
     use else_wire::notices::OwnerNoticeStatus;
     use serde_json::json;
     use uuid::Uuid;

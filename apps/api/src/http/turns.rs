@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
@@ -15,7 +15,7 @@ use crate::app::messages::{InvalidMessage, MessagePart, Reaction, canonical_part
 use crate::app::providers::Availability;
 use crate::db::bots::{self, BotStatus};
 use crate::db::turns::{self, AcceptError, SendRequest};
-use crate::views::*;
+use else_wire as wire;
 
 pub fn routes() -> Routes {
     // Sending stays open so its handler can queue the message for after
@@ -141,7 +141,10 @@ async fn send(
     };
     Ok((
         status,
-        Json(json!({ "item": item_json(&accepted.item), "turn": turn_json(&accepted.turn) })),
+        Json(wire::conversation::Sent {
+            item: (&accepted.item).into(),
+            turn: (&accepted.turn).into(),
+        }),
     )
         .into_response())
 }
@@ -255,7 +258,7 @@ async fn accept_send(
 async fn by_request(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<wire::conversation::Sent>, ApiError> {
     let bot = crate::db::bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -265,9 +268,10 @@ async fn by_request(
     let (turn, item) = turns::find_by_request(&state.db, bot_id, request_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(
-        json!({ "item": item_json(&item), "turn": turn_json(&turn) }),
-    ))
+    Ok(Json(wire::conversation::Sent {
+        item: (&item).into(),
+        turn: (&turn).into(),
+    }))
 }
 
 #[derive(Deserialize)]

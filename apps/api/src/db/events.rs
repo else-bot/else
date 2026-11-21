@@ -4,21 +4,27 @@
 //! sequences follow commit order. EventHub observes committed data versions;
 //! rows remain authoritative and streams also poll as a fallback.
 
-use else_wire::routines::{Routine, Watcher, Webhook};
-use serde_json::{Value, json};
+use else_wire::conversation::{BotUpdated, Event, ItemDelta, ItemUpsert, TurnUpdated};
+use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::db::turns::{ConversationKind, ItemKind};
-use crate::db::{bots, routines, turns};
-use crate::views::{item_json, turn_json};
+use crate::db::{bots, turns};
 
 async fn append(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
-    kind: &str,
-    data: Value,
+    event: Event,
 ) -> Result<i64, sqlx::Error> {
+    let kind = event.kind().as_str();
+    let data = match &event {
+        Event::ItemUpsert(data) => serde_json::to_value(data),
+        Event::ItemDelta(data) => serde_json::to_value(data),
+        Event::TurnUpdated(data) => serde_json::to_value(data),
+        Event::BotUpdated(data) => serde_json::to_value(data),
+    }
+    .map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
     let seq: i64 = sqlx::query_scalar(
         "UPDATE bots SET last_event_seq = last_event_seq + 1 WHERE id = ?1 RETURNING last_event_seq",
     )
@@ -51,34 +57,15 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
                 .bind(bot_id)
                 .fetch_one(&mut *conn)
                 .await?;
-        let routines: Vec<Routine> = routines::list(conn, bot_id)
-            .await?
-            .iter()
-            .map(Routine::from)
-            .collect();
-        let social_triggers = crate::socials::store::triggers(conn, bot_id).await?;
-        let mail_triggers = crate::connectors::store::mail_triggers(conn, bot_id).await?;
-        let webhooks: Vec<Webhook> = super::webhooks::list(conn, bot_id)
-            .await?
-            .iter()
-            .map(Webhook::from)
-            .collect();
-        let watchers: Vec<Watcher> = super::watchers::list_active(conn, bot_id)
-            .await?
-            .iter()
-            .map(Watcher::from)
-            .collect();
-        let rules_version = super::rules::version(conn, bot_id).await?;
-        let draft_grants = super::outgoing_drafts::always_approved(conn, bot_id).await?;
+        let extras = super::conversation::bot_extras(conn, bot_id).await?;
         append(
             conn,
             bot_id,
-            "bot.updated",
-            json!({ "bot_id": bot_id, "bot": else_wire::bots::Bot::from(&bot), "routines": routines,
-                    "social_triggers": social_triggers.iter().map(else_wire::socials::Trigger::from).collect::<Vec<_>>(),
-                    "mail_triggers": mail_triggers.iter().map(else_wire::email::MailTrigger::from).collect::<Vec<_>>(),
-                    "webhooks": webhooks, "watchers": watchers, "draft_grants": draft_grants,
-                    "rules_version": rules_version }),
+            Event::BotUpdated(Box::new(BotUpdated {
+                bot_id: Some(bot_id),
+                bot: (&bot).into(),
+                extras,
+            })),
         )
         .await?;
     }
@@ -97,12 +84,12 @@ pub async fn item_upsert(
     {
         return Ok(());
     }
-    let data = json!({
-        "bot_id": bot_id,
-        "conversation_id": item.conversation_id,
-        "item": item_json(&item),
-    });
-    append(conn, bot_id, "item.upsert", data).await?;
+    let event = Event::ItemUpsert(Box::new(ItemUpsert {
+        bot_id: Some(bot_id),
+        conversation_id: Some(item.conversation_id),
+        item: (&item).into(),
+    }));
+    append(conn, bot_id, event).await?;
     Ok(())
 }
 
@@ -117,14 +104,14 @@ pub async fn item_delta(
     if is_task(conn, conversation_id).await? {
         return Ok(());
     }
-    let data = json!({
-        "bot_id": bot_id,
-        "conversation_id": conversation_id,
-        "item_id": item_id,
-        "offset_utf8": offset,
-        "text": text,
+    let event = Event::ItemDelta(ItemDelta {
+        bot_id: Some(bot_id),
+        conversation_id: Some(conversation_id),
+        item_id,
+        offset_utf8: u64::try_from(offset).unwrap_or_default(),
+        text: text.to_owned(),
     });
-    append(conn, bot_id, "item.delta", data).await?;
+    append(conn, bot_id, event).await?;
     Ok(())
 }
 
@@ -149,12 +136,12 @@ pub async fn turn_changed(
             .bind(bot_id)
             .fetch_one(&mut *conn)
             .await?;
-    let data = json!({
-        "bot_id": bot_id,
-        "conversation_id": owner_conversation_id,
-        "turn": turn_json(&turn),
-    });
-    append(conn, bot_id, "turn.updated", data).await?;
+    let event = Event::TurnUpdated(Box::new(TurnUpdated {
+        bot_id: Some(bot_id),
+        conversation_id: Some(owner_conversation_id),
+        turn: (&turn).into(),
+    }));
+    append(conn, bot_id, event).await?;
     bot_updated(conn, bot_id).await?;
     crate::db::delegations::publish_reply(conn, turn_id).await?;
     root_changed(conn, turn_id).await?;
@@ -213,12 +200,12 @@ async fn reply_drafts_changed(
     .await?;
     for (bot_id, turn_id, conversation_id) in shown {
         let turn = turns::load_turn(conn, turn_id).await?;
-        let data = json!({
-            "bot_id": bot_id,
-            "conversation_id": conversation_id,
-            "turn": turn_json(&turn),
-        });
-        append(conn, bot_id, "turn.updated", data).await?;
+        let event = Event::TurnUpdated(Box::new(TurnUpdated {
+            bot_id: Some(bot_id),
+            conversation_id: Some(conversation_id),
+            turn: (&turn).into(),
+        }));
+        append(conn, bot_id, event).await?;
     }
     Ok(())
 }
@@ -245,12 +232,12 @@ async fn root_changed(conn: &mut SqliteConnection, task_turn: Uuid) -> Result<()
     .await?;
     for (bot_id, root_turn) in roots {
         let turn = turns::load_turn(conn, root_turn).await?;
-        let data = json!({
-            "bot_id": bot_id,
-            "conversation_id": turn.conversation_id,
-            "turn": turn_json(&turn),
-        });
-        append(conn, bot_id, "turn.updated", data).await?;
+        let event = Event::TurnUpdated(Box::new(TurnUpdated {
+            bot_id: Some(bot_id),
+            conversation_id: Some(turn.conversation_id),
+            turn: (&turn).into(),
+        }));
+        append(conn, bot_id, event).await?;
     }
     Ok(())
 }

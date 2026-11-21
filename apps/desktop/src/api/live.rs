@@ -139,11 +139,7 @@ pub(super) fn route(
     }
     Some(LiveEvent::Bot {
         bot,
-        message: StreamMessage::Frame(Frame {
-            id: Some(id),
-            event: message["event"].as_str().unwrap_or_default().to_owned(),
-            data: message["data"].to_string(),
-        }),
+        message: StreamMessage::Frame(Frame::decode(Some(id), message)),
     })
 }
 

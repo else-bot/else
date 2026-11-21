@@ -154,6 +154,34 @@ pub enum ReactionKind {
     ThumbsDown,
 }
 
+impl From<Reaction> for else_wire::items::Reaction {
+    fn from(reaction: Reaction) -> Self {
+        Self {
+            item_id: reaction.item_id,
+            kind: match reaction.kind {
+                ReactionKind::ThumbsUp => else_wire::items::ReactionKind::ThumbsUp,
+                ReactionKind::ThumbsDown => else_wire::items::ReactionKind::ThumbsDown,
+            },
+        }
+    }
+}
+
+impl From<&MessagePart> for else_wire::items::MessagePart {
+    fn from(part: &MessagePart) -> Self {
+        match part {
+            MessagePart::Text { text } => Self::Text { text: text.clone() },
+            MessagePart::File { file } => Self::File {
+                file: else_wire::items::Attachment {
+                    id: file.id,
+                    name: file.name.clone(),
+                    media_type: file.media_type.clone(),
+                    size: file.size,
+                },
+            },
+        }
+    }
+}
+
 impl ReactionKind {
     pub fn as_str(self) -> &'static str {
         self.into()

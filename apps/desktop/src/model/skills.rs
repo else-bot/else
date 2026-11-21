@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::model::Turn;
     use else_wire::skills::{SkillInstallStatus, SkillScope};
+    use else_wire::turns::Turn;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

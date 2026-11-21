@@ -906,7 +906,7 @@ impl ElseApp {
 /// The row above a mail-triggered reply: the email that woke the bot,
 /// where it is now, and a button that opens the emails still there.
 pub(super) fn mail_banner(
-    turn: &crate::model::Turn,
+    turn: &else_wire::turns::Turn,
     bots: &[else_wire::bots::Bot],
     cx: &mut Context<ElseApp>,
 ) -> Option<Div> {
@@ -1020,7 +1020,7 @@ fn places_summary(mails: &[TurnMail]) -> Option<String> {
 
 /// What a bot's turn did to the emails that woke it, for a turn that
 /// wrote no reply, such as "Archived the email."
-pub(super) fn mail_outcome(turn: &crate::model::Turn) -> Option<String> {
+pub(super) fn mail_outcome(turn: &else_wire::turns::Turn) -> Option<String> {
     let mine: Vec<&MailLocation> = turn
         .mail
         .iter()
@@ -1215,7 +1215,7 @@ mod tests {
     }
 
     /// A completed turn as the server sends it, woken by `mail`.
-    fn mail_turn(mail: serde_json::Value) -> crate::model::Turn {
+    fn mail_turn(mail: serde_json::Value) -> else_wire::turns::Turn {
         serde_json::from_value(serde_json::json!({
             "id": "00000000-0000-0000-0000-00000000000a",
             "request_id": "00000000-0000-0000-0000-00000000000b", "turn_no": 1,

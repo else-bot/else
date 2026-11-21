@@ -1,14 +1,15 @@
 use super::conversation::Spot;
 use super::pending_send::Delivery;
 use super::reply::Author;
+use super::reply::Feedback as _;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::app::transcript::CardKey;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use else_wire::items::ItemKind;
+use else_wire::items::ReactionKind;
 use else_wire::outgoing::DraftStatus;
 use else_wire::routines::RoutineRun;
 use else_wire::turns::TurnStatus;
@@ -228,7 +229,7 @@ impl ElseApp {
 
     pub(super) fn render_turn_status(
         &self,
-        turn: &crate::model::Turn,
+        turn: &else_wire::turns::Turn,
         bot: uuid::Uuid,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
@@ -269,7 +270,7 @@ impl ElseApp {
     /// details, which it opens to show how the retry goes.
     pub(super) fn routine_retry(
         &self,
-        turn: &crate::model::Turn,
+        turn: &else_wire::turns::Turn,
         bot: uuid::Uuid,
         cx: &Context<Self>,
     ) -> Option<Button> {
@@ -909,7 +910,7 @@ const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 /// A Switch model action for a turn that failed because its provider
 /// cannot run now.
 pub(super) fn model_remedy(
-    turn: &crate::model::Turn,
+    turn: &else_wire::turns::Turn,
     bot: uuid::Uuid,
     cx: &Context<ElseApp>,
 ) -> Option<Button> {
@@ -928,7 +929,7 @@ fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
         .on_click(cx.listener(move |app, _, window, cx| app.switch_model(bot, window, cx)))
 }
 
-pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
+pub(super) fn turn_label(turn: &else_wire::turns::Turn) -> (String, bool) {
     use else_wire::questions::QuestionUse;
     let (label, error) = status_label(turn);
     if !turn.status.is_unsuccessful() {
@@ -950,7 +951,7 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     (format!("{label}. {note}"), error)
 }
 
-fn waiting_label(turn: &crate::model::Turn) -> String {
+fn waiting_label(turn: &else_wire::turns::Turn) -> String {
     let open = turn.open_delegations();
     let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
     for task in &open {
@@ -963,7 +964,7 @@ fn waiting_label(turn: &crate::model::Turn) -> String {
     crate::sidebar::status::waiting_for(&names, open.len(), jobs)
 }
 
-fn status_label(turn: &crate::model::Turn) -> (String, bool) {
+fn status_label(turn: &else_wire::turns::Turn) -> (String, bool) {
     let detail = turn
         .error
         .as_ref()

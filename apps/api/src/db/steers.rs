@@ -41,6 +41,16 @@ pub enum Status {
     Delivered,
 }
 
+impl From<Status> for else_wire::turns::SteerStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Pending => Self::Pending,
+            Status::Sending => Self::Sending,
+            Status::Delivered => Self::Delivered,
+        }
+    }
+}
+
 /// SQL condition on `turns t`: the turn is steered into another one, so
 /// the scheduler must not claim it.
 pub const STEERED: &str = "EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = t.id)";

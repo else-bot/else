@@ -1,6 +1,6 @@
 use super::attachments::DraftFile;
-use crate::model::ReactionKind;
 use else_wire::items::ItemKind;
+use else_wire::items::ReactionKind;
 use gpui_kit::component::input::InputContent;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -17,7 +17,7 @@ impl Author {
         match kind {
             ItemKind::User => Some(Author::Owner),
             ItemKind::Assistant => Some(Author::Bot),
-            ItemKind::Status | ItemKind::Routine | ItemKind::Unknown => None,
+            ItemKind::Status | ItemKind::Routine | ItemKind::Connector | ItemKind::Unknown => None,
         }
     }
 }
@@ -426,15 +426,22 @@ impl<'a> QuotedReply<'a> {
     }
 }
 
-impl ReactionKind {
-    pub(super) fn mark(self) -> &'static str {
+/// How the owner's reaction reads in the transcript and in the feedback
+/// message it sends.
+pub(super) trait Feedback {
+    fn mark(self) -> &'static str;
+    fn message(self, reference: &MessageReference) -> String;
+}
+
+impl Feedback for ReactionKind {
+    fn mark(self) -> &'static str {
         match self {
             ReactionKind::ThumbsUp => "👍",
             ReactionKind::ThumbsDown => "👎",
         }
     }
 
-    pub(super) fn message(self, reference: &MessageReference) -> String {
+    fn message(self, reference: &MessageReference) -> String {
         let request = match self {
             ReactionKind::ThumbsUp => {
                 "I reacted 👍 to this message. This is approval, not an instruction, so do not \

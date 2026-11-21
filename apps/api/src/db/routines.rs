@@ -751,7 +751,7 @@ pub async fn update(
             .fetch_one(&mut *tx)
             .await?;
             let item_id = Uuid::new_v4();
-            let update = super::turns::RoutineUpdate {
+            let update = else_wire::items::RoutineUpdate {
                 routine_id: id,
                 name: new_name.clone(),
             };

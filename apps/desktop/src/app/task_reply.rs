@@ -446,7 +446,7 @@ impl ElseApp {
     fn task_message(
         &self,
         id: Uuid,
-        reaction: Option<crate::model::ReactionKind>,
+        reaction: Option<else_wire::items::ReactionKind>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -504,7 +504,7 @@ impl ElseApp {
     }
 }
 
-fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+fn waits_on_owner(task: &TaskReply, turn: &else_wire::turns::Turn) -> bool {
     task.state == ReplyState::Waiting
         && (turn.waits_on_owner()
             || turn
@@ -515,7 +515,7 @@ fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
 
 /// Whether a task row shows only its bot's name: the turn waits on the
 /// owner and has said nothing yet, so the card under it speaks for it.
-pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+pub(super) fn shows_only_name(task: &TaskReply, turn: &else_wire::turns::Turn) -> bool {
     waits_on_owner(task, turn)
         && task.latest.is_none()
         && task.history.is_empty()

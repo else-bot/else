@@ -88,14 +88,14 @@ impl CardKey {
     }
 
     /// The turn that raised it.
-    pub(super) fn turn(self, c: &Conversation) -> Option<&crate::model::Turn> {
+    pub(super) fn turn(self, c: &Conversation) -> Option<&else_wire::turns::Turn> {
         c.turns_in_order()
             .into_iter()
             .find(|turn| Self::raised_by(turn).any(|card| card == self))
     }
 
     /// Every card `turn` raised.
-    fn raised_by(turn: &crate::model::Turn) -> impl Iterator<Item = Self> + '_ {
+    fn raised_by(turn: &else_wire::turns::Turn) -> impl Iterator<Item = Self> + '_ {
         (turn
             .secret_requests
             .iter()
@@ -135,7 +135,7 @@ pub(super) struct TranscriptRow {
     /// The runs a [`RowKey::QuietRuns`] row stands for, oldest first.
     pub(super) quiet_runs: Vec<Uuid>,
     routine_status: Option<(String, bool)>,
-    reaction: Option<crate::model::ReactionKind>,
+    reaction: Option<else_wire::items::ReactionKind>,
     state: Option<RowState>,
 }
 
@@ -416,7 +416,10 @@ pub(super) fn opens_turns(c: Option<&Conversation>, rows: &[RowKey]) -> Vec<Opti
 }
 
 /// The mail-triggered turn a row opens, whose emails it offers to view.
-pub(super) fn opened_mail(c: &Conversation, opens: Option<Uuid>) -> Option<&crate::model::Turn> {
+pub(super) fn opened_mail(
+    c: &Conversation,
+    opens: Option<Uuid>,
+) -> Option<&else_wire::turns::Turn> {
     c.turn(opens?).filter(|turn| !turn.mail.is_empty())
 }
 
@@ -879,7 +882,9 @@ mod tests {
     use chrono::{DateTime, FixedOffset, Utc};
     use else_wire::bots::ReplyPosition;
 
-    use crate::model::{Conversation, Snapshot};
+    use crate::model::Conversation;
+
+    use else_wire::conversation::Snapshot;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

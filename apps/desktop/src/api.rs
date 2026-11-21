@@ -47,15 +47,17 @@ use else_wire::bots::{
 use serde_json::json;
 
 use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Reaction, Snapshot, Turn};
 use else_wire::bots::Avatar;
+use else_wire::conversation::Sent;
+use else_wire::conversation::Snapshot;
+use else_wire::items::Reaction;
 
 pub struct SendRequest {
     pub request_id: Uuid,
     pub text: String,
     pub provider_id: Option<String>,
     pub reaction: Option<Reaction>,
-    pub parts: Vec<crate::attachments::MessagePart>,
+    pub parts: Vec<else_wire::items::MessagePart>,
     pub open_draft: Option<crate::model::outgoing::DraftAttachment>,
     /// The owner ask this message replies to.
     pub answers_notice: Option<Uuid>,
@@ -92,13 +94,6 @@ pub enum ReadCommand {
 pub struct Latest {
     pub snapshot: Snapshot,
     pub raw: String,
-}
-
-/// The server's canonical owner item and turn for an accepted message.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Sent {
-    pub item: Item,
-    pub turn: Turn,
 }
 
 /// Errors shown to the owner. None of them contain the token.
@@ -395,7 +390,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         query: String,
-    ) -> Result<crate::model::SearchHits, ClientError> {
+    ) -> Result<else_wire::conversation::SearchHits, ClientError> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", &query)
             .finish();
@@ -416,7 +411,7 @@ impl Client {
         anchor_seq: i64,
         (older, newer): (i64, i64),
         (below, above): (Option<i64>, Option<i64>),
-    ) -> Result<crate::model::Window, ClientError> {
+    ) -> Result<else_wire::conversation::Window, ClientError> {
         let mut query = format!("anchor_seq={anchor_seq}&older={older}&newer={newer}");
         if let Some(below) = below {
             query.push_str(&format!("&after_seq={below}"));
@@ -1540,7 +1535,7 @@ pub(crate) mod tests {
                 ..
             }) => {
                 assert_eq!(f.id.as_deref(), Some("i:b:2"));
-                assert_eq!(f.event, "item.delta");
+                assert_eq!(f.event, Err(crate::model::Reset::Malformed));
             }
             other => panic!("{other:?}"),
         }

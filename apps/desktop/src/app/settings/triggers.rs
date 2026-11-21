@@ -390,7 +390,8 @@ fn still_pending(save: &Request<TriggerChange>, current: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Request, TriggerChange, pace, still_pending, trigger_cards};
-    use crate::model::{Conversation, Snapshot};
+    use crate::model::Conversation;
+    use else_wire::conversation::Snapshot;
     use else_wire::socials::Trigger;
     use serde_json::json;
     use uuid::Uuid;
