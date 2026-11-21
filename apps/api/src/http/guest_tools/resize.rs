@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{AppState, Grant, secrets_for};
-use crate::app::questions::{Kind, Spec, TaskScope};
+use crate::app::questions::{ApprovalKind, Kind, Spec, TaskScope};
 use crate::computers::ComputerManager;
 use crate::computers::jobs::{JobStatus, Rerun, Started};
 use crate::computers::memory::{MEMORY_SIZES_MIB, MemorySizes, gib};
@@ -155,7 +155,7 @@ pub(super) async fn resize(
     };
     let scope = covering_scope(state, grant, memory_mib).await;
     let spec = Spec::tool_approval(
-        Kind::Destructive,
+        ApprovalKind::Destructive,
         NAME,
         args,
         Some(scope),
@@ -239,7 +239,7 @@ pub(super) async fn resize(
 /// Whether this attempt ran this exact call on a card the owner approved,
 /// which "Always allow" also does while saving its grant.
 async fn card_shown(state: &AppState, grant: &Grant, spec: &Spec) -> bool {
-    let Some(approval) = &spec.approval else {
+    let Some(approval) = spec.approval() else {
         return false;
     };
     sqlx::query_scalar(

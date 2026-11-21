@@ -502,7 +502,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
         grant,
         "mcp_install",
         args,
-        crate::app::questions::Kind::External,
+        crate::app::questions::ApprovalKind::External,
         title,
         context,
     )

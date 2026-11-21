@@ -1,3 +1,4 @@
+pub mod args;
 pub mod bots;
 pub mod memory_tree;
 pub mod messages;

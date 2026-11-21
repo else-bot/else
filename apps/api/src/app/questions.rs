@@ -6,6 +6,12 @@ use uuid::Uuid;
 use else_wire::questions as wire;
 pub use else_wire::questions::QuestionAnswer as Answer;
 
+mod permission;
+mod spec;
+
+pub use permission::{Covers, DESTRUCTIVE_SCOPE, MAX_TASK_SCOPE, PermissionTarget, TaskScope};
+pub use spec::{Approval, Ask, Spec, permission_authorization};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
     pub id: String,
@@ -51,10 +57,6 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
 pub const APPROVE_TASK: &str = "approve_task";
-/// Bytes of a task scope's task or target, after normalization.
-pub const MAX_TASK_SCOPE: usize = 200;
-/// The broad destructive grant, separate from permissions for individual tools.
-pub const DESTRUCTIVE_SCOPE: &str = "destructive";
 
 /// Where a standing approval applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,13 +90,46 @@ impl Kind {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
+}
 
-    /// The effect a bot may declare for an approval: never `choice`.
-    pub fn approval(text: &str) -> Option<Self> {
+/// The [`Kind`] of an action to approve: never `choice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalKind {
+    Destructive,
+    External,
+}
+
+impl ApprovalKind {
+    pub fn parse(text: &str) -> Option<Self> {
         match text {
             "destructive" => Some(Self::Destructive),
             "external" => Some(Self::External),
             _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        Kind::from(self).as_str()
+    }
+}
+
+impl From<ApprovalKind> for Kind {
+    fn from(kind: ApprovalKind) -> Self {
+        match kind {
+            ApprovalKind::Destructive => Self::Destructive,
+            ApprovalKind::External => Self::External,
+        }
+    }
+}
+
+impl TryFrom<Kind> for ApprovalKind {
+    type Error = ();
+
+    fn try_from(kind: Kind) -> Result<Self, ()> {
+        match kind {
+            Kind::Choice => Err(()),
+            Kind::Destructive => Ok(Self::Destructive),
+            Kind::External => Ok(Self::External),
         }
     }
 }
@@ -119,11 +154,11 @@ impl Effect {
         }
     }
 
-    pub fn approval(self) -> Option<Kind> {
+    pub fn approval(self) -> Option<ApprovalKind> {
         match self {
             Self::Local => None,
-            Self::Destructive => Some(Kind::Destructive),
-            Self::External => Some(Kind::External),
+            Self::Destructive => Some(ApprovalKind::Destructive),
+            Self::External => Some(ApprovalKind::External),
         }
     }
 }
@@ -145,40 +180,6 @@ impl Status {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
-}
-
-/// The options of an approval card, including the standing scope offered by the gate.
-pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
-    let mut choices = vec![
-        Choice {
-            id: APPROVE.into(),
-            label: "Approve once".into(),
-        },
-        Choice {
-            id: DENY.into(),
-            label: "Deny".into(),
-        },
-    ];
-    match (kind, offer) {
-        (Kind::Destructive, Some(Standing::Bot)) => choices.push(Choice {
-            id: APPROVE_FOREVER.into(),
-            label: "Always allow for this bot".into(),
-        }),
-        (Kind::Destructive | Kind::External, Some(Standing::Routine)) => choices.push(Choice {
-            id: APPROVE_ROUTINE.into(),
-            label: "Always allow for this routine".into(),
-        }),
-        (Kind::Destructive | Kind::External, Some(Standing::Tool)) => choices.push(Choice {
-            id: APPROVE_TOOL.into(),
-            label: "Always allow this tool".into(),
-        }),
-        (Kind::Destructive | Kind::External, Some(Standing::Task)) => choices.push(Choice {
-            id: APPROVE_TASK.into(),
-            label: "Always allow".into(),
-        }),
-        _ => {}
-    }
-    choices
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,94 +285,6 @@ pub fn says_always_allow(text: &str) -> bool {
     )
 }
 
-/// The recurring work a host action or computer tool call belongs to, as
-/// the bot declared it:
-/// what kind of task, on which target. A standing grant matches it exactly,
-/// after normalization; it never parses the action itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskScope {
-    pub task: String,
-    pub target: String,
-}
-
-fn scope_text(text: &str) -> Option<String> {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty() && text.len() <= MAX_TASK_SCOPE && !text.chars().any(char::is_control))
-        .then_some(text)
-}
-
-impl TaskScope {
-    /// The normalized scope, or `None` when either part is empty, too long,
-    /// or contains control characters.
-    pub fn new(task: &str, target: &str) -> Option<Self> {
-        Some(Self {
-            task: scope_text(task)?,
-            target: {
-                let target = target.trim();
-                if target.is_empty()
-                    || target.len() > MAX_TASK_SCOPE
-                    || target.chars().any(char::is_control)
-                {
-                    return None;
-                }
-                target.to_owned()
-            },
-        })
-    }
-
-    /// The optional `task_scope` argument of a gated call, normalized.
-    pub fn from_args(args: &Value) -> Result<Option<Self>, &'static str> {
-        const SCOPE_ERROR: &str =
-            "task_scope is {task, target}: each 1 to 200 bytes of text without control characters";
-        match args.get("task_scope") {
-            None | Some(Value::Null) => Ok(None),
-            Some(value) => {
-                let scope =
-                    serde_json::from_value::<Self>(value.clone()).map_err(|_| SCOPE_ERROR)?;
-                Self::new(&scope.task, &scope.target)
-                    .map(Some)
-                    .ok_or(SCOPE_ERROR)
-            }
-        }
-    }
-
-    fn canonical(&self) -> bool {
-        Self::new(&self.task, &self.target).as_ref() == Some(self)
-    }
-
-    fn key(&self, covers: Covers, kind: Kind) -> String {
-        format!(
-            "task:{}:{}:{}:{}",
-            covers.as_str(),
-            kind.as_str(),
-            hex::encode(self.task.to_lowercase()),
-            hex::encode(&self.target),
-        )
-    }
-}
-
-/// Which gated calls a task grant covers. MCP tools/call is never one of
-/// them: a grant for MCP work is an `mcp_tool` grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-pub enum Covers {
-    /// Host actions approved through `ask_permission`.
-    Host,
-    /// Computer tool calls.
-    Computer,
-    /// A grant saved through `confirm_permission` before grants named what
-    /// they cover. A bot can no longer save one.
-    Both,
-}
-
-impl Covers {
-    fn as_str(self) -> &'static str {
-        self.into()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConnection {
@@ -437,249 +350,6 @@ pub struct MailFile {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "lowercase", deny_unknown_fields)]
-pub enum PermissionTarget {
-    Bot,
-    Routine {
-        routine_id: Uuid,
-        prompt_revision: i64,
-        /// Grants saved before routine grants named their effect allow
-        /// destructive actions.
-        #[serde(default = "destructive")]
-        kind: Kind,
-    },
-    #[serde(rename = "mcp_tool")]
-    McpTool {
-        mcp_id: crate::mcp::PackageId,
-        tool: String,
-        kind: Kind,
-    },
-    /// One computer tool's external calls without a declared task scope.
-    #[serde(rename = "computer_tool")]
-    ComputerTool {
-        tool: String,
-        kind: Kind,
-    },
-    Task {
-        task: String,
-        target: String,
-        kind: Kind,
-        covers: Covers,
-    },
-}
-
-fn destructive() -> Kind {
-    Kind::Destructive
-}
-
-impl PermissionTarget {
-    pub fn standing(&self) -> Standing {
-        match self {
-            Self::Bot => Standing::Bot,
-            Self::Routine { .. } => Standing::Routine,
-            Self::McpTool { .. } | Self::ComputerTool { .. } => Standing::Tool,
-            Self::Task { .. } => Standing::Task,
-        }
-    }
-
-    pub fn kind(&self) -> Kind {
-        match self {
-            Self::Bot => Kind::Destructive,
-            Self::Routine { kind, .. }
-            | Self::McpTool { kind, .. }
-            | Self::ComputerTool { kind, .. }
-            | Self::Task { kind, .. } => *kind,
-        }
-    }
-
-    pub fn valid(&self) -> bool {
-        match self {
-            Self::McpTool { tool, kind, .. } => {
-                *kind != Kind::Choice
-                    && !tool.trim().is_empty()
-                    && tool.len() <= 128
-                    && !tool.contains('\0')
-            }
-            Self::ComputerTool { tool, kind } => *kind == Kind::External && computer_tool(tool),
-            Self::Task { kind, .. } => *kind != Kind::Choice && self.task_scope().is_some(),
-            Self::Routine { kind, .. } => *kind != Kind::Choice,
-            Self::Bot => true,
-        }
-    }
-
-    /// The target with a task scope normalized, or `None` when it is invalid.
-    pub fn canonical(self) -> Option<Self> {
-        let target = match self {
-            Self::Task {
-                task,
-                target,
-                kind,
-                covers,
-            } => {
-                let scope = TaskScope::new(&task, &target)?;
-                Self::Task {
-                    task: scope.task,
-                    target: scope.target,
-                    kind,
-                    covers,
-                }
-            }
-            other => other,
-        };
-        target.valid().then_some(target)
-    }
-
-    fn task_scope(&self) -> Option<TaskScope> {
-        let Self::Task { task, target, .. } = self else {
-            return None;
-        };
-        let scope = TaskScope {
-            task: task.clone(),
-            target: target.clone(),
-        };
-        scope.canonical().then_some(scope)
-    }
-
-    pub fn bot_scope(&self) -> Option<String> {
-        match self {
-            Self::Bot => Some(DESTRUCTIVE_SCOPE.into()),
-            Self::Routine { .. } => None,
-            Self::McpTool { mcp_id, tool, kind } => Some(format!(
-                "mcp:{}:{}:{}",
-                String::from(mcp_id.clone()),
-                kind.as_str(),
-                hex::encode(tool),
-            )),
-            Self::ComputerTool { tool, kind } => {
-                Some(format!("computer:{}:{}", kind.as_str(), hex::encode(tool)))
-            }
-            Self::Task { kind, covers, .. } => Some(self.task_scope()?.key(*covers, *kind)),
-        }
-    }
-
-    /// The approval hash of a `confirm_permission` question for this task
-    /// target saved before task grants named what they cover.
-    pub fn legacy_permission_hash(&self) -> Option<[u8; 32]> {
-        let Self::Task { kind, .. } = self else {
-            return None;
-        };
-        let scope = self.task_scope()?;
-        let key = format!(
-            "task:{}:{}:{}",
-            kind.as_str(),
-            hex::encode(scope.task.to_lowercase()),
-            hex::encode(&scope.target),
-        );
-        Some(hash(&[b"standing_permission", key.as_bytes()]))
-    }
-
-    /// The saved scopes that would cover this target: its own, and for a
-    /// task, also a grant saved before grants named what they cover.
-    pub fn covering_scopes(&self) -> Vec<String> {
-        let mut scopes = Vec::from_iter(self.bot_scope());
-        if let Self::Task { kind, .. } = self
-            && let Some(scope) = self.task_scope()
-        {
-            scopes.push(scope.key(Covers::Both, *kind));
-        }
-        scopes.dedup();
-        scopes
-    }
-
-    /// The standing grant that would cover this approved action: an MCP tool
-    /// call, a host action or computer tool call declared with a task scope,
-    /// or a computer tool's external call without one.
-    pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
-        let declared = match action {
-            Action::Host {
-                task_scope: Some(scope),
-                ..
-            } => Some((scope, Covers::Host)),
-            Action::Tool {
-                task_scope: Some(scope),
-                ..
-            } => Some((scope, Covers::Computer)),
-            _ => None,
-        };
-        if let Some((scope, covers)) = declared {
-            let target = Self::Task {
-                task: scope.task.clone(),
-                target: scope.target.clone(),
-                kind,
-                covers,
-            };
-            return target.valid().then_some(target);
-        }
-        let Action::Tool { tool, args, .. } = action else {
-            return None;
-        };
-        if kind == Kind::External && computer_tool(tool) {
-            return Some(Self::ComputerTool {
-                tool: tool.clone(),
-                kind,
-            });
-        }
-        if tool != "mcp_request" || args["method"] != "tools/call" {
-            return None;
-        }
-        let target = Self::McpTool {
-            mcp_id: crate::mcp::PackageId::try_from(args["id"].as_str()?.to_owned()).ok()?,
-            tool: args["tool"].as_str()?.to_owned(),
-            kind,
-        };
-        target.valid().then_some(target)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Approval {
-    pub action: Action,
-    pub hash: [u8; 32],
-}
-
-/// What the bot asks: a question with options, or an action to approve.
-/// An approval's choices are those of an owner request; the gate replaces
-/// them with the standing grant the asking turn may receive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Spec {
-    pub kind: Kind,
-    pub title: String,
-    pub context: Option<String>,
-    pub choices: Vec<Choice>,
-    pub multiple: bool,
-    pub approval: Option<Approval>,
-}
-
-fn text_arg<'a>(args: &'a Value, key: &str, max: usize) -> Result<Option<&'a str>, ()> {
-    match args.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => {
-            let text = text.trim();
-            if text.is_empty() || text.len() > max || text.contains('\0') {
-                Err(())
-            } else {
-                Ok(Some(text))
-            }
-        }
-        Some(_) => Err(()),
-    }
-}
-
-/// `text` cut to at most `max` bytes on a character boundary.
-fn clip(text: &str, max: usize) -> String {
-    text[..text.floor_char_boundary(max)].to_owned()
-}
-
-fn only_keys(args: &Value, allowed: &[&str]) -> Result<(), ()> {
-    let object = args.as_object().ok_or(())?;
-    if object.keys().all(|k| allowed.contains(&k.as_str())) {
-        Ok(())
-    } else {
-        Err(())
-    }
-}
-
 fn hash(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -687,350 +357,6 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
         hasher.update(b"\0");
     }
     hasher.finalize().into()
-}
-
-/// The owner's exact words in this request that ask for the host action,
-/// quoted by the bot in `ask_permission`. The gate checks it against the
-/// request's own owner message; it never grants standing permission.
-pub fn permission_authorization(args: &Value) -> Result<Option<&str>, &'static str> {
-    text_arg(args, "authorization", MAX_CONTEXT)
-        .map_err(|_| "authorization is 1 to 4000 bytes: the owner's exact words")
-}
-
-impl Spec {
-    pub fn mcp_connection(connection: McpConnection, title: String, context: String) -> Self {
-        let encoded = serde_json::to_vec(&connection).expect("MCP consent serialization");
-        Self {
-            kind: Kind::External,
-            title,
-            context: Some(context),
-            choices: approval_choices(Kind::External, None),
-            multiple: false,
-            approval: Some(Approval {
-                hash: hash(&[b"mcp_connection", &encoded]),
-                action: Action::McpConnection {
-                    mcp_connection: connection,
-                },
-            }),
-        }
-    }
-
-    pub fn email_connection(connection: EmailConnection, title: String, context: String) -> Self {
-        let encoded = serde_json::to_vec(&connection).expect("email consent serialization");
-        Self {
-            kind: Kind::External,
-            title,
-            context: Some(context),
-            choices: approval_choices(Kind::External, None),
-            multiple: false,
-            approval: Some(Approval {
-                hash: hash(&[b"email_connection", &encoded]),
-                action: Action::EmailConnection {
-                    email_connection: connection,
-                },
-            }),
-        }
-    }
-
-    /// A card approving one deletion of `deletion.bot_id`. It offers no
-    /// standing grant, and its identity is the target alone, so a retry in
-    /// the same request finds it even after the listed work changed.
-    pub fn bot_deletion(deletion: BotDeletion, context: String) -> Self {
-        Self {
-            kind: Kind::Destructive,
-            title: format!("Delete {}", deletion.name),
-            context: Some(context),
-            choices: approval_choices(Kind::Destructive, None),
-            multiple: false,
-            approval: Some(Approval {
-                hash: hash(&[b"bot_deletion", deletion.bot_id.as_bytes()]),
-                action: Action::BotDeletion {
-                    bot_deletion: deletion,
-                },
-            }),
-        }
-    }
-
-    /// A card approving one removal of an inbox. Like a bot deletion it
-    /// offers no standing grant and is identified by its target alone.
-    pub fn email_removal(removal: EmailRemoval, context: String) -> Self {
-        Self {
-            kind: Kind::Destructive,
-            title: format!("Remove {}", removal.address),
-            context: Some(context),
-            choices: approval_choices(Kind::Destructive, None),
-            multiple: false,
-            approval: Some(Approval {
-                hash: hash(&[b"email_removal", removal.account_id.as_bytes()]),
-                action: Action::EmailRemoval {
-                    email_removal: removal,
-                },
-            }),
-        }
-    }
-
-    /// A card approving one read of these attachments. Its identity is the
-    /// message and the set of parts, so a retry with the parts in another
-    /// order finds the same card.
-    pub fn mail_attachments(attachments: MailAttachments) -> Self {
-        let mut parts: Vec<_> = attachments.files.iter().map(|f| f.part).collect();
-        parts.sort_unstable();
-        let message = &attachments.message;
-        let identity = format!(
-            "{}:{}:{}:{}:{parts:?}",
-            attachments.account_id, message.uid_validity, message.uid, message.folder
-        );
-        let title = match attachments.files.as_slice() {
-            [file] => format!("Open {}", file.name),
-            files => format!("Open {} attachments", files.len()),
-        };
-        let mut context = format!(
-            "The bot reads and searches the text of these files. Nothing else in {} changes.",
-            attachments.address
-        );
-        if let Some(subject) = &attachments.subject {
-            context.push_str(&format!("\nEmail: {subject}"));
-        }
-        if !attachments.from.is_empty() {
-            context.push_str(&format!("\nFrom: {}", attachments.from.join(", ")));
-        }
-        for file in &attachments.files {
-            context.push_str(&format!(
-                "\n- {} ({}, {} bytes)",
-                file.name, file.media_type, file.size
-            ));
-        }
-        Self {
-            kind: Kind::External,
-            title: clip(&title, MAX_TITLE),
-            context: Some(clip(&context, MAX_CONTEXT)),
-            choices: approval_choices(Kind::External, None),
-            multiple: false,
-            approval: Some(Approval {
-                hash: hash(&[b"mail_attachments", identity.as_bytes()]),
-                action: Action::MailAttachments {
-                    mail_attachments: attachments,
-                },
-            }),
-        }
-    }
-
-    pub fn standing_permission(target: PermissionTarget, authorization: &str) -> Self {
-        let standing = target.standing();
-        let kind = target.kind();
-        let permission_hash = match &target {
-            PermissionTarget::Bot => hash(&[b"standing_permission", b"bot"]),
-            PermissionTarget::Routine {
-                routine_id,
-                kind: Kind::Destructive,
-                ..
-            } => hash(&[b"standing_permission", b"routine", routine_id.as_bytes()]),
-            PermissionTarget::Routine {
-                routine_id, kind, ..
-            } => hash(&[
-                b"standing_permission",
-                b"routine",
-                routine_id.as_bytes(),
-                kind.as_str().as_bytes(),
-            ]),
-            PermissionTarget::McpTool { .. }
-            | PermissionTarget::ComputerTool { .. }
-            | PermissionTarget::Task { .. } => hash(&[
-                b"standing_permission",
-                target.bot_scope().unwrap().as_bytes(),
-            ]),
-        };
-        Self {
-            kind,
-            title: match standing {
-                Standing::Bot => "Always allow destructive actions for this bot".into(),
-                Standing::Routine => format!("Allow {} actions for this routine", kind.as_str()),
-                Standing::Tool => match &target {
-                    PermissionTarget::McpTool { mcp_id, tool, kind } => format!(
-                        "Always allow {} actions with {}/{tool}",
-                        kind.as_str(),
-                        String::from(mcp_id.clone()),
-                    ),
-                    PermissionTarget::ComputerTool { tool, kind } => {
-                        format!("Always allow {} actions with {tool}", kind.as_str())
-                    }
-                    _ => unreachable!(),
-                },
-                Standing::Task => match &target {
-                    PermissionTarget::Task {
-                        task,
-                        target,
-                        kind,
-                        covers,
-                    } => {
-                        let calls = match covers {
-                            Covers::Host => " host",
-                            Covers::Computer => " computer",
-                            Covers::Both => "",
-                        };
-                        format!(
-                            "Always allow {}{calls} actions: {task} on {target}",
-                            kind.as_str()
-                        )
-                    }
-                    _ => unreachable!(),
-                },
-            },
-            context: Some(authorization.into()),
-            choices: approval_choices(kind, Some(standing)),
-            multiple: false,
-            approval: Some(Approval {
-                action: Action::Permission { permission: target },
-                hash: permission_hash,
-            }),
-        }
-    }
-
-    /// Omit choices for a question answered through the chat composer.
-    pub fn choice(args: &Value) -> Result<Self, &'static str> {
-        only_keys(args, &["question", "choices", "context", "multiple"])
-            .map_err(|_| "use question, choices, and optionally context and multiple")?;
-        let multiple = match args.get("multiple") {
-            None => false,
-            Some(Value::Bool(multiple)) => *multiple,
-            _ => return Err("multiple must be true or false"),
-        };
-        let title = text_arg(args, "question", MAX_TITLE)
-            .ok()
-            .flatten()
-            .ok_or("question is 1 to 500 bytes of text")?;
-        let context = text_arg(args, "context", MAX_CONTEXT)
-            .map_err(|_| "context is at most 4000 bytes of text")?;
-        let list = match args.get("choices") {
-            None => &[][..],
-            Some(Value::Array(list))
-                if list.is_empty() || (MIN_CHOICES..=MAX_CHOICES).contains(&list.len()) =>
-            {
-                list.as_slice()
-            }
-            _ => return Err("choices lists 2 to 5 short labels, or omit it for a chat answer"),
-        };
-        if multiple && list.is_empty() {
-            return Err("multiple requires 2 to 5 choices");
-        }
-        let mut choices = Vec::new();
-        for (index, label) in list.iter().enumerate() {
-            let label = label
-                .as_str()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && l.len() <= MAX_CHOICE_LABEL && !l.contains('\0'))
-                .ok_or("each choice is 1 to 120 bytes of text")?;
-            if choices.iter().any(|c: &Choice| c.label == label) {
-                return Err("choices must be distinct");
-            }
-            choices.push(Choice {
-                id: ((b'a' + index as u8) as char).to_string(),
-                label: label.to_owned(),
-            });
-        }
-        Ok(Self {
-            kind: Kind::Choice,
-            title: title.to_owned(),
-            context: context.map(str::to_owned),
-            choices,
-            multiple,
-            approval: None,
-        })
-    }
-
-    /// Parse `ask_permission` arguments: the kind, the exact action the bot
-    /// will take on the host, why, and optionally the recurring task and
-    /// target it belongs to, which a card may offer to always allow. The
-    /// optional authorization quote is read by [`permission_authorization`]
-    /// and is not part of the action's identity, so a denial still matches.
-    pub fn permission(args: &Value) -> Result<Self, &'static str> {
-        only_keys(
-            args,
-            &["kind", "action", "reason", "task_scope", "authorization"],
-        )
-        .map_err(|_| "use kind, action, and optionally reason, task_scope, and authorization")?;
-        let kind = args["kind"]
-            .as_str()
-            .and_then(Kind::approval)
-            .ok_or("kind is destructive or external")?;
-        let action = text_arg(args, "action", MAX_CONTEXT)
-            .ok()
-            .flatten()
-            .ok_or("action is 1 to 4000 bytes: exactly what will be done")?;
-        let reason = text_arg(args, "reason", MAX_TITLE)
-            .map_err(|_| "reason is at most 500 bytes of text")?;
-        let task_scope = TaskScope::from_args(args)?;
-        let action_hash = match &task_scope {
-            None => hash(&[b"host", kind.as_str().as_bytes(), action.as_bytes()]),
-            Some(scope) => hash(&[
-                b"host",
-                kind.as_str().as_bytes(),
-                action.as_bytes(),
-                b"task",
-                scope.task.as_bytes(),
-                scope.target.as_bytes(),
-            ]),
-        };
-        let offer = task_scope.as_ref().map(|_| Standing::Task);
-        let title = reason.map(str::to_owned).unwrap_or_else(|| {
-            match kind {
-                Kind::External => "Allow this action that reaches outside your machine?",
-                _ => "Allow this action on your machine?",
-            }
-            .to_owned()
-        });
-        Ok(Self {
-            kind,
-            title,
-            context: Some(action.to_owned()),
-            choices: approval_choices(kind, offer),
-            multiple: false,
-            approval: Some(Approval {
-                action: Action::Host {
-                    host: action.to_owned(),
-                    task_scope,
-                },
-                hash: action_hash,
-            }),
-        })
-    }
-
-    /// An approval bound to one computer tool call: the tool and its exact
-    /// arguments. `title` and `context` are what the card shows. A call
-    /// declared with a task scope offers that task's standing grant instead
-    /// of the bot-wide destructive one.
-    pub fn tool_approval(
-        kind: Kind,
-        tool: &str,
-        args: &Value,
-        task_scope: Option<TaskScope>,
-        title: String,
-        context: String,
-    ) -> Self {
-        let offer = if task_scope.is_some() {
-            Standing::Task
-        } else {
-            Standing::Bot
-        };
-        let mut canonical = args.clone();
-        canonical.sort_all_objects();
-        let canonical = canonical.to_string();
-        Self {
-            kind,
-            title,
-            context: Some(context),
-            choices: approval_choices(kind, Some(offer)),
-            multiple: false,
-            approval: Some(Approval {
-                action: Action::Tool {
-                    tool: tool.to_owned(),
-                    args: crate::http::tool_defs::loggable_args(tool, args),
-                    task_scope,
-                },
-                hash: hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()]),
-            }),
-        }
-    }
 }
 
 impl From<Kind> for wire::QuestionKind {
@@ -1138,62 +464,9 @@ impl From<&Action> for wire::QuestionAction {
     }
 }
 
-impl From<&TaskScope> for wire::TaskScope {
-    fn from(scope: &TaskScope) -> Self {
-        Self {
-            task: scope.task.clone(),
-            target: scope.target.clone(),
-        }
-    }
-}
-
-impl From<&PermissionTarget> for wire::QuestionPermission {
-    fn from(target: &PermissionTarget) -> Self {
-        match target {
-            PermissionTarget::Bot => Self::Bot,
-            PermissionTarget::Routine {
-                routine_id,
-                prompt_revision,
-                kind,
-            } => Self::Routine {
-                routine_id: *routine_id,
-                prompt_revision: *prompt_revision,
-                kind: (*kind).into(),
-            },
-            PermissionTarget::McpTool { mcp_id, tool, kind } => Self::McpTool {
-                mcp_id: mcp_id.clone().into(),
-                tool: tool.clone(),
-                kind: Some((*kind).into()),
-            },
-            PermissionTarget::ComputerTool { tool, kind } => Self::ComputerTool {
-                tool: tool.clone(),
-                kind: (*kind).into(),
-            },
-            PermissionTarget::Task {
-                task,
-                target,
-                kind,
-                covers,
-            } => Self::Task {
-                task_scope: wire::TaskScope {
-                    task: task.clone(),
-                    target: target.clone(),
-                },
-                kind: Some((*kind).into()),
-                covers: Some(match covers {
-                    Covers::Host => wire::TaskCoverage::Host,
-                    Covers::Computer => wire::TaskCoverage::Computer,
-                    Covers::Both => wire::TaskCoverage::Both,
-                }),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn only_a_bare_always_allow_reply_answers_a_card() {
@@ -1217,311 +490,5 @@ mod tests {
         ] {
             assert!(!says_always_allow(text), "{text}");
         }
-    }
-
-    #[test]
-    fn a_choice_question_parses_only_its_fields_and_letters_its_options() {
-        let spec = Spec::choice(&json!({
-            "question": " Which newsletter template? ",
-            "choices": ["Plain text", "HTML digest", "Both"],
-            "context": "Draft: Hello everyone...",
-        }))
-        .unwrap();
-        assert_eq!(spec.kind, Kind::Choice);
-        assert_eq!(spec.title, "Which newsletter template?");
-        let ids: Vec<&str> = spec.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["a", "b", "c"]);
-        assert_eq!(spec.approval, None);
-        assert!(!spec.multiple);
-        let multiple = Spec::choice(&json!({
-            "question": "Which tasks?", "choices": ["one", "two", "three", "four", "five"],
-            "multiple": true,
-        }))
-        .unwrap();
-        assert!(multiple.multiple);
-        assert_eq!(multiple.choices.last().unwrap().id, "e");
-        for bad in [
-            json!({ "question": "q", "choices": ["only one"] }),
-            json!({ "question": "q", "choices": ["a", "a"] }),
-            json!({ "question": "q", "choices": ["a", "b", "c", "d", "e", "f"] }),
-            json!({ "question": "q", "multiple": true }),
-            json!({ "question": "q", "choices": ["a", "b"], "multiple": "yes" }),
-            json!({ "question": " ", "choices": ["a", "b"] }),
-            json!({ "question": "q", "choices": ["a", "b"], "value": "x" }),
-            json!({ "question": "q", "choices": [1, 2] }),
-            json!(["q"]),
-        ] {
-            assert!(Spec::choice(&bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_permission_binds_the_described_action_and_offers_no_blanket_grant() {
-        let delete = Spec::permission(&json!({
-            "kind": "destructive", "action": "rm -rf ~/old-site", "reason": "Remove the old site",
-        }))
-        .unwrap();
-        assert_eq!(delete.kind, Kind::Destructive);
-        assert_eq!(delete.title, "Remove the old site");
-        assert_eq!(delete.context.as_deref(), Some("rm -rf ~/old-site"));
-        let ids: Vec<&str> = delete.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, [APPROVE, DENY]);
-
-        let send =
-            Spec::permission(&json!({ "kind": "external", "action": "mail -s hi bob@x" })).unwrap();
-        let ids: Vec<&str> = send.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, [APPROVE, DENY]);
-        assert_ne!(
-            send.approval.as_ref().map(|a| a.hash),
-            delete.approval.as_ref().map(|a| a.hash)
-        );
-        assert!(Spec::permission(&json!({ "kind": "local", "action": "ls" })).is_err());
-        assert!(Spec::permission(&json!({ "kind": "external" })).is_err());
-    }
-
-    fn tailscale(task: &str, target: &str) -> Spec {
-        Spec::permission(&json!({
-            "kind": "destructive", "action": "ssh omarchy-m1 sudo tailscale up --ssh",
-            "task_scope": { "task": task, "target": target },
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn a_task_scoped_permission_offers_always_allow_and_binds_its_scope() {
-        let spec = tailscale("  Manage   Tailscale via SSH ", "omarchy-m1");
-        let ids: Vec<&str> = spec.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, [APPROVE, DENY, APPROVE_TASK]);
-        assert_eq!(spec.choices[2].label, "Always allow");
-        let approval = spec.approval.as_ref().unwrap();
-        let scope = TaskScope {
-            task: "Manage Tailscale via SSH".into(),
-            target: "omarchy-m1".into(),
-        };
-        assert_eq!(
-            approval.action,
-            Action::Host {
-                host: "ssh omarchy-m1 sudo tailscale up --ssh".into(),
-                task_scope: Some(scope),
-            }
-        );
-        let target = PermissionTarget::for_action(spec.kind, &approval.action).unwrap();
-        assert_eq!(target.standing(), Standing::Task);
-        let serialized = serde_json::to_value(&target).unwrap();
-        assert_eq!(
-            serialized,
-            json!({ "scope": "task", "task": "Manage Tailscale via SSH",
-                    "target": "omarchy-m1", "kind": "destructive", "covers": "host" })
-        );
-        assert_eq!(
-            serde_json::from_value::<PermissionTarget>(serialized).unwrap(),
-            target
-        );
-
-        let unscoped = Spec::permission(&json!({
-            "kind": "destructive", "action": "ssh omarchy-m1 sudo tailscale up --ssh",
-        }))
-        .unwrap();
-        let other_target = tailscale("Manage Tailscale via SSH", "omarchy-m2");
-        let hashes = [
-            unscoped.approval.as_ref().unwrap().hash,
-            approval.hash,
-            other_target.approval.as_ref().unwrap().hash,
-        ];
-        assert_ne!(
-            hashes[0], hashes[1],
-            "the scope is part of the bound action"
-        );
-        assert_ne!(hashes[1], hashes[2]);
-        assert_eq!(
-            serde_json::to_value(&unscoped.approval.unwrap().action).unwrap(),
-            json!({ "host": "ssh omarchy-m1 sudo tailscale up --ssh" }),
-            "unscoped host actions keep their stored shape"
-        );
-    }
-
-    #[test]
-    fn task_grants_preserve_target_identity_and_match_task_names_case_insensitively() {
-        let key = |task: &str, target: &str, kind: Kind| {
-            PermissionTarget::Task {
-                task: task.into(),
-                target: target.into(),
-                kind,
-                covers: Covers::Host,
-            }
-            .bot_scope()
-            .unwrap()
-        };
-        let base = key("Manage Tailscale via SSH", "omarchy-m1", Kind::Destructive);
-        assert_eq!(
-            base,
-            key("manage tailscale via ssh", "omarchy-m1", Kind::Destructive)
-        );
-        assert_ne!(
-            key("Manage files", "/srv/Prod", Kind::Destructive),
-            key("Manage files", "/srv/prod", Kind::Destructive)
-        );
-        assert_ne!(
-            key("Manage files", "/srv/a  b", Kind::Destructive),
-            key("Manage files", "/srv/a b", Kind::Destructive)
-        );
-        assert_eq!(
-            TaskScope::new("Manage files", " /srv/a  b ")
-                .unwrap()
-                .target,
-            "/srv/a  b"
-        );
-        assert_ne!(
-            base,
-            key("Manage Tailscale via SSH", "omarchy-m2", Kind::Destructive)
-        );
-        assert_ne!(
-            base,
-            key("Manage Docker via SSH", "omarchy-m1", Kind::Destructive)
-        );
-        assert_ne!(
-            base,
-            key("Manage Tailscale via SSH", "omarchy-m1", Kind::External)
-        );
-        assert_ne!(
-            key("a:b", "c", Kind::Destructive),
-            key("a", "b:c", Kind::Destructive),
-            "separators inside the text cannot collide"
-        );
-        assert!(base.starts_with("task:host:destructive:"));
-        assert_ne!(base, DESTRUCTIVE_SCOPE);
-        let computer = PermissionTarget::Task {
-            task: "Manage Tailscale via SSH".into(),
-            target: "omarchy-m1".into(),
-            kind: Kind::Destructive,
-            covers: Covers::Computer,
-        };
-        let both = base.replacen("task:host:", "task:both:", 1);
-        assert_ne!(computer.bot_scope().unwrap(), base);
-        assert_eq!(
-            computer.covering_scopes(),
-            [computer.bot_scope().unwrap(), both.clone()],
-            "a grant saved before covers existed still covers computer calls"
-        );
-    }
-
-    #[test]
-    fn malformed_task_scopes_are_refused() {
-        let long = "x".repeat(MAX_TASK_SCOPE + 1);
-        for bad in [
-            json!("Manage Tailscale"),
-            json!({ "task": "Manage Tailscale" }),
-            json!({ "task": "  ", "target": "omarchy-m1" }),
-            json!({ "task": "Manage Tailscale", "target": "" }),
-            json!({ "task": long, "target": "omarchy-m1" }),
-            json!({ "task": "Manage\u{7}Tailscale", "target": "omarchy-m1" }),
-            json!({ "task": "Manage\u{0}Tailscale", "target": "omarchy-m1" }),
-            json!({ "task": 1, "target": "omarchy-m1" }),
-            json!({ "task": "Manage Tailscale", "target": "omarchy-m1", "kind": "external" }),
-        ] {
-            assert!(
-                Spec::permission(&json!({
-                    "kind": "destructive", "action": "tailscale up", "task_scope": bad,
-                }))
-                .is_err(),
-                "{bad}"
-            );
-        }
-        assert!(
-            Spec::permission(&json!({
-                "kind": "destructive", "action": "tailscale up", "task_scope": null,
-            }))
-            .unwrap()
-            .approval
-            .is_some_and(|a| matches!(
-                a.action,
-                Action::Host {
-                    task_scope: None,
-                    ..
-                }
-            ))
-        );
-        let raw = PermissionTarget::Task {
-            task: " Manage  Tailscale ".into(),
-            target: "omarchy-m1".into(),
-            kind: Kind::External,
-            covers: Covers::Host,
-        };
-        assert!(!raw.valid(), "only normalized targets are valid");
-        assert_eq!(
-            raw.canonical(),
-            Some(PermissionTarget::Task {
-                task: "Manage Tailscale".into(),
-                target: "omarchy-m1".into(),
-                kind: Kind::External,
-                covers: Covers::Host,
-            })
-        );
-        for bad in [
-            PermissionTarget::Task {
-                task: "".into(),
-                target: "omarchy-m1".into(),
-                kind: Kind::External,
-                covers: Covers::Host,
-            },
-            PermissionTarget::Task {
-                task: "Manage".into(),
-                target: "omarchy-m1".into(),
-                kind: Kind::Choice,
-                covers: Covers::Host,
-            },
-        ] {
-            assert_eq!(bad.canonical(), None);
-        }
-    }
-
-    #[test]
-    fn a_tool_approval_hashes_the_exact_arguments_regardless_of_key_order() {
-        let a = Spec::tool_approval(
-            Kind::External,
-            "computer_run",
-            &json!({ "command": "./send.sh", "effect": "external" }),
-            None,
-            "t".into(),
-            "c".into(),
-        );
-        let b = Spec::tool_approval(
-            Kind::External,
-            "computer_run",
-            &json!({ "effect": "external", "command": "./send.sh" }),
-            None,
-            "t".into(),
-            "c".into(),
-        );
-        let c = Spec::tool_approval(
-            Kind::External,
-            "computer_run",
-            &json!({ "command": "./send.sh --all", "effect": "external" }),
-            None,
-            "t".into(),
-            "c".into(),
-        );
-        assert_eq!(
-            a.approval.as_ref().map(|a| a.hash),
-            b.approval.as_ref().map(|a| a.hash)
-        );
-        assert_ne!(
-            a.approval.as_ref().map(|a| a.hash),
-            c.approval.as_ref().map(|a| a.hash)
-        );
-        assert_ne!(
-            a.approval.as_ref().map(|a| a.hash),
-            Spec::tool_approval(
-                Kind::External,
-                "computer_job_start",
-                &json!({ "command": "./send.sh", "effect": "external" }),
-                None,
-                "t".into(),
-                "c".into()
-            )
-            .approval
-            .as_ref()
-            .map(|a| a.hash)
-        );
     }
 }

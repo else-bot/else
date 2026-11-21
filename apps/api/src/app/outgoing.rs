@@ -746,19 +746,12 @@ pub fn detail(value: Option<&Value>) -> Result<Option<String>, &'static str> {
     }
 }
 
-fn only(args: &Value, allowed: &[&str], usage: &'static str) -> Result<(), &'static str> {
-    match args.as_object() {
-        Some(object) if object.keys().all(|k| allowed.contains(&k.as_str())) => Ok(()),
-        _ => Err(usage),
-    }
-}
-
 impl Email {
     /// Parse `draft_email` arguments (`replaces` is read by the caller).
     /// With `account_id`, `from` is the connected account's `address`,
     /// which the caller looked up for the bot.
     pub fn parse(args: &Value, account: Option<&str>) -> Result<Self, &'static str> {
-        only(
+        if !crate::app::args::only(
             args,
             &[
                 "from",
@@ -772,9 +765,12 @@ impl Email {
                 "reply_to",
                 "attachments",
             ],
-            "use from (or account_id), to, subject, body, and optionally cc, bcc, reply_to, \
-             attachments, replaces",
-        )?;
+        ) {
+            return Err(
+                "use from (or account_id), to, subject, body, and optionally cc, bcc, reply_to, \
+                 attachments, replaces",
+            );
+        }
         let account_id = match args.get("account_id") {
             None | Some(Value::Null) => None,
             Some(id) => Some(
@@ -867,7 +863,7 @@ impl Email {
 impl Message {
     /// Parse `draft_message` arguments (`replaces` is read by the caller).
     pub fn parse(args: &Value) -> Result<Self, &'static str> {
-        only(
+        if !crate::app::args::only(
             args,
             &[
                 "platform",
@@ -880,9 +876,12 @@ impl Message {
                 "task",
                 "attachments",
             ],
-            "use platform, body, and optionally account, destination, task, attachments, replaces \
-             (a message has no subject or addresses; use draft_email for email)",
-        )?;
+        ) {
+            return Err(
+                "use platform, body, and optionally account, destination, task, attachments, replaces \
+                 (a message has no subject or addresses; use draft_email for email)",
+            );
+        }
         let platform = args["platform"]
             .as_str()
             .and_then(|p| p.parse::<Platform>().ok())

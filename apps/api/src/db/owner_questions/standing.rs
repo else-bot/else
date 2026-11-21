@@ -140,9 +140,11 @@ pub async fn confirm(
     {
         return Err(ConfirmError::AuthorizationUsed);
     }
-    let spec = Spec::standing_permission(target.clone(), authorization);
+    let Some(spec) = Spec::standing_permission(target.clone(), authorization) else {
+        return Err(ConfirmError::NotAuthorized);
+    };
     if let Some(question) = find_same(&mut tx, turn_id, &spec).await? {
-        if question.action.as_ref() != spec.approval.as_ref().map(|approval| &approval.action) {
+        if question.action.as_ref() != spec.approval().map(|approval| &approval.action) {
             return Err(ConfirmError::AuthorizationUsed);
         }
         let active: bool = match &target {

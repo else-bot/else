@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
-use crate::app::questions::{Effect, Kind};
+use crate::app::questions::{ApprovalKind, Effect};
 use crate::db::mcp_waits::{self, Check, CreateError, Created, Due, Spec};
 use crate::grants::Grant;
 use crate::mcp::{Error, Library, PackageId};
@@ -80,7 +80,7 @@ struct Args {
 }
 
 /// The spec, and the approval its first call needs, if any.
-fn parse(args: &Value) -> Result<(Spec, Option<Kind>), String> {
+fn parse(args: &Value) -> Result<(Spec, Option<ApprovalKind>), String> {
     let args: Args = serde_json::from_value(args.clone())
         .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds and timeout_minutes.".to_owned())?;
     let approval = args.effect.approval();

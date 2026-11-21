@@ -283,7 +283,7 @@ async fn approve_pace(
         grant,
         tool,
         args,
-        crate::app::questions::Kind::External,
+        crate::app::questions::ApprovalKind::External,
         format!(
             "Let the webhook \"{name}\" wake this bot every {} min, up to {} a day",
             pace.min_interval_minutes(),

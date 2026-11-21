@@ -48,9 +48,9 @@ pub use uses::{RanAction, Use, UseOutcome, ran_before, ran_in_task, record_use, 
 
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, Answer, Choice,
-    DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status,
-    approval_choices, says_always_allow,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, Answer, Ask,
+    Choice, DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing,
+    Status, says_always_allow,
 };
 use crate::db::in_ids;
 use crate::grants::policy::GrantReach;
@@ -226,7 +226,7 @@ async fn find_same(
     turn_id: Uuid,
     spec: &Spec,
 ) -> Result<Option<QuestionInfo>, sqlx::Error> {
-    let row: Option<Row> = match &spec.approval {
+    let row: Option<Row> = match spec.approval() {
         Some(approval) => return find_hash(conn, turn_id, &approval.hash).await,
         None => {
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -289,13 +289,13 @@ async fn insert(
     .bind(caller.bot_id)
     .bind(turn_id)
     .bind(caller.attempt)
-    .bind(spec.kind.as_str())
+    .bind(spec.kind().as_str())
     .bind(&spec.title)
     .bind(&spec.context)
-    .bind(Json(&spec.choices))
-    .bind(spec.approval.as_ref().map(|a| Json(&a.action)))
-    .bind(spec.approval.as_ref().map(|a| a.hash.as_slice()))
-    .bind(spec.multiple)
+    .bind(Json(spec.choices()))
+    .bind(spec.approval().map(|a| Json(&a.action)))
+    .bind(spec.approval().map(|a| a.hash.as_slice()))
+    .bind(spec.multiple())
     .fetch_one(&mut *conn)
     .await?;
     Ok(info(row)?)
@@ -314,10 +314,10 @@ pub async fn create(
         .await?
         .ok_or(RequestError::NotRunning)?;
     if let Some(found) = find_same(&mut tx, turn_id, spec).await? {
-        if found.kind != spec.kind
-            || found.choices != spec.choices
+        if found.kind != spec.kind()
+            || found.choices != spec.choices()
             || found.context != spec.context
-            || found.multiple != spec.multiple
+            || found.multiple != spec.multiple()
         {
             return Err(RequestError::Conflict);
         }
@@ -493,14 +493,10 @@ async fn decide(
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
     let reach = grant_reach(&mut tx, turn_id).await?;
-    let standing_allowed = spec
-        .approval
-        .as_ref()
-        .is_none_or(|a| a.action.standing_allowed());
+    let standing_allowed = spec.approval().is_none_or(|a| a.action.standing_allowed());
     let target = spec
-        .approval
-        .as_ref()
-        .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
+        .approval()
+        .and_then(|a| PermissionTarget::for_action(spec.kind(), &a.action))
         .filter(|t| reach.covers(t));
     let mut granted = None;
     if let Some(target) = &target {
@@ -512,24 +508,22 @@ async fn decide(
         }
     }
     let broad = spec
-        .approval
-        .as_ref()
+        .approval()
         .is_none_or(|a| a.action.broad_grants_cover());
     let routine_covers = spec
-        .approval
-        .as_ref()
-        .is_some_and(|a| a.action.routine_grant_covers(spec.kind));
+        .approval()
+        .is_some_and(|a| a.action.routine_grant_covers(spec.kind()));
     if standing_allowed && (broad || routine_covers) {
         let standing = match scope {
             Scope::Bot
-                if spec.kind == Kind::Destructive
+                if spec.kind() == Kind::Destructive
                     && broad
                     && has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? =>
             {
                 Some(Standing::Bot)
             }
             Scope::Routine { current: true }
-                if routine_covers && routine_granted(&mut tx, turn_id, spec.kind).await? =>
+                if routine_covers && routine_granted(&mut tx, turn_id, spec.kind()).await? =>
             {
                 Some(Standing::Routine)
             }
@@ -563,7 +557,7 @@ async fn decide(
         return Ok(Gate::Run { standing: granted });
     }
     let host = matches!(
-        spec.approval.as_ref().map(|a| &a.action),
+        spec.approval().map(|a| &a.action),
         Some(Action::Host { .. })
     );
     if let Some(quote) = authorization.filter(|_| host)
@@ -588,17 +582,14 @@ async fn decide(
         (Scope::Bot, None) => Some(Standing::Bot),
         _ => None,
     };
-    let spec = Spec {
+    let mut spec = spec.clone();
+    if let Ask::Approval { offer: offered, .. } = &mut spec.ask {
         // Work another bot delegated may be offered only a task or tool
         // grant, which its reach already admitted as `target`.
-        choices: approval_choices(
-            spec.kind,
-            offer.filter(|offer| {
-                caller.owner_conversation || matches!(offer, Standing::Task | Standing::Tool)
-            }),
-        ),
-        ..spec.clone()
-    };
+        *offered = offer.filter(|offer| {
+            caller.owner_conversation || matches!(offer, Standing::Task | Standing::Tool)
+        });
+    }
     let question = insert(&mut tx, turn_id, &caller, &spec).await?;
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
     tx.commit().await?;

@@ -271,9 +271,10 @@ fn id_arg(args: &Value, key: &str) -> Result<Uuid, Refusal> {
 }
 
 fn only(args: &Value, allowed: &[&str]) -> Result<(), Refusal> {
-    match args.as_object() {
-        Some(object) if object.keys().all(|k| allowed.contains(&k.as_str())) => Ok(()),
-        _ => Err(Refusal::text(format!("use only {}.", allowed.join(", ")))),
+    if crate::app::args::only(args, allowed) {
+        Ok(())
+    } else {
+        Err(Refusal::text(format!("use only {}.", allowed.join(", "))))
     }
 }
 

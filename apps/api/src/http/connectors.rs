@@ -713,7 +713,7 @@ async fn approve_trigger(
     args: &Value,
     request: &TriggerSet,
 ) -> Result<Result<(), Refusal>, store::StoreError> {
-    use crate::app::questions::{Kind, Spec, approval_choices};
+    use crate::app::questions::{ApprovalKind, Spec};
     let bot_id = store::trigger_manager(&state.db, grant.turn_id).await?;
     let instructions = store::wake_instructions(&request.instructions)?;
     let readable = store::permissions(&state.db, request.account_id, bot_id)
@@ -728,15 +728,14 @@ async fn approve_trigger(
         .find(|account| account.id == request.account_id)
         .map(|account| account.config.address)
         .ok_or(store::StoreError::NotFound)?;
-    let mut spec = Spec::tool_approval(
-        Kind::External,
+    let spec = Spec::tool_approval(
+        ApprovalKind::External,
         "mail_trigger_set",
         args,
         None,
         format!("Wake on new mail in {address}"),
         format!("New mail in {address} will wake this bot to: {instructions}"),
     );
-    spec.choices = approval_choices(Kind::External, None);
     let card = Card::approval(
         "The owner sees an approval card for this trigger. End this attempt. If approved, call \
          mail_trigger_set with exactly the same arguments once.",
