@@ -8,8 +8,8 @@ mod watchers;
 use super::computer::{ComputerView, DetailsTab, LayoutChanged};
 use super::panel::{hairline, list_rows, muted, section};
 use super::rules::{RulesSummary, RulesTab};
-use super::view::HEADER_HEIGHT;
-use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
+use super::view::{HEADER_END_PADDING, HEADER_HEIGHT};
+use super::{Connection, ElseApp};
 use crate::api::Client;
 use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
@@ -18,9 +18,7 @@ use else_wire::conversation::BotExtras;
 use else_wire::routines::Routine;
 use else_wire::settings::Capabilities;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, IconName, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, FocusableExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use identity::Details;
 use model::ModelState;
@@ -443,15 +441,6 @@ impl ElseApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let line = hairline(cx);
-        let close = Button::new("close-settings")
-            .focus_ring(false)
-            .cursor_pointer()
-            .icon(IconName::PanelRightClose)
-            .small()
-            .ghost()
-            .accessibility_label("Hide bot details")
-            .tooltip_with_action("Hide bot details", &ToggleSettings, Some(APP_CONTEXT))
-            .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)));
         let mut panel = v_flex()
             .id("bot-settings")
             .relative()
@@ -470,7 +459,7 @@ impl ElseApp {
                     .flex_none()
                     .h(HEADER_HEIGHT)
                     .pl_4()
-                    .pr_2()
+                    .pr(HEADER_END_PADDING)
                     .items_center()
                     .border_b_1()
                     .border_color(line)
@@ -510,7 +499,7 @@ impl ElseApp {
                             ),
                     )
                     .child(div().flex_1())
-                    .child(div().flex_none().child(close)),
+                    .child(self.header_actions(cx)),
             );
         panel = match self.panel(bot.id) {
             Some(details) => panel.child(div().flex_1().min_h_0().child(details.clone())),

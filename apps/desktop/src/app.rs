@@ -406,6 +406,10 @@ pub struct ElseApp {
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
+    /// Owned here because the header actions move between the conversation
+    /// header and the details panel's, which would give them new focus state.
+    find_focus: FocusHandle,
+    details_toggle_focus: FocusHandle,
     pause: pause::PauseStrip,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
@@ -519,6 +523,8 @@ impl ElseApp {
             rules: HashMap::new(),
             rules_dialog: None,
             sidebar_focus,
+            find_focus: cx.focus_handle(),
+            details_toggle_focus: cx.focus_handle(),
             pause: Default::default(),
             live: None,
             _live: None,
