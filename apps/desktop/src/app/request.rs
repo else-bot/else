@@ -13,6 +13,11 @@ pub(in crate::app) enum Request<Op> {
         attempt: Uuid,
         op: Op,
     },
+    /// Sending `op` again after its outcome was unknown.
+    Resending {
+        attempt: Uuid,
+        op: Op,
+    },
     /// The server accepted `op`; the stream settles the card next.
     Accepted(Op),
     Failed(String),
@@ -27,14 +32,17 @@ pub(in crate::app) enum Request<Op> {
 impl<Op> Request<Op> {
     /// Whether the controls stay locked: sent and not yet failed.
     pub(in crate::app) fn busy(&self) -> bool {
-        matches!(self, Self::Sending { .. } | Self::Accepted(_))
+        matches!(
+            self,
+            Self::Sending { .. } | Self::Resending { .. } | Self::Accepted(_)
+        )
     }
 
     /// The op sent and not failed, for showing its effect before the
     /// stream confirms it.
     pub(in crate::app) fn pending(&self) -> Option<&Op> {
         match self {
-            Self::Sending { op, .. } | Self::Accepted(op) => Some(op),
+            Self::Sending { op, .. } | Self::Resending { op, .. } | Self::Accepted(op) => Some(op),
             _ => None,
         }
     }
@@ -48,6 +56,14 @@ impl<Op> Request<Op> {
 
     pub(in crate::app) fn unconfirmed(&self) -> bool {
         matches!(self, Self::Unconfirmed { .. })
+    }
+
+    /// The op whose outcome is unknown, which a resend must repeat.
+    pub(in crate::app) fn unconfirmed_op(&self) -> Option<&Op> {
+        match self {
+            Self::Unconfirmed { op, .. } => Some(op),
+            _ => None,
+        }
     }
 
     /// Starts sending `op`, unless a request is already busy. Returns the
@@ -72,7 +88,7 @@ impl<Op> Request<Op> {
         };
         let op = op.clone();
         let attempt = Uuid::new_v4();
-        *self = Self::Sending {
+        *self = Self::Resending {
             attempt,
             op: op.clone(),
         };
@@ -97,18 +113,24 @@ impl<Op> Request<Op> {
         self.settle_as(attempt, result, ToString::to_string)
     }
 
-    /// Like [`Self::settle`], with `message` describing a failure.
+    /// Like [`Self::settle`], with `message` describing a failure. A
+    /// rejected token says nothing about an earlier attempt, so a resend
+    /// that gets one stays unconfirmed.
     pub(in crate::app) fn settle_as<T>(
         &mut self,
         attempt: Uuid,
         result: &Result<T, ClientError>,
         message: impl FnOnce(&ClientError) -> String,
     ) -> bool {
-        let op = match std::mem::take(self) {
+        let (op, resent) = match std::mem::take(self) {
             Self::Sending {
                 attempt: current,
                 op,
-            } if current == attempt => op,
+            } if current == attempt => (op, false),
+            Self::Resending {
+                attempt: current,
+                op,
+            } if current == attempt => (op, true),
             other => {
                 *self = other;
                 return false;
@@ -116,10 +138,16 @@ impl<Op> Request<Op> {
         };
         *self = match result {
             Ok(_) => Self::Accepted(op),
-            Err(err) if err.outcome_unknown() || err.is_request_conflict() => Self::Unconfirmed {
-                op,
-                error: message(err),
-            },
+            Err(err)
+                if err.outcome_unknown()
+                    || err.is_request_conflict()
+                    || (resent && *err == ClientError::Unauthorized) =>
+            {
+                Self::Unconfirmed {
+                    op,
+                    error: message(err),
+                }
+            }
             Err(err) => Self::Failed(message(err)),
         };
         true
@@ -130,6 +158,9 @@ impl<Op> Request<Op> {
     pub(in crate::app) fn fail(&mut self, attempt: Uuid, message: String) -> bool {
         match self {
             Self::Sending {
+                attempt: current, ..
+            }
+            | Self::Resending {
                 attempt: current, ..
             } if *current == attempt => {
                 *self = Self::Failed(message);
@@ -224,7 +255,7 @@ mod tests {
             assert_eq!(op, "discard");
             assert_eq!(
                 request,
-                Request::Sending {
+                Request::Resending {
                     attempt: retry,
                     op: "discard"
                 }

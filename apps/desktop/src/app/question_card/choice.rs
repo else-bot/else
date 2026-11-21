@@ -504,7 +504,9 @@ fn settled(question: &Question, form: Option<&QuestionForm>, reply: Option<&str>
         return Settled {
             marker: "Answer sent",
             resumed: true,
-            outcome: if form.is_some_and(|f| matches!(f.state, Request::Sending { .. })) {
+            outcome: if form.is_some_and(|f| {
+                matches!(f.state, Request::Sending { .. } | Request::Resending { .. })
+            }) {
                 "Sending…".into()
             } else {
                 chose(question, form.map(|f| &f.answer))

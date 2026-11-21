@@ -72,16 +72,52 @@ pub(super) struct CreateFormHolder {
 
 impl ElseApp {
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Research"));
+        let resumed = self.preferences.unconfirmed_create.clone();
+        let name = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder("e.g. Research");
+            match &resumed {
+                Some(op) => input.default_value(op.name.clone()),
+                None => input,
+            }
+        });
         let profile = self.caps.clone().map(|caps| {
-            let picker = self
-                .profile_picker(&caps, caps.defaults.as_ref(), cx)
-                .tabs();
-            cx.new(|_| picker)
+            let initial = match &resumed {
+                Some(op) => op.profile.as_ref(),
+                None => caps.defaults.as_ref(),
+            };
+            let mut picker = self.profile_picker(&caps, initial, cx).tabs();
+            let locked = resumed.is_some();
+            cx.new(|cx| {
+                picker.set_disabled(locked, cx);
+                picker
+            })
         });
         let choices = category_choices(&self.categories);
-        let category =
-            cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));
+        let selected = resumed
+            .as_ref()
+            .and_then(|op| {
+                choices
+                    .iter()
+                    .position(|choice| choice.id == op.category_id)
+            })
+            .unwrap_or(0);
+        let category = cx.new(|cx| {
+            SelectState::new(choices.clone(), Some(IndexPath::new(selected)), window, cx)
+        });
+        let avatar = resumed
+            .as_ref()
+            .and_then(|op| op.avatar)
+            .unwrap_or_else(|| Avatar {
+                shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
+                color: AvatarColor::ALL[rand::random_range(0..AvatarColor::ALL.len())],
+            });
+        let request = match resumed {
+            Some(op) => Request::Unconfirmed {
+                op,
+                error: "The last Create bot request may have reached the server.".into(),
+            },
+            None => Request::Idle,
+        };
         let enter =
             cx.subscribe_in(
                 &name,
@@ -94,12 +130,9 @@ impl ElseApp {
             );
         let holder = cx.new(|_| CreateFormHolder {
             form: CreateForm {
-                request: Request::Idle,
+                request,
                 name: name.clone(),
-                avatar: Avatar {
-                    shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
-                    color: AvatarColor::ALL[rand::random_range(0..AvatarColor::ALL.len())],
-                },
+                avatar,
                 profile,
                 category,
                 category_choices: choices,
@@ -319,6 +352,10 @@ impl ElseApp {
             let result = client.create_bot(payload).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
+                if settled {
+                    let unconfirmed = holder.read(cx).form.request.unconfirmed_op().cloned();
+                    app.keep_unconfirmed_create(unconfirmed);
+                }
                 if let Err(err) = &result {
                     app.unauthorized(err, window, cx);
                 }
@@ -354,6 +391,19 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+}
+
+impl ElseApp {
+    /// Saved now rather than debounced: a changed owner key replaces this
+    /// session, and the next one reads the request back from disk.
+    fn keep_unconfirmed_create(&mut self, op: Option<CreateBotRequest>) {
+        if self.preferences.unconfirmed_create != op {
+            self.preferences.unconfirmed_create = op;
+            if let Err(err) = self.preferences.save() {
+                eprintln!("{err}");
+            }
+        }
     }
 }
 

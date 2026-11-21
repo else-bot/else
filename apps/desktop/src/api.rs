@@ -72,7 +72,7 @@ pub enum HandoffAction {
 }
 
 /// The complete create payload, retained unchanged when delivery is uncertain.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreateBotRequest {
     pub request_id: Uuid,
     pub name: String,
