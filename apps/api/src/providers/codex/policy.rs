@@ -253,6 +253,12 @@ impl Protocol for TurnEvents<'_> {
         let turn = params["turnId"].as_str().or(params["turn"]["id"].as_str());
         let other_thread = thread.is_some_and(|t| t != self.thread_id);
         let other_turn = turn.is_some_and(|t| t != self.native_turn);
+        // A summary allows no other item anywhere, not even in another
+        // thread or turn.
+        if self.allowed == Allowed::Messages && matches!(method, "item/started" | "item/completed")
+        {
+            self.check_item(&params["item"])?;
+        }
         let mut events = Vec::new();
         match method {
             "thread/started" if params["thread"]["id"].as_str() != Some(self.thread_id) => {
@@ -282,7 +288,6 @@ impl Protocol for TurnEvents<'_> {
             "item/started" => self.check_item(&params["item"])?,
             "item/completed" if self.allowed == Allowed::Messages => {
                 let item = &params["item"];
-                self.check_item(item)?;
                 if item["type"] == "agentMessage" && item["phase"] != "commentary" {
                     let text = item["text"].as_str().unwrap_or_default();
                     events.extend([Event::EndMessage, Event::Text(text.to_owned())]);

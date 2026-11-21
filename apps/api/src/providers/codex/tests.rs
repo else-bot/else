@@ -413,7 +413,7 @@ async fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
 async fn fake_codex_with(
     dir: &std::path::Path,
     servers: &Value,
-    items: &[Value],
+    notifications: &[Value],
 ) -> (Codex, std::path::PathBuf) {
     let received = dir.join("received.jsonl");
     let inputs = dir.join("inputs.jsonl");
@@ -438,7 +438,7 @@ async fn fake_codex_with(
         })).collect::<Vec<_>>(),
     });
     let catalog = format!("{:?}", catalog.to_string());
-    let items = format!("{:?}", Value::from(items).to_string());
+    let notifications = format!("{:?}", Value::from(notifications).to_string());
     let servers = format!("{:?}", servers.to_string());
     let script = format!(
         r#"python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> {launches:?}
@@ -453,7 +453,7 @@ cat "$CODEX_HOME/config.toml" > {launched:?}
 exec python3 -c '
 import json, os, sys
 def out(m): print(json.dumps(m), flush=True)
-items = json.loads({items})
+notifications = json.loads({notifications})
 models = [m["slug"] for m in json.loads({catalog})["models"]]
 if os.path.exists({one_model:?}): models = models[:1]
 for flag, value in zip(sys.argv, sys.argv[1:]):
@@ -493,10 +493,9 @@ for line in sys.stdin:
     else: r = {{}}
     out({{"id": m["id"], "result": r}})
     if method == "turn/start":
-        for item in items:
-            for event in ("item/started", "item/completed"):
-                out({{"method": event, "params": {{"threadId": p["threadId"],
-                     "turnId": "native-turn", "item": item}}}})
+        for n in notifications:
+            out({{"method": n["method"], "params": {{"threadId": p["threadId"],
+                 "turnId": "native-turn", **n["params"]}}}})
         out({{"method": "turn/completed", "params": {{"threadId": p["threadId"],
              "turn": {{"id": "native-turn", "status": "completed"}}}}}})
 ' "$@""#
@@ -707,16 +706,29 @@ async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
     assert!(!dir.path().join("threads.jsonl").exists());
 }
 
+/// A notification about `item` for the fake Codex's current turn.
+fn item(method: &str, item: Value) -> Value {
+    json!({ "method": method, "params": { "item": item } })
+}
+
+/// `item` started and completed.
+fn whole(item: Value) -> [Value; 2] {
+    [
+        self::item("item/started", item.clone()),
+        self::item("item/completed", item),
+    ]
+}
+
 #[tokio::test]
-async fn a_summary_is_its_final_message_and_refuses_any_other_item() {
+async fn a_summary_is_its_final_messages_and_refuses_any_other_item() {
     let profile = turn_from(crate::app::providers::Origin::Other)
         .profile
         .unwrap();
-    let summarize = |items: Vec<Value>| {
+    let summarize = |notifications: Vec<Value>| {
         let profile = profile.clone();
         async move {
             let dir = tempfile::tempdir().unwrap();
-            let (codex, _) = fake_codex_with(dir.path(), &json!([]), &items).await;
+            let (codex, _) = fake_codex_with(dir.path(), &json!([]), &notifications).await;
             codex
                 .summarize_once(
                     Uuid::new_v4(),
@@ -727,21 +739,39 @@ async fn a_summary_is_its_final_message_and_refuses_any_other_item() {
                 .await
         }
     };
-    let result = summarize(vec![
-        json!({ "type": "agentMessage", "id": "c", "phase": "commentary", "text": "Reading." }),
-        json!({ "type": "reasoning", "id": "r" }),
-        json!({ "type": "agentMessage", "id": "f", "phase": "final_answer", "text": " Summary. " }),
-    ])
+    let message = |id: &str, phase: &str, text: &str| {
+        whole(json!({ "type": "agentMessage", "id": id, "phase": phase, "text": text }))
+    };
+    let result = summarize(
+        [
+            message("c", "commentary", "Reading."),
+            whole(json!({ "type": "reasoning", "id": "r" })),
+            message("f1", "final_answer", " First."),
+            message("f2", "final_answer", "Second. "),
+        ]
+        .concat(),
+    )
     .await;
-    assert_eq!(result, Ok("Summary.".into()));
-    // A kind a turn would allow, such as a new one, is refused here too.
-    for kind in ["commandExecution", "mcpToolCall", "plan"] {
-        let result = summarize(vec![json!({ "type": kind, "id": "item-1" })]).await;
+    assert_eq!(result, Ok("First.\n\nSecond.".into()));
+    let plan = json!({ "type": "plan", "id": "p" });
+    let forbidden = [
+        // A kind a turn would allow, such as a new one, is refused here.
+        whole(plan.clone()).to_vec(),
+        whole(json!({ "type": "commandExecution", "id": "x" })).to_vec(),
+        vec![item(
+            "item/completed",
+            json!({ "type": "mcpToolCall", "id": "m" }),
+        )],
+        vec![json!({ "method": "item/started",
+                     "params": { "threadId": "other-thread", "turnId": "other", "item": plan } })],
+    ];
+    for notifications in forbidden {
+        let result = summarize(notifications.clone()).await;
         assert!(
             result
                 .as_ref()
-                .is_err_and(|e| e.contains(&format!("Codex produced a {kind} item"))),
-            "{kind}: {result:?}"
+                .is_err_and(|e| e.contains("Codex produced a")),
+            "{notifications:?}: {result:?}"
         );
     }
 }
@@ -881,7 +911,10 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
         let (codex, _) = fake_codex_with(
             dir.path(),
             &elsebot_server(),
-            &[json!({ "type": kind, "id": "item-1" })],
+            &[item(
+                "item/started",
+                json!({ "type": kind, "id": "item-1" }),
+            )],
         )
         .await;
         let codex = codex.with_tools(TOOL_URL.into());
@@ -902,7 +935,10 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
         let (codex, _) = fake_codex_with(
             dir.path(),
             &elsebot_server(),
-            &[json!({ "type": kind, "id": "item-1" })],
+            &[item(
+                "item/started",
+                json!({ "type": kind, "id": "item-1" }),
+            )],
         )
         .await;
         let codex = codex.with_tools(TOOL_URL.into());
