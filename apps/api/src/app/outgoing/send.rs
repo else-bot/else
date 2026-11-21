@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::{Channels, DraftFile, Platform};
+use super::{Channels, DraftFile, Platform, Status};
 use crate::connectors::types::{MailCommand, MailError, OutgoingAttachment};
 use crate::db::outgoing_drafts::{
     self, Claim, Claimed, DraftError, MailSend, OutgoingDraft, Payload, SentCheck,
@@ -18,8 +18,9 @@ use crate::socials::types::{Error as SocialError, SendFile, SendMessage};
 /// The connected accounts a send reaches, for one caller. A send must
 /// record its action receipt under `action_id` before its external effect
 /// and deduplicate by it, because a resumed claim calls it again with the
-/// same ID. It returns an error that leaves no receipt only when nothing
-/// was sent: the draft then fails.
+/// same ID. After an error that left no receipt, the draft fails and the
+/// action is withdrawn, so a copy of the send still queued finds the
+/// withdrawal and never sends.
 #[async_trait]
 pub trait Connected: Sync {
     /// Send through the mail connector as action `action_id`.
@@ -70,7 +71,12 @@ pub async fn send_connected(
     let claimed = match outgoing_drafts::claim_connected(db, turn_id, draft_id, channels).await? {
         Claim::Fresh(claimed) | Claim::Resumed(claimed) => claimed,
         Claim::Settled(draft) => return Ok(draft),
-        Claim::FailedUnsent(changed) => return Err(SendError::FileChanged(changed)),
+        Claim::FailedUnsent { draft, changed } => {
+            return match draft.status {
+                Status::Failed => Err(SendError::FileChanged(changed)),
+                _ => Ok(draft),
+            };
+        }
         Claim::FileChangedAfterClaim(changed) => {
             return Err(SendError::FileChangedAfterClaim(changed));
         }
@@ -85,13 +91,13 @@ pub async fn send_connected(
     Ok(match payload {
         Payload::Mail(email) => {
             let message_id = email.message_id(draft.id);
-            match outgoing_drafts::next_mail_send(db, turn_id, draft_id, &message_id).await? {
+            match outgoing_drafts::next_mail_send(db, draft_id, action_id, &message_id).await? {
                 MailSend::Dispatch { message_id } => {
                     let attachments = files.iter().map(mail_file).collect();
                     let command = email.send_command(attachments, Some(message_id));
                     let result = via.send_mail(account_id, action_id, command).await;
                     let refused = result.err().map(|error| error.code.as_str());
-                    outgoing_drafts::after_mail_send(db, draft_id, refused).await?
+                    outgoing_drafts::after_mail_send(db, draft_id, action_id, refused).await?
                 }
                 MailSend::Settled(draft) => *draft,
                 MailSend::CheckSent {
@@ -130,8 +136,15 @@ pub async fn send_connected(
             let result = via
                 .send_social(account_id, action_id, message.platform, send)
                 .await;
-            let refused = result.err().map(|error| error.to_string());
-            outgoing_drafts::after_social_send(db, draft_id, refused.as_deref()).await?
+            let refused = result.err().map(|error| match error {
+                // Its worker had not admitted it, or the draft would not fail.
+                SocialError::Uncertain => {
+                    "The connection did not start the send before the wait ended. Nothing was sent."
+                        .to_owned()
+                }
+                error => error.to_string(),
+            });
+            outgoing_drafts::after_social_send(db, draft_id, action_id, refused.as_deref()).await?
         }
     })
 }

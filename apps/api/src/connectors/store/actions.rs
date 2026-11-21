@@ -108,6 +108,22 @@ pub async fn begin_action(
         .unwrap_or_default();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_in(&mut tx, account_id, generation, bot_id, turn_id, command).await?;
+    // A draft settled the send it claimed under this action without it, so
+    // a copy still queued must never send.
+    let released: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM draft_claims c JOIN outgoing_drafts d ON d.id = c.draft_id
+             WHERE c.account_id = ?1 AND c.action_id = ?2
+               AND NOT (d.status = 'sending' AND d.claim_action_id = c.action_id)
+               AND NOT EXISTS (SELECT 1 FROM connector_actions a
+                               WHERE a.account_id = ?1 AND a.action_id = ?2))",
+    )
+    .bind(account_id)
+    .bind(action_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if released {
+        return Err(StoreError::Conflict);
+    }
     let start = ACTIONS
         .begin(
             &mut tx,

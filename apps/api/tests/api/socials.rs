@@ -3,7 +3,10 @@ use crate::common;
 use async_trait::async_trait;
 use common::recorder::{Called, GATE, GATE_AFTER_OPENING, GATE_EVERY_ATTEMPT, harness, tool};
 use common::{TestApp, TestDb};
+use else_api::app::outgoing::send::{Connected, send_connected};
+use else_api::app::outgoing::{Channels, Platform};
 use else_api::connector_core::actions::Start;
+use else_api::connectors::types::{MailCommand, MailError};
 use else_api::grants::Tool;
 use else_api::{
     credentials::SecretKey,
@@ -868,60 +871,176 @@ async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
 }
 
+/// A Telegram message to chat 100 drafted for connection `connection` by a
+/// running request and approved by the owner; the request continues.
+async fn approved_social_draft(
+    h: &common::recorder::Harness,
+    bot: Uuid,
+    connection: Uuid,
+) -> (Uuid, Uuid) {
+    let app = &h.app;
+    let (turn, grant) = h.running(&bot.to_string(), GATE_EVERY_ATTEMPT).await;
+    let proposed = social_result(
+        tool(
+            app,
+            &grant,
+            "draft_message",
+            json!({ "platform": "telegram", "account_id": connection, "destination": "100",
+                    "body": "Approved update" }),
+        )
+        .await,
+    );
+    let draft: Uuid = proposed["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+    let (status, approved) = http(
+        &app.router,
+        "POST",
+        &format!("/v1/bots/{bot}/outgoing-drafts/{draft}/approve"),
+        common::TOKEN,
+        json!({ "version": 1 }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
+    h.continued(turn, &grant).await;
+    (turn, draft)
+}
+
+const SOCIAL: Channels = Channels {
+    mail: false,
+    social: true,
+};
+
+/// A send that gives up before the connection answers, as its wait does.
+/// With `admit`, the real worker first starts the same action for `bot` in
+/// `turn` and holds it in the transport.
+struct GaveUp {
+    manager: Arc<Manager>,
+    fake: Arc<Fake>,
+    bot: Uuid,
+    turn: Uuid,
+    admit: bool,
+}
+
+#[async_trait]
+impl Connected for GaveUp {
+    async fn send_mail(&self, _: Uuid, _: Uuid, _: MailCommand) -> Result<(), MailError> {
+        unreachable!("these drafts are messages")
+    }
+
+    async fn find_sent(&self, _: Uuid, _: String) -> Result<bool, MailError> {
+        unreachable!("these drafts are messages")
+    }
+
+    async fn send_social(
+        &self,
+        account_id: Uuid,
+        action_id: Uuid,
+        _: Platform,
+        message: SendMessage,
+    ) -> Result<(), Error> {
+        if self.admit {
+            let (manager, bot, turn) = (self.manager.clone(), self.bot, self.turn);
+            tokio::spawn(async move {
+                manager
+                    .send(account_id, bot, turn, action_id, message)
+                    .await
+            });
+            tokio::time::timeout(common::SETTLE, self.fake.started.notified())
+                .await
+                .expect("the worker admits the send");
+        }
+        Err(Error::Uncertain)
+    }
+}
+
 #[tokio::test]
-async fn a_queued_send_whose_caller_gave_up_is_never_delivered() {
-    let db = TestDb::migrated().await;
-    let c = account(&db, "queued").await;
+async fn a_send_given_up_before_its_worker_admits_it_fails_and_is_never_delivered() {
+    let fake = Arc::new(Fake::default());
+    let db = Arc::new(TestDb::migrated().await);
+    let h = harness(TestApp::builder().db(db.clone()).social(fake.clone())).await;
+    let app = &h.app;
+    let c = account(&db, "withdrawn").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let (turn, draft) = approved_social_draft(&h, bot, c.id).await;
+    let via = GaveUp {
+        manager: app.state.socials.clone(),
+        fake: fake.clone(),
+        bot,
+        turn,
+        admit: false,
+    };
+
+    let failed = send_connected(&db.pool, turn, draft, SOCIAL, &via)
+        .await
+        .unwrap();
+    assert_eq!(failed.status.as_str(), "failed");
+    let queued = app
+        .state
+        .socials
+        .send(
+            c.id,
+            bot,
+            turn,
+            failed.claim_action_id.unwrap(),
+            SendMessage {
+                destination: "100".into(),
+                body: "Approved update".into(),
+                reply_to: None,
+                files: Vec::new(),
+            },
+        )
+        .await;
+    assert!(matches!(queued, Err(Error::Conflict)), "{queued:?}");
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_send_its_worker_admitted_before_the_caller_gave_up_settles_by_its_receipt() {
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let send = |destination: &str, id: Uuid| {
-        let manager = manager.clone();
-        let message = SendMessage {
-            destination: destination.into(),
-            body: "body".into(),
-            reply_to: None,
-            files: Vec::new(),
-        };
-        tokio::spawn(async move { manager.send(c.id, bot, turn, id, message).await })
+    let db = Arc::new(TestDb::migrated().await);
+    let h = harness(TestApp::builder().db(db.clone()).social(fake.clone())).await;
+    let app = &h.app;
+    let c = account(&db, "admitted").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let (turn, draft) = approved_social_draft(&h, bot, c.id).await;
+    let via = GaveUp {
+        manager: app.state.socials.clone(),
+        fake: fake.clone(),
+        bot,
+        turn,
+        admit: true,
     };
-    let first = send("100", Uuid::new_v4());
-    tokio::time::timeout(common::SETTLE, fake.started.notified())
+
+    let pending = send_connected(&db.pool, turn, draft, SOCIAL, &via)
         .await
         .unwrap();
-    let abandoned = Uuid::new_v4();
-    let queued = send("200", abandoned);
-    // Long enough for the send to queue behind the first; if it has not, the
-    // abort only drops it sooner and the assertions still hold.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    queued.abort();
-    fake.blocked.store(false, Ordering::SeqCst);
+    assert_eq!(pending.status.as_str(), "sending");
     fake.release.notify_one();
-    tokio::time::timeout(common::SETTLE, first)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(common::SETTLE, send("100", Uuid::new_v4()))
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(*fake.sent_to.lock().unwrap(), ["100", "100"]);
-    assert_eq!(
-        store::ACTIONS
-            .receipt(&db.pool, c.id, bot, abandoned)
-            .await
-            .unwrap(),
-        None
-    );
+    tokio::time::timeout(common::SETTLE, async {
+        loop {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+                    .bind(draft)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            if status == "sent" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the admitted send settles the draft as sent");
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

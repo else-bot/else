@@ -76,6 +76,10 @@ pub struct OutgoingDraft {
     pub context_turn_id: Option<Uuid>,
     #[serde(skip)]
     pub context_version: Option<i64>,
+    /// The action of the connected send this approval claimed. Settling the
+    /// draft keeps it, while `delivery` may come to name an earlier send.
+    #[serde(skip)]
+    pub claim_action_id: Option<Uuid>,
 }
 
 /// The [`DraftKind`] of draft `d` as JSON, or NULL when it has none: the one
@@ -117,7 +121,7 @@ const SELECT: &str = concat!(
             AND c.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')) AS in_reply,
         d.approval_source, d.approved_version, d.approved_item_id, d.approved_at, d.delivery,
         d.result_detail, d.superseded_by, d.created_at, d.updated_at, d.settled_at,
-        d.send_turn_id, d.context_turn_id, d.context_version, ",
+        d.send_turn_id, d.context_turn_id, d.context_version, d.claim_action_id, ",
     kind!(),
     " AS kind
     FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id"
@@ -768,7 +772,8 @@ pub async fn confirm(
         "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'message',
              approved_version = version, approved_item_id = ?3,
              approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), send_turn_id = ?2,
-             turn_id = ?2, attempt = ?4, delivery = NULL, result_detail = NULL, settled_at = NULL,
+             turn_id = ?2, attempt = ?4, delivery = NULL, claim_action_id = NULL,
+             result_detail = NULL, settled_at = NULL,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
     )
@@ -848,8 +853,12 @@ pub enum Claim {
     /// An earlier call of this request already settled it.
     Settled(OutgoingDraft),
     /// An approved file changed before this call's claim: the claim failed
-    /// the draft, and nothing was sent.
-    FailedUnsent(FileChanged),
+    /// the draft and sent nothing. `draft` is what was stored: uncertain,
+    /// naming that send, when an earlier send of it may have gone out.
+    FailedUnsent {
+        draft: OutgoingDraft,
+        changed: FileChanged,
+    },
     /// An approved file changed after an earlier call of this request
     /// claimed the send, which may have gone out. The draft stays as it is.
     FileChangedAfterClaim(FileChanged),
@@ -858,18 +867,35 @@ pub enum Claim {
 /// Claim a draft bound to a connected account for its account's send, in
 /// the request allowed to send it, if `channels` allow that account's
 /// transport. A repeated claim in the same request resumes the first, with
-/// its action ID, or returns the draft it settled. The claim reads the
-/// approved files in its transaction, so a draft is never `sending` before
-/// its files are checked, and a changed file fails only a fresh claim.
+/// its action ID, or returns the draft it settled. The approved files are
+/// checked before the claim commits, so a draft is never `sending` with
+/// unchecked files, and a changed file fails only a fresh claim.
 pub async fn claim_connected(
     pool: &SqlitePool,
     turn_id: Uuid,
     draft_id: Uuid,
     channels: Channels,
 ) -> Result<Claim, DraftError> {
+    // Read and hash the files outside the write lock: a message may carry
+    // up to 100 MiB. The claim sends exactly the bytes checked here.
+    let (files, checked) = {
+        let mut conn = pool.acquire().await?;
+        let snapshot: OutgoingDraft =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE d.id = ?1")))
+                .bind(draft_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .ok_or(DraftError::NotFound)?;
+        let checked = send::approved(&mut conn, &snapshot).await;
+        (snapshot.content.files().to_vec(), checked)
+    };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
+    // An approval since the read changed which files it carries.
+    if draft.content.files() != files.as_slice() {
+        return Err(DraftError::Changed(draft.version));
+    }
     let account_id = draft.content.account().ok_or(DraftError::NotConnected)?;
     let payload = match &draft.content.0 {
         Content::Email(email) if channels.mail => Payload::Mail(email.clone()),
@@ -882,17 +908,12 @@ pub async fn claim_connected(
         },
         _ => return Err(DraftError::NoTransport),
     };
-    let earlier = match draft.delivery.as_deref() {
-        Some(Delivery::Mail { action_id, .. } | Delivery::Social { action_id, .. })
-            if draft.send_turn_id == Some(turn_id) =>
-        {
-            Some(*action_id)
-        }
-        _ => None,
-    };
+    let earlier = draft
+        .claim_action_id
+        .filter(|_| draft.send_turn_id == Some(turn_id));
     match (draft.status, earlier) {
         (Status::Sending, Some(action_id)) => {
-            return Ok(match send::approved(&mut tx, &draft).await {
+            return Ok(match checked {
                 Ok(files) => Claim::Resumed(Claimed {
                     draft,
                     account_id,
@@ -920,7 +941,7 @@ pub async fn claim_connected(
         },
     };
     let draft = mark_sending(&mut tx, caller.bot_id, turn_id, draft, &delivery).await?;
-    let claim = match send::approved(&mut tx, &draft).await {
+    let claim = match checked {
         Ok(files) => Claim::Fresh(Claimed {
             draft,
             account_id,
@@ -928,17 +949,17 @@ pub async fn claim_connected(
             payload,
             files,
         }),
-        Err(changed) => {
-            fail_claimed(&mut tx, draft.id, &changed.to_string()).await?;
-            Claim::FailedUnsent(changed)
-        }
+        Err(changed) => Claim::FailedUnsent {
+            draft: fail_claimed(&mut tx, draft.id, &changed.to_string()).await?,
+            changed,
+        },
     };
     tx.commit().await?;
     Ok(claim)
 }
 
 /// Move an approved draft of request `turn_id` to `sending` through
-/// `delivery`.
+/// `delivery`, recording a connected delivery's action as the claim.
 async fn mark_sending(
     tx: &mut SqliteConnection,
     bot_id: Uuid,
@@ -952,19 +973,41 @@ async fn mark_sending(
     if draft.send_turn_id != Some(turn_id) {
         return Err(DraftError::OtherRequest);
     }
+    let claim = match delivery {
+        Delivery::Mail {
+            account_id,
+            action_id,
+        }
+        | Delivery::Social {
+            account_id,
+            action_id,
+        } => Some((*account_id, *action_id)),
+        Delivery::Tool { .. } | Delivery::Host => None,
+    };
     let moved = sqlx::query(
-        "UPDATE outgoing_drafts SET status = 'sending', delivery = ?2,
+        "UPDATE outgoing_drafts SET status = 'sending', delivery = ?2, claim_action_id = ?3,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'approved'",
     )
     .bind(draft.id)
     .bind(Json(delivery))
+    .bind(claim.map(|(_, action_id)| action_id))
     .execute(&mut *tx)
     .await?
     .rows_affected();
     let current = reload(&mut *tx, draft.id).await?;
     if moved == 0 {
         return Err(DraftError::Settled(current.status));
+    }
+    if let Some((account_id, action_id)) = claim {
+        sqlx::query(
+            "INSERT INTO draft_claims (account_id, action_id, draft_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(account_id)
+        .bind(action_id)
+        .bind(draft.id)
+        .execute(&mut *tx)
+        .await?;
     }
     events::turn_changed(&mut *tx, bot_id, draft.turn_id).await?;
     Ok(current)
@@ -981,10 +1024,7 @@ pub async fn fail_unsent(
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = reload(&mut tx, draft_id).await?;
-    if matches!(
-        draft.delivery.as_deref(),
-        Some(Delivery::Mail { .. } | Delivery::Social { .. })
-    ) {
+    if draft.claim_action_id.is_some() {
         return Err(DraftError::Connected);
     }
     let draft = fail_claimed(&mut tx, draft_id, detail).await?;
@@ -1057,41 +1097,41 @@ pub async fn report(
     Ok((draft, true))
 }
 
-/// After a connector send returned: a send the mail connector refused
-/// before recording its action (`refused`) never reached the mail server,
-/// so it fails; otherwise the action receipt already settled it, or will.
-/// Announces the draft's current state.
+/// Refuse a call whose claim `claim` no longer owns the draft: a new
+/// approval claimed it again since, so the draft holds another send's state.
+fn own_claim(draft: &OutgoingDraft, claim: Uuid) -> Result<(), DraftError> {
+    if draft.claim_action_id == Some(claim) {
+        Ok(())
+    } else {
+        Err(DraftError::Settled(draft.status))
+    }
+}
+
+/// After the connector send of claim `claim` returned. A send the mail
+/// connector refused before admitting it (`refused`) fails; the connector
+/// then never admits a copy of it still queued. One admitted first settles
+/// through its own receipt. Announces the draft's current state.
 pub async fn after_mail_send(
     pool: &SqlitePool,
     draft_id: Uuid,
+    claim: Uuid,
     refused: Option<&str>,
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = reload(&mut tx, draft_id).await?;
-    if let (
-        Some(code),
-        Status::Sending,
-        Some(Delivery::Mail {
-            account_id,
-            action_id,
-        }),
-    ) = (refused, draft.status, draft.delivery.as_deref())
-    {
-        sqlx::query(
-            "UPDATE outgoing_drafts SET status = 'failed', result_detail = ?2,
-                 settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status = 'sending' AND NOT EXISTS (
-                 SELECT 1 FROM connector_actions WHERE account_id = ?3 AND action_id = ?4)",
+    own_claim(&draft, claim)?;
+    if let (Some(code), Some((account_id, action_id))) = (refused, claimed_mail(&draft)) {
+        let admitted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM connector_actions WHERE account_id = ?1 AND action_id = ?2)",
         )
-        .bind(draft.id)
-        .bind(format!(
-            "The mail connector refused it ({code}). Nothing was sent."
-        ))
         .bind(account_id)
         .bind(action_id)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        if !admitted {
+            let detail = format!("The mail connector refused it ({code}). Nothing was sent.");
+            fail_claimed(&mut tx, draft_id, &detail).await?;
+        }
     }
     events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
     let draft = reload(&mut tx, draft_id).await?;
@@ -1154,26 +1194,24 @@ fn claimed_mail(draft: &OutgoingDraft) -> Option<(Uuid, Uuid)> {
     }
 }
 
-/// Decide whether a connected email request `turn_id` claimed may be
-/// sent. An earlier send that may have gone out, and that Sent was not
-/// searched for, blocks it. The search moves the draft out of `sending`, so
-/// the next claim needs a new approval. Otherwise its attempt is recorded,
-/// once, before the mail connector sends it. A claim another call of the
-/// request settled since returns that receipt.
+/// Decide whether the connected email claim `claim` may be sent. An
+/// earlier send that may have gone out, and that Sent was not searched
+/// for, blocks it. The search moves the draft out of `sending`, so the next
+/// claim needs a new approval. Otherwise its attempt is recorded, once,
+/// before the mail connector sends it. A claim another call settled since
+/// returns that receipt.
 pub async fn next_mail_send(
     pool: &SqlitePool,
-    turn_id: Uuid,
     draft_id: Uuid,
+    claim: Uuid,
     message_id: &str,
 ) -> Result<MailSend, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = reload(&mut tx, draft_id).await?;
+    own_claim(&draft, claim)?;
     let Some((account_id, action_id)) = claimed_mail(&draft) else {
         return match draft.status {
-            Status::Sent | Status::Failed | Status::Uncertain
-                if draft.send_turn_id == Some(turn_id)
-                    && matches!(draft.delivery.as_deref(), Some(Delivery::Mail { .. })) =>
-            {
+            Status::Sent | Status::Failed | Status::Uncertain => {
                 Ok(MailSend::Settled(Box::new(draft)))
             }
             status => Err(DraftError::Settled(status)),
@@ -1267,8 +1305,9 @@ pub async fn next_mail_send(
 /// Found: the newest earlier action succeeded and the draft is sent,
 /// naming it. Absent: the draft is uncertain again, naming it, and the next
 /// approval sends. No search: the draft is uncertain and nothing is
-/// recorded, so the next approval must search again. A draft no longer in
-/// that claim, or an earlier send already searched for, changes nothing.
+/// recorded, so the next approval must search again. A draft another claim
+/// owns is refused. A claim already settled, or an earlier send already
+/// searched for, changes nothing.
 pub async fn record_sent_check(
     pool: &SqlitePool,
     draft_id: Uuid,
@@ -1278,6 +1317,7 @@ pub async fn record_sent_check(
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = reload(&mut tx, draft_id).await?;
+    own_claim(&draft, claimed)?;
     let (Some((account_id, _)), Some(&newest)) = (claimed_mail(&draft), earlier.first()) else {
         return Ok(draft);
     };
@@ -1305,7 +1345,7 @@ pub async fn record_sent_check(
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'sending' AND json_extract(delivery, '$.via') = 'mail'
-           AND json_extract(delivery, '$.action_id') = ?5",
+           AND claim_action_id = ?5",
     )
     .bind(draft_id)
     .bind(status.as_str())
@@ -1319,7 +1359,7 @@ pub async fn record_sent_check(
             .take(outgoing::MAX_DETAIL)
             .collect::<String>(),
     )
-    .bind(claimed.to_string())
+    .bind(claimed)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -1347,7 +1387,7 @@ pub async fn record_sent_check(
                 && !crate::connectors::store::found_in_sent(&mut tx, account_id, newest).await?);
         if settled {
             tx.rollback().await?;
-            return Ok(reload(&mut *pool.acquire().await?, draft_id).await?);
+            return Ok(draft);
         }
     }
     events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
@@ -1374,22 +1414,39 @@ pub async fn mail_attempts(
     .await
 }
 
+/// After the social send of claim `claim` returned. A send the connection
+/// refused, or gave up on, before its worker admitted it (`refused`) fails;
+/// the worker then never admits a copy of it still queued. One admitted
+/// first settles through its own receipt. Announces the draft's current
+/// state.
 pub async fn after_social_send(
     pool: &SqlitePool,
     id: Uuid,
+    claim: Uuid,
     refused: Option<&str>,
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = reload(&mut tx, id).await?;
+    own_claim(&draft, claim)?;
     if let (
         Some(reason),
+        Status::Sending,
         Some(Delivery::Social {
             account_id,
             action_id,
         }),
-    ) = (refused, draft.delivery.as_deref())
+    ) = (refused, draft.status, draft.delivery.as_deref())
     {
-        sqlx::query("UPDATE outgoing_drafts SET status='failed',result_detail=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),settled_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND status='sending' AND NOT EXISTS(SELECT 1 FROM social_actions WHERE connection_id=?3 AND action_id=?4)").bind(id).bind(reason).bind(account_id).bind(action_id).execute(&mut *tx).await?;
+        let admitted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM social_actions WHERE connection_id = ?1 AND action_id = ?2)",
+        )
+        .bind(account_id)
+        .bind(action_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !admitted {
+            fail_claimed(&mut tx, id, reason).await?;
+        }
     }
     events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
     let updated = reload(&mut tx, id).await?;
