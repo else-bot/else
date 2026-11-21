@@ -427,35 +427,16 @@ impl<A: Stream> Cli<A> {
         };
         let mut protocol = launch.protocol;
         let label = A::DEFINITION.label;
-        let (started, line) = match launch.delivery {
-            Delivery::Launch | Delivery::Stdin(_) if sink.sending().await.is_err() => {
-                return TurnOutcome::Interrupted;
-            }
-            Delivery::Launch => (
-                StreamAttempt::spawn(&ready.host, &spec, Interrupt::Signal, label)
-                    .map(|attempt| (attempt, Prompt::Written)),
-                None,
-            ),
-            Delivery::Stdin(packet) => (
-                StreamAttempt::spawn_with_prompt(&ready.host, &spec, &packet, label).await,
-                None,
-            ),
-            Delivery::Line { message, interrupt } => (
-                StreamAttempt::spawn(&ready.host, &spec, Interrupt::Line(interrupt), label)
-                    .map(|attempt| (attempt, Prompt::Written)),
-                Some(message),
-            ),
-        };
-        let (mut attempt, prompt) = match started {
+        let (mut attempt, delivered) = match launch
+            .delivery
+            .start(&ready.host, &spec, sink, &stop, label)
+            .await
+        {
             Ok(started) => started,
-            Err(err) => return unavailable(err.to_string()),
-        };
-        let delivered = match &line {
-            Some(message) => deliver(&mut attempt, message, sink, &stop, label).await,
-            None => Ok(()),
+            Err(outcome) => return outcome,
         };
         let ended = match delivered {
-            Ok(()) => {
+            Ok(prompt) => {
                 self.adapter
                     .drive(&mut attempt, prompt, &mut protocol, &mut turn, sink, &stop)
                     .await
@@ -468,27 +449,74 @@ impl<A: Stream> Cli<A> {
     }
 }
 
-/// Write the owner's message to a CLI that is already running, recording
-/// `sending` first.
-async fn deliver(
-    attempt: &mut StreamAttempt,
-    message: &str,
-    sink: &dyn TurnSink,
-    stop: &Stop,
-    label: &str,
-) -> Result<(), Ended> {
-    if sink.sending().await.is_err() {
-        return Err(Ended::Undelivered(TurnOutcome::Interrupted));
+impl Delivery {
+    /// Start the CLI and give it the owner's message. `Err` when nothing
+    /// runs. A running attempt comes back with the [`Prompt`] to drive it
+    /// with, or with how it ended: a write that fails after `sending` may
+    /// have been read in part, so it is never a refusal.
+    async fn start(
+        self,
+        host: &Host,
+        spec: &LaunchSpec,
+        sink: &dyn TurnSink,
+        stop: &Stop,
+        label: &'static str,
+    ) -> Result<(StreamAttempt, Result<Prompt, Ended>), TurnOutcome> {
+        let unavailable = |err: std::io::Error| {
+            TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string())
+        };
+        let unknown = |err: std::io::Error| {
+            Ended::Abandoned(TurnOutcome::Uncertain {
+                message: format!("Delivery to {label} is unknown: {err}"),
+            })
+        };
+        match self {
+            Self::Launch => {
+                sending(sink).await?;
+                let attempt = StreamAttempt::spawn(host, spec, Interrupt::Signal, label)
+                    .map_err(unavailable)?;
+                Ok((attempt, Ok(Prompt::Written)))
+            }
+            Self::Stdin(packet) => {
+                sending(sink).await?;
+                let mut attempt =
+                    StreamAttempt::spawn_for_prompt(host, spec, label).map_err(unavailable)?;
+                let prompt = match write(&mut attempt, &packet, stop).await {
+                    Ok(()) => Ok(Prompt::Written),
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(Prompt::Refused),
+                    Err(err) => Err(unknown(err)),
+                };
+                attempt.end_input();
+                Ok((attempt, prompt))
+            }
+            Self::Line { message, interrupt } => {
+                let mut attempt =
+                    StreamAttempt::spawn(host, spec, Interrupt::Line(interrupt), label)
+                        .map_err(unavailable)?;
+                let prompt = match sending(sink).await {
+                    Err(outcome) => Err(Ended::Undelivered(outcome)),
+                    Ok(()) => write(&mut attempt, &message, stop)
+                        .await
+                        .map(|()| Prompt::Written)
+                        .map_err(unknown),
+                };
+                Ok((attempt, prompt))
+            }
+        }
     }
-    let written = tokio::select! {
-        written = attempt.write(message) => written.map_err(|e| e.to_string()),
-        () = stop.escalated() => Err("the stop escalated during delivery".to_owned()),
-    };
-    written.map_err(|err| {
-        Ended::Abandoned(TurnOutcome::Uncertain {
-            message: format!("Delivery to {label} is unknown: {err}"),
-        })
-    })
+}
+
+/// Record [`TurnSink::sending`]; a fenced turn ends interrupted.
+async fn sending(sink: &dyn TurnSink) -> Result<(), TurnOutcome> {
+    sink.sending().await.map_err(|_| TurnOutcome::Interrupted)
+}
+
+/// Write to the CLI's input until it is written or the stop escalates.
+async fn write(attempt: &mut StreamAttempt, text: &str, stop: &Stop) -> std::io::Result<()> {
+    tokio::select! {
+        written = attempt.write(text) => written,
+        () = stop.escalated() => Err(std::io::Error::other("the stop escalated during delivery")),
+    }
 }
 
 #[async_trait]
