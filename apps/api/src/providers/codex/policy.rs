@@ -144,22 +144,107 @@ pub(super) struct Completed {
     error: Option<String>,
 }
 
-/// What a Codex attempt may do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Allowed {
-    /// A turn: any item but the forbidden ones, with tools from this set.
-    Tools(ToolSet),
-    /// A summary or checkpoint: messages and reasoning only. Its text is
-    /// each final message, read whole.
-    Messages,
-}
-
-/// One running Codex turn's notifications, checked against its policy.
-pub(super) struct TurnEvents<'a> {
-    pub thread_id: &'a str,
+/// The thread and turn a Codex attempt runs, and the profile it must keep.
+pub(super) struct Thread<'a> {
+    pub id: &'a str,
     pub native_turn: &'a str,
     pub profile: &'a Profile,
-    pub allowed: Allowed,
+}
+
+impl Thread<'_> {
+    /// The notification's method and parameters when it is about this
+    /// turn. A request or a native sub-agent thread is refused anywhere.
+    fn guard<'m>(&self, message: &'m Incoming) -> Result<Option<(&'m str, &'m Value)>, Violation> {
+        let (method, params) = match message {
+            Incoming::Refused { method } => {
+                return Err(Violation::policy(format!("Codex requested {method}")));
+            }
+            Incoming::Notification { method, params } => (method.as_str(), params),
+        };
+        if !method.ends_with("/delta") {
+            tracing::debug!(
+                %method,
+                item = params["item"]["type"].as_str().unwrap_or_default(),
+                tool = params["item"]["tool"].as_str().unwrap_or_default(),
+                "codex event"
+            );
+        }
+        if method == "thread/started" && params["thread"]["id"].as_str() != Some(self.id) {
+            return Err(Violation::policy("Codex started a native sub-agent thread"));
+        }
+        let thread = params["threadId"].as_str();
+        let turn = params["turnId"].as_str().or(params["turn"]["id"].as_str());
+        let own = thread.is_none_or(|t| t == self.id) && turn.is_none_or(|t| t == self.native_turn);
+        Ok(own.then_some((method, params)))
+    }
+
+    /// What every attempt reports alike about its own turn.
+    fn report(&self, method: &str, params: &Value) -> Result<Vec<Event<Completed>>, Violation> {
+        let event = match method {
+            "thread/compacted" => Event::Compacted,
+            "item/completed" if params["item"]["type"] == "contextCompaction" => Event::Compacted,
+            "model/rerouted" => {
+                let to = params["toModel"].as_str().unwrap_or_default();
+                if to != self.profile.model {
+                    return Err(Violation::profile(format!(
+                        "Codex rerouted the turn to {to}."
+                    )));
+                }
+                return Ok(Vec::new());
+            }
+            "thread/settings/updated" => {
+                let settings = &params["threadSettings"];
+                if let Some(mismatch) = Reported::from_response(settings).mismatch(self.profile) {
+                    return Err(Violation::profile(mismatch));
+                }
+                return Ok(Vec::new());
+            }
+            "thread/tokenUsage/updated" => {
+                // `last` is one model request; a turn sums its requests.
+                let last = &params["tokenUsage"]["last"];
+                let count = |key: &str| last[key].as_i64().unwrap_or(0).max(0);
+                Event::Usage(crate::app::providers::Usage {
+                    input: count("inputTokens"),
+                    cached_input: count("cachedInputTokens"),
+                    cache_write: count("cacheWriteInputTokens"),
+                    output: count("outputTokens"),
+                })
+            }
+            "account/rateLimits/updated" => match limit_windows(&params["rateLimits"]) {
+                windows if windows.is_empty() => return Ok(Vec::new()),
+                windows => Event::Limits(windows),
+            },
+            "turn/completed" => {
+                let turn = &params["turn"];
+                Event::Finished(Completed {
+                    status: turn["status"].as_str().map(str::to_owned),
+                    error: turn["error"]["message"].as_str().map(str::to_owned),
+                })
+            }
+            _ => return Ok(Vec::new()),
+        };
+        Ok(vec![event])
+    }
+}
+
+fn outcome(completed: Completed) -> TurnOutcome {
+    match completed.status.as_deref() {
+        Some("completed") => TurnOutcome::Completed,
+        Some("interrupted") => TurnOutcome::Interrupted,
+        _ => TurnOutcome::failed(
+            FailureCode::ProviderFailed,
+            completed
+                .error
+                .unwrap_or_else(|| "Codex reported a failed turn.".to_owned()),
+        ),
+    }
+}
+
+/// One running Codex turn's notifications: any item but the forbidden
+/// ones, with tools from `tools`.
+pub(super) struct TurnEvents<'a> {
+    pub thread: Thread<'a>,
+    pub tools: ToolSet,
     pub current_message: Option<String>,
     /// Where a steered message's files are staged.
     pub project: &'a std::path::Path,
@@ -168,8 +253,8 @@ pub(super) struct TurnEvents<'a> {
 }
 
 impl TurnEvents<'_> {
-    fn allowed_tool(tools: ToolSet, item: &Value) -> bool {
-        tools.elsebot()
+    fn allowed_tool(&self, item: &Value) -> bool {
+        self.tools.elsebot()
             && item["server"].as_str() == Some(SERVER_NAME)
             && item["tool"]
                 .as_str()
@@ -178,19 +263,12 @@ impl TurnEvents<'_> {
 
     fn check_item(&self, item: &Value) -> Result<(), Violation> {
         let kind = item["type"].as_str().unwrap_or_default();
-        let tools = match self.allowed {
-            Allowed::Tools(tools) => tools,
-            Allowed::Messages if matches!(kind, "userMessage" | "agentMessage" | "reasoning") => {
-                return Ok(());
-            }
-            Allowed::Messages => {
-                return Err(Violation::policy(format!("Codex produced a {kind} item")));
-            }
-        };
-        if FORBIDDEN_ITEMS.contains(&kind) || (!tools.host() && HOST_TOOL_ITEMS.contains(&kind)) {
+        if FORBIDDEN_ITEMS.contains(&kind)
+            || (!self.tools.host() && HOST_TOOL_ITEMS.contains(&kind))
+        {
             return Err(Violation::policy(format!("Codex attempted a {kind} item")));
         }
-        if kind == "mcpToolCall" && !Self::allowed_tool(tools, item) {
+        if kind == "mcpToolCall" && !self.allowed_tool(item) {
             return Err(Violation::policy(format!(
                 "Codex called an MCP tool outside else.bot's allowlist: {}/{}",
                 item["server"].as_str().unwrap_or("?"),
@@ -198,6 +276,47 @@ impl TurnEvents<'_> {
             )));
         }
         Ok(())
+    }
+}
+
+/// A summary's or checkpoint's notifications: messages and reasoning
+/// only. Its text is each final message, read whole.
+pub(super) struct Messages<'a> {
+    pub thread: Thread<'a>,
+}
+
+impl Protocol for Messages<'_> {
+    type Message = Incoming;
+    type Terminal = Completed;
+
+    fn on(&mut self, message: &Incoming) -> Result<Vec<Event<Completed>>, Violation> {
+        // No other item anywhere, not even in another thread or turn.
+        if let Incoming::Notification { method, params } = message
+            && matches!(method.as_str(), "item/started" | "item/completed")
+        {
+            let kind = params["item"]["type"].as_str().unwrap_or_default();
+            if !matches!(kind, "userMessage" | "agentMessage" | "reasoning") {
+                return Err(Violation::policy(format!("Codex produced a {kind} item")));
+            }
+        }
+        let Some((method, params)) = self.thread.guard(message)? else {
+            return Ok(Vec::new());
+        };
+        match method {
+            "item/completed" => {
+                let item = &params["item"];
+                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
+                    let text = item["text"].as_str().unwrap_or_default();
+                    return Ok(vec![Event::EndMessage, Event::Text(text.to_owned())]);
+                }
+                Ok(Vec::new())
+            }
+            _ => self.thread.report(method, params),
+        }
+    }
+
+    fn outcome(&self, completed: Completed, _: Option<StopCause>, _: bool) -> TurnOutcome {
+        outcome(completed)
     }
 }
 
@@ -235,36 +354,11 @@ impl Protocol for TurnEvents<'_> {
     type Terminal = Completed;
 
     fn on(&mut self, message: &Incoming) -> Result<Vec<Event<Completed>>, Violation> {
-        let (method, params) = match message {
-            Incoming::Refused { method } => {
-                return Err(Violation::policy(format!("Codex requested {method}")));
-            }
-            Incoming::Notification { method, params } => (method.as_str(), params),
+        let Some((method, params)) = self.thread.guard(message)? else {
+            return Ok(Vec::new());
         };
-        if !method.ends_with("/delta") {
-            tracing::debug!(
-                %method,
-                item = params["item"]["type"].as_str().unwrap_or_default(),
-                tool = params["item"]["tool"].as_str().unwrap_or_default(),
-                "codex event"
-            );
-        }
-        let thread = params["threadId"].as_str();
-        let turn = params["turnId"].as_str().or(params["turn"]["id"].as_str());
-        let other_thread = thread.is_some_and(|t| t != self.thread_id);
-        let other_turn = turn.is_some_and(|t| t != self.native_turn);
-        // A summary allows no other item anywhere, not even in another
-        // thread or turn.
-        if self.allowed == Allowed::Messages && matches!(method, "item/started" | "item/completed")
-        {
-            self.check_item(&params["item"])?;
-        }
         let mut events = Vec::new();
         match method {
-            "thread/started" if params["thread"]["id"].as_str() != Some(self.thread_id) => {
-                return Err(Violation::policy("Codex started a native sub-agent thread"));
-            }
-            _ if other_thread || other_turn => {}
             "item/completed"
                 if params["item"]["type"] == "mcpToolCall"
                     && params["item"]["tool"].as_str().is_some_and(|t| {
@@ -286,32 +380,6 @@ impl Protocol for TurnEvents<'_> {
                 }
             }
             "item/started" => self.check_item(&params["item"])?,
-            "item/completed" if self.allowed == Allowed::Messages => {
-                let item = &params["item"];
-                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
-                    let text = item["text"].as_str().unwrap_or_default();
-                    events.extend([Event::EndMessage, Event::Text(text.to_owned())]);
-                }
-            }
-            "item/agentMessage/delta" if self.allowed == Allowed::Messages => {}
-            "thread/compacted" => events.push(Event::Compacted),
-            "item/completed" if params["item"]["type"] == "contextCompaction" => {
-                events.push(Event::Compacted);
-            }
-            "model/rerouted" => {
-                let to = params["toModel"].as_str().unwrap_or_default();
-                if to != self.profile.model {
-                    return Err(Violation::profile(format!(
-                        "Codex rerouted the turn to {to}."
-                    )));
-                }
-            }
-            "thread/settings/updated" => {
-                let settings = &params["threadSettings"];
-                if let Some(mismatch) = Reported::from_response(settings).mismatch(self.profile) {
-                    return Err(Violation::profile(mismatch));
-                }
-            }
             "item/agentMessage/delta" => {
                 let item = params["itemId"].as_str().unwrap_or_default().to_owned();
                 if self.current_message.as_ref().is_some_and(|c| *c != item) {
@@ -322,31 +390,7 @@ impl Protocol for TurnEvents<'_> {
                     events.push(Event::Text(delta.to_owned()));
                 }
             }
-            "thread/tokenUsage/updated" => {
-                // `last` is one model request; a turn sums its requests.
-                let last = &params["tokenUsage"]["last"];
-                let count = |key: &str| last[key].as_i64().unwrap_or(0).max(0);
-                events.push(Event::Usage(crate::app::providers::Usage {
-                    input: count("inputTokens"),
-                    cached_input: count("cachedInputTokens"),
-                    cache_write: count("cacheWriteInputTokens"),
-                    output: count("outputTokens"),
-                }));
-            }
-            "account/rateLimits/updated" => {
-                let windows = limit_windows(&params["rateLimits"]);
-                if !windows.is_empty() {
-                    events.push(Event::Limits(windows));
-                }
-            }
-            "turn/completed" => {
-                let turn = &params["turn"];
-                events.push(Event::Finished(Completed {
-                    status: turn["status"].as_str().map(str::to_owned),
-                    error: turn["error"]["message"].as_str().map(str::to_owned),
-                }));
-            }
-            _ => {}
+            _ => return self.thread.report(method, params),
         }
         Ok(events)
     }
@@ -354,8 +398,8 @@ impl Protocol for TurnEvents<'_> {
     /// The turn's own `turn/steer` request; it fails once the turn ended.
     fn steer_input(&self, steer: &Steer) -> Option<Value> {
         Some(json!({
-            "threadId": self.thread_id,
-            "expectedTurnId": self.native_turn,
+            "threadId": self.thread.id,
+            "expectedTurnId": self.thread.native_turn,
             "clientUserMessageId": steer.turn_id,
             "input": super::turn::turn_input(&prompt::steer_segments(steer), self.project),
         }))
@@ -369,23 +413,14 @@ impl Protocol for TurnEvents<'_> {
     /// ID no steered message has, so it reports nothing.
     fn notice_input(&self, text: &str) -> Option<Value> {
         Some(json!({
-            "threadId": self.thread_id,
-            "expectedTurnId": self.native_turn,
+            "threadId": self.thread.id,
+            "expectedTurnId": self.thread.native_turn,
             "clientUserMessageId": uuid::Uuid::new_v4(),
             "input": super::turn::turn_input(&[prompt::Segment::Text(text.to_owned())], self.project),
         }))
     }
 
     fn outcome(&self, completed: Completed, _: Option<StopCause>, _: bool) -> TurnOutcome {
-        match completed.status.as_deref() {
-            Some("completed") => TurnOutcome::Completed,
-            Some("interrupted") => TurnOutcome::Interrupted,
-            _ => TurnOutcome::failed(
-                FailureCode::ProviderFailed,
-                completed
-                    .error
-                    .unwrap_or_else(|| "Codex reported a failed turn.".to_owned()),
-            ),
-        }
+        outcome(completed)
     }
 }

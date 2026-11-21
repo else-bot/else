@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming, RpcError};
-use super::policy::{Allowed, Refusal, Reported, TurnEvents};
+use super::policy::{Refusal, Reported, Thread, TurnEvents};
 use super::{Codex, RPC_TIMEOUT, Ready, codex_home, prompt, skills};
 use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use crate::providers::cli::attempt::{self, Channel, Ended, SendError};
@@ -327,10 +327,12 @@ impl Codex {
             stop.request();
         }
         let mut events = TurnEvents {
-            thread_id: &thread_id,
-            native_turn: &native_turn,
-            profile,
-            allowed: Allowed::Tools(ToolSet::for_turn(input, self.tool_url.as_deref())),
+            thread: Thread {
+                id: &thread_id,
+                native_turn: &native_turn,
+                profile,
+            },
+            tools: ToolSet::for_turn(input, self.tool_url.as_deref()),
             current_message: None,
             project: &project,
             steers: Default::default(),
