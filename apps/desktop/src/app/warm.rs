@@ -128,6 +128,10 @@ impl ElseApp {
             self.live_command(LiveCommand::Unsubscribe { bot });
             self.warm.keep(bot, old);
         }
+        // A tray opens as it did by default once its view is dropped.
+        let warm = &self.warm;
+        self.trays
+            .retain(|id, _| Some(*id) == bot || warm.contains(*id));
     }
 
     fn new_view(&self, bot: Uuid, cx: &mut Context<Self>) -> Entity<ConversationView> {
@@ -331,12 +335,13 @@ impl ElseApp {
                         if activity.as_ref().is_some_and(|a| a.phase == Phase::Idle) {
                             self.stopping.remove(&bot);
                         }
-                        if let Some(entry) = Arc::make_mut(&mut self.bots)
-                            .iter_mut()
-                            .find(|b| b.id == bot)
-                            && activity.is_some()
+                        // Most frames leave the activity as it was; only a
+                        // change copies the shared bot list.
+                        if activity.is_some()
+                            && let Some(ix) = (self.bots.iter())
+                                .position(|b| b.id == bot && b.activity != activity)
                         {
-                            entry.activity = activity;
+                            Arc::make_mut(&mut self.bots)[ix].activity = activity;
                         }
                         self.sync_rows(window, cx);
                         self.ensure_rules(bot, window, cx);

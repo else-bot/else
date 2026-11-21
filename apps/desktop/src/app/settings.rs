@@ -294,12 +294,7 @@ impl Render for BotPanel {
 impl ElseApp {
     fn apply_routine(&mut self, bot: Uuid, saved: Routine, cx: &mut App) {
         if let Some(view) = self.view_of(bot, cx) {
-            view.update(cx, |view, cx| {
-                if let Some(conversation) = view.conversation.as_mut() {
-                    conversation.apply_routine(saved);
-                    cx.notify();
-                }
-            });
+            view.update(cx, |view, cx| view.apply_routine(saved, cx));
         }
     }
 

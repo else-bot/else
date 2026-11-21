@@ -5,6 +5,7 @@ use super::ConversationView;
 use crate::model::{Applied, Conversation, Frame, Reset};
 use else_wire::bots::Activity;
 use else_wire::conversation::Sent;
+use else_wire::routines::Routine;
 use gpui_kit::*;
 
 pub(super) enum Load {
@@ -116,6 +117,14 @@ impl ConversationView {
             cx.notify();
         }
         Some(applied.map(|applied| (applied, conversation.activity.clone())))
+    }
+
+    /// Applies a routine from a change response.
+    pub(in crate::app) fn apply_routine(&mut self, routine: Routine, cx: &mut Context<Self>) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            conversation.apply_routine(routine);
+            cx.notify();
+        }
     }
 
     /// Adds a send the server accepted. Returns whether a conversation took
