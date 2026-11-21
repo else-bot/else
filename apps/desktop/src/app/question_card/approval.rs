@@ -214,7 +214,7 @@ impl ElseApp {
                     .child(
                         crate::avatar::bot_avatar(
                             SharedString::from(format!("question-deletion-avatar-{id}")),
-                            serde_json::from_value(deletion.avatar.clone()).unwrap_or_default(),
+                            deletion.avatar,
                             px(28.),
                         )
                         .still(),

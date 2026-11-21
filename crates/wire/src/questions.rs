@@ -199,7 +199,7 @@ pub struct BotDeletion {
     pub bot_id: Option<Uuid>,
     pub name: String,
     #[serde(default)]
-    pub avatar: Value,
+    pub avatar: crate::bots::Avatar,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

@@ -1085,7 +1085,7 @@ impl From<&Action> for wire::QuestionAction {
                 bot_deletion: wire::BotDeletion {
                     bot_id: Some(bot_deletion.bot_id),
                     name: bot_deletion.name.clone(),
-                    avatar: serde_json::json!(bot_deletion.avatar),
+                    avatar: bot_deletion.avatar.into(),
                     model: bot_deletion.model.clone(),
                     category: bot_deletion.category.clone(),
                 },
