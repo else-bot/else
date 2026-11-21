@@ -808,12 +808,37 @@ pub async fn attach_owner_requests(
     Ok(())
 }
 
+/// The turn behind a tool call, as [`caller`] reads it.
 #[derive(sqlx::FromRow)]
-pub struct AskingCaller {
+pub struct Caller {
     pub bot_id: Uuid,
+    pub conversation_id: Uuid,
     pub attempt: i32,
     pub owner_conversation: bool,
     pub main_bot: bool,
+    /// The turn is sending or running and its bot is active with no Stop
+    /// pending, so it may still call tools.
+    pub running: bool,
+}
+
+/// The turn `turn_id` whether or not it still runs, so a gate can check
+/// ownership before it reports that the turn ended.
+pub async fn caller(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Option<Caller>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.bot_id, t.conversation_id, t.attempt, c.kind = 'owner' AS owner_conversation,
+             EXISTS (SELECT 1 FROM installation WHERE default_bot_id = t.bot_id) AS main_bot,
+             t.status IN ('sending', 'running') AND b.status = 'active' AND NOT b.cancel_pending
+                 AS running
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         JOIN bots b ON b.id = t.bot_id
+         WHERE t.id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(conn)
+    .await
 }
 
 /// [`asking_caller`] on a pooled connection, for a tool that reads the
@@ -821,26 +846,17 @@ pub struct AskingCaller {
 pub async fn running_caller(
     pool: &sqlx::SqlitePool,
     turn_id: Uuid,
-) -> Result<Option<AskingCaller>, sqlx::Error> {
+) -> Result<Option<Caller>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     asking_caller(&mut conn, turn_id).await
 }
 
+/// The [`caller`] of `turn_id` only while it is running.
 pub async fn asking_caller(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
-) -> Result<Option<AskingCaller>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT t.bot_id, t.attempt, c.kind = 'owner' AS owner_conversation,
-             EXISTS (SELECT 1 FROM installation WHERE default_bot_id = t.bot_id) AS main_bot
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id
-         WHERE t.id = ?1 AND t.status IN ('sending', 'running')
-           AND b.status = 'active' AND NOT b.cancel_pending",
-    )
-    .bind(turn_id)
-    .fetch_optional(conn)
-    .await
+) -> Result<Option<Caller>, sqlx::Error> {
+    Ok(caller(conn, turn_id).await?.filter(|caller| caller.running))
 }
 
 /// Whether `caller` may show the owner a card: from the owner's own chat, or
@@ -849,7 +865,7 @@ pub async fn asking_caller(
 pub async fn may_ask_owner(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
-    caller: &AskingCaller,
+    caller: &Caller,
 ) -> Result<bool, sqlx::Error> {
     use crate::app::providers::Origin;
     Ok(caller.owner_conversation

@@ -234,11 +234,12 @@ async fn a_second_wait_is_refused_and_a_follow_up_continues_the_waiting_reply() 
     )
     .await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "{}", parked.body);
-    use else_api::db::computer_job_waits::{CreateError, Created, create};
+    use else_api::db::computer_job_waits::{CreateError, create};
+    use else_api::db::holds::Created;
     let id: Uuid = first["wait_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(
         create(&app.db.pool, turn, 1, job).await,
-        Ok(Created::Waiting(id)),
+        Ok(Some(Created::Waiting(id))),
         "a retry is the same wait"
     );
     assert_eq!(

@@ -11,7 +11,6 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::ConversationKind;
 use crate::app::providers::Origin;
 use crate::app::rules::{
     Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules,
@@ -172,29 +171,29 @@ async fn authorize_turn(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Authority, RulesError> {
-    let row: Option<(Uuid, ConversationKind, Option<Uuid>)> = sqlx::query_as(
-        "SELECT t.bot_id, c.kind, d.owner_question_id
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
-         LEFT JOIN delegations d ON d.child_turn_id = t.id
-         WHERE t.id = ?1 AND t.conversation_id = ?2",
-    )
-    .bind(caller.turn_id)
-    .bind(caller.conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((bot, kind, question)) = row else {
-        return Err(RulesError::NotRunning);
-    };
-    if bot != caller.bot_id {
+    let turn = super::turns::caller(conn, caller.turn_id)
+        .await?
+        .filter(|turn| turn.conversation_id == caller.conversation_id)
+        .ok_or(RulesError::NotRunning)?;
+    if turn.bot_id != caller.bot_id {
         return Err(RulesError::NotAllowed);
     }
-    let authority = match (kind, question) {
-        (ConversationKind::Owner, _)
+    let question: Option<Uuid> = if turn.owner_conversation {
+        None
+    } else {
+        sqlx::query_scalar("SELECT owner_question_id FROM delegations WHERE child_turn_id = ?1")
+            .bind(caller.turn_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .flatten()
+    };
+    let authority = match (turn.owner_conversation, question) {
+        (true, _)
             if super::delegations::origin(conn, caller.turn_id).await? == Origin::OwnerRequest =>
         {
             Authority::OwnerRequest
         }
-        (ConversationKind::Task, Some(question)) => {
+        (false, Some(question)) => {
             let chosen: Vec<String> = super::owner_questions::get(conn, question)
                 .await?
                 .map(|question| question.selected().into_iter().map(|c| c.label).collect())
@@ -212,10 +211,7 @@ async fn authorize_turn(
         }
         _ => return Err(RulesError::NotAllowed),
     };
-    if super::turns::asking_caller(conn, caller.turn_id)
-        .await?
-        .is_none()
-    {
+    if !turn.running {
         return Err(RulesError::NotRunning);
     }
     Ok(authority)

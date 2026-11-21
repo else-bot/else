@@ -273,10 +273,7 @@ pub async fn for_turns(
     Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
-async fn caller(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-) -> Result<turns::AskingCaller, DraftError> {
+async fn caller(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<turns::Caller, DraftError> {
     let caller = turns::asking_caller(conn, turn_id)
         .await?
         .ok_or(DraftError::NotRunning)?;

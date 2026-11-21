@@ -428,18 +428,10 @@ pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
-    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT t.bot_id, t.conversation_id, o.id
-         FROM turns t JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
-         WHERE t.id = ?1",
-    )
-    .bind(caller.turn_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((bot, conversation, owner_conversation)) = row else {
+    let Some(turn) = super::turns::caller(conn, caller.turn_id).await? else {
         return Err(RoutineError::NotRunning);
     };
-    if bot != caller.bot_id || conversation != caller.conversation_id {
+    if turn.bot_id != caller.bot_id || turn.conversation_id != caller.conversation_id {
         return Err(RoutineError::NotAllowed);
     }
     if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest
@@ -447,13 +439,13 @@ pub(crate) async fn authorized_owner_conversation(
     {
         return Err(RoutineError::NotAllowed);
     }
-    if super::turns::asking_caller(conn, caller.turn_id)
-        .await?
-        .is_none()
-    {
+    if !turn.running {
         return Err(RoutineError::NotRunning);
     }
-    Ok(owner_conversation)
+    super::conversation::owner_conversation(conn, turn.bot_id)
+        .await?
+        .map(|(id, _)| id)
+        .ok_or(RoutineError::NotRunning)
 }
 
 pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {

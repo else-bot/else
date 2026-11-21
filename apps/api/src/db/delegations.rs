@@ -297,18 +297,7 @@ async fn create_in(
     if task.is_empty() || task.len() > MAX_TASK_BYTES || task.contains('\0') {
         return Err(DelegateError::InvalidTask);
     }
-    let parent_bot: Option<Uuid> = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
-        .bind(turn_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    let Some(parent_bot) = parent_bot else {
-        return Err(DelegateError::NotRunning);
-    };
-    sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
-        .bind(parent_bot)
-        .execute(&mut *conn)
-        .await?;
-    let Some(super::turns::AskingCaller {
+    let Some(super::turns::Caller {
         bot_id: parent,
         attempt,
         owner_conversation,

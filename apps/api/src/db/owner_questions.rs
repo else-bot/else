@@ -38,7 +38,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns::{self, AskingCaller as Caller};
+use super::turns::{self, Caller};
 
 pub mod standing;
 mod uses;
