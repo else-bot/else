@@ -173,6 +173,33 @@ async fn a_removed_package_refuses_requests() {
 }
 
 #[tokio::test]
+async fn work_queued_before_a_removal_does_not_reach_a_reinstall() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let id = input("again").id;
+    library
+        .install(input("again"), "Maple".into())
+        .await
+        .unwrap();
+    let queued = library.installed_slot(&id).await.unwrap();
+    library.remove(&id).await.unwrap();
+    library
+        .install(input("again"), "Scout".into())
+        .await
+        .unwrap();
+    let ran = queued
+        .live(library.shared.clone(), Admit::Turn, |live, _| {
+            Box::pin(live.package())
+        })
+        .await;
+    assert!(matches!(ran, Err(Error::NotFound)));
+    assert_eq!(
+        library.read(&id).await.unwrap().manifest.installed_by,
+        "Scout"
+    );
+}
+
+#[tokio::test]
 async fn discovery_ignores_stray_directories_and_can_remove_a_damaged_config() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
