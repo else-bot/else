@@ -37,7 +37,7 @@ async fn turn(conn: &mut SqliteConnection, bot: Uuid, turn_no: i64, status: &str
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
              owner_item_id, provider_id, status)
          SELECT ?1, ?2, id, ?3, zeroblob(32), ?4, ?5, 'codex', ?6
-         FROM conversations WHERE bot_id = ?2",
+         FROM conversations WHERE bot_id = ?2 AND kind = 'owner'",
     )
     .bind(turn)
     .bind(bot)
@@ -347,16 +347,22 @@ async fn an_unconfirmed_joined_message_ends_uncertain_once() {
 }
 
 #[tokio::test]
-async fn a_restore_ends_social_work_with_a_reason() {
+async fn a_restore_ends_every_unfinished_social_turn() {
     let mut conn = pool().await.acquire().await.unwrap().detach();
     let bot = bot(&mut conn).await;
     let queued = turn(&mut conn, bot, 1, "queued").await;
-    let running = turn(&mut conn, bot, 2, "running").await;
+    let preparing = turn(&mut conn, bot, 2, "preparing").await;
+    let other = self::bot(&mut conn).await;
+    let running = turn(&mut conn, other, 1, "running").await;
     sqlx::query("PRAGMA foreign_keys = OFF")
         .execute(&mut conn)
         .await
         .unwrap();
-    for (event, turn) in [("a", queued), ("b", running)] {
+    for (event, bot, turn) in [
+        ("a", bot, queued),
+        ("b", bot, preparing),
+        ("c", other, running),
+    ] {
         sqlx::query(
             "INSERT INTO social_deliveries
                  (connection_id, event_id, bot_id, trigger_id, destination, message_id, turn_id)
@@ -371,13 +377,65 @@ async fn a_restore_ends_social_work_with_a_reason() {
         .unwrap();
     }
     super::end_restored_social(&mut conn).await.unwrap();
+    for turn in [queued, preparing] {
+        assert_eq!(
+            row(&mut conn, turn).await,
+            (
+                TurnStatus::Interrupted,
+                Some("social_restored".into()),
+                true
+            ),
+            "a turn that never reached its provider is not resumed"
+        );
+    }
     assert_eq!(
-        row(&mut conn, queued).await,
-        (
-            TurnStatus::Interrupted,
-            Some("social_restored".into()),
-            true
-        )
+        row(&mut conn, running).await,
+        (TurnStatus::Uncertain, Some("social_restored".into()), true),
+        "a turn that may have replied is never resent"
     );
-    assert_eq!(row(&mut conn, running).await.0, TurnStatus::Running);
+}
+
+async fn join(conn: &mut SqliteConnection, message: Uuid, into: Uuid) {
+    sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
+        .bind(message)
+        .bind(into)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_message_joined_to_a_turn_that_fails_unstarted_runs_on_its_own() {
+    let mut conn = pool().await.acquire().await.unwrap().detach();
+    let bot = bot(&mut conn).await;
+    let reply = turn(&mut conn, bot, 1, "preparing").await;
+    let message = turn(&mut conn, bot, 2, "queued").await;
+    join(&mut conn, message, reply).await;
+    super::fail_unstarted(&mut conn, bot, reply, "no input")
+        .await
+        .unwrap();
+    assert!(super::claim(&mut conn, message, bot).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_message_joined_to_a_task_the_owner_stops_runs_on_its_own() {
+    let pool = pool().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let parent = bot(&mut conn).await;
+    let root = turn(&mut conn, parent, 1, "waiting").await;
+    let (child, delegation) = task(&mut conn, parent, root).await;
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let message = turn(&mut conn, target, 1, "queued").await;
+    join(&mut conn, message, child).await;
+    drop(conn);
+    crate::db::waits::stop(&pool, parent, delegation)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(row(&mut conn, child).await.0, TurnStatus::Interrupted);
+    assert!(super::claim(&mut conn, message, target).await.unwrap());
 }
