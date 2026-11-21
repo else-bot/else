@@ -1,6 +1,8 @@
 //! Turns no live provider owns after a restart, an orphaned task, or a
 //! restore.
 
+use std::collections::BTreeSet;
+
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -203,8 +205,10 @@ pub async fn end_restored(
     for &(turn, bot) in &ended_turns {
         ended(&mut tx, bot, turn).await?;
     }
-    for &(_, bot) in &ended_turns {
-        settled(&mut tx, bot).await?;
+    let bots: BTreeSet<Uuid> = ended_turns.iter().map(|&(_, bot)| bot).collect();
+    for bot in bots {
+        crate::db::stop::settle(&mut tx, bot).await?;
     }
+    crate::db::steers::settle(&mut tx).await?;
     tx.commit().await
 }

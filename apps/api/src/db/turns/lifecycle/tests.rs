@@ -352,6 +352,8 @@ async fn a_restore_ends_every_unfinished_social_turn() {
     let bot = bot(&mut conn).await;
     let queued = turn(&mut conn, bot, 1, "queued").await;
     let preparing = turn(&mut conn, bot, 2, "preparing").await;
+    let waiting = turn(&mut conn, bot, 3, "waiting").await;
+    let done = turn(&mut conn, bot, 4, "completed").await;
     let other = self::bot(&mut conn).await;
     let running = turn(&mut conn, other, 1, "running").await;
     sqlx::query("PRAGMA foreign_keys = OFF")
@@ -361,7 +363,9 @@ async fn a_restore_ends_every_unfinished_social_turn() {
     for (event, bot, turn) in [
         ("a", bot, queued),
         ("b", bot, preparing),
-        ("c", other, running),
+        ("c", bot, waiting),
+        ("d", bot, done),
+        ("e", other, running),
     ] {
         sqlx::query(
             "INSERT INTO social_deliveries
@@ -376,7 +380,7 @@ async fn a_restore_ends_every_unfinished_social_turn() {
         .await
         .unwrap();
     }
-    super::end_restored(&mut conn, super::Restored::Social)
+    crate::socials::store::restore_passive(&mut conn)
         .await
         .unwrap();
     for turn in [queued, preparing] {
@@ -390,10 +394,17 @@ async fn a_restore_ends_every_unfinished_social_turn() {
             "a turn that never reached its provider is not resumed"
         );
     }
+    for turn in [waiting, running] {
+        assert_eq!(
+            row(&mut conn, turn).await,
+            (TurnStatus::Uncertain, Some("social_restored".into()), true),
+            "a turn that may have replied is never resent"
+        );
+    }
     assert_eq!(
-        row(&mut conn, running).await,
-        (TurnStatus::Uncertain, Some("social_restored".into()), true),
-        "a turn that may have replied is never resent"
+        row(&mut conn, done).await,
+        (TurnStatus::Completed, None, false),
+        "an ended turn keeps its outcome"
     );
 }
 
