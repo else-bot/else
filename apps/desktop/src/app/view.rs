@@ -670,6 +670,7 @@ impl ElseApp {
             .items_center()
             .child(
                 Button::new("find-in-conversation")
+                    .track_focus(&self.find_focus)
                     .focus_ring(false)
                     .cursor_pointer()
                     .icon(IconName::Search)
@@ -687,6 +688,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("toggle-settings")
+                    .track_focus(&self.details_toggle_focus)
                     .focus_ring(false)
                     .cursor_pointer()
                     .icon(icon)
