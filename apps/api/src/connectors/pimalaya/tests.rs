@@ -1381,13 +1381,15 @@ async fn locate_finds_the_exact_message_id_after_archive_and_trash() {
 
 #[tokio::test]
 async fn imap_and_smtp_name_the_same_cause_for_a_refused_connection() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bound but never listening, so the port refuses connections and no
+    // other process can take it.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = Endpoint {
         host: "127.0.0.1".into(),
-        port: listener.local_addr().unwrap().port(),
+        port: closed.local_addr().unwrap().port(),
         start_tls: true,
     };
-    drop(listener);
     let (_, connector) = tls();
     let imap = Imap::connect(&endpoint, &auth(), &connector).await.err();
     let smtp = Smtp::connect(&endpoint, &auth(), &connector).await.err();
@@ -1399,4 +1401,5 @@ async fn imap_and_smtp_name_the_same_cause_for_a_refused_connection() {
             Some("the mail server refused the connection")
         );
     }
+    drop(closed);
 }
