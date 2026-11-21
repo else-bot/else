@@ -1,89 +1,23 @@
 use crate::common;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
+use common::guest::Guest;
 use common::{TOKEN, TestApp};
-use else_api::computers::{
-    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
-    viewer,
-};
+use else_api::computers::{ComputerConfig, ComputerManager, viewer};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use uuid::Uuid;
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-#[derive(Default)]
-struct Runtime {
-    computers: Mutex<HashMap<String, RuntimeState>>,
-    calls: Mutex<Vec<String>>,
-    hang_exec: AtomicBool,
-}
-
-impl Runtime {
-    fn set(&self, name: &str, state: RuntimeState) -> Result<(), RuntimeError> {
-        self.calls.lock().unwrap().push(format!("{state:?} {name}"));
-        self.computers.lock().unwrap().insert(name.into(), state);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ComputerRuntime for Runtime {
-    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        Ok(self
-            .computers
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(n, s)| (n.clone(), *s))
-            .collect())
-    }
-    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
-        self.set(&spec.name, RuntimeState::Running)
-    }
-    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.set(name, RuntimeState::Running)
-    }
-    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
-        self.set(name, RuntimeState::Stopped)
-    }
-    async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
-        self.set(name, RuntimeState::Paused)
-    }
-    async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
-        self.set(name, RuntimeState::Running)
-    }
-    async fn exec(
-        &self,
-        name: &str,
-        _: &str,
-        _: &[&str],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        if self.hang_exec.load(Ordering::SeqCst) {
-            self.calls.lock().unwrap().push(format!("Setup {name}"));
-            std::future::pending::<()>().await;
-        }
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-            truncated: false,
-        })
-    }
-    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-}
 
 #[derive(Default)]
 struct Log(Mutex<Vec<String>>);
@@ -325,7 +259,10 @@ fn full_update(shade: u8) -> Vec<u8> {
 
 struct Setup {
     app: Arc<TestApp>,
-    runtime: Arc<Runtime>,
+    runtime: Arc<Guest>,
+    /// While set, each guest command hangs, as a boot that never finishes.
+    hang: Arc<AtomicBool>,
+    booting: Arc<Notify>,
     manager: Arc<ComputerManager>,
     addr: String,
     log: Arc<Log>,
@@ -337,7 +274,21 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
     let db = Arc::new(common::TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(Runtime::default());
+    let hang = Arc::new(AtomicBool::new(false));
+    let booting = Arc::new(Notify::new());
+    let runtime = Arc::new(Guest::new().on_exec({
+        let (hang, booting) = (hang.clone(), booting.clone());
+        move |_| {
+            let (hang, booting) = (hang.load(Ordering::SeqCst), booting.clone());
+            async move {
+                if hang {
+                    booting.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                None
+            }
+        }
+    }));
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
         runtime.clone(),
@@ -391,6 +342,8 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
     Setup {
         app,
         runtime,
+        hang,
+        booting,
         manager,
         addr,
         log,
@@ -533,16 +486,16 @@ async fn the_stream_authenticates_and_never_wakes_unless_asked() {
     let bot_id: Uuid = s.bot.parse().unwrap();
     s.manager.owner_stop(bot_id).await.unwrap();
     s.manager.owner_resume(bot_id).await.unwrap();
-    let calls = s.runtime.calls.lock().unwrap().len();
+    let calls = s.runtime.events().len();
     let mut socket = s.open("mode=watch").await;
     ends_with(&mut socket, "computer_not_running").await;
-    assert_eq!(s.runtime.calls.lock().unwrap().len(), calls, "nothing woke");
+    assert_eq!(s.runtime.events().len(), calls, "nothing woke");
 
     s.manager.owner_stop(bot_id).await.unwrap();
-    let calls = s.runtime.calls.lock().unwrap().len();
+    let calls = s.runtime.events().len();
     let mut socket = s.open("mode=watch&wake=true").await;
     ends_with(&mut socket, "computer_stopped").await;
-    assert_eq!(s.runtime.calls.lock().unwrap().len(), calls, "nothing woke");
+    assert_eq!(s.runtime.events().len(), calls, "nothing woke");
 
     s.manager.owner_resume(bot_id).await.unwrap();
     let mut socket = s.open("mode=watch&wake=true").await;
@@ -555,12 +508,7 @@ async fn the_stream_authenticates_and_never_wakes_unless_asked() {
         json!({"type":"mode","mode":"watch"})
     );
     assert!(
-        s.runtime
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.starts_with("Running")),
+        s.runtime.events().iter().any(|c| c.starts_with("Running")),
         "an explicit wake starts the computer"
     );
 }
@@ -937,22 +885,9 @@ async fn stopping_the_api_abandons_a_stream_waiting_for_boot() {
     let bot_id: Uuid = s.bot.parse().unwrap();
     s.manager.owner_stop(bot_id).await.unwrap();
     s.manager.owner_resume(bot_id).await.unwrap();
-    s.runtime.hang_exec.store(true, Ordering::SeqCst);
+    s.hang.store(true, Ordering::SeqCst);
     let mut socket = s.open("mode=control&wake=true").await;
-    common::until(
-        "the stream to start a boot",
-        common::poll(|| {
-            let setup = s
-                .runtime
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|c| c.starts_with("Setup"));
-            std::future::ready(setup.then_some(()))
-        }),
-    )
-    .await;
+    common::until("the stream to start a boot", s.booting.notified()).await;
     assert_eq!(
         s.leases("desktop-stream:%").await,
         1,

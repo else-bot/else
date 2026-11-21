@@ -9,16 +9,12 @@
 
 mod common;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
+use common::guest::Guest;
 use common::{TOKEN, TestApp};
-use else_api::computers::{
-    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
-    cursors, viewer,
-};
+use else_api::computers::{ComputerConfig, ComputerManager, cursors, viewer};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -27,74 +23,6 @@ use uuid::Uuid;
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-#[derive(Default)]
-struct Runtime(Mutex<HashMap<String, RuntimeState>>);
-
-#[async_trait]
-impl ComputerRuntime for Runtime {
-    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(n, s)| (n.clone(), *s))
-            .collect())
-    }
-    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(spec.name.clone(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Stopped);
-        Ok(())
-    }
-    async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Paused);
-        Ok(())
-    }
-    async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn exec(
-        &self,
-        _: &str,
-        _: &str,
-        _: &[&str],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-            truncated: false,
-        })
-    }
-    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-}
 
 /// Forwards the computer's desktop port to the real guest's noVNC.
 async fn forward(port: u16, guest: String) {
@@ -213,7 +141,7 @@ async fn open(query: &str) -> Option<Live> {
     let dir = tempfile::tempdir().unwrap();
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
-        Arc::new(Runtime::default()),
+        Arc::new(Guest::new()),
         ComputerConfig {
             desktop: true,
             idle_after: Duration::from_secs(3600),

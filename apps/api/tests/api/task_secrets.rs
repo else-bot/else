@@ -1,40 +1,33 @@
 use crate::common;
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::http::StatusCode;
 use common::TestApp;
+use common::guest::{Exec, Guest, Reply, ok};
 use common::recorder::{GATE, Harness, harness, tool};
-use else_api::computers::{
-    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
-};
+use else_api::computers::{ComputerConfig, ComputerManager, ExecOutput};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 const PASSWORD: &str = "s3cr3t-Pa55word";
 
-#[derive(Clone)]
-struct Exec {
-    program: String,
-    args: Vec<String>,
-    input: Vec<u8>,
-}
-
+/// What the fake guest's foreground commands and kills wait on.
 #[derive(Default)]
-struct Guest {
-    state: Mutex<std::collections::HashMap<String, RuntimeState>>,
-    execs: Mutex<Vec<Exec>>,
-    killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
-    started: tokio::sync::Notify,
+struct Script {
+    killed: Mutex<HashMap<String, Arc<Notify>>>,
+    started: Notify,
     stalled: Mutex<Vec<String>>,
-    release_stalled_kill: tokio::sync::Notify,
-    fail_desktop: std::sync::atomic::AtomicBool,
+    release_stalled_kill: Notify,
+    fail_desktop: AtomicBool,
 }
 
-impl Guest {
-    fn killed(&self, name: &str) -> Arc<tokio::sync::Notify> {
+impl Script {
+    fn killed(&self, name: &str) -> Arc<Notify> {
         self.killed
             .lock()
             .unwrap()
@@ -43,164 +36,98 @@ impl Guest {
             .clone()
     }
 
-    fn execs(&self) -> Vec<Exec> {
-        self.execs.lock().unwrap().clone()
-    }
-
-    fn run_reply(&self, args: &[&str], input: &[u8]) -> String {
-        use base64::Engine;
-        let mut out = String::from("no secret");
-        for line in String::from_utf8_lossy(input).lines() {
-            if let Some((name, value)) = line.split_once(' ') {
-                let value = base64::engine::general_purpose::STANDARD
-                    .decode(value)
-                    .unwrap();
-                out = format!("{name}={}", String::from_utf8(value).unwrap());
-            }
-        }
-        let _ = args;
-        format!("0\n{}\n0\n{out}\n\0\n", out.len())
-    }
-}
-
-#[async_trait]
-impl ComputerRuntime for Guest {
-    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(n, s)| (n.clone(), *s))
-            .collect())
-    }
-    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(spec.name.clone(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Stopped);
-        Ok(())
-    }
-    async fn pause(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn resume(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn exec(
-        &self,
-        name: &str,
-        program: &str,
-        args: &[&str],
-        timeout: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        self.exec_input(name, program, args, &[], timeout).await
-    }
-    async fn exec_input(
-        &self,
-        name: &str,
-        program: &str,
-        args: &[&str],
-        input: &[u8],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        self.execs.lock().unwrap().push(Exec {
-            program: program.into(),
-            args: args.iter().map(|a| (*a).to_owned()).collect(),
-            input: input.to_vec(),
-        });
-        let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
-        let script = args.get(at).copied().unwrap_or_default();
-        if script == else_api::computers::GUEST_DESKTOP
-            && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Ok(ExecOutput {
+    async fn reply(&self, e: Exec) -> Option<Reply> {
+        let script = e.script();
+        if script == else_api::computers::GUEST_DESKTOP && self.fail_desktop.load(SeqCst) {
+            return Some(Ok(ExecOutput {
                 status: Some(1),
                 stdout: String::new(),
                 stderr: "Xvfb did not start".into(),
                 truncated: false,
-            });
+            }));
         }
-        let stdout = if script.contains("wait $pg; c=$?") {
-            if args.get(at + 2).is_some_and(|c| c.contains("HANG")) {
+        let browser = script.contains("else-browser");
+        let reply = if script.contains("wait $pg; c=$?") {
+            if e.arg(2).is_some_and(|c| c.contains("HANG")) {
                 self.started.notify_one();
-                let killed = self.killed(name);
-                killed.notified().await;
-                "143\n0\n0\n\n\0\n".to_owned()
+                self.killed(&e.name).notified().await;
+                ok("143\n0\n0\n\n\0\n")
             } else {
-                self.run_reply(args, input)
+                ok(run_reply(&e.input))
             }
         } else if script.contains("alive()") {
-            if self.stalled.lock().unwrap().iter().any(|n| n == name) {
+            if self.stalled.lock().unwrap().contains(&e.name) {
                 self.release_stalled_kill.notified().await;
             }
-            self.killed(name).notify_one();
-            "stopped".into()
-        } else if script.contains("else-browser") && args.contains(&"type-secret") {
-            let typed = String::from_utf8_lossy(input);
-            json!({ "url": "https://x.com/login", "title": "Log in",
+            self.killed(&e.name).notify_one();
+            ok("stopped")
+        } else if browser && e.has_arg("type-secret") {
+            let typed = String::from_utf8_lossy(&e.input);
+            ok(json!({ "url": "https://x.com/login", "title": "Log in",
                     "value": format!("({} characters)", typed.len()),
                     "added": [format!("Signed in as {typed}")] })
-            .to_string()
-        } else if script.contains("else-browser") && args.contains(&"#echoes") {
-            json!({ "error": format!("no element matches; similar: \"{PASSWORD}\"") }).to_string()
-        } else if script.contains("else-browser") && args.contains(&"text") {
-            json!({ "url": "https://mobile.x.com/home", "title": "Home",
+            .to_string())
+        } else if browser && e.has_arg("#echoes") {
+            ok(
+                json!({ "error": format!("no element matches; similar: \"{PASSWORD}\"") })
+                    .to_string(),
+            )
+        } else if browser && e.has_arg("text") {
+            ok(json!({ "url": "https://mobile.x.com/home", "title": "Home",
                     "text": format!("Signed in as me@example.com with {PASSWORD}") })
-            .to_string()
-        } else if script.contains("else-browser") && args.contains(&"snapshot") {
-            json!({ "url": "https://example.com/", "title": "Projects",
+            .to_string())
+        } else if browser && e.has_arg("snapshot") {
+            ok(json!({ "url": "https://example.com/", "title": "Projects",
                     "snapshot": "heading \"Projects\"\nbutton \"Delete project\" @kqvzb5" })
-            .to_string()
-        } else if script.contains("echo launched") {
-            if args.get(at + 3).is_some_and(|c| c.contains("LAUNCH_ERROR")) {
-                return Ok(ExecOutput {
-                    status: Some(2),
-                    stdout: String::new(),
-                    stderr: format!("sh: launch failed: {}", self.run_reply(args, input)),
-                    truncated: false,
-                });
-            }
-            "launched".into()
+            .to_string())
+        } else if script.contains("echo launched")
+            && e.arg(3).is_some_and(|c| c.contains("LAUNCH_ERROR"))
+        {
+            Ok(ExecOutput {
+                status: Some(2),
+                stdout: String::new(),
+                stderr: format!("sh: launch failed: {}", run_reply(&e.input)),
+                truncated: false,
+            })
         } else {
-            String::new()
+            return None;
         };
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout,
-            stderr: String::new(),
-            truncated: false,
-        })
+        Some(reply)
     }
+}
+
+/// The framed output of a foreground command that prints the last task
+/// secret on its input as `NAME=value`.
+fn run_reply(input: &[u8]) -> String {
+    use base64::Engine;
+    let mut out = String::from("no secret");
+    for line in String::from_utf8_lossy(input).lines() {
+        if let Some((name, value)) = line.split_once(' ') {
+            let value = base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .unwrap();
+            out = format!("{name}={}", String::from_utf8(value).unwrap());
+        }
+    }
+    format!("0\n{}\n0\n{out}\n\0\n", out.len())
 }
 
 struct Setup {
     h: Harness,
     guest: Arc<Guest>,
+    script: Arc<Script>,
     manager: Arc<ComputerManager>,
 }
 
 async fn setup() -> Setup {
     let db = Arc::new(common::TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let guest = Arc::new(Guest::default());
+    let script = Arc::new(Script::default());
+    let replies = script.clone();
+    let guest = Arc::new(Guest::new().on_exec(move |e| {
+        let replies = replies.clone();
+        async move { replies.reply(e).await }
+    }));
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
         guest.clone(),
@@ -212,7 +139,12 @@ async fn setup() -> Setup {
     ));
     manager.reconcile_startup().await.unwrap();
     let h = harness(TestApp::builder().db(db).computers(manager.clone())).await;
-    Setup { h, guest, manager }
+    Setup {
+        h,
+        guest,
+        script,
+        manager,
+    }
 }
 
 /// Stop the bot's work, so the next message starts a turn of its own.
@@ -340,6 +272,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         program,
         args,
         input,
+        ..
     } = execs
         .iter()
         .find(|Exec { args, .. }| args.iter().any(|a| a == "./send.sh"))
@@ -408,7 +341,12 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_work_ends_a_running_foreground_command() {
-    let Setup { h, guest, manager } = setup().await;
+    let Setup {
+        h,
+        guest,
+        script,
+        manager,
+    } = setup().await;
     let bot = h.app.create_bot("Worker").await;
     let (_, token) = h.running(&bot, GATE).await;
     let h = Arc::new(h);
@@ -426,7 +364,7 @@ async fn stop_work_ends_a_running_foreground_command() {
             .await.result
         })
     };
-    common::until("the foreground command to start", guest.started.notified()).await;
+    common::until("the foreground command to start", script.started.notified()).await;
     manager.end_orphaned_commands().await.unwrap();
     assert!(!call.is_finished());
     let stop = app
@@ -504,7 +442,9 @@ async fn stop_work_ends_a_running_foreground_command() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_stalled_kill_does_not_delay_another_bots_stop() {
-    let Setup { h, guest, manager } = setup().await;
+    let Setup {
+        h, script, manager, ..
+    } = setup().await;
     let slow = h.app.create_bot("Slow").await;
     let fast = h.app.create_bot("Fast").await;
     let h = Arc::new(h);
@@ -523,10 +463,10 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
             .await
             .result
         }));
-        common::until("the foreground command to start", guest.started.notified()).await;
+        common::until("the foreground command to start", script.started.notified()).await;
     }
     let slow_name = ComputerManager::runtime_name(slow.parse().unwrap());
-    guest.stalled.lock().unwrap().push(slow_name);
+    script.stalled.lock().unwrap().push(slow_name);
     for bot in [&slow, &fast] {
         let stop = app
             .owner(
@@ -547,7 +487,7 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
         .await
         .unwrap();
     assert_eq!(result["exit_code"], 143);
-    guest.release_stalled_kill.notify_one();
+    script.release_stalled_kill.notify_one();
     common::until("the orphan cleanup pass to finish", pass)
         .await
         .unwrap()
@@ -564,7 +504,12 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() {
-    let Setup { h, guest, manager } = setup().await;
+    let Setup {
+        h,
+        guest,
+        script,
+        manager,
+    } = setup().await;
     let bot = h.app.create_bot("Clicker").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, token) = h.running(&bot, GATE).await;
@@ -593,7 +538,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     };
 
     let first = call("HANG one");
-    common::until("the foreground command to start", guest.started.notified()).await;
+    common::until("the foreground command to start", script.started.notified()).await;
     common::until("the owner stop to finish", manager.owner_stop(bot_id))
         .await
         .unwrap();
@@ -605,7 +550,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
 
     let before = kills();
     let second = call("HANG two");
-    common::until("the foreground command to start", guest.started.notified()).await;
+    common::until("the foreground command to start", script.started.notified()).await;
     second.abort();
     common::until(
         "the dropped request's command to be killed",
@@ -614,7 +559,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     .await;
 
     let third = call("HANG three");
-    common::until("the foreground command to start", guest.started.notified()).await;
+    common::until("the foreground command to start", script.started.notified()).await;
     let queued = call("echo should-not-run");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let stop = app
@@ -662,13 +607,11 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
 /// with the startup error and say how to inspect it.
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_commands_run_while_the_desktop_fails_to_start() {
-    let Setup { h, guest, .. } = setup().await;
+    let Setup { h, script, .. } = setup().await;
     let app = &h.app;
     let bot = app.create_bot("Fixer").await;
     let (_, token) = h.running(&bot, GATE).await;
-    guest
-        .fail_desktop
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    script.fail_desktop.store(true, SeqCst);
 
     let ran = tool(
         app,
@@ -1107,12 +1050,9 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
     );
     assert!(!result.to_string().contains(PASSWORD));
     let exec = guest
-        .execs
-        .lock()
-        .unwrap()
-        .iter()
+        .execs()
+        .into_iter()
         .rfind(|e| e.args.iter().any(|a| a == "type-secret"))
-        .cloned()
         .expect("the guest helper ran");
     assert_eq!(exec.input, PASSWORD.as_bytes(), "the value goes on stdin");
     assert!(

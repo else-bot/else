@@ -3,14 +3,12 @@ use crate::common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::http::StatusCode;
 use base64::Engine;
 use common::TestApp;
+use common::guest::{Exec, Guest, Reply, ok};
 use common::recorder::{Called, GATE, Harness, harness, tool};
-use else_api::computers::{
-    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
-};
+use else_api::computers::{ComputerConfig, ComputerManager};
 use serde_json::{Value, json};
 use sha2::Digest;
 use uuid::Uuid;
@@ -25,10 +23,9 @@ enum Mode {
     Mismatch,
 }
 
-struct Guest {
-    state: Mutex<std::collections::HashMap<String, RuntimeState>>,
+/// What the fake guest's screenshot and input helpers answer.
+struct Screen {
     mode: Mutex<Mode>,
-    files: Mutex<Vec<String>>,
     inputs: Mutex<Vec<Value>>,
     input_reply: Mutex<(i32, Vec<String>)>,
 }
@@ -39,70 +36,43 @@ fn png() -> Vec<u8> {
         .unwrap()
 }
 
-#[async_trait]
-impl ComputerRuntime for Guest {
-    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(n, s)| (n.clone(), *s))
-            .collect())
+impl Screen {
+    fn reply(&self, e: &Exec) -> Option<Reply> {
+        if e.stdin {
+            return Some(self.input(e));
+        }
+        e.args.iter().find(|a| a.contains("else-screenshot"))?;
+        let stdout = match *self.mode.lock().unwrap() {
+            Mode::NoDisplay => {
+                r#"{"error": "DISPLAY_UNAVAILABLE: the desktop display is not running"}"#.into()
+            }
+            Mode::TooLarge => {
+                r#"{"error": "IMAGE_TOO_LARGE: the screenshot is over 1500000 bytes even at 1/4 size"}"#.into()
+            }
+            mode => {
+                let sha = hex::encode(sha2::Sha256::digest(png()));
+                let w = if mode == Mode::Mismatch { 2 } else { 1 };
+                json!({ "screen_width": 1280, "screen_height": 800, "image_width": w,
+                        "image_height": 1, "scale": 1, "pointer": [640, 400],
+                        "bytes": png().len(), "sha256": sha, "captured_at": 1.0 })
+                .to_string()
+            }
+        };
+        Some(ok(stdout))
     }
-    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(spec.name.clone(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Stopped);
-        Ok(())
-    }
-    async fn pause(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn resume(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn copy_out(
-        &self,
-        _: &str,
-        guest: &str,
-        host: &std::path::Path,
-    ) -> Result<(), RuntimeError> {
-        self.files.lock().unwrap().push(guest.to_owned());
-        std::fs::write(host, png()).map_err(|e| RuntimeError::Unavailable(e.to_string()))
-    }
-    async fn exec_input(
-        &self,
-        _: &str,
-        _: &str,
-        args: &[&str],
-        input: &[u8],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
+
+    fn input(&self, e: &Exec) -> Reply {
         assert!(
-            args.iter().any(|a| a.contains("/usr/local/bin/else-input")),
+            e.args
+                .iter()
+                .any(|a| a.contains("/usr/local/bin/else-input")),
             "only input batches take stdin here"
         );
         assert!(
-            args.iter().all(|a| !a.contains("actions")),
+            e.args.iter().all(|a| !a.contains("actions")),
             "the batch is never an argument"
         );
-        let line = String::from_utf8_lossy(input).into_owned();
+        let line = String::from_utf8_lossy(&e.input).into_owned();
         let encoded = line
             .lines()
             .find_map(|l| l.strip_prefix("ELSE_INPUT_BATCH "))
@@ -116,50 +86,14 @@ impl ComputerRuntime for Guest {
         self.inputs.lock().unwrap().push(batch);
         let (code, lines) = self.input_reply.lock().unwrap().clone();
         let out = lines.join("\n");
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout: format!("{code}\n{}\n0\n{out}\n\0\n", out.len()),
-            stderr: String::new(),
-            truncated: false,
-        })
-    }
-    async fn exec(
-        &self,
-        _: &str,
-        _: &str,
-        args: &[&str],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        let script = args.iter().find(|a| a.contains("else-screenshot")).copied();
-        let stdout = match (script, *self.mode.lock().unwrap()) {
-            (None, _) => String::new(),
-            (Some(_), Mode::NoDisplay) => {
-                r#"{"error": "DISPLAY_UNAVAILABLE: the desktop display is not running"}"#.into()
-            }
-            (Some(_), Mode::TooLarge) => {
-                r#"{"error": "IMAGE_TOO_LARGE: the screenshot is over 1500000 bytes even at 1/4 size"}"#.into()
-            }
-            (Some(_), mode) => {
-                let sha = hex::encode(sha2::Sha256::digest(png()));
-                let w = if mode == Mode::Mismatch { 2 } else { 1 };
-                json!({ "screen_width": 1280, "screen_height": 800, "image_width": w,
-                        "image_height": 1, "scale": 1, "pointer": [640, 400],
-                        "bytes": png().len(), "sha256": sha, "captured_at": 1.0 })
-                .to_string()
-            }
-        };
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout,
-            stderr: String::new(),
-            truncated: false,
-        })
+        ok(format!("{code}\n{}\n0\n{out}\n\0\n", out.len()))
     }
 }
 
 struct Setup {
     h: Harness,
     guest: Arc<Guest>,
+    screen: Arc<Screen>,
     manager: Arc<ComputerManager>,
     dir: tempfile::TempDir,
 }
@@ -168,10 +102,8 @@ async fn setup(desktop: bool) -> Setup {
     let db = Arc::new(common::TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let guest = Arc::new(Guest {
-        state: Mutex::default(),
+    let screen = Arc::new(Screen {
         mode: Mutex::new(Mode::Ok),
-        files: Mutex::default(),
         inputs: Mutex::default(),
         input_reply: Mutex::new((
             0,
@@ -183,6 +115,12 @@ async fn setup(desktop: bool) -> Setup {
             ],
         )),
     });
+    let replies = screen.clone();
+    let guest = Arc::new(
+        Guest::new()
+            .with_file(png())
+            .on_exec(move |e| std::future::ready(replies.reply(&e))),
+    );
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
         guest.clone(),
@@ -204,6 +142,7 @@ async fn setup(desktop: bool) -> Setup {
     Setup {
         h,
         guest,
+        screen,
         manager,
         dir,
     }
@@ -212,7 +151,11 @@ async fn setup(desktop: bool) -> Setup {
 #[tokio::test(flavor = "multi_thread")]
 async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let Setup {
-        h, guest, manager, ..
+        h,
+        guest,
+        screen,
+        manager,
+        ..
     } = setup(true).await;
     let app = &h.app;
     let bot = app.create_bot("Seer").await;
@@ -234,7 +177,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert_eq!(content[1]["mimeType"], "image/png");
     assert_eq!(content[1]["data"], PNG);
     let artifact = meta["artifact_id"].as_str().unwrap().to_owned();
-    assert!(guest.files.lock().unwrap()[0].starts_with("/var/lib/elsebot-screens/"));
+    assert!(guest.copied()[0].starts_with("/var/lib/elsebot-screens/"));
     let logged: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
@@ -276,13 +219,13 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
         else_api::computers::Acquire::Ready { lease_id, .. } => lease_id,
         other => panic!("{other:?}"),
     };
-    let before = guest.files.lock().unwrap().len();
+    let before = guest.copied().len();
     let late = manager
         .capture_screen(lease, bot.parse().unwrap(), Some(Uuid::new_v4()), true)
         .await
         .unwrap();
     assert!(late.is_err(), "a stopped turn captures nothing");
-    assert_eq!(guest.files.lock().unwrap().len(), before);
+    assert_eq!(guest.copied().len(), before);
     manager.release(lease).await.unwrap();
     let (other_turn, other_token) = h.running(&other, GATE).await;
     let foreign = tool(
@@ -308,19 +251,19 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
         (Mode::TooLarge, "IMAGE_TOO_LARGE"),
         (Mode::Mismatch, "SCREENSHOT_INVALID"),
     ] {
-        *guest.mode.lock().unwrap() = mode;
+        *screen.mode.lock().unwrap() = mode;
         let refused = tool(app, &token, "computer_screenshot", json!({})).await;
         assert!(refused.error, "{}", refused.body);
         assert_eq!(refused.code(), code, "{}", refused.body);
     }
-    *guest.mode.lock().unwrap() = Mode::Ok;
+    *screen.mode.lock().unwrap() = Mode::Ok;
 
     manager.owner_stop(bot.parse().unwrap()).await.unwrap();
-    let before = guest.files.lock().unwrap().len();
+    let before = guest.copied().len();
     let stopped = tool(app, &token, "computer_screenshot", json!({})).await;
     assert!(stopped.error, "{}", stopped.body);
     assert_eq!(stopped.code(), "COMPUTER_STOPPED", "{}", stopped.body);
-    assert_eq!(guest.files.lock().unwrap().len(), before);
+    assert_eq!(guest.copied().len(), before);
 
     app.state.grants.revoke_turn(other_turn).await;
     let revoked = tool(app, &other_token, "computer_screenshot", json!({})).await;
@@ -392,7 +335,7 @@ async fn a_handoff_never_wakes_a_computer_to_share_its_screen() {
     assert_eq!(asked["parked"], true, "{asked}");
     assert!(asked.get("shared").is_none(), "{asked}");
     assert!(
-        guest.state.lock().unwrap().is_empty(),
+        guest.events().is_empty(),
         "no computer was created or started"
     );
 }
@@ -416,11 +359,11 @@ async fn a_handoff_without_a_desktop_still_asks_the_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_input_progress_never_reports_success() {
-    let Setup { h, guest, .. } = setup(true).await;
+    let Setup { h, screen, .. } = setup(true).await;
     let app = &h.app;
     let bot = app.create_bot("Hands").await;
     let (_, token) = h.running(&bot, GATE).await;
-    *guest.input_reply.lock().unwrap() = (
+    *screen.input_reply.lock().unwrap() = (
         0,
         vec![
             r#"{"started": true}"#.into(),
@@ -445,13 +388,13 @@ async fn duplicate_input_progress_never_reports_success() {
         text.contains("Take a screenshot before repeating"),
         "{text}"
     );
-    assert_eq!(guest.inputs.lock().unwrap().len(), 1, "nothing replayed");
+    assert_eq!(screen.inputs.lock().unwrap().len(), 1, "nothing replayed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let Setup {
-        h, guest, manager, ..
+        h, screen, manager, ..
     } = setup(true).await;
     let app = &h.app;
     let bot = app.create_bot("Hands").await;
@@ -469,7 +412,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let mut sent = batch.clone();
     sent.as_object_mut().unwrap().remove("effect");
     assert_eq!(
-        guest.inputs.lock().unwrap()[0],
+        screen.inputs.lock().unwrap()[0],
         sent,
         "the batch reached the guest as sent; the effect declaration stays in the API"
     );
@@ -491,7 +434,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         "typed text never enters memory"
     );
 
-    *guest.input_reply.lock().unwrap() = (2, vec![r#"{"error": "SCREEN_CHANGED: the screen is now 1024x768, not 1280x800; take a new screenshot"}"#.into()]);
+    *screen.input_reply.lock().unwrap() = (2, vec![r#"{"error": "SCREEN_CHANGED: the screen is now 1024x768, not 1280x800; take a new screenshot"}"#.into()]);
     let refused = tool(app, &token, "computer_input", batch.clone()).await;
     assert!(refused.error, "{}", refused.body);
     let text = refused.result.as_str().unwrap();
@@ -499,7 +442,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         text.starts_with("SCREEN_CHANGED") && text.ends_with("Nothing was done."),
         "{text}"
     );
-    *guest.input_reply.lock().unwrap() = (
+    *screen.input_reply.lock().unwrap() = (
         143,
         vec![
             r#"{"started": true}"#.into(),
@@ -512,7 +455,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     assert!(cut.error, "{}", cut.body);
     let text = cut.result.as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
-    *guest.input_reply.lock().unwrap() = (
+    *screen.input_reply.lock().unwrap() = (
         5,
         vec![
             r#"{"started": true}"#.into(),
@@ -524,10 +467,10 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     assert!(late.error, "{}", late.body);
     let text = late.result.as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
-    let sent = guest.inputs.lock().unwrap().len();
+    let sent = screen.inputs.lock().unwrap().len();
     assert_eq!(sent, 4, "nothing was replayed");
 
-    *guest.input_reply.lock().unwrap() = (
+    *screen.input_reply.lock().unwrap() = (
         0,
         vec![
             r#"{"started": true}"#.into(),
@@ -542,7 +485,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     assert!(busy.error, "{}", busy.body);
     assert_eq!(busy.code(), "OWNER_USING_DESKTOP");
     assert_eq!(
-        guest.inputs.lock().unwrap().len(),
+        screen.inputs.lock().unwrap().len(),
         sent,
         "nothing sent while the owner is in"
     );
@@ -564,7 +507,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         "{limited:?}"
     );
     assert_eq!(
-        guest.inputs.lock().unwrap().len(),
+        screen.inputs.lock().unwrap().len(),
         39,
         "40 batches counted per turn (one refused while the owner was in never reached the guest)"
     );
