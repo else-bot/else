@@ -82,15 +82,22 @@ fn text(args: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    Start,
+    List,
+    Stop,
+}
+
+pub(super) async fn call(state: &AppState, grant: &Grant, op: Op, args: &Value) -> ToolResult {
     let failed = |err: sqlx::Error| {
         tracing::warn!(error = %err, "a watcher tool failed");
         Err(Refusal::text(
             "WATCHER_ERROR: the watcher store failed. Try again.",
         ))
     };
-    match name {
-        START => {
+    match op {
+        Op::Start => {
             let (Some(check), Some(purpose), Some(prompt)) = (
                 text(args, "check"),
                 text(args, "purpose"),
@@ -201,7 +208,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Err(err) => failed(err),
             }
         }
-        LIST => {
+        Op::List => {
             let listed = match state.db.acquire().await {
                 Ok(mut conn) => watchers::list_active(&mut conn, grant.bot_id).await,
                 Err(err) => Err(err),
@@ -213,7 +220,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Err(err) => failed(err),
             }
         }
-        STOP => {
+        Op::Stop => {
             let Some(id) = text(args, "watch_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return Err(Refusal::text("watch_id must be a watcher ID."));
             };
@@ -226,6 +233,5 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Err(err) => failed(err),
             }
         }
-        _ => Err(Refusal::text("unknown watcher tool")),
     }
 }

@@ -66,13 +66,6 @@ pub(super) fn schemas() -> Vec<Value> {
     ]
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    match name {
-        INSTALL => install(state, grant, args).await,
-        _ => read(state, grant, args).await,
-    }
-}
-
 fn env_names(args: &Value) -> Result<Vec<String>, &'static str> {
     let Some(list) = args.get("env") else {
         return Ok(Vec::new());
@@ -94,7 +87,7 @@ fn env_names(args: &Value) -> Result<Vec<String>, &'static str> {
     Ok(names.into_iter().collect())
 }
 
-async fn install(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn install(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let refuse = |code: &str, message: &str| Err(Refusal::coded(code, message));
     let Some(url) = args["url"].as_str().filter(|u| u.len() <= 2048) else {
         return refuse("INVALID_REQUEST", "url is a github.com link");
@@ -164,7 +157,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     }
 }
 
-async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(id) = args["id"].as_str().filter(|id| valid_id(id)) else {
         return Err(Refusal::text(
             "INVALID_REQUEST: id is an installed skill id",

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::owner_tools::{Card, Declined, ask};
+use super::tool_defs::Call;
 use crate::app::questions::Effect;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use axum::extract::State;
@@ -169,17 +170,28 @@ pub(crate) fn oversized_purpose(purpose: &str) -> Option<String> {
 
 /// Runs a shared MCP tool. Every failure reaches the bot in the same JSON
 /// envelope as a result, whichever layer refused it.
-pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    run(state, grant, name, args)
-        .await
-        .map_err(Refusal::enveloped)
+pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
+    run(c, op).await.map_err(Refusal::enveloped)
 }
 
-async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
+/// The shared MCP library's tools, each bound to its name in `tool_defs`.
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    List,
+    Install,
+    Request,
+    Connect,
+    ConnectionStatus,
+}
+
+async fn run(c: Call<'_>, op: Op) -> ToolResult {
+    let Call {
+        state, grant, args, ..
+    } = c;
     let mut approval = None;
     let mut upstream_error = false;
-    let result = match name {
-        "mcp_connect" | "mcp_connection_status" => {
+    let result = match op {
+        Op::Connect | Op::ConnectionStatus => {
             let input = match serde_json::from_value::<ConnectArgs>(args.clone()) {
                 Ok(input)
                     if input
@@ -195,7 +207,7 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolR
                     ));
                 }
             };
-            if name == "mcp_connection_status" {
+            if matches!(op, Op::ConnectionStatus) {
                 state
                     .mcps
                     .connection_status(&input.id)
@@ -223,7 +235,7 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolR
                 }
             }
         }
-        "mcp_list" => match serde_json::from_value::<ListArgs>(args.clone()) {
+        Op::List => match serde_json::from_value::<ListArgs>(args.clone()) {
             Ok(ListArgs { id: Some(id) }) => state
                 .mcps
                 .read(&id)
@@ -232,14 +244,14 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolR
             Ok(ListArgs { id: None }) => state.mcps.list().await.map(|mcps| json!({"mcps":mcps})),
             Err(_) => Err(Error::Invalid("Use an optional MCP id only.")),
         },
-        "mcp_install" => match install(state, grant, args).await? {
+        Op::Install => match install(state, grant, args).await? {
             Install::Done(result) => result,
             Install::Approved(result, note) => {
                 approval = Some(note);
                 result
             }
         },
-        "mcp_request" => {
+        Op::Request => {
             if let Some(error) = args["purpose"].as_str().and_then(oversized_purpose) {
                 return Err(invalid(&error));
             }
@@ -274,8 +286,9 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolR
                     }
                 };
                 if let Some(kind) = kind {
-                    approval = super::guest_tools::approval::approve(state, grant, name, args, kind)
-                        .await?
+                    approval =
+                        super::guest_tools::approval::approve(state, grant, c.tool.name, args, kind)
+                            .await?
                 }
             }
             let result = list_or_request(state, &request.id, request.method, request.params).await;
@@ -322,7 +335,6 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolR
                 Err(error) => Err(error),
             }
         }
-        _ => return Err(invalid("Unknown MCP library tool.")),
     };
     let note = approval.map(|note| format!("; {note}")).unwrap_or_default();
     match result {

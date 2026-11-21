@@ -32,23 +32,25 @@ pub(crate) use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
 use input_progress::InputProgress;
 
-pub const TOOL_NAMES: &[&str] = &[
-    "computer_run",
-    "computer_job_start",
-    "computer_job",
-    "computer_job_cancel",
-    "computer_watch_start",
-    "computer_watches",
-    "computer_watch_stop",
-    "computer_write_file",
-    "computer_read_file",
-    "computer_fetch",
-    "computer_browser",
-    "computer_secrets",
-    "computer_screenshot",
-    "computer_input",
-    "computer_resize",
-];
+/// The computer tools, each bound to its name in `tool_defs`.
+#[derive(Clone, Copy)]
+pub(crate) enum Op {
+    Run,
+    JobStart,
+    Job,
+    JobCancel,
+    WatchStart,
+    Watches,
+    WatchStop,
+    WriteFile,
+    ReadFile,
+    Fetch,
+    Browser,
+    Secrets,
+    Screenshot,
+    Input,
+    Resize,
+}
 
 /// Input batches one turn may send (unattended iterations are bounded; the
 /// bot asks the owner to continue beyond this).
@@ -937,15 +939,15 @@ async fn add_github(
     }
 }
 
-async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
+async fn execute(state: &AppState, grant: &Grant, op: Op, name: &str, args: &Value) -> ToolResult {
     let Some(computers) = state.computers.manager().cloned() else {
         return Err(Refusal::text(
             "COMPUTER_UNAVAILABLE: no computer runtime on this host.",
         ));
     };
     let text = |key: &str| args[key].as_str().map(str::to_owned);
-    match name {
-        "computer_run" => {
+    match op {
+        Op::Run => {
             let Some(command) = text("command") else {
                 return Err(Refusal::text("command is required."));
             };
@@ -999,7 +1001,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_job_start" => {
+        Op::JobStart => {
             let Some(command) = text("command") else {
                 return Err(Refusal::text("command is required."));
             };
@@ -1061,19 +1063,21 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        resize::NAME => resize::resize(state, grant, &computers, args).await,
-        watch::START | watch::LIST | watch::STOP => watch::call(state, grant, name, args).await,
-        "computer_job" if args["wait"] == true => {
+        Op::Resize => resize::resize(state, grant, &computers, args).await,
+        Op::WatchStart => watch::call(state, grant, watch::Op::Start, args).await,
+        Op::Watches => watch::call(state, grant, watch::Op::List, args).await,
+        Op::WatchStop => watch::call(state, grant, watch::Op::Stop, args).await,
+        Op::Job if args["wait"] == true => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return Err(Refusal::text("job_id must be a job ID."));
             };
             job_wait::wait_job(state, grant, &computers, id).await
         }
-        "computer_job" | "computer_job_cancel" => {
+        Op::Job | Op::JobCancel => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return Err(Refusal::text("job_id must be a job ID."));
             };
-            let result = if name == "computer_job" {
+            let result = if matches!(op, Op::Job) {
                 computers.job(grant.bot_id, id).await
             } else {
                 computers.cancel_job(grant.bot_id, id).await
@@ -1091,7 +1095,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_write_file" => {
+        Op::WriteFile => {
             let (Some(path), Some(content)) = (text("path"), text("content")) else {
                 return Err(Refusal::text("path and content are required."));
             };
@@ -1111,7 +1115,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_read_file" => {
+        Op::ReadFile => {
             let Some(path) = text("path") else {
                 return Err(Refusal::text("path is required."));
             };
@@ -1151,7 +1155,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_fetch" => {
+        Op::Fetch => {
             let Some(path) = text("path") else {
                 return Err(Refusal::text("path is required."));
             };
@@ -1175,7 +1179,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_browser" => {
+        Op::Browser => {
             let action = text("action").unwrap_or_default();
             let mut fill: Option<VaultFill> = None;
             let mut argv = match text("dialog").as_deref() {
@@ -1244,9 +1248,9 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 Err(err) => Err(err.into()),
             }
         }
-        "computer_screenshot" => screenshot(state, grant, args, &computers).await,
-        "computer_input" => input(state, grant, args, &computers).await,
-        "computer_secrets" => match task_secrets::list(&state.db).await {
+        Op::Screenshot => screenshot(state, grant, args, &computers).await,
+        Op::Input => input(state, grant, args, &computers).await,
+        Op::Secrets => match task_secrets::list(&state.db).await {
             Ok(list) => {
                 let query = text("query").unwrap_or_default();
                 let secrets: Vec<Value> = list
@@ -1279,7 +1283,6 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> T
                 ))
             }
         },
-        _ => Err(Refusal::text("Unknown tool.")),
     }
 }
 

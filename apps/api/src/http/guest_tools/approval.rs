@@ -1,8 +1,9 @@
 use serde_json::Value;
 
-use super::{AppState, Grant, slice, summarize_input};
+use super::{AppState, Grant, Op, slice, summarize_input};
 use crate::app::questions::{Effect, Kind, TaskScope};
 use crate::computers::browser_refs::RefLabel;
+use crate::http::tool_defs::{Call, ToolDef};
 use crate::http::tool_result::{self, Refusal, ToolResult};
 
 pub(super) const MAX_PURPOSE: usize = 300;
@@ -19,31 +20,6 @@ pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads and ro
     message or email, publishes publicly, pays, changes access or security, or makes another \
     sensitive commitment). Routine work requested by the owner needs no approval merely because \
     it uses a remote service. Required; a missing effect is refused, never assumed local.";
-
-fn needs_effect(name: &str, args: &Value) -> bool {
-    match name {
-        "computer_run" | "computer_job_start" | "computer_input" | "computer_write_file" => true,
-        "computer_browser" => {
-            matches!(args["action"].as_str(), Some("click") | Some("type"))
-                || args["dialog"] == "accept"
-        }
-        _ => false,
-    }
-}
-
-/// The computer tools whose schema declares `effect`, all of them parking
-/// tools. Any other tool given an effect is refused before approval: its
-/// card would park the turn under a name no provider treats as parking.
-fn declares_effect(name: &str) -> bool {
-    matches!(
-        name,
-        "computer_run"
-            | "computer_job_start"
-            | "computer_input"
-            | "computer_write_file"
-            | "computer_browser"
-    )
-}
 
 const PURPOSE_REQUIRED: &str = "PURPOSE_REQUIRED: computer_job_start needs purpose, what the \
     job does or waits for in plain words, e.g. CI checks on PR #482. Nothing was done.";
@@ -73,11 +49,15 @@ fn checked_purpose(name: &str, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
-    if !declares_effect(name) && args.get("effect").is_some_and(|e| !e.is_null()) {
+/// Only computer tools declare `effect`, all of them parking tools. Any other
+/// tool given one is refused before approval: its card would park the turn
+/// under a name no provider treats as parking.
+fn declared_effect(tool: &ToolDef, args: &Value) -> Result<Option<Effect>, String> {
+    let name = tool.name;
+    if !tool.effect.declared() && args.get("effect").is_some_and(|e| !e.is_null()) {
         return Err(format!("{name} takes no effect. Nothing was done."));
     }
-    let needs = needs_effect(name, args);
+    let needs = tool.effect.required(args);
     let effect = match args.get("effect") {
         None | Some(Value::Null) if needs => {
             return Err(format!(
@@ -269,7 +249,8 @@ pub(crate) async fn approve_card(
 ) -> Result<Option<&'static str>, Refusal> {
     use crate::app::questions::{Spec, Standing};
     use crate::http::owner_tools::{Card, Declined, ask};
-    let task_scope = declares_effect(name)
+    let declares = crate::http::tool_defs::get(name).is_some_and(|tool| tool.effect.declared());
+    let task_scope = declares
         .then(|| TaskScope::from_args(args).ok().flatten())
         .flatten();
     let spec = Spec::tool_approval(kind, name, args, task_scope, title, context);
@@ -306,15 +287,22 @@ pub(crate) async fn approve_card(
 /// Run a computer tool once its declared effect allows it: a local call
 /// runs at once, a destructive or external one only with the owner's
 /// approval for exactly this call. The approval is noted in the activity log.
-pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    if name == "computer_job_start"
+pub(crate) async fn call(c: Call<'_>, op: Op) -> ToolResult {
+    let Call {
+        state,
+        grant,
+        args,
+        tool,
+    } = c;
+    let name = tool.name;
+    if matches!(op, Op::JobStart)
         && args["max_minutes"]
             .as_u64()
             .is_some_and(|minutes| minutes > super::MAX_JOB_MINUTES)
     {
         return Err(Refusal::text(super::JOB_TOO_LONG));
     }
-    let effect = match declared_effect(name, args) {
+    let effect = match declared_effect(tool, args) {
         Ok(effect) => effect,
         Err(message) => return Err(Refusal::text(message)),
     };
@@ -335,7 +323,7 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
             None => None,
         },
     };
-    let result = super::execute(state, grant, name, args).await;
+    let result = super::execute(state, grant, op, name, args).await;
     match note {
         Some(note) => tool_result::amend(
             result,
@@ -351,6 +339,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
+        super::declared_effect(crate::http::tool_defs::get(name).unwrap(), args)
+    }
+
     #[test]
     fn a_tool_without_an_effect_in_its_schema_refuses_one() {
         let read = json!({ "path": "notes.txt", "effect": "destructive" });
@@ -364,7 +356,8 @@ mod tests {
         for tool in &schemas {
             let name = tool["name"].as_str().unwrap();
             let declared = tool["inputSchema"]["properties"].get("effect").is_some();
-            assert_eq!(declares_effect(name), declared, "{name}");
+            let rule = crate::http::tool_defs::get(name).unwrap().effect;
+            assert_eq!(rule.declared(), declared, "{name}");
         }
     }
 

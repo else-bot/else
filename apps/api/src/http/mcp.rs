@@ -21,6 +21,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::error::ApiError;
 use super::owner_tools::{Card, Declined, ask};
+use super::tool_defs::ToolDef;
 use super::tool_result::{self, Done, Refusal, ToolResult, text_result};
 use super::tools::check;
 use crate::app::memory_tree::NodeId;
@@ -100,78 +101,28 @@ pub async fn endpoint(
             } else {
                 (params["name"].as_str(), &params["arguments"])
             };
-            // The grant match below falls through to ReadMemory, so refuse an
-            // unknown name before it can pick a grant (#630).
-            if let Some(name) = name
-                && !crate::app::tools::TOOL_NAMES.contains(&name)
-                && !crate::app::tools::DEFERRED_TOOLS.contains(&name)
-            {
+            let Some(name) = name else {
+                return rpc_error(id, -32602, "Invalid params: name and object arguments");
+            };
+            let Some(tool) = super::tool_defs::get(name) else {
                 return Json(
                     json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
                 )
                 .into_response();
-            }
-            let needs = match name {
-                Some(
-                    "delegate" | "council" | "list_bots" | "delegation_update"
-                    | "delegation_cancel",
-                ) => Tool::Delegate,
-                Some("mcp_install" | super::skills::INSTALL) => Tool::ManageMcp,
-                Some(super::skills::READ) => Tool::Mcp,
-                Some(
-                    "mcp_list"
-                    | "mcp_request"
-                    | "mcp_wait"
-                    | "mcp_connect"
-                    | "mcp_connection_status",
-                ) => Tool::Mcp,
-                Some("create_bot") => Tool::CreateBot,
-                Some("rename_bot" | "set_bot_model" | "delete_bot") => Tool::EditBot,
-                Some("rules_update") => Tool::Rules,
-                // Previews read the project, which only turns with the computer may do.
-                Some(super::visual_tools::NAME) => Tool::Computer,
-                Some("request_secret") => Tool::RequestSecret,
-                Some("ask_permission") => Tool::AskPermission,
-                Some(
-                    "ask_owner" | "confirm_permission" | "social_connect" | "mail_connect"
-                    | "mail_disconnect",
-                ) => Tool::AskOwner,
-                Some("draft_email" | "send_draft") => Tool::DraftEmail,
-                Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
-                Some(name)
-                    if name.starts_with("routine_")
-                        || name.starts_with("reminder_")
-                        || name.starts_with("webhook_")
-                        || name.starts_with("social_trigger_")
-                        || name.starts_with("mail_trigger_") =>
-                {
-                    Tool::Routines
-                }
-                Some(name) if name.starts_with("computer_") => Tool::Computer,
-                Some("mail_accounts" | "mail_action" | "mail_action_status") => Tool::Mail,
-                Some("social_connections" | "social_action" | "social_action_status") => {
-                    Tool::Social
-                }
-                Some("else_status") => Tool::Diagnose,
-                // Every turn may read its history; each tool itself admits
-                // only the turn it serves: a running delegated task or
-                // routine run.
-                Some("notify_owner" | super::routines::NO_NEWS) => Tool::ReadHistory,
-                _ => Tool::ReadMemory,
             };
-            if matches!(name, Some("delegate" | "council"))
+            if matches!(tool.name, "delegate" | "council")
                 && !grant.allows(Tool::Delegate)
                 && let Some(refusal) = task_cannot_delegate(&state, &grant).await
             {
                 return Json(json!({ "jsonrpc": "2.0", "id": id, "result": refusal }))
                     .into_response();
             }
-            if let Err(err) = check(&state, &grant, needs).await {
+            if let Err(err) = check(&state, &grant, tool.needs).await {
                 return err.into_response();
             }
-            match (name, arguments) {
-                (Some(name), args @ (Value::Object(_) | Value::Null)) => {
-                    Ok(call(&state, &grant, name, args).await)
+            match arguments {
+                args @ (Value::Object(_) | Value::Null) => {
+                    Ok(call(&state, &grant, tool, args).await)
                 }
                 _ => Err((-32602, "Invalid params: name and object arguments")),
             }
@@ -658,12 +609,13 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
     })
 }
 
-async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Value {
+async fn call(state: &AppState, grant: &Grant, tool: &'static ToolDef, args: &Value) -> Value {
     use crate::db::owner_questions::{self, UseOutcome};
-    let (result, used) = owner_questions::track_use(dispatch(state, grant, name, args)).await;
+    let name = tool.name;
+    let (result, used) = owner_questions::track_use(tool.run(state, grant, args)).await;
     let (result, log) = tool_result::render(result);
     // A parked call may or may not have run its effect: its use stays started.
-    if let Some(question) = used.filter(|_| !crate::app::tools::parks(name, &result)) {
+    if let Some(question) = used.filter(|_| !crate::app::tools::parks(tool.name, &result)) {
         let outcome = if result["isError"] == true {
             UseOutcome::Error
         } else {
@@ -674,78 +626,10 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         }
     }
     if let Some(log) = log {
-        let logged = crate::app::tools::loggable_args(name, args);
+        let logged = (tool.loggable)(args);
         record(state, grant, name, &logged, &log).await;
     }
     with_next(name, result)
-}
-
-async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    match name {
-        "memory_bots" => bots(state, grant).await,
-        "mcp_list" | "mcp_install" | "mcp_request" | "mcp_connect" | "mcp_connection_status" => {
-            super::shared_mcp::call(state, grant, name, args).await
-        }
-        super::mcp_wait::NAME => super::mcp_wait::call(state, grant, args).await,
-        super::skills::INSTALL | super::skills::READ => {
-            super::skills::call(state, grant, name, args).await
-        }
-        "memory_search" => search(state, grant, args).await,
-        "memory_read" => read(state, grant, args).await,
-        "memory_view" => view(state, grant, args).await,
-        "memory_zoom" => zoom(state, grant, args).await,
-        "memory_date" => date(state, grant, args).await,
-        "else_status" => Ok(Done::json(super::status(state).await)),
-        "delegate" => super::delegation_tools::delegate(state, grant, args).await,
-        "council" => super::delegation_tools::council(state, grant, args).await,
-        "delegation_update" => super::delegation_tools::update(state, grant, args).await,
-        "delegation_cancel" => super::delegation_tools::cancel(state, grant, args).await,
-        "list_bots" => list_bots(state, grant, args).await,
-        "create_bot" => create_bot(state, grant, args).await,
-        "rename_bot" => rename_bot(state, grant, args).await,
-        "set_bot_model" => set_bot_model(state, grant, args).await,
-        "delete_bot" => delete_bot(state, grant, args).await,
-        "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
-        "social_connect"
-        | "social_connections"
-        | "social_action"
-        | "social_action_status"
-        | "social_trigger_set"
-        | "social_trigger_list"
-        | "social_trigger_delete" => super::social_tools::call(state, grant, name, args).await,
-        "ask_owner" => super::owner_tools::ask_owner(state, grant, args).await,
-        "ask_permission" => super::owner_tools::ask_permission(state, grant, args).await,
-        "confirm_permission" => super::owner_tools::confirm_permission(state, grant, args).await,
-        name if super::outgoing_tools::TOOL_NAMES.contains(&name) => {
-            super::outgoing_tools::call(state, grant, name, args).await
-        }
-        "routine_create" => super::routines::create(state, grant, args).await,
-        "routine_list" => super::routines::list(state, grant).await,
-        "routine_update" => super::routines::update(state, grant, args).await,
-        "routine_delete" => super::routines::delete(state, grant, args).await,
-        "routine_run" => super::routines::run(state, grant, args).await,
-        "reminder_create" => super::routines::create_reminder(state, grant, args).await,
-        super::routines::NO_NEWS => super::routines::no_news(state, grant).await,
-        "rules_update" => super::rules::update(state, grant, args).await,
-        super::visual_tools::NAME => super::visual_tools::call(state, grant, args).await,
-        "webhook_create" => super::webhooks::create(state, grant, args).await,
-        "webhook_list" => super::webhooks::list(state, grant).await,
-        "webhook_update" => super::webhooks::update(state, grant, args).await,
-        "webhook_delete" => super::webhooks::delete(state, grant, args).await,
-        "mail_accounts"
-        | "mail_connect"
-        | "mail_disconnect"
-        | "mail_action"
-        | "mail_action_status"
-        | "mail_trigger_set"
-        | "mail_trigger_delete" => super::connectors::call(state, grant, name, args).await,
-        "computer_handoff" => super::owner_tools::computer_handoff(state, grant, args).await,
-        "notify_owner" => super::owner_tools::notify_owner(state, grant, args).await,
-        name if name.starts_with("computer_") => {
-            super::guest_tools::call(state, grant, name, args).await
-        }
-        _ => Err(Refusal::text("Unknown tool.")),
-    }
 }
 
 /// What the server tells a client about itself on initialize. Codex appends
@@ -781,7 +665,7 @@ fn with_next(name: &str, mut result: Value) -> Value {
     result
 }
 
-async fn bots(state: &AppState, grant: &Grant) -> ToolResult {
+pub(super) async fn bots(state: &AppState, grant: &Grant) -> ToolResult {
     match memory::readable_bots(&state.db, grant.bot_id).await {
         Ok(mut rows) => {
             if let Some(scope) = &grant.memory_scope {
@@ -806,7 +690,7 @@ fn parse_cursor(cursor: &str) -> Option<(i64, i64)> {
     (pair.0 >= 0 && pair.1 >= 0).then_some(pair)
 }
 
-async fn search(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn search(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(query) = args["query"]
         .as_str()
         .map(str::trim)
@@ -863,7 +747,7 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     Ok(Done::json(result).logged(log))
 }
 
-async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(start) = args["start_seq"].as_i64().filter(|s| *s >= 0) else {
         return Err(Refusal::text("start_seq must be a non-negative integer."));
     };
@@ -960,7 +844,7 @@ fn suffix(grant: &Grant, bot_id: Uuid) -> String {
     }
 }
 
-async fn view(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn view(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let bot_id = target(state, grant, args).await?;
     let from = args.get("from_index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let Ok(saved) = memory_tree::load_view(&state.db, bot_id).await else {
@@ -1029,7 +913,7 @@ fn text_fields(item: &mut Value, node: NodeId, body: &str, max: usize) {
     }
 }
 
-async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let (Some(start), Some(span)) = (args["start_seq"].as_i64(), args["span"].as_i64()) else {
         return Err(Refusal::text("start_seq and span are required."));
     };
@@ -1094,7 +978,7 @@ async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     Ok(Done::json(result).logged(log))
 }
 
-async fn date(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn date(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(seq) = args["seq"].as_i64().filter(|s| *s >= 0) else {
         return Err(Refusal::text("seq must be a non-negative integer."));
     };
@@ -1130,7 +1014,7 @@ struct ListBotsArgs {
     category_id: Option<Uuid>,
 }
 
-async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let parsed = if args.is_null() {
         Ok(ListBotsArgs::default())
     } else {
@@ -1183,7 +1067,7 @@ struct CreateBotArgs {
     service_tier: Option<String>,
 }
 
-async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::bots::{BotName, BotPurpose};
     use crate::db::bots::{self, BotError, Created, Refusal as BotRefusal};
     let parsed: CreateBotArgs = tool_result::args(args, || {
@@ -1317,7 +1201,7 @@ struct RenameBotArgs {
     name: String,
 }
 
-async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::bots::BotName;
     use crate::db::bots;
     let parsed: RenameBotArgs = tool_result::args(args, || {
@@ -1392,7 +1276,7 @@ struct SetBotModelArgs {
     service_tier: Option<String>,
 }
 
-async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::bots;
     let parsed: SetBotModelArgs = tool_result::args(args, || {
         Refusal::coded(
@@ -1492,7 +1376,7 @@ struct DeleteBotArgs {
     reason: Option<String>,
 }
 
-async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+pub(super) async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::questions::{BotDeletion, MAX_TITLE, Spec};
     use crate::db::bots::{self, Deletion};
     let parsed = serde_json::from_value::<DeleteBotArgs>(args.clone())

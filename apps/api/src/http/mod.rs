@@ -30,6 +30,7 @@ mod skills;
 mod social_tools;
 pub mod socials;
 pub mod task_secrets;
+pub(crate) mod tool_defs;
 mod tool_result;
 mod tool_search;
 pub mod tools;
