@@ -4,9 +4,8 @@
 
 use std::io::Cursor;
 
-use else_wire::settings::{LetterStyle, Stored};
-use serde::Deserialize;
-use serde::de::{EnumAccess, Error, VariantAccess, Visitor};
+use else_wire::settings::{LetterStyle as WireLetterStyle, Stored};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The side of a picture, as desktops store it.
@@ -24,7 +23,6 @@ pub enum Look {
     Default {},
     /// `None` fields follow the server's name.
     Letters {
-        #[serde(deserialize_with = "letter_style")]
         style: LetterStyle,
         #[serde(default)]
         letters: Option<String>,
@@ -43,40 +41,92 @@ pub enum Look {
     Picture {},
 }
 
-fn letter_style<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<LetterStyle, D::Error> {
-    struct Input;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LetterStyle {
+    Gradient,
+    Monogram,
+}
 
-    const STYLES: &[&str] = &["gradient", "monogram"];
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoredIcon {
+    Default {},
+    Letters {
+        style: LetterStyle,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        letters: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hue: Option<u16>,
+    },
+    Pattern {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hue: Option<u16>,
+    },
+    Emoji {
+        emoji: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hue: Option<u16>,
+    },
+    Picture {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+    },
+}
 
-    impl<'de> Visitor<'de> for Input {
-        type Value = LetterStyle;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("enum LetterStyle")
-        }
-
-        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
-            let (text, value) = data.variant::<String>()?;
-            let style = LetterStyle::from(text.clone());
-            if style == LetterStyle::Unknown {
-                return Err(A::Error::unknown_variant(&text, STYLES));
-            }
-            value.unit_variant()?;
-            Ok(style)
+impl From<StoredIcon> for Stored {
+    fn from(icon: StoredIcon) -> Self {
+        match icon {
+            StoredIcon::Default {} => Self::Default {},
+            StoredIcon::Letters {
+                style,
+                letters,
+                hue,
+            } => Self::Letters {
+                style: match style {
+                    LetterStyle::Gradient => WireLetterStyle::Gradient,
+                    LetterStyle::Monogram => WireLetterStyle::Monogram,
+                },
+                letters,
+                hue,
+            },
+            StoredIcon::Pattern { hue } => Self::Pattern { hue },
+            StoredIcon::Emoji { emoji, hue } => Self::Emoji { emoji, hue },
+            StoredIcon::Picture { digest } => Self::Picture { digest },
         }
     }
+}
 
-    deserializer.deserialize_enum("LetterStyle", STYLES, Input)
+impl TryFrom<Stored> for StoredIcon {
+    type Error = WireLetterStyle;
+
+    fn try_from(icon: Stored) -> Result<Self, Self::Error> {
+        Ok(match icon {
+            Stored::Default {} => Self::Default {},
+            Stored::Letters {
+                style,
+                letters,
+                hue,
+            } => Self::Letters {
+                style: match style {
+                    WireLetterStyle::Gradient => LetterStyle::Gradient,
+                    WireLetterStyle::Monogram => LetterStyle::Monogram,
+                    other => return Err(other),
+                },
+                letters,
+                hue,
+            },
+            Stored::Pattern { hue } => Self::Pattern { hue },
+            Stored::Emoji { emoji, hue } => Self::Emoji { emoji, hue },
+            Stored::Picture { digest } => Self::Picture { digest },
+        })
+    }
 }
 
 /// A checked icon, ready to store.
 #[derive(Debug)]
 pub struct ServerIcon {
-    /// What capabilities advertise: the look, and a picture's SHA-256 as
-    /// `digest` so desktops fetch the PNG only when it changes.
-    pub advertised: Stored,
+    pub stored: StoredIcon,
     pub picture: Option<Vec<u8>>,
 }
 
@@ -113,27 +163,24 @@ impl ServerIcon {
             }
             _ => {}
         }
-        let advertised = match look {
-            Look::Default {} => Stored::Default {},
+        let stored = match look {
+            Look::Default {} => StoredIcon::Default {},
             Look::Letters {
                 style,
                 letters,
                 hue,
-            } => Stored::Letters {
+            } => StoredIcon::Letters {
                 style,
                 letters,
                 hue,
             },
-            Look::Pattern { hue } => Stored::Pattern { hue },
-            Look::Emoji { emoji, hue } => Stored::Emoji { emoji, hue },
-            Look::Picture {} => Stored::Picture {
+            Look::Pattern { hue } => StoredIcon::Pattern { hue },
+            Look::Emoji { emoji, hue } => StoredIcon::Emoji { emoji, hue },
+            Look::Picture {} => StoredIcon::Picture {
                 digest: picture.as_deref().map(digest),
             },
         };
-        Ok(Self {
-            advertised,
-            picture,
-        })
+        Ok(Self { stored, picture })
     }
 }
 

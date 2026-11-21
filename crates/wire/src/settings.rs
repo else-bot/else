@@ -291,8 +291,7 @@ wire_state! {
     _ => Unknown
 }
 
-/// An icon as the cache and the server write it. Only the server fills a
-/// picture's `digest`.
+/// A server icon as advertised to desktops. A picture may include its SHA-256 digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Stored {
@@ -336,18 +335,6 @@ pub enum Shared {
 impl Shared {
     fn is_unsupported(&self) -> bool {
         matches!(self, Self::Unsupported)
-    }
-
-    pub fn from_persisted(value: Value) -> Self {
-        if value.is_null() {
-            return Self::Unset;
-        }
-        match serde_json::from_value::<Stored>(value.clone()) {
-            Ok(icon) if serde_json::to_value(&icon).is_ok_and(|encoded| encoded == value) => {
-                Self::Set(icon)
-            }
-            _ => Self::Preserved(value),
-        }
     }
 }
 

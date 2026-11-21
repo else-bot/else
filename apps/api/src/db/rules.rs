@@ -4,7 +4,8 @@
 //! earlier version. Every save appends a version.
 
 use chrono::{DateTime, Utc};
-use else_wire::rules::{DiffLine, RulesUpdate, RulesVersion};
+use else_wire::rules::{RuleChange, RulesUpdate, RulesVersion};
+use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -12,7 +13,9 @@ use uuid::Uuid;
 use super::events;
 use super::turns::ConversationKind;
 use crate::app::providers::Origin;
-use crate::app::rules::{Applied, ChangeKind, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules};
+use crate::app::rules::{
+    Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules,
+};
 use crate::db::bots::{self, BotStatus};
 
 #[derive(Debug, thiserror::Error)]
@@ -63,9 +66,74 @@ impl From<&Version> for RulesVersion {
             owner_words: version.owner_words.clone(),
             author: version.author.clone().into(),
             restored_from: version.restored_from,
-            diff: version.diff.0.clone(),
+            diff: version.diff.iter().map(Into::into).collect(),
             created_at: version.created_at,
             undone_at: version.undone_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum UpdateChange {
+    Known(ChangeKind),
+    Other(String),
+}
+
+impl From<&UpdateChange> for RuleChange {
+    fn from(change: &UpdateChange) -> Self {
+        match change {
+            UpdateChange::Known(change) => (*change).into(),
+            UpdateChange::Other(_) => Self::Unknown,
+        }
+    }
+}
+
+impl From<RuleChange> for UpdateChange {
+    fn from(change: RuleChange) -> Self {
+        match change {
+            RuleChange::Added => Self::Known(ChangeKind::Added),
+            RuleChange::Changed => Self::Known(ChangeKind::Changed),
+            RuleChange::Removed => Self::Known(ChangeKind::Removed),
+            RuleChange::Restored => Self::Known(ChangeKind::Restored),
+            RuleChange::Unknown => Self::Other("unknown".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredRulesUpdate {
+    version: i64,
+    section: String,
+    change: UpdateChange,
+    owner_words: String,
+    diff: Vec<DiffLine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    undone_at: Option<DateTime<Utc>>,
+}
+
+impl From<&StoredRulesUpdate> for RulesUpdate {
+    fn from(update: &StoredRulesUpdate) -> Self {
+        Self {
+            version: update.version,
+            section: update.section.clone(),
+            change: (&update.change).into(),
+            owner_words: update.owner_words.clone(),
+            diff: update.diff.iter().map(Into::into).collect(),
+            undone_at: update.undone_at,
+        }
+    }
+}
+
+impl From<RulesUpdate> for StoredRulesUpdate {
+    fn from(update: RulesUpdate) -> Self {
+        Self {
+            version: update.version,
+            section: update.section,
+            change: update.change.into(),
+            owner_words: update.owner_words,
+            diff: update.diff.into_iter().map(Into::into).collect(),
+            undone_at: update.undone_at,
         }
     }
 }
@@ -259,10 +327,10 @@ pub async fn update_for_turn(
         },
     )
     .await?;
-    let update = RulesUpdate {
+    let update = StoredRulesUpdate {
         version,
         section,
-        change: change.into(),
+        change: UpdateChange::Known(change),
         owner_words,
         diff,
         undone_at: None,
@@ -297,7 +365,7 @@ pub async fn update_for_turn(
     events::item_upsert(&mut tx, caller.bot_id, item_id).await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
     tx.commit().await?;
-    Ok(Saved::Saved(update))
+    Ok(Saved::Saved((&update).into()))
 }
 
 /// The owner restores an earlier version as a new one; version 0 is the
@@ -386,4 +454,58 @@ async fn mark_undone(
         events::item_upsert(conn, bot_id, item).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rules_update_reads_existing_json() {
+        let json = r#"{"version":3,"section":"Replies","change":"changed","owner_words":"Keep replies short.","diff":[{"op":"add","text":"Keep replies short."}]}"#;
+        let stored: StoredRulesUpdate = serde_json::from_str(json).unwrap();
+        let wire: RulesUpdate = (&stored).into();
+        assert_eq!(
+            wire,
+            RulesUpdate {
+                version: 3,
+                section: "Replies".into(),
+                change: RuleChange::Changed,
+                owner_words: "Keep replies short.".into(),
+                diff: vec![else_wire::rules::DiffLine {
+                    op: else_wire::rules::DiffOp::Add,
+                    text: "Keep replies short.".into(),
+                }],
+                undone_at: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+        let from_wire: StoredRulesUpdate = wire.into();
+        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
+    }
+
+    #[test]
+    fn rules_diff_reads_existing_json() {
+        let json = r###"[{"op":"same","text":"## Replies"},{"op":"remove","text":"Send updates."},{"op":"add","text":"Send one update."}]"###;
+        let stored: Vec<DiffLine> = serde_json::from_str(json).unwrap();
+        let wire: Vec<else_wire::rules::DiffLine> = stored.iter().map(Into::into).collect();
+        assert_eq!(
+            wire,
+            [
+                else_wire::rules::DiffLine {
+                    op: else_wire::rules::DiffOp::Same,
+                    text: "## Replies".into(),
+                },
+                else_wire::rules::DiffLine {
+                    op: else_wire::rules::DiffOp::Remove,
+                    text: "Send updates.".into(),
+                },
+                else_wire::rules::DiffLine {
+                    op: else_wire::rules::DiffOp::Add,
+                    text: "Send one update.".into(),
+                },
+            ]
+        );
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+    }
 }

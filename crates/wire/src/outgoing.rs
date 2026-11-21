@@ -66,9 +66,7 @@ impl DraftStatus {
     }
 }
 
-/// A file attached to a draft. Drafting copies it into the bot's file store
-/// (`attachments`), so the owner approves these exact bytes and a send
-/// refuses bytes whose hash differs.
+/// A file the owner can review and approve with a draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftFile {
     pub id: Uuid,
@@ -77,17 +75,6 @@ pub struct DraftFile {
     pub size: u64,
     /// Lowercase hex SHA-256 of the approved bytes.
     pub sha256: String,
-}
-
-impl DraftFile {
-    /// A picture platforms show inline: a photo on Telegram, an image with
-    /// a caption on WhatsApp.
-    pub fn is_image(&self) -> bool {
-        matches!(
-            self.media_type.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        )
-    }
 }
 
 /// What "Approve always" covers: messages on one platform from one sending

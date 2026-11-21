@@ -9,9 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use else_wire::skills::{
-    InstalledSkill, SkillFile, SkillInstall, SkillInstallStatus, SkillScope, SkillSource,
-};
+use else_wire::skills::{InstalledSkill, SkillInstall, SkillInstallStatus, SkillScope};
 use serde::Serialize;
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -21,7 +19,7 @@ use super::events;
 use super::task_secrets::{self, SecretError};
 use crate::credentials::SecretKey;
 use crate::db::in_ids;
-use crate::skills::{Package, secret_name};
+use crate::skills::{Package, SkillFile, SkillSource, secret_name};
 
 /// Install cards per owner request (turn).
 pub const MAX_PER_TURN: i64 = 3;
@@ -97,8 +95,8 @@ impl From<&InstallInfo> for SkillInstall {
             name: install.name.clone(),
             description: install.description.clone(),
             reason: install.reason.clone(),
-            source: install.source.clone(),
-            files: install.files.clone(),
+            source: (&install.source).into(),
+            files: install.files.iter().map(Into::into).collect(),
             env: install.env.clone(),
             secret: install.secret.clone(),
             status: match install.status {
@@ -547,14 +545,14 @@ impl From<&SkillInfo> for InstalledSkill {
             id: skill.id.clone(),
             name: skill.name.clone(),
             description: skill.description.clone(),
-            source: skill.source.clone(),
+            source: (&skill.source).into(),
             scope: skill.scope.into(),
             bot_id: skill.bot_id,
             bot_name: skill.bot_name.clone(),
             installed_by: skill.installed_by,
             installed_by_name: skill.installed_by_name.clone(),
             installed_at: skill.installed_at,
-            files: skill.files.clone(),
+            files: skill.files.iter().map(Into::into).collect(),
             env: skill.env.clone(),
             secret: skill.secret.clone(),
             key_stored: skill.key_stored,
@@ -697,4 +695,51 @@ pub async fn visible(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<SkillInfo>, 
         .into_iter()
         .filter(|s| s.bot_id.is_none_or(|owner| owner == bot_id))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_source_reads_existing_json() {
+        let json = r#"{"url":"https://github.com/org/tools/tree/main/brief","repo":"org/tools","path":"brief","commit":"4a6b2f6f0dfae01899cb9fc4266e20b813138377"}"#;
+        let stored: SkillSource = serde_json::from_str(json).unwrap();
+        let wire: else_wire::skills::SkillSource = (&stored).into();
+        assert_eq!(
+            wire,
+            else_wire::skills::SkillSource {
+                url: "https://github.com/org/tools/tree/main/brief".into(),
+                repo: "org/tools".into(),
+                path: "brief".into(),
+                commit: "4a6b2f6f0dfae01899cb9fc4266e20b813138377".into(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+        let from_wire: SkillSource = wire.into();
+        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
+    }
+
+    #[test]
+    fn skill_install_files_read_existing_json() {
+        let json = r#"[{"path":"SKILL.md","size":150,"script":false},{"path":"scripts/brief.sh","size":62,"script":true}]"#;
+        let files: Vec<SkillFile> = serde_json::from_str(json).unwrap();
+        let wire: Vec<else_wire::skills::SkillFile> = files.iter().map(Into::into).collect();
+        assert_eq!(
+            wire,
+            [
+                else_wire::skills::SkillFile {
+                    path: "SKILL.md".into(),
+                    size: 150,
+                    script: false
+                },
+                else_wire::skills::SkillFile {
+                    path: "scripts/brief.sh".into(),
+                    size: 62,
+                    script: true
+                },
+            ]
+        );
+        assert_eq!(serde_json::to_string(&files).unwrap(), json);
+    }
 }

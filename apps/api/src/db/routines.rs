@@ -54,6 +54,30 @@ mod checks;
 
 pub(crate) use checks::stop_checks;
 pub use checks::{Check, SETTLE_BATCH, settle_checks};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct StoredRoutineUpdate {
+    routine_id: Uuid,
+    name: String,
+}
+
+impl From<&StoredRoutineUpdate> for else_wire::items::RoutineUpdate {
+    fn from(value: &StoredRoutineUpdate) -> Self {
+        Self {
+            routine_id: value.routine_id,
+            name: value.name.clone(),
+        }
+    }
+}
+
+impl From<else_wire::items::RoutineUpdate> for StoredRoutineUpdate {
+    fn from(value: else_wire::items::RoutineUpdate) -> Self {
+        Self {
+            routine_id: value.routine_id,
+            name: value.name,
+        }
+    }
+}
 use checks::{CheckedJob, skip_checks};
 
 /// Due routines admitted per scheduler scan.
@@ -751,7 +775,7 @@ pub async fn update(
             .fetch_one(&mut *tx)
             .await?;
             let item_id = Uuid::new_v4();
-            let update = else_wire::items::RoutineUpdate {
+            let update = StoredRoutineUpdate {
                 routine_id: id,
                 name: new_name.clone(),
             };
@@ -1821,4 +1845,26 @@ async fn skip(
     events::bot_updated(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Admit::Nothing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routine_update_reads_existing_json() {
+        let json = r#"{"routine_id":"37c15814-56b0-4a52-836c-70b9ab580bdc","name":"Daily brief"}"#;
+        let stored: StoredRoutineUpdate = serde_json::from_str(json).unwrap();
+        let wire: else_wire::items::RoutineUpdate = (&stored).into();
+        assert_eq!(
+            wire,
+            else_wire::items::RoutineUpdate {
+                routine_id: "37c15814-56b0-4a52-836c-70b9ab580bdc".parse().unwrap(),
+                name: "Daily brief".into(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&stored).unwrap(), json);
+        let from_wire: StoredRoutineUpdate = wire.into();
+        assert_eq!(serde_json::to_string(&from_wire).unwrap(), json);
+    }
 }

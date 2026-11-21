@@ -91,7 +91,7 @@ impl From<&BotRecord> for wire::bots::Activity {
             phase,
             active_turn_id: bot.active_turn_id,
             queued_count: u32::try_from(bot.queued_count).unwrap_or(u32::MAX),
-            waiting_on: bot.waiting_on.as_ref().map(|waiting| waiting.0.clone()),
+            waiting_on: bot.waiting_on.as_deref().map(Into::into),
             running_job_count: 0,
             error: None,
         }
@@ -129,8 +129,8 @@ impl From<&TurnRecord> for wire::turns::Turn {
             social_setups: turn.social_setups.iter().map(Into::into).collect(),
             skill_installs: turn.skill_installs.iter().map(Into::into).collect(),
             questions: turn.questions.iter().map(Into::into).collect(),
-            routine: turn.routine.as_ref().map(|run| run.0.clone()),
-            mail: turn.mail.0.clone(),
+            routine: turn.routine.as_deref().map(Into::into),
+            mail: turn.mail.iter().map(Into::into).collect(),
             outgoing_drafts: turn.outgoing_drafts.iter().map(Into::into).collect(),
             delegations: turn.delegations.iter().map(Into::into).collect(),
             mcp_waits: turn.mcp_waits.iter().map(Into::into).collect(),
@@ -155,9 +155,9 @@ impl From<&ItemRecord> for wire::items::Item {
             reaction: item.reaction.as_ref().map(|reaction| reaction.0.into()),
             bot_task: item.bot_task.as_ref().map(|task| task.0.clone()),
             bot_reply: item.bot_reply.as_ref().map(|reply| reply.0.clone()),
-            routine_update: item.routine_update.as_ref().map(|update| update.0.clone()),
-            bot_created: item.bot_created.as_ref().map(|created| created.0.clone()),
-            rules_update: item.rules_update.as_ref().map(|update| update.0.clone()),
+            routine_update: item.routine_update.as_deref().map(Into::into),
+            bot_created: item.bot_created.as_deref().map(Into::into),
+            rules_update: item.rules_update.as_deref().map(Into::into),
             parts: item
                 .parts
                 .iter()

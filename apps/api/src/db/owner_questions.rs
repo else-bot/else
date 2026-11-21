@@ -84,7 +84,7 @@ impl From<&QuestionInfo> for wire::Question {
             kind: question.kind.into(),
             title: question.title.clone(),
             context: question.context.clone(),
-            choices: question.choices.clone(),
+            choices: question.choices.iter().map(Into::into).collect(),
             multiple: question.multiple,
             action: question.action.as_ref().map(Into::into),
             status: question.status.into(),
@@ -1139,4 +1139,30 @@ pub async fn revoke_routine_grant(
     .await?
     .rows_affected();
     Ok(removed > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_question_choices_read_existing_json() {
+        let json = r#"[{"id":"approve","label":"Approve once"},{"id":"deny","label":"Deny"}]"#;
+        let choices: Vec<Choice> = serde_json::from_str(json).unwrap();
+        let wire: Vec<wire::QuestionChoice> = choices.iter().map(Into::into).collect();
+        assert_eq!(
+            wire,
+            [
+                wire::QuestionChoice {
+                    id: "approve".into(),
+                    label: "Approve once".into()
+                },
+                wire::QuestionChoice {
+                    id: "deny".into(),
+                    label: "Deny".into()
+                },
+            ]
+        );
+        assert_eq!(serde_json::to_string(&choices).unwrap(), json);
+    }
 }
