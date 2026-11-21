@@ -415,18 +415,6 @@ pub async fn refresh(providers: &[Arc<dyn Provider>], cache: &Cache) {
     cache.save(saved).await;
 }
 
-/// Check every unavailable CLI again, concurrently.
-async fn recheck_unavailable(registry: &Registry) {
-    futures_util::future::join_all(
-        registry
-            .all()
-            .iter()
-            .filter(|p| p.availability() != super::Availability::Available)
-            .map(|p| p.reprobe()),
-    )
-    .await;
-}
-
 /// Refresh now, then every [`INTERVAL`] recheck unavailable CLIs and
 /// refresh again, until `stop`.
 pub async fn run(registry: Registry, cache: Cache, stop: CancellationToken) {
@@ -441,7 +429,7 @@ pub async fn run(registry: Registry, cache: Cache, stop: CancellationToken) {
         }
         tokio::select! {
             () = stop.cancelled() => return,
-            () = recheck_unavailable(&registry) => {}
+            () = super::recheck_unavailable(&registry) => {}
         }
     }
 }

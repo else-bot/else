@@ -335,6 +335,10 @@ impl Scheduler {
                 provider_id,
                 provider,
             }) => {
+                tokio::select! {
+                    _ = crate::providers::availability_now(provider.as_ref()) => {}
+                    () = stop.requested() => {}
+                }
                 let project = input
                     .delegation
                     .host_tools()
