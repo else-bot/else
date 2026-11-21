@@ -264,6 +264,8 @@ impl ElseApp {
             let app_ok = app.clone();
             let app_close = app.clone();
             let mine = holder.clone();
+            let app_cancel = app.clone();
+            let mine_cancel = holder.clone();
             crate::appearance::modal_surface(dialog, cx)
                 .title(
                     div()
@@ -297,7 +299,14 @@ impl ElseApp {
                             Button::new("create-cancel")
                                 .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                                .on_click(move |_, window, cx| {
+                                    let _ = app_cancel.update(cx, |app, _| {
+                                        if app.create.as_ref() == Some(&mine_cancel) {
+                                            app.create = None;
+                                        }
+                                    });
+                                    window.close_dialog(cx);
+                                }),
                         )
                         .child(
                             Button::new("create-submit")
@@ -404,14 +413,34 @@ impl ElseApp {
                         }
                     }
                     Err(_) => {
-                        holder.update(cx, |h, cx| {
-                            if let Some(profile) = &h.form.profile {
-                                let unconfirmed = h.form.request.unconfirmed();
-                                profile
-                                    .update(cx, |picker, cx| picker.set_disabled(unconfirmed, cx));
-                            }
-                            cx.notify();
+                        let mut forms = vec![holder.clone()];
+                        let reopened = app.create.clone().filter(|current| {
+                            rejected
+                                && current != &holder
+                                && current
+                                    .read(cx)
+                                    .form
+                                    .request
+                                    .unconfirmed_op()
+                                    .is_some_and(|op| op.request_id == request_id)
                         });
+                        if let Some(current) = reopened {
+                            let error = holder.read(cx).form.request.error().unwrap_or_default();
+                            let error = error.to_owned();
+                            current.update(cx, |h, _| h.form.request = Request::Failed(error));
+                            forms.push(current);
+                        }
+                        for form in forms {
+                            form.update(cx, |h, cx| {
+                                if let Some(profile) = &h.form.profile {
+                                    let unconfirmed = h.form.request.unconfirmed();
+                                    profile.update(cx, |picker, cx| {
+                                        picker.set_disabled(unconfirmed, cx)
+                                    });
+                                }
+                                cx.notify();
+                            });
+                        }
                         window.refresh();
                     }
                 }
