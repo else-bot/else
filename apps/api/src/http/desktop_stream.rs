@@ -41,6 +41,8 @@
 //! control, and lease cleanup within the configured shutdown grace period.
 
 mod control;
+mod end;
+mod link;
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -62,12 +64,17 @@ use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::{TaskTrackerToken, TaskTrackerWaitFuture};
 use uuid::Uuid;
 
-use self::control::{Control, ControlClaim, Controlling, close, control_failed, write_guest};
+use self::control::{Control, ControlClaim, Controlling, control_failed};
+use self::end::{
+    End, STOPPING, disconnected, end, error_message, lease_end, refused, release_abandoned,
+    stopping, unavailable,
+};
+use self::link::{CLOSE_LIMIT, GuestLink};
 use super::AppState;
 use super::error::{ApiError, ApiPath};
 use crate::computers::cursors;
 use crate::computers::viewer::{self, Event, Framebuffer, Target};
-use crate::computers::{ComputerManager, ViewerLease, ViewerRefusal, ViewerTarget};
+use crate::computers::{ComputerManager, ViewerLease, ViewerTarget};
 
 /// Room for the longest clipboard text even when JSON escapes all of it.
 const MAX_MESSAGE: usize = 8 * viewer::MAX_CLIPBOARD_BYTES;
@@ -78,9 +85,7 @@ const LEASE_CHECK: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
 const WRITE_LIMIT: Duration = Duration::from_secs(30);
-const CLOSE_LIMIT: Duration = Duration::from_secs(2);
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
-const STOPPING: &str = "else.bot is stopping; reconnect in a moment.";
 
 #[derive(Default)]
 pub(crate) struct Streams {
@@ -155,53 +160,8 @@ pub(super) async fn stream(
         .on_upgrade(move |socket| session(computers, db, gate, bot_id, params, socket, admission)))
 }
 
-struct End {
-    code: &'static str,
-    message: String,
-}
-
-fn end(code: &'static str, message: impl Into<String>) -> End {
-    End {
-        code,
-        message: message.into(),
-    }
-}
-
-fn stopping() -> End {
-    end("server_stopping", STOPPING)
-}
-
-fn disconnected() -> End {
-    end("desktop_disconnected", "The desktop connection closed.")
-}
-
-fn unavailable() -> End {
-    end("computer_unavailable", "The computer is not available now.")
-}
-
-fn lease_end(lease: ViewerLease) -> Option<End> {
-    match lease {
-        ViewerLease::Live => None,
-        ViewerLease::OwnerStopped => {
-            Some(end("computer_stopped", "The owner stopped this computer."))
-        }
-        ViewerLease::BotInactive => Some(end("bot_deleted", "This bot was deleted.")),
-        ViewerLease::NotRunning => {
-            Some(end("computer_not_running", "The computer stopped running."))
-        }
-        ViewerLease::Ended => Some(end("lease_ended", "The desktop session ended.")),
-    }
-}
-
 fn event_message(event: ServerEvent) -> Message {
     Message::Text(json!(event).to_string().into())
-}
-
-fn error_message(code: &str, message: &str) -> Message {
-    event_message(ServerEvent::Error {
-        code: code.to_owned(),
-        message: message.to_owned(),
-    })
 }
 
 async fn session(
@@ -295,62 +255,6 @@ async fn session(
     writer.abort();
 }
 
-async fn release_abandoned(computers: &ComputerManager, db: &sqlx::SqlitePool, holder: &str) {
-    let leases = async {
-        // A cancelled SQLite COMMIT may still run on its worker. Take the
-        // writer before reading so that commit cannot appear after cleanup.
-        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-        let leases: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM computer_leases WHERE holder = ?1 AND released_at IS NULL",
-        )
-        .bind(holder)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok::<_, sqlx::Error>(leases)
-    }
-    .await;
-    let leases = match leases {
-        Ok(leases) => leases,
-        Err(err) => {
-            tracing::warn!(error = %err, "finding an abandoned desktop lease");
-            return;
-        }
-    };
-    for lease in leases {
-        if let Err(err) = computers.release(lease).await {
-            tracing::warn!(error = %err, "releasing an abandoned desktop lease");
-        }
-    }
-}
-
-fn refused(refusal: ViewerRefusal) -> End {
-    let (code, message) = match refusal {
-        ViewerRefusal::NotRunning => (
-            "computer_not_running",
-            "The computer is not running; connect with wake=true to start it.".to_owned(),
-        ),
-        ViewerRefusal::OwnerStopped => (
-            "computer_stopped",
-            "The owner stopped this computer; resume it first.".to_owned(),
-        ),
-        ViewerRefusal::BotInactive => ("bot_deleted", "This bot was deleted.".to_owned()),
-        ViewerRefusal::NoDesktop => (
-            "desktop_unavailable",
-            "This computer has no desktop.".to_owned(),
-        ),
-        ViewerRefusal::Starting => (
-            "desktop_starting",
-            "The desktop is starting; try again shortly.".to_owned(),
-        ),
-        ViewerRefusal::Unavailable(reason) => (
-            "computer_unavailable",
-            format!("The computer is not available now: {reason}"),
-        ),
-    };
-    End { code, message }
-}
-
 /// At most one frame waits for the socket, and a frame dropped because the
 /// queue was full is encoded again only after the writer makes progress.
 #[derive(Default)]
@@ -382,10 +286,7 @@ async fn write(
 
 struct View {
     target: Target,
-    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    events: mpsc::Receiver<Event>,
-    reader: JoinHandle<Result<(), viewer::ViewerError>>,
-    bridge: JoinHandle<()>,
+    link: GuestLink,
 }
 
 enum Mode {
@@ -739,7 +640,7 @@ impl Session {
             return Ok(());
         }
         if let Some(view) = self.view.take() {
-            close(view.writer, view.reader, view.bridge).await;
+            view.link.close().await;
         }
         let Some(target) = wanted else {
             return Ok(());
@@ -755,30 +656,13 @@ impl Session {
             }
         };
         if target == Target::Watch && connection.name != viewer::WATCH_NAME {
-            close(
-                connection.writer,
-                tokio::spawn(async { Ok(()) }),
-                connection.bridge,
-            )
-            .await;
+            link::discard(connection).await;
             self.watch_unsupported = true;
             return Box::pin(self.sync_view()).await;
         }
-        let (tx, events) = mpsc::channel(8);
-        let reader = tokio::spawn(viewer::read_events(
-            connection.reader,
-            connection.width,
-            connection.height,
-            Some(tx),
-        ));
         self.fb = Framebuffer::new(connection.width, connection.height);
-        self.view = Some(View {
-            target,
-            writer: connection.writer,
-            events,
-            reader,
-            bridge: connection.bridge,
-        });
+        let link = GuestLink::open(connection, 8);
+        self.view = Some(View { target, link });
         self.requested = false;
         self.full = true;
         self.cursor_shapes = false;
@@ -809,7 +693,7 @@ impl Session {
                 self.fb.height,
             ));
         }
-        let written = write_guest(&mut view.writer, &encodings);
+        let written = view.link.write(&encodings);
         match self.stop.run_until_cancelled(written).await {
             None => return Err(stopping()),
             Some(false) => return Err(disconnected()),
@@ -898,7 +782,7 @@ impl Session {
             return Ok(());
         }
         let request = viewer::update_request(!self.full, self.fb.width, self.fb.height);
-        let written = write_guest(&mut view.writer, &request);
+        let written = view.link.write(&request);
         match self.stop.run_until_cancelled(written).await {
             None => return Err(stopping()),
             Some(false) => return Err(disconnected()),
@@ -921,7 +805,7 @@ impl Session {
     async fn shutdown(&mut self) {
         self.leave_control().await;
         if let Some(view) = self.view.take() {
-            close(view.writer, view.reader, view.bridge).await;
+            view.link.close().await;
         }
         if let Some(encoding) = self.encoding.take() {
             encoding.abort();
@@ -941,7 +825,7 @@ fn unsupported() -> End {
 
 async fn next_event(view: &mut Option<View>) -> Option<Event> {
     match view {
-        Some(view) => view.events.recv().await,
+        Some(view) => view.link.event().await,
         None => std::future::pending().await,
     }
 }

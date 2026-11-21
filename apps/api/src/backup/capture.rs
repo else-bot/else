@@ -224,7 +224,8 @@ pub async fn create_set(
 /// filesystem sources. Without a checkpoint, only the database is captured.
 #[derive(Clone, Default)]
 pub struct Coordinator {
-    pub scheduler: Option<std::sync::Arc<crate::scheduler::Scheduler>>,
+    /// The turns of the API this capture runs in, which it pauses.
+    pub turns: Option<Turns>,
     pub computers: Option<std::sync::Arc<crate::computers::ComputerManager>>,
     /// How long active turns may take to finish before the set is deferred.
     pub drain: std::time::Duration,
@@ -236,6 +237,14 @@ pub struct Coordinator {
     pub projects_dir: Option<PathBuf>,
     /// Shared MCP packages under the installation's data directory.
     pub mcp_dir: Option<PathBuf>,
+}
+
+/// The scheduler of the API a capture runs in, and the gate it admits
+/// turns through, which the capture closes before it drains them.
+#[derive(Clone)]
+pub struct Turns {
+    pub scheduler: std::sync::Arc<crate::scheduler::Scheduler>,
+    pub gate: std::sync::Arc<crate::maintenance::Gate>,
 }
 
 async fn seal_file(
@@ -602,13 +611,13 @@ impl Capture<'_> {
                 }
             }
         }
-        let Some(scheduler) = &coordinator.scheduler else {
+        let Some(Turns { scheduler, gate }) = &coordinator.turns else {
             return Ok(None);
         };
         let deadline = tokio::time::Instant::now() + coordinator.drain;
         let expected = last_pause(pool).await?;
         let pause = crate::maintenance::Pause::backup(expected);
-        let closed = match scheduler.gate().close(coordinator.drain, pause).await {
+        let closed = match gate.close(coordinator.drain, pause).await {
             Ok(Some(closed)) => closed,
             Ok(None) => {
                 return Err(BackupError::Refused("another backup holds the gate".into()));
@@ -805,13 +814,13 @@ async fn capture_set(
     if let Some(closed) = gate {
         drop(closed);
         // Messages sent during the pause can now take over and run.
-        if let Some(scheduler) = &capture.coordinator.scheduler {
-            scheduler.wake();
+        if let Some(turns) = &capture.coordinator.turns {
+            turns.scheduler.wake();
         }
         super::runs::paused(capture.pool, capture.set_id, paused_at.elapsed()).await?;
     }
     let coordinated = capture.coordinator.computers.is_some()
-        && (capture.coordinator.scheduler.is_some() || capture.coordinator.exclusive);
+        && (capture.coordinator.turns.is_some() || capture.coordinator.exclusive);
     let manifest = build_manifest(
         capture.set_id,
         encryption,

@@ -158,9 +158,10 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
     .await
     .unwrap();
     let (tx, mut rx) = mpsc::channel(16);
-    let manager = Arc::new(Manager::with_transport(
+    let manager = Arc::new(Manager::new(
         db.pool.clone(),
         key.clone(),
+        db.scheduler(),
         Arc::new(ObserveSessions(tx)),
     ));
     let stop = CancellationToken::new();

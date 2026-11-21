@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::connector_core::actions::{Outcome, Start};
 use crate::connector_core::workers::{Inbox, Worker, Workers};
-use crate::{actor::Actor, credentials::SecretKey, scheduler::Scheduler};
+use crate::{actor::Actor, credentials::SecretKey, maintenance::Gate, scheduler::Scheduler};
 use store::Whereabouts;
 use types::*;
 
@@ -158,6 +158,8 @@ pub struct ConnectorManager {
     pub db: sqlx::SqlitePool,
     pub key: Arc<SecretKey>,
     scheduler: Arc<Scheduler>,
+    /// The maintenance gate account changes are admitted through.
+    gate: Arc<Gate>,
     transport: Arc<dyn MailTransport>,
     workers: Workers<Request>,
     messages: Actor<cache::Messages>,
@@ -169,19 +171,18 @@ pub struct ConnectorManager {
 }
 
 impl ConnectorManager {
-    pub fn new(db: sqlx::SqlitePool, key: Arc<SecretKey>, scheduler: Arc<Scheduler>) -> Self {
-        Self::with_transport(db, key, scheduler, Arc::new(pimalaya::Pimalaya))
-    }
-    pub fn with_transport(
+    pub fn new(
         db: sqlx::SqlitePool,
         key: Arc<SecretKey>,
         scheduler: Arc<Scheduler>,
+        gate: Arc<Gate>,
         transport: Arc<dyn MailTransport>,
     ) -> Self {
         Self {
             db,
             key,
             scheduler,
+            gate,
             transport,
             workers: Workers::default(),
             messages: Actor::default(),
@@ -288,8 +289,7 @@ impl ConnectorManager {
         credential: Credential,
     ) -> Result<(), MailError> {
         let _admission = self
-            .scheduler
-            .gate()
+            .gate
             .enter()
             .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let account = store::account(&self.db, id)
@@ -347,8 +347,7 @@ impl ConnectorManager {
             return Err(MailError::new(MailErrorCode::MailAccountPaused));
         }
         let _admission = self
-            .scheduler
-            .gate()
+            .gate
             .enter()
             .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let whereabouts = store::whereabouts(&self.db, account_id, &message).await?;
@@ -596,8 +595,7 @@ impl ConnectorManager {
             .await;
         let _refresh = refresh.lock().await;
         let _admission = self
-            .scheduler
-            .gate()
+            .gate
             .enter()
             .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let mut credential = store::credential(&self.db, &self.key, account.id).await?;
@@ -655,8 +653,7 @@ impl ConnectorManager {
             return Err(MailError::new(MailErrorCode::MailQueueExpired));
         }
         let _admission = self
-            .scheduler
-            .gate()
+            .gate
             .enter()
             .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
         let account = store::account(&self.db, id)
@@ -786,8 +783,7 @@ impl ConnectorManager {
             let more = scan.more || scan.arrivals.len() > store::MAX_ARRIVALS;
             {
                 let _admission = self
-                    .scheduler
-                    .gate()
+                    .gate
                     .enter()
                     .ok_or_else(|| MailError::new(MailErrorCode::MaintenanceInProgress))?;
                 if !store::record_scan(&self.db, id, account.generation, old.as_ref(), &scan)
@@ -801,7 +797,7 @@ impl ConnectorManager {
                 break scan.cursor;
             }
         };
-        if let Some(_admission) = self.scheduler.gate().enter() {
+        if let Some(_admission) = self.gate.enter() {
             let _ = store::mark_connected(&self.db, id, account.generation, since).await;
         }
         self.transport
@@ -816,7 +812,7 @@ impl ConnectorManager {
         if code.rejects_credential() {
             self.drop_reads(id, false).await;
         }
-        if let Some(_admission) = self.scheduler.gate().enter() {
+        if let Some(_admission) = self.gate.enter() {
             let health = Health::from(code);
             let _ = store::set_health(&self.db, id, generation, &health).await;
         }

@@ -340,9 +340,9 @@ impl Backups {
             env_keep: engine.config.keep,
             gate: engine
                 .coordinator
-                .scheduler
+                .turns
                 .as_ref()
-                .map(|scheduler| scheduler.gate().clone()),
+                .map(|turns| turns.gate.clone()),
             initial_estimate: BackupEstimate {
                 bytes: initial_bytes,
                 basis: "Rough database, file, project and shared MCP size. Computer snapshots and encryption overhead are excluded until the first complete backup.".into(),

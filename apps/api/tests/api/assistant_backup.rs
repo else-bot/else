@@ -279,7 +279,10 @@ fn worker(s: &Setup, drain: Duration) -> BackupWorker {
         },
     )
     .with_coordinator(Coordinator {
-        scheduler: Some(s.app.scheduler.clone()),
+        turns: Some(else_api::backup::capture::Turns {
+            scheduler: s.app.scheduler.clone(),
+            gate: s.app.state.gate.clone(),
+        }),
         computers: Some(s.manager.clone()),
         drain,
         exclusive: false,

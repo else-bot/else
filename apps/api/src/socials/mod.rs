@@ -104,31 +104,25 @@ pub struct Manager {
     pub db: SqlitePool,
     pub key: Arc<SecretKey>,
     transport: Arc<dyn providers::Transport>,
-    scheduler: Option<Arc<crate::scheduler::Scheduler>>,
+    scheduler: Arc<crate::scheduler::Scheduler>,
     workers: Workers<WorkerRequest>,
     pairings: Actor<HashMap<pairing::Purpose, pairing::Live>>,
 }
 impl Manager {
-    pub fn new(db: SqlitePool, key: Arc<SecretKey>) -> Self {
-        Self::with_transport(db, key, Arc::new(providers::Native))
-    }
-    pub fn with_transport(
+    pub fn new(
         db: SqlitePool,
         key: Arc<SecretKey>,
+        scheduler: Arc<crate::scheduler::Scheduler>,
         transport: Arc<dyn providers::Transport>,
     ) -> Self {
         Self {
             db,
             key,
             transport,
-            scheduler: None,
+            scheduler,
             workers: Workers::default(),
             pairings: Actor::default(),
         }
-    }
-    pub fn with_scheduler(mut self, scheduler: Arc<crate::scheduler::Scheduler>) -> Self {
-        self.scheduler = Some(scheduler);
-        self
     }
     async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker<WorkerRequest>, Error> {
         let manager = self.clone();
@@ -207,10 +201,7 @@ impl Manager {
         if access != Access::Owner {
             return Err(Error::Forbidden);
         }
-        let cancel = match &self.scheduler {
-            Some(scheduler) => scheduler.cancellation(turn).await.unwrap_or_default(),
-            None => CancellationToken::new(),
-        };
+        let cancel = self.scheduler.cancellation(turn).await.unwrap_or_default();
         let worker = self.worker(id).await?;
         let (reply, result) = oneshot::channel();
         worker
@@ -272,11 +263,7 @@ impl Manager {
         drop(conn);
         let worker = self.worker(id).await?;
         let (tx, rx) = oneshot::channel();
-        let cancel = if let Some(scheduler) = &self.scheduler {
-            scheduler.cancellation(turn).await.unwrap_or_default()
-        } else {
-            CancellationToken::new()
-        };
+        let cancel = self.scheduler.cancellation(turn).await.unwrap_or_default();
         worker
             .try_send(WorkerRequest::Action(
                 Request {

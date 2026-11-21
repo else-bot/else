@@ -258,7 +258,7 @@ fn run_backup(database_only: bool) -> anyhow::Result<()> {
             config.backup.clone(),
         )
         .with_coordinator(else_api::backup::capture::Coordinator {
-            scheduler: None,
+            turns: None,
             computers,
             drain: std::time::Duration::from_secs(0),
             exclusive: true,

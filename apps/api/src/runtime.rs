@@ -271,7 +271,10 @@ pub async fn start(
             pool.clone(),
             secret_key.clone(),
             crate::backup::capture::Coordinator {
-                scheduler: Some(scheduler.clone()),
+                turns: Some(crate::backup::capture::Turns {
+                    scheduler: scheduler.clone(),
+                    gate: gate.clone(),
+                }),
                 computers: computers.manager().cloned(),
                 drain: Duration::from_secs(300),
                 exclusive: false,
@@ -300,26 +303,32 @@ pub async fn start(
         Backups::Off(reason) => Err(reason),
     };
 
-    let connectors = Arc::new(crate::connectors::ConnectorManager::with_transport(
+    let connectors = Arc::new(crate::connectors::ConnectorManager::new(
         pool.clone(),
         secret_key.clone(),
         scheduler.clone(),
+        gate.clone(),
         mail,
     ));
     connectors.start_workers().await;
     background.spawn("connectors", connectors.clone().run(shutdown.clone()));
-    let socials = Arc::new(
-        crate::socials::Manager::with_transport(pool.clone(), secret_key.clone(), social)
-            .with_scheduler(scheduler.clone()),
-    );
+    let socials = Arc::new(crate::socials::Manager::new(
+        pool.clone(),
+        secret_key.clone(),
+        scheduler.clone(),
+        social,
+    ));
     background.spawn("socials", socials.clone().run(shutdown.clone()));
-    let mcps = crate::mcp::Library::new(mcp_root, gate.clone())
-        .with_oauth_key(Some(secret_key.clone()))
-        .with_oauth_client(config.github_oauth.clone())
-        .with_task_secrets(crate::mcp::TaskSecrets::new(
+    let mcps = crate::mcp::Library::new(crate::mcp::Config {
+        root: mcp_root,
+        gate: gate.clone(),
+        oauth_key: Some(secret_key.clone()),
+        oauth_client: config.github_oauth.clone(),
+        task_secrets: Some(crate::mcp::TaskSecrets::new(
             pool.clone(),
             Some(secret_key.clone()),
-        ));
+        )),
+    });
 
     let state = Arc::new(AppState {
         owner_token,

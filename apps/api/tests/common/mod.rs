@@ -129,6 +129,21 @@ impl TestDb {
     pub fn dir(&self) -> &std::path::Path {
         self._dir.path()
     }
+    /// A scheduler on this database that runs no turns and has no providers.
+    pub fn scheduler(&self) -> std::sync::Arc<else_api::scheduler::Scheduler> {
+        else_api::scheduler::Scheduler::new(
+            else_api::scheduler::Services {
+                pool: self.pool.clone(),
+                registry: else_api::providers::Registry::new(Vec::new()),
+                gate: Default::default(),
+                grants: Default::default(),
+                mcp_root: self.dir().join("mcp"),
+                computers: None,
+            },
+            1,
+            else_api::scheduler::DEFAULT_CANCEL_GRACE,
+        )
+    }
 }
 
 pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

@@ -560,7 +560,10 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     let r = replicator(&app, &s3);
     let summary = worker(&app, dir.path(), r.clone())
         .with_coordinator(Coordinator {
-            scheduler: Some(app.scheduler.clone()),
+            turns: Some(else_api::backup::capture::Turns {
+                scheduler: app.scheduler.clone(),
+                gate: app.state.gate.clone(),
+            }),
             computers: Some(manager.clone()),
             drain: common::SETTLE,
             exclusive: false,
@@ -1006,7 +1009,10 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
     r.keep = 1;
     let whole = worker(&app, dir.path(), r.clone())
         .with_coordinator(Coordinator {
-            scheduler: Some(app.scheduler.clone()),
+            turns: Some(else_api::backup::capture::Turns {
+                scheduler: app.scheduler.clone(),
+                gate: app.state.gate.clone(),
+            }),
             computers: Some(manager.clone()),
             drain: common::SETTLE,
             exclusive: false,

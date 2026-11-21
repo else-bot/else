@@ -113,9 +113,10 @@ impl Transport for Phone {
 }
 
 fn manager(db: &TestDb, phone: &Arc<Phone>) -> Arc<Manager> {
-    Arc::new(Manager::with_transport(
+    Arc::new(Manager::new(
         db.pool.clone(),
         Arc::new(key()),
+        db.scheduler(),
         phone.clone(),
     ))
 }

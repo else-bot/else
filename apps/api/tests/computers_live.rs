@@ -968,7 +968,10 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         },
     )
     .with_coordinator(else_api::backup::capture::Coordinator {
-        scheduler: Some(app.scheduler.clone()),
+        turns: Some(else_api::backup::capture::Turns {
+            scheduler: app.scheduler.clone(),
+            gate: app.state.gate.clone(),
+        }),
         computers: Some(manager.clone()),
         drain: Duration::from_secs(30),
         exclusive: false,

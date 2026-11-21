@@ -287,9 +287,10 @@ async fn health_after_listening(refused: bool) -> Health {
     let c = account(&db, "listener").await;
     let fake = Arc::new(Fake::default());
     fake.refused.store(refused, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
+    let manager = Arc::new(Manager::new(
         db.pool.clone(),
         Arc::new(key()),
+        db.scheduler(),
         fake,
     ));
     manager.changed(c.id).await;

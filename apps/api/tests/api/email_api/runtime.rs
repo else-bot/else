@@ -96,10 +96,11 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
             uncertain,
             recovers: None,
         });
-        let manager = Arc::new(ConnectorManager::with_transport(
+        let manager = Arc::new(ConnectorManager::new(
             h.app.db.pool.clone(),
             h.app.state.secret_key.clone(),
             h.app.scheduler.clone(),
+            h.app.state.gate.clone(),
             transport.clone(),
         ));
         let action = Uuid::new_v4();
@@ -164,10 +165,11 @@ async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
         .await
         .unwrap();
-    let manager = Arc::new(ConnectorManager::with_transport(
+    let manager = Arc::new(ConnectorManager::new(
         h.app.db.pool.clone(),
         h.app.state.secret_key.clone(),
         h.app.scheduler.clone(),
+        h.app.state.gate.clone(),
         Arc::new(Transport {
             sends: AtomicUsize::new(0),
             uncertain: false,
@@ -209,10 +211,11 @@ async fn store_refusals_reach_the_bot_under_their_own_codes() {
     store::set_permissions(pool, account.id, bot, &permissions())
         .await
         .unwrap();
-    let manager = Arc::new(ConnectorManager::with_transport(
+    let manager = Arc::new(ConnectorManager::new(
         pool.clone(),
         h.app.state.secret_key.clone(),
         h.app.scheduler.clone(),
+        h.app.state.gate.clone(),
         Arc::new(Transport {
             sends: AtomicUsize::new(0),
             uncertain: false,
