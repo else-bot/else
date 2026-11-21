@@ -153,9 +153,10 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
     let turn = turn(&db, bot, ItemKind::User).await;
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
+    let manager = Arc::new(Manager::new(
         db.pool.clone(),
         Arc::new(key()),
+        db.scheduler(),
         fake.clone(),
     ));
     let id = Uuid::new_v4();
@@ -267,9 +268,10 @@ async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
     let turn = turn(&db, bot, ItemKind::User).await;
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
+    let manager = Arc::new(Manager::new(
         db.pool.clone(),
         Arc::new(key()),
+        db.scheduler(),
         fake.clone(),
     ));
     let id = Uuid::new_v4();

@@ -104,12 +104,6 @@ impl Scheduler {
         self.running.call(|running| running.len()).await
     }
 
-    /// The gate turns are admitted through, which a backup closes before
-    /// it drains them.
-    pub(crate) fn gate(&self) -> &Arc<crate::maintenance::Gate> {
-        &self.gate
-    }
-
     /// Wait until no turn runs in this process or remains active in the
     /// database. False on timeout (the caller defers its work).
     pub async fn drain(&self, timeout: Duration) -> Result<bool, sqlx::Error> {
