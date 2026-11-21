@@ -1045,7 +1045,12 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
         .await
         .unwrap();
     send(&mut socket, json!({"type":"mode","mode":"control"})).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    common::never(
+        "control to be granted while the writer blocks the lease lookup",
+        Duration::from_millis(300),
+        wait_mode(&mut socket, "control"),
+    )
+    .await;
 
     let mut drain = Box::pin(s.app.state.stop_desktop_streams());
     common::never(

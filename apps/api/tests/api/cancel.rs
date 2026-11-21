@@ -467,7 +467,7 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
         .await
         .unwrap();
     let request = Uuid::new_v4();
-    let stop_task = {
+    let mut stop_task = {
         let router = app.router.clone();
         tokio::spawn(async move {
             use tower::ServiceExt;
@@ -482,7 +482,12 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
             router.oneshot(request).await.unwrap().status()
         })
     };
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::never(
+        "the stop to answer while the send holds the write lock",
+        Duration::from_millis(300),
+        &mut stop_task,
+    )
+    .await;
     let turn_id = common::seed::turn(bot_id).insert(&mut *tx).await;
     tx.commit().await.unwrap();
     assert_eq!(

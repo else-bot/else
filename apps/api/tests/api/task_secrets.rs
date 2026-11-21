@@ -22,6 +22,7 @@ struct Script {
     killed: Mutex<HashMap<String, Arc<Notify>>>,
     started: Notify,
     stalled: Mutex<Vec<String>>,
+    kill_stalled: Notify,
     release_stalled_kill: Notify,
     fail_desktop: AtomicBool,
 }
@@ -57,6 +58,7 @@ impl Script {
             }
         } else if script.contains("alive()") {
             if self.stalled.lock().unwrap().contains(&e.name) {
+                self.kill_stalled.notify_one();
                 self.release_stalled_kill.notified().await;
             }
             self.killed(&e.name).notify_one();
@@ -477,7 +479,11 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
             .await;
         assert!(stop.status.is_success());
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::until(
+        "the slow bot's kill to stall",
+        script.kill_stalled.notified(),
+    )
+    .await;
     let pass = {
         let manager = manager.clone();
         tokio::spawn(async move { manager.end_orphaned_commands().await })
@@ -560,8 +566,13 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
 
     let third = call("HANG three");
     common::until("the foreground command to start", script.started.notified()).await;
-    let queued = call("echo should-not-run");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut queued = call("echo should-not-run");
+    common::never(
+        "the queued command to finish while another holds the computer",
+        Duration::from_millis(300),
+        &mut queued,
+    )
+    .await;
     let stop = app
         .owner(
             "POST",

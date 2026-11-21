@@ -170,7 +170,7 @@ async fn api(app: &TestApp, guest: &Arc<Guest>, max_vms: u64) -> ComputerManager
     manager
 }
 
-fn never() -> tokio_util::sync::CancellationToken {
+fn no_cancel() -> tokio_util::sync::CancellationToken {
     tokio_util::sync::CancellationToken::new()
 }
 
@@ -252,7 +252,7 @@ async fn a_crash_before_launch_never_launches_and_ends_the_job() {
     drop(first);
     let restarted = api(&app, &guest, 2).await;
     age_jobs(&app).await;
-    restarted.tick(&never()).await.unwrap();
+    restarted.tick(&no_cancel()).await.unwrap();
     let job: Uuid = sqlx::query_scalar("SELECT id FROM guest_jobs")
         .fetch_one(&app.db.pool)
         .await
@@ -278,7 +278,7 @@ async fn a_crash_after_launch_keeps_the_same_job_running_once() {
     drop(first);
     let restarted = api(&app, &guest, 2).await;
     age_jobs(&app).await;
-    restarted.tick(&never()).await.unwrap();
+    restarted.tick(&no_cancel()).await.unwrap();
     let job: Uuid = sqlx::query_scalar("SELECT id FROM guest_jobs")
         .fetch_one(&app.db.pool)
         .await
@@ -294,9 +294,9 @@ async fn a_crash_after_launch_keeps_the_same_job_running_once() {
         "its lease keeps the computer"
     );
     guest.finish(job, 0);
-    restarted.tick(&never()).await.unwrap();
+    restarted.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "completed");
-    restarted.tick(&never()).await.unwrap();
+    restarted.tick(&no_cancel()).await.unwrap();
     assert_eq!(
         observed(&app, bot).await,
         "stopped",
@@ -345,7 +345,7 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
     ));
     drop(second);
     let third = api(&app, &guest, 1).await;
-    third.tick(&never()).await.unwrap();
+    third.tick(&no_cancel()).await.unwrap();
     assert_eq!(
         observed(&app, a).await,
         "running",
@@ -355,7 +355,7 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
     third.release(lease_id).await.unwrap();
     faults::arm("computer.after_stop_decision");
     assert!(matches!(
-        third.tick(&never()).await,
+        third.tick(&no_cancel()).await,
         Err(ComputerError::Interrupted)
     ));
     assert_eq!(observed(&app, a).await, "stopping");
@@ -366,7 +366,7 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
     drop(third);
     let fourth = api(&app, &guest, 1).await;
     assert_eq!(observed(&app, a).await, "running");
-    fourth.tick(&never()).await.unwrap();
+    fourth.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, a).await, "stopped");
     assert!(matches!(
         fourth.acquire(b, "test:b").await.unwrap(),
@@ -407,7 +407,7 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
     ));
     // Outlast the fake's 500 ms create delay.
     tokio::time::sleep(Duration::from_millis(600)).await;
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, a).await, "absent");
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
@@ -445,7 +445,7 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
         panic!()
     };
     manager.close_desktop(bot_id).await.unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "running");
     let request = uuid::Uuid::new_v4();
     let stop = app
@@ -457,7 +457,7 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
         .await;
     assert_eq!(stop.status, StatusCode::ACCEPTED, "{}", stop.body);
     assert_eq!(job_status(&app, job).await.0, "cancelling");
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelled");
     assert_eq!(guest.kills.lock().unwrap().len(), 1);
     let again = app
@@ -484,7 +484,7 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     guest.stops_fail.store(true, SeqCst);
     let deleted = app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     assert!(deleted.status.is_success());
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, other).await.0, "cancelled");
     assert_eq!(
         guest.kills.lock().unwrap().len(),
@@ -493,7 +493,7 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     );
     assert_eq!(bot_status(&app, bot_id).await, "deleting");
     guest.stops_fail.store(false, SeqCst);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
     assert_eq!(bot_status(&app, bot_id).await, "deleted");
 }
@@ -518,14 +518,14 @@ async fn a_launch_whose_reply_is_lost_is_recovered_not_failed() {
     assert!(error.unwrap().contains("unconfirmed"));
     assert_eq!(job_leases(&app).await, 1, "it keeps its reservation");
     age_jobs(&app).await;
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(
         job_status(&app, job).await.0,
         "running",
         "found in the guest"
     );
     guest.finish(job, 0);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "completed");
     assert_eq!(guest.launches(), 1);
 }
@@ -549,13 +549,13 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     };
     guest.kills_fail.store(true, SeqCst);
     let request = stop_work(&app, bot).await;
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelling");
     sqlx::query("UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 minutes')")
         .execute(&app.db.pool)
         .await
         .unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelling");
     assert_eq!(
         job_leases(&app).await,
@@ -572,7 +572,7 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     );
     assert_eq!(guest.launches(), 1);
     guest.kills_fail.store(false, SeqCst);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelled");
     assert_eq!(job_leases(&app).await, 0);
     assert_eq!(receipt(&app, request).await, "done");
@@ -619,7 +619,7 @@ async fn a_stop_before_the_job_had_a_lease_completes() {
     let request = stop_work(&app, bot).await;
     assert_eq!(receipt(&app, request).await, "pending");
     let restarted = api(&app, &guest, 2).await;
-    restarted.tick(&never()).await.unwrap();
+    restarted.tick(&no_cancel()).await.unwrap();
     let (status,): (String,) = sqlx::query_as("SELECT status FROM guest_jobs")
         .fetch_one(&app.db.pool)
         .await
@@ -649,7 +649,7 @@ async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(receipt(&app, request).await, "done");
 }
 
@@ -676,7 +676,7 @@ async fn an_unconfirmed_job_cancel_is_retried_until_the_job_is_gone() {
         "not released before the kill is confirmed"
     );
     guest.kills_fail.store(false, SeqCst);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelled");
     assert_eq!(job_leases(&app).await, 0);
     assert_eq!(guest.kills.lock().unwrap().len(), 2);
@@ -720,7 +720,7 @@ async fn a_job_cancel_on_a_paused_computer_resumes_it_and_stops_only_that_job() 
         .await
         .unwrap();
     manager.cancel_job(bot, cancelled).await.unwrap().unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(job_status(&app, cancelled).await.0, "cancelled");
     assert_eq!(job_status(&app, kept).await.0, "running");
     assert_eq!(observed(&app, bot).await, "running");

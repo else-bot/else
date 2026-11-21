@@ -113,7 +113,7 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
         .await;
     app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
     assert!(
         !fake.calls().iter().any(|c| c == &format!("start {name}")),
@@ -153,7 +153,7 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
         Acquire::Queued { .. }
     ));
     manager.release(lease).await.unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, a).await, "paused");
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
@@ -185,7 +185,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(
         observed(&app, bot_id).await,
         "running",
@@ -212,7 +212,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
 }
 
@@ -227,7 +227,7 @@ async fn acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer
         let acquire =
             tokio::spawn(async move { m.acquire(bot, &format!("test:{round}")).await.unwrap() });
         let m = manager.clone();
-        let tick = tokio::spawn(async move { m.tick(&never()).await.unwrap() });
+        let tick = tokio::spawn(async move { m.tick(&no_cancel()).await.unwrap() });
         let acquired = acquire.await.unwrap();
         tick.await.unwrap();
         if let Acquire::Ready { lease_id, .. } = acquired {
@@ -290,7 +290,7 @@ async fn deleting_a_bot_stops_its_computer_and_keeps_it() {
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, name) = ready(&manager, bot_id, "test:g").await;
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
     assert!(
         fake.computers.lock().unwrap().contains_key(&name),
@@ -320,7 +320,7 @@ async fn a_failed_stop_keeps_its_reservation_and_is_retried() {
     ));
     fake.fail_stop
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, a).await, "stopped");
     ready(&manager, b, "test:b").await;
 }
@@ -370,7 +370,7 @@ async fn a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer() {
     .await
     .unwrap();
     assert!(manager.renew(lease).await.unwrap());
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(
         observed(&app, bot).await,
         "running",
@@ -400,7 +400,7 @@ async fn nothing_is_used_until_the_runtime_has_been_inspected() {
     ));
     fake.fail_list
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     ready(&manager, bot, "test:w").await;
 }
 
