@@ -1,6 +1,7 @@
 //! Failed runs: retries, pausing, and the owner's retry.
 
 use super::*;
+use else_api::db::turns::{ItemKind, TurnStatus};
 
 async fn wait_routine(app: &TestApp, bot: &str, done: impl Fn(&Value) -> bool) -> Value {
     let settled = common::poll(|| async {
@@ -512,4 +513,182 @@ async fn a_successful_run_forgets_earlier_failures() {
     assert_eq!(routine["last_run"]["status"], "completed");
     assert_eq!(routine["enabled"], true);
     assert_eq!(runs(&h.app, &id).await.len(), 1);
+}
+
+/// Seed a run of a new routine `name` due at `due_at` in `bot`'s owner
+/// conversation, not reviewed yet. Its turn failed with `failure`, or
+/// completed without one. Returns the run's turn.
+async fn unreviewed_run(
+    conn: &mut sqlx::SqliteConnection,
+    bot: Uuid,
+    name: &str,
+    due_at: &str,
+    failure: Option<&str>,
+) -> Uuid {
+    let status = match failure {
+        Some(_) => TurnStatus::Failed,
+        None => TurnStatus::Completed,
+    };
+    let turn = common::seed::turn(bot)
+        .message(ItemKind::Routine, "Update the tickets.")
+        .status(status)
+        .insert(&mut *conn)
+        .await;
+    if let Some(code) = failure {
+        sqlx::query("UPDATE turns SET error_code = ?2, error_message = 'It failed.' WHERE id = ?1")
+            .bind(turn)
+            .bind(code)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let routine = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
+             created_turn_id, created_name, request_hash)
+         SELECT ?1, bot_id, conversation_id, ?3, 'Update the tickets.', '0 * * * *', 'UTC',
+             id, ?3, zeroblob(32) FROM turns WHERE id = ?2",
+    )
+    .bind(routine)
+    .bind(turn)
+    .bind(name)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
+         VALUES (randomblob(16), ?1, ?2, ?3, ?4)",
+    )
+    .bind(routine)
+    .bind(due_at)
+    .bind(name)
+    .bind(turn)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    turn
+}
+
+const DUE: &str = "2026-01-01T10:00:00.000+00:00";
+
+#[tokio::test]
+async fn the_next_turn_waits_for_the_failure_notice_of_an_ended_run() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    unreviewed_run(
+        &mut pool.acquire().await.unwrap(),
+        bot.id,
+        "Tickets",
+        DUE,
+        Some("policy_violation"),
+    )
+    .await;
+    let next = common::seed::turn(bot.id)
+        .message(ItemKind::User, "Any news on the tickets?")
+        .insert(pool)
+        .await;
+    let claim = || async {
+        else_api::db::turns::claim_next(pool, &[], true)
+            .await
+            .unwrap()
+            .map(|claimed| claimed.id)
+    };
+
+    assert_eq!(claim().await, None, "the run ended but is not reviewed");
+    assert!(
+        !else_api::db::turns::lifecycle::claim(&mut pool.acquire().await.unwrap(), next, bot.id)
+            .await
+            .unwrap(),
+        "the claim itself refuses it"
+    );
+    else_api::db::routines::review_ended(
+        pool,
+        &else_api::providers::Registry::new(vec![]),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(claim().await, Some(next), "the review lets it start");
+    let input = else_api::db::turns::input(pool, next).await.unwrap();
+    assert!(
+        input.history.iter().any(|entry| entry.text.starts_with(
+            "I paused the routine **Tickets** because it tried to use a tool it is not allowed \
+             to use."
+        )),
+        "the next turn reads the notice: {:?}",
+        input.history
+    );
+}
+
+#[tokio::test]
+async fn a_routine_retry_takes_the_last_queue_slot_before_a_watcher_wake() {
+    // No run slots, so queued turns stay queued and the queue stays full.
+    let app = TestApp::builder().max_active(0).start().await;
+    let bot: Uuid = app.main_bot().await.parse().unwrap();
+    // Seed between two pump passes, so both become ready in the same tick.
+    let closed = app
+        .state
+        .gate
+        .close(common::SETTLE, else_api::maintenance::Pause::backup(None))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tx = app.db.pool.begin().await.unwrap();
+    // More ended runs than one review query reads come first.
+    for n in 0..9 {
+        let due = format!("2026-01-01T09:00:0{n}.000+00:00");
+        unreviewed_run(&mut tx, bot, &format!("Digest {n}"), &due, None).await;
+    }
+    let run = unreviewed_run(&mut tx, bot, "Tickets", DUE, Some("provider_failed")).await;
+    for _ in 0..3 {
+        common::seed::turn(bot)
+            .message(ItemKind::User, "Queued.")
+            .insert(&mut *tx)
+            .await;
+    }
+    let watcher = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO watchers (id, bot_id, conversation_id, created_turn_id, purpose,
+             check_command, prompt, every_minutes, watch_until, status, outcome, ended_at)
+         SELECT ?1, bot_id, conversation_id, id, 'Build', 'true', 'Report the build.', 5,
+             '2100-01-01T00:00:00.000+00:00', 'waking', 'met',
+             strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         FROM turns WHERE id = ?2",
+    )
+    .bind(watcher)
+    .bind(run)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(closed);
+    app.scheduler.wake();
+
+    let settled = common::poll(|| async {
+        sqlx::query_as::<_, (bool, String, bool)>(
+            "SELECT rr.reviewed, w.status, w.wake_after IS NOT NULL
+             FROM routine_runs rr, watchers w WHERE rr.turn_id = ?1 AND w.id = ?2",
+        )
+        .bind(run)
+        .bind(watcher)
+        .fetch_one(&app.db.pool)
+        .await
+        .ok()
+        .filter(|(reviewed, status, refused)| *reviewed && (status == "ended" || *refused))
+    });
+    let (_, status, _) = tokio::time::timeout(common::SETTLE, settled)
+        .await
+        .expect("the run and the wake settle");
+    let retried: Option<Uuid> = sqlx::query_scalar(
+        "SELECT r.turn_id FROM routine_runs r JOIN routine_runs o ON o.id = r.retry_of
+         WHERE o.turn_id = ?1",
+    )
+    .bind(run)
+    .fetch_optional(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(retried.is_some(), "the retry took the last slot");
+    assert_eq!(status, "waking", "the wake waits for a free slot");
 }

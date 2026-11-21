@@ -187,7 +187,9 @@ impl Scheduler {
 
     /// Run until `shutdown` fires, then interrupt running turns and wait up
     /// to `grace` for them to record outcomes. Claiming and the feature
-    /// pumps run in separate loops, so a slow pump never delays a claim.
+    /// pumps run in separate loops, so a slow pump delays only the turns
+    /// that wait on it, such as one behind a routine run it has not
+    /// reviewed yet.
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken, grace: Duration) {
         tokio::join!(self.claim_loop(&shutdown), self.pump_loop(&shutdown));
         self.running
@@ -250,8 +252,7 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        if let Some(admission) = self.gate.enter() {
-            let launch = |check| self.launch_check(&admission, check);
+        if let Some(_admission) = self.gate.enter() {
             match turns::settle_deferred(&self.pool).await {
                 Ok((0, _)) => {}
                 Ok((_, woken)) => {
@@ -262,7 +263,6 @@ impl Scheduler {
                 }
                 Err(err) => tracing::warn!(error = %err, "settling deferred messages failed"),
             }
-            pump::before_claim(&self.tick(&launch)).await;
         }
         loop {
             let Some(_admission) = self.gate.enter() else {

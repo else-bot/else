@@ -73,7 +73,8 @@ async fn ended(conn: &mut SqliteConnection, bot: Uuid, turn: Uuid) -> Result<(),
 }
 
 /// Claim queued `turn` of `bot` for a new attempt: it moves to `preparing`
-/// unless it is deferred, joined another reply, or the bot already has an
+/// unless it is deferred, joined another reply, waits for the review of an
+/// earlier routine run in its conversation, or the bot already has an
 /// active turn. True when it did.
 pub async fn claim(
     conn: &mut SqliteConnection,
@@ -81,12 +82,14 @@ pub async fn claim(
     bot: Uuid,
 ) -> Result<bool, sqlx::Error> {
     let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE turns SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+        "UPDATE turns AS t SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              attempt = attempt + 1
          WHERE id = ?1 AND status = 'queued' AND NOT deferred
            AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = ?1)
            AND NOT EXISTS (SELECT 1 FROM turns a
-                           WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
+                           WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})
+           AND NOT {}",
+        crate::db::routines::behind_unreviewed_run()
     )))
     .bind(turn)
     .bind(bot)

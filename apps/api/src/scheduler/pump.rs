@@ -22,17 +22,13 @@ pub struct Tick<'a> {
     pub launch: &'a (dyn Fn(Check) + Send + Sync),
 }
 
-/// What the scheduler settles before each claim pass, after deferred
-/// messages: the review of ended routine runs writes into conversations
-/// their next turn reads.
-pub(super) async fn before_claim(tick: &Tick<'_>) {
-    crate::db::routines::pump_review(tick).await;
-}
-
-/// Advance every feature once. Routine check settling and watchers go
-/// first, in the order that shares the bots' job slots and turn queues as
-/// before; the remaining admissions run concurrently, as they did before.
+/// Advance every feature once. Routines go first: the review of ended runs
+/// queues their retries, then finished checks settle, so on a nearly full
+/// queue a retry takes a bot's last slot ahead of a watcher wake. Watchers
+/// go next because they share the bots' job slots and turn queues; the
+/// remaining admissions run concurrently.
 pub(super) async fn all(tick: &Tick<'_>) {
+    crate::db::routines::pump_review(tick).await;
     crate::db::routines::pump_settle(tick).await;
     crate::db::watchers::pump(tick).await;
     tokio::join!(
