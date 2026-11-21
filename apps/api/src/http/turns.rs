@@ -1,4 +1,3 @@
-use crate::db::bots::{self, BotStatus};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -14,6 +13,7 @@ use super::error::{ApiError, ApiJson, ApiPath};
 use super::{AppState, Routes};
 use crate::app::messages::{InvalidMessage, MessagePart, Reaction, canonical_parts, validate_text};
 use crate::app::providers::Availability;
+use crate::db::bots::{self, BotStatus};
 use crate::db::turns::{self, AcceptError, SendRequest};
 use crate::views::*;
 
@@ -300,7 +300,7 @@ async fn cancel(
     if let Some(turn_id) = receipt.interrupt {
         state.scheduler.interrupt(turn_id).await;
     }
-    let status = if receipt.state == "done" {
+    let status = if receipt.state == stop::ReceiptState::Done {
         StatusCode::OK
     } else {
         StatusCode::ACCEPTED

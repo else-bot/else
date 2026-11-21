@@ -39,6 +39,14 @@ impl BotStatus {
     }
 }
 
+/// What a `request_receipts` row records, as stored in its `operation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub(crate) enum ReceiptOperation {
+    CreateBot,
+    Cancel,
+}
+
 /// The bot's status, or `None` when no such bot exists.
 pub async fn status<'e>(
     conn: impl sqlx::SqliteExecutor<'e>,
@@ -409,7 +417,7 @@ async fn create_as(
             return Err(Refusal::PurposeRequired.into());
         }
     }
-    let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
+    let receipt: Option<(ReceiptOperation, Vec<u8>, Uuid)> = sqlx::query_as(
         "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = ?1",
     )
     .bind(request_id)
@@ -419,7 +427,7 @@ async fn create_as(
         return Err(BotError::RequestConflict);
     }
     if let Some((operation, saved_hash, bot_id)) = receipt {
-        if operation != "create_bot" || saved_hash != hash {
+        if operation != ReceiptOperation::CreateBot || saved_hash != hash {
             return Err(BotError::RequestConflict);
         }
         tx.commit().await?;
