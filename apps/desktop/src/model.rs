@@ -813,6 +813,33 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_servers_reaction_part_and_draft_channel_decode_without_a_reset() {
+        let mut reacted = item(1, 1, "user", "hi [Poll]");
+        reacted["reaction"] = json!({ "item_id": Uuid::from_u128(2), "kind": "heart" });
+        reacted["parts"] = json!([
+            { "type": "text", "text": "hi " },
+            { "type": "poll", "question": "Lunch?" },
+        ]);
+        let upsert = frame(1, "item.upsert", json!({ "item": reacted }));
+        assert!(upsert.event.is_ok(), "{:?}", upsert.event);
+
+        let turn = json!({
+            "id": Uuid::nil(), "request_id": Uuid::nil(), "turn_no": 1, "provider_id": "codex",
+            "status": "completed", "error": null, "effect_uncertain": false,
+            "outgoing_drafts": [{
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1, "bot_id": null,
+                "turn_id": null, "content": { "channel": "fax", "number": "+1 555" },
+                "version": 1, "status": "pending", "can_approve": true,
+                "approved_version": null, "approved_item_id": null, "approved_at": null,
+                "delivery": null, "result_detail": null, "superseded_by": null,
+                "created_at": null, "updated_at": "2026-11-02T00:00:00Z", "settled_at": null,
+            }],
+        });
+        let updated = frame(2, "turn.updated", json!({ "turn": turn }));
+        assert!(updated.event.is_ok(), "{:?}", updated.event);
+    }
+
+    #[test]
     fn a_window_below_the_tail_leaves_gaps_that_close_when_loaded() {
         let tail = vec![item(90, 90, "user", "latest")];
         let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();

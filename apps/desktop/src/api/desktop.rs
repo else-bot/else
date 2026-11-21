@@ -520,6 +520,12 @@ mod tests {
     use else_wire::computers::ComputerUpgrade;
 
     #[test]
+    fn a_newer_servers_status_message_decodes_instead_of_closing_the_stream() {
+        let event = serde_json::from_str::<ServerEvent>(r#"{"type":"clipboard","text":"copied"}"#);
+        assert!(event.is_ok(), "{event:?}");
+    }
+
+    #[test]
     fn typed_text_maps_to_keysyms_and_skips_control_characters() {
         let keys: Vec<_> = "a\né\t\u{7}€".chars().filter_map(text_keysym).collect();
         assert_eq!(keys, [0x61, 0xff0d, 0xe9, 0xff09, 0x20ac]);
