@@ -1,6 +1,7 @@
 use super::{BotSettings, automation_section};
 use crate::api::socials::Provider;
 use crate::app::panel::{alert, item_name, meta, meta_line};
+use crate::app::request::Request;
 use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
 use crate::controls::toggle;
 use crate::model::Conversation;
@@ -12,23 +13,12 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use uuid::Uuid;
 
-pub(super) enum TriggerSave {
-    Saving { attempt: Uuid, enabled: bool },
-    Deleting { attempt: Uuid },
-    Failed(String),
-}
-
-impl TriggerSave {
-    fn attempt(&self) -> Option<Uuid> {
-        match self {
-            Self::Saving { attempt, .. } | Self::Deleting { attempt } => Some(*attempt),
-            Self::Failed(_) => None,
-        }
-    }
-
-    fn busy(&self) -> bool {
-        self.attempt().is_some()
-    }
+/// A change to one trigger. An accepted change stays until the stream
+/// reports it; `Enable` holds the switch at the value sent until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TriggerChange {
+    Enable(bool),
+    Delete,
 }
 
 impl BotSettings {
@@ -50,11 +40,7 @@ impl ElseApp {
             return None;
         }
         let entry = self.settings.get(&bot)?;
-        if entry
-            .triggers
-            .get(&source.key())
-            .is_some_and(TriggerSave::busy)
-        {
+        if entry.triggers.get(&source.key()).is_some_and(Request::busy) {
             return None;
         }
         let conversation = self.automations(bot)?;
@@ -75,15 +61,19 @@ impl ElseApp {
         if self.changeable_trigger(bot, source).is_none() {
             return;
         }
-        let attempt = Uuid::new_v4();
         let change = match enabled {
-            Some(enabled) => TriggerSave::Saving { attempt, enabled },
-            None => TriggerSave::Deleting { attempt },
+            Some(enabled) => TriggerChange::Enable(enabled),
+            None => TriggerChange::Delete,
         };
-        let Some(entry) = self.settings.get_mut(&bot) else {
+        let Some(attempt) = self.settings.get_mut(&bot).and_then(|entry| {
+            entry
+                .triggers
+                .entry(source.key())
+                .or_default()
+                .begin(change)
+        }) else {
             return;
         };
-        entry.triggers.insert(source.key(), change);
         cx.notify();
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -104,24 +94,19 @@ impl ElseApp {
                 }
                 (TriggerSource::Webhook { id }, None) => client.delete_webhook(bot, id).await,
             };
-            let _ = this.update(cx, |app, cx| {
-                let Some(entry) = app.settings.get_mut(&bot) else {
-                    return;
-                };
-                if entry
-                    .triggers
-                    .get(&source.key())
-                    .and_then(TriggerSave::attempt)
-                    != Some(attempt)
-                {
-                    return;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = &result {
+                    app.unauthorized(err, window, cx);
                 }
-                if let Err(error) = result {
-                    let action = if enabled.is_some() { "save" } else { "delete" };
-                    entry.triggers.insert(
-                        source.key(),
-                        TriggerSave::Failed(format!("Couldn't {action}. {error}")),
-                    );
+                let action = if enabled.is_some() { "save" } else { "delete" };
+                let settled = app
+                    .settings
+                    .get_mut(&bot)
+                    .and_then(|entry| entry.triggers.get_mut(&source.key()))
+                    .is_some_and(|save| {
+                        save.settle_as(attempt, &result, |err| format!("Couldn't {action}. {err}"))
+                    });
+                if settled && result.is_err() {
                     cx.notify();
                 }
             });
@@ -180,18 +165,18 @@ impl ElseApp {
         &self,
         bot: Uuid,
         card: TriggerCard,
-        save: Option<&TriggerSave>,
+        save: Option<&Request<TriggerChange>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let source = card.source;
         let key = source.key();
-        let checked = match save {
-            Some(TriggerSave::Saving { enabled, .. }) => *enabled,
+        let pending = save.and_then(Request::pending);
+        let checked = match pending {
+            Some(TriggerChange::Enable(enabled)) => *enabled,
             _ => card.enabled,
         };
-        let disabled =
-            save.is_some_and(TriggerSave::busy) || self.connection != Connection::Connected;
+        let disabled = save.is_some_and(Request::busy) || self.connection != Connection::Connected;
         let switch = toggle(
             ElementId::Name(format!("trigger-{key}").into()),
             checked,
@@ -212,15 +197,12 @@ impl ElseApp {
             .xsmall()
             .icon(gpui_kit::assets::IconName::Trash)
             .accessibility_label(format!("Delete the trigger for {}", card.title))
-            .loading(matches!(save, Some(TriggerSave::Deleting { .. })))
+            .loading(pending == Some(&TriggerChange::Delete))
             .disabled(disabled)
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_trigger_delete_dialog(bot, source, window, cx)
             }));
-        let error = match save {
-            Some(TriggerSave::Failed(error)) => Some(error.clone()),
-            _ => None,
-        };
+        let error = save.and_then(Request::error).map(str::to_owned);
         let mut facts = card.pills;
         if !checked {
             facts.push("Paused".to_owned());
@@ -389,17 +371,17 @@ fn pace(minutes: i64) -> String {
 
 /// Whether a trigger's local change still waits for the server: a save until
 /// the trigger reports the saved state, a failure until the trigger is gone.
-fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
-    match (save, current) {
+fn still_pending(save: &Request<TriggerChange>, current: Option<bool>) -> bool {
+    match (save.pending(), current) {
         (_, None) => false,
-        (TriggerSave::Saving { enabled, .. }, Some(current)) => *enabled != current,
+        (Some(TriggerChange::Enable(enabled)), Some(current)) => *enabled != current,
         _ => true,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TriggerSave, pace, still_pending, trigger_cards};
+    use super::{Request, TriggerChange, pace, still_pending, trigger_cards};
     use crate::api::socials::Trigger;
     use crate::model::{Conversation, Snapshot};
     use serde_json::json;
@@ -418,23 +400,26 @@ mod tests {
 
     #[test]
     fn a_trigger_switch_stays_busy_until_the_server_reports_the_saved_state() {
-        let saving = TriggerSave::Saving {
-            attempt: Uuid::new_v4(),
-            enabled: false,
-        };
+        let mut saving = Request::Idle;
+        let attempt = saving.begin(TriggerChange::Enable(false)).unwrap();
         assert!(
             still_pending(&saving, Some(trigger(true).enabled)),
             "a stale event keeps it busy"
         );
         assert!(!still_pending(&saving, Some(trigger(false).enabled)));
-        let failed = TriggerSave::Failed("Couldn't save.".into());
+        saving.settle(attempt, &Ok::<_, crate::api::ClientError>(()));
+        assert!(
+            still_pending(&saving, Some(trigger(true).enabled)),
+            "an accepted save stays busy until the stream reports it"
+        );
+        assert!(!still_pending(&saving, Some(trigger(false).enabled)));
+        let failed = Request::Failed("Couldn't save.".into());
         assert!(
             still_pending(&failed, Some(trigger(true).enabled)),
             "the error stays visible"
         );
-        let deleting = TriggerSave::Deleting {
-            attempt: Uuid::new_v4(),
-        };
+        let mut deleting = Request::Idle;
+        deleting.begin(TriggerChange::Delete);
         assert!(
             !still_pending(&deleting, None),
             "a deleted trigger drops its state"

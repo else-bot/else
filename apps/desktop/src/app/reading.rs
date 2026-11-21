@@ -22,7 +22,9 @@ const UNREAD_DIVIDER_DELAY: Duration = Duration::from_secs(5);
 impl ElseApp {
     pub(super) fn check_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_mut() {
-            view._unread_dismissal = None;
+            if let Some(unread) = &mut view.unread {
+                unread.dismissal = None;
+            }
             view.reply_layout = None;
             view.latest_seen = false;
             window.refresh();
@@ -37,27 +39,29 @@ impl ElseApp {
             return;
         };
         // A kept view can show its old tail before the unread reply arrives.
-        let unread_loaded = view.unread_since.is_some_and(|since| latest > Some(since));
-        if !attending || !view.latest_seen || !unread_loaded {
-            view._unread_dismissal = None;
+        let latest_seen = view.latest_seen;
+        let Some(unread) = &mut view.unread else {
+            return;
+        };
+        if !attending || !latest_seen || latest <= Some(unread.since) {
+            unread.dismissal = None;
             return;
         }
-        if view.unread_since.is_none() || view._unread_dismissal.is_some() {
+        if unread.dismissal.is_some() {
             return;
         }
         let bot = view.bot_id;
-        view._unread_dismissal = Some(cx.spawn_in(window, async move |this, cx| {
+        unread.dismissal = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(UNREAD_DIVIDER_DELAY).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 if !app.viewing_transcript(window, cx) {
                     return;
                 }
-                let Some(view) = app.view.as_mut().filter(|view| view.bot_id == bot) else {
+                let Some(view) = app.view_of(bot) else {
                     return;
                 };
                 if view.latest_seen {
-                    view.unread_since = None;
-                    view._unread_dismissal = None;
+                    view.unread = None;
                     app.sync_rows(window, cx);
                 }
             });
@@ -100,8 +104,8 @@ impl ElseApp {
         self.attending(window)
             && self.image_viewer.is_none()
             && self
-                .computer
-                .as_ref()
+                .details
+                .computer()
                 .is_none_or(|computer| !computer.read(cx).expanded)
     }
 
@@ -304,8 +308,7 @@ impl ElseApp {
         self.hidden = hidden;
         if hidden {
             self.requested = None;
-            self.computer = None;
-            self._computer_layout = None;
+            self.details.drop_computer();
             self.clear_social_forms(window, cx);
         } else {
             self.sync_skill_cards(window, cx);

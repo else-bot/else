@@ -5,10 +5,12 @@ mod schedule_text;
 mod triggers;
 mod watchers;
 
+use super::computer::{ComputerView, DetailsTab, LayoutChanged};
 use super::panel::{hairline, list_rows, muted, section};
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use crate::api::Bot;
+use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
 use crate::model::Conversation;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -18,9 +20,9 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use identity::Details;
 use model::ModelState;
-use routines::RoutineSave;
+use routines::RoutineChange;
 use std::collections::HashMap;
-use triggers::TriggerSave;
+use triggers::TriggerChange;
 use uuid::Uuid;
 use watchers::WatcherStop;
 
@@ -30,11 +32,90 @@ pub(super) struct BotSettings {
     /// bot can change another bot's model, which publishes `bot.updated`.
     revision: Option<i64>,
     model: ModelState,
-    routines: HashMap<Uuid, RoutineSave>,
+    /// The one-click switch to the newer model of the bot's family.
+    model_upgrade: Request<()>,
+    routines: HashMap<Uuid, Request<RoutineChange>>,
     /// Trigger changes by `TriggerSource::key`.
-    triggers: HashMap<Uuid, TriggerSave>,
+    triggers: HashMap<Uuid, Request<TriggerChange>>,
     watcher_stops: HashMap<Uuid, WatcherStop>,
     open_watcher_log: Option<Uuid>,
+}
+
+/// The bot details panel. Its tab outlives closing it; the computer view
+/// exists only while the panel is open on the Computer tab.
+pub(super) enum DetailsPanel {
+    Closed {
+        tab: DetailsTab,
+    },
+    Open {
+        tab: DetailsTab,
+        computer: Option<ComputerPane>,
+    },
+}
+
+pub(super) struct ComputerPane {
+    pub(super) view: Entity<ComputerView>,
+    _layout: Subscription,
+}
+
+impl Default for DetailsPanel {
+    fn default() -> Self {
+        Self::Closed {
+            tab: DetailsTab::default(),
+        }
+    }
+}
+
+impl DetailsPanel {
+    pub(super) fn open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
+    pub(super) fn tab(&self) -> DetailsTab {
+        match self {
+            Self::Closed { tab } | Self::Open { tab, .. } => *tab,
+        }
+    }
+
+    pub(super) fn computer(&self) -> Option<&Entity<ComputerView>> {
+        match self {
+            Self::Open {
+                computer: Some(pane),
+                ..
+            } => Some(&pane.view),
+            _ => None,
+        }
+    }
+
+    /// Drops the computer view; showing the tab again builds it anew.
+    pub(super) fn drop_computer(&mut self) {
+        if let Self::Open { computer, .. } = self {
+            *computer = None;
+        }
+    }
+
+    fn toggle(&mut self) {
+        let tab = self.tab();
+        *self = match self {
+            Self::Closed { .. } => Self::Open {
+                tab,
+                computer: None,
+            },
+            Self::Open { .. } => Self::Closed { tab },
+        };
+    }
+
+    pub(super) fn select(&mut self, next: DetailsTab) {
+        match self {
+            Self::Closed { tab } => *tab = next,
+            Self::Open { tab, computer } => {
+                *tab = next;
+                if next != DetailsTab::Computer {
+                    *computer = None;
+                }
+            }
+        }
+    }
 }
 
 impl ElseApp {
@@ -47,9 +128,7 @@ impl ElseApp {
 
     fn apply_routine(&mut self, bot: Uuid, saved: crate::model::Routine) {
         if let Some(conversation) = self
-            .view
-            .as_mut()
-            .filter(|view| view.bot_id == bot)
+            .view_of(bot)
             .and_then(|view| view.conversation.as_mut())
         {
             conversation.apply_routine(saved);
@@ -57,8 +136,8 @@ impl ElseApp {
     }
 
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_open.toggle();
-        if self.settings_open {
+        self.details.toggle();
+        if self.details.open() {
             if let Some(bot) = self.selected.filter(|id| {
                 self.settings
                     .get(id)
@@ -69,37 +148,32 @@ impl ElseApp {
         } else {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
         }
-        if !self.settings_open {
-            self.computer = None;
-            self._computer_layout = None;
-        }
         self.ensure_settings(window, cx);
         cx.notify();
     }
 
     pub(super) fn settings_shown(&self) -> bool {
-        self.settings_open && self.selected_bot().is_some_and(|b| b.is_active())
+        self.details.open() && self.selected_bot().is_some_and(|b| b.is_active())
     }
 
     pub(super) fn ensure_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
             return;
         };
-        if self.settings_open
-            && self.details_tab == super::computer::DetailsTab::Computer
-            && self.computer.is_none()
+        if let DetailsPanel::Open {
+            tab: DetailsTab::Computer,
+            computer: computer @ None,
+        } = &mut self.details
         {
             let client = self.client.clone();
-            let computer =
-                cx.new(|cx| super::computer::ComputerView::new(client, &bot, window, cx));
-            self._computer_layout = Some(cx.subscribe_in(
-                &computer,
-                window,
-                |app, _, _: &super::computer::LayoutChanged, window, cx| {
-                    app.check_reading(window, cx)
-                },
-            ));
-            self.computer = Some(computer);
+            let view = cx.new(|cx| ComputerView::new(client, &bot, window, cx));
+            let layout = cx.subscribe_in(&view, window, |app, _, _: &LayoutChanged, window, cx| {
+                app.check_reading(window, cx)
+            });
+            *computer = Some(ComputerPane {
+                view,
+                _layout: layout,
+            });
         }
         if self.settings.contains_key(&bot.id) {
             return;
@@ -111,6 +185,7 @@ impl ElseApp {
                 details,
                 revision: bot.metadata_revision,
                 model: ModelState::Loading(Uuid::nil()),
+                model_upgrade: Request::Idle,
                 routines: HashMap::new(),
                 triggers: HashMap::new(),
                 watcher_stops: HashMap::new(),
@@ -176,10 +251,10 @@ impl ElseApp {
             .pt_2()
             .pb_6()
             .overflow_y_scroll();
-        if let Some(computer) = &self.computer {
+        if let Some(computer) = self.details.computer() {
             body = body.child(v_flex().flex_1().p_4().child(computer.clone()));
         }
-        if self.details_tab == super::computer::DetailsTab::Details {
+        if self.details.tab() == DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
                 body = body
                     .child(self.render_bot_usage(cx))
@@ -228,15 +303,13 @@ impl ElseApp {
                                 crate::panel_kit::hugging(segment(
                                     "details-tab",
                                     "Details",
-                                    self.details_tab == super::computer::DetailsTab::Details,
+                                    self.details.tab() == DetailsTab::Details,
                                     false,
                                     cx,
                                 ))
                                 .on_click(cx.listener(
                                     |app, _, _, cx| {
-                                        app.details_tab = super::computer::DetailsTab::Details;
-                                        app.computer = None;
-                                        app._computer_layout = None;
+                                        app.details.select(DetailsTab::Details);
                                         cx.notify();
                                     },
                                 )),
@@ -245,13 +318,13 @@ impl ElseApp {
                                 crate::panel_kit::hugging(segment(
                                     "computer-tab",
                                     "Computer",
-                                    self.details_tab == super::computer::DetailsTab::Computer,
+                                    self.details.tab() == DetailsTab::Computer,
                                     false,
                                     cx,
                                 ))
                                 .on_click(cx.listener(
                                     |app, _, window, cx| {
-                                        app.details_tab = super::computer::DetailsTab::Computer;
+                                        app.details.select(DetailsTab::Computer);
                                         app.ensure_settings(window, cx);
                                         cx.notify();
                                     },

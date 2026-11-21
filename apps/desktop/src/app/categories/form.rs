@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use super::creation::Creation;
 use super::{Connection, ElseApp};
 use crate::api::Category;
+use crate::app::request::Request;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -35,9 +36,10 @@ pub(in crate::app) struct CategoryFormHolder {
     search: Entity<InputState>,
     selected: HashSet<Uuid>,
     filter: BotFilter,
-    error: Option<String>,
-    busy: bool,
+    /// Busy while saving; `operation` keeps any create left in doubt.
+    request: Request<()>,
     _search: Subscription,
+    _enter: Subscription,
 }
 
 impl CategoryFormHolder {
@@ -46,7 +48,8 @@ impl CategoryFormHolder {
     }
 
     fn locked(&self) -> bool {
-        self.busy || matches!(&self.operation, Operation::Create(create) if create.locked())
+        self.request.busy()
+            || matches!(&self.operation, Operation::Create(create) if create.locked())
     }
 
     fn action(&self) -> &'static str {
@@ -80,6 +83,16 @@ impl ElseApp {
                     window.refresh();
                 }
             });
+        let enter =
+            cx.subscribe_in(
+                &name,
+                window,
+                |app, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => app.submit_category(window, cx),
+                    InputEvent::Change => window.refresh(),
+                    _ => {}
+                },
+            );
         let holder = cx.new(|_| CategoryFormHolder {
             operation: renaming
                 .map(|category| Operation::Rename(category.id))
@@ -88,20 +101,11 @@ impl ElseApp {
             search,
             selected: HashSet::new(),
             filter: BotFilter::All,
-            error: None,
-            busy: false,
+            request: Request::Idle,
             _search: search_events,
+            _enter: enter,
         });
         self.category_form = Some(holder.clone());
-        self._category_enter = Some(cx.subscribe_in(
-            &name,
-            window,
-            |app, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => app.submit_category(window, cx),
-                InputEvent::Change => window.refresh(),
-                _ => {}
-            },
-        ));
         let app = cx.entity().downgrade();
         let focus_once = std::cell::Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -134,7 +138,7 @@ impl ElseApp {
                     )
                     .into_any_element()
             };
-            if let Some(error) = &form.error {
+            if let Some(error) = form.request.error() {
                 body = v_flex()
                     .gap_3()
                     .child(body)
@@ -142,7 +146,7 @@ impl ElseApp {
                         div()
                             .text_xs()
                             .text_color(theme.danger)
-                            .child(error.clone()),
+                            .child(error.to_owned()),
                     )
                     .into_any_element();
             }
@@ -151,7 +155,7 @@ impl ElseApp {
             let close = app.clone();
             let mine = holder.clone();
             let submit_name = name.clone();
-            let busy = form.busy;
+            let busy = form.request.busy();
             let can_submit = connected && !form.name.read(cx).value().trim().is_empty();
             let title = if creating {
                 "New category"
@@ -277,7 +281,7 @@ impl ElseApp {
             return;
         };
         let form = holder.read(cx);
-        if form.busy || self.connection != Connection::Connected {
+        if form.request.busy() || self.connection != Connection::Connected {
             return;
         }
         let name = form.name.read(cx).value().trim().to_owned();
@@ -296,17 +300,16 @@ impl ElseApp {
         };
         if bot_ids.iter().any(|id| self.moving.contains(id)) {
             holder.update(cx, |form, _| {
-                form.error =
-                    Some("A selected bot is already moving. Try again when it finishes.".to_owned())
+                form.request
+                    .reject("A selected bot is already moving. Try again when it finishes.")
             });
             window.refresh();
             return;
         }
+        let Some(attempt) = holder.update(cx, |form, _| form.request.begin(())) else {
+            return;
+        };
         self.moving.extend(bot_ids.iter().copied());
-        holder.update(cx, |form, _| {
-            form.busy = true;
-            form.error = None;
-        });
         cx.notify();
         window.refresh();
         let client = self.client.clone();
@@ -333,8 +336,7 @@ impl ElseApp {
                         if current {
                             holder.update(cx, |form, _| {
                                 form.operation = operation;
-                                form.busy = false;
-                                form.error = Some(error);
+                                form.request.fail(attempt, error);
                             });
                             window.refresh();
                         } else {

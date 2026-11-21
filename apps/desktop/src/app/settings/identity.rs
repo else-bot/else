@@ -175,7 +175,7 @@ impl ElseApp {
             return;
         }
         self.open_bot(id, window, cx);
-        if !self.settings_open {
+        if !self.details.open() {
             self.toggle_settings(window, cx);
         }
         self.edit_name(id, window, cx);

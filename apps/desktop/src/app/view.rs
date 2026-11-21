@@ -651,7 +651,7 @@ impl ElseApp {
                 )
                 .on_click(cx.listener(|app, _, window, cx| app.open_find(window, cx))),
         );
-        if !self.settings_open {
+        if !self.details.open() {
             actions = actions.child(
                 Button::new("toggle-settings")
                     .focus_ring(false)
@@ -746,7 +746,7 @@ impl ElseApp {
                         .is_some_and(|c| c.older_before_seq.is_some());
                     let mut column = v_flex().flex_1().min_w_0().min_h_0();
                     if older {
-                        let loading = view.loading_older;
+                        let loading = view.older.is_some();
                         column =
                             column.child(
                                 h_flex().justify_center().py_1().child(
@@ -1186,7 +1186,12 @@ impl Render for ElseApp {
                 .child(self.render_welcome(welcome, cx))
                 .into_any_element();
         }
-        if let Some(computer) = self.computer.clone().filter(|view| view.read(cx).expanded) {
+        if let Some(computer) = self
+            .details
+            .computer()
+            .filter(|view| view.read(cx).expanded)
+            .cloned()
+        {
             return h_flex()
                 .size_full()
                 .child(div().flex_1().min_w_0().h_full().child(computer))

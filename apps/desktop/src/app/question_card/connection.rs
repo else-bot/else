@@ -85,7 +85,7 @@ impl ElseApp {
             })
             .collect::<Vec<_>>();
         for question in checking {
-            self.check_connection(question, cx);
+            self.check_connection(question, window, cx);
         }
     }
 
@@ -94,15 +94,16 @@ impl ElseApp {
         flow: &Flow,
         result: Result<Resolution, ClientError>,
         hint: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&result, Err(ClientError::Unauthorized)) {
-            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+        // A rejected token still ends the step, as a failed check the owner
+        // can repeat once the token is fixed.
+        if let Err(err) = &result {
+            self.unauthorized(err, window, cx);
         }
         let Some(form) = self
-            .view
-            .as_mut()
-            .filter(|v| v.bot_id == flow.bot)
+            .view_of(flow.bot)
             .and_then(|v| v.cards.connection_mut(flow.question))
         else {
             return;
@@ -117,7 +118,7 @@ impl ElseApp {
         self.remeasure_row(RowKey::Card(CardKey::Question(flow.question)), cx);
     }
 
-    fn check_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+    fn check_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self
             .view
             .as_mut()
@@ -127,9 +128,11 @@ impl ElseApp {
         };
         form.phase = Phase::Checking;
         let flow = form.flow.clone();
-        form.request = Some(cx.spawn(async move |this, cx| {
+        form.request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = flow.recover().await;
-            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.resolved(&flow, result, None, window, cx)
+            });
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
@@ -144,14 +147,16 @@ impl ElseApp {
         };
         match form.phase {
             Phase::Ready(_) if form.password.is_some() => self.save_password(question, window, cx),
-            Phase::Ready(_) => self.sign_in(question, cx),
-            Phase::CheckFailed(_) => self.check_connection(question, cx),
+            Phase::Ready(_) => self.sign_in(question, window, cx),
+            Phase::CheckFailed(_) => self.check_connection(question, window, cx),
             Phase::ConfirmationRequired(_) => {
                 form.phase = Phase::Confirming;
                 let flow = form.flow.clone();
-                form.request = Some(cx.spawn(async move |this, cx| {
+                form.request = Some(cx.spawn_in(window, async move |this, cx| {
                     let result = flow.confirm().await;
-                    let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
+                    let _ = this.update_in(cx, |app, window, cx| {
+                        app.resolved(&flow, result, None, window, cx)
+                    });
                 }));
                 self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
             }
@@ -159,7 +164,7 @@ impl ElseApp {
         }
     }
 
-    fn sign_in(&mut self, question: Uuid, cx: &mut Context<Self>) {
+    fn sign_in(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self
             .view
             .as_mut()
@@ -170,7 +175,7 @@ impl ElseApp {
         form.phase = Phase::SigningIn;
         form.signin_url = None;
         let flow = form.flow.clone();
-        form.request = Some(cx.spawn(async move |this, cx| {
+        form.request = Some(cx.spawn_in(window, async move |this, cx| {
             let signin = async {
                 let mut signin = flow.sign_in().await?;
                 let opened = this
@@ -185,9 +190,7 @@ impl ElseApp {
                         if pending {
                             cx.open_url(signin.url());
                             if let Some(form) = app
-                                .view
-                                .as_mut()
-                                .filter(|v| v.bot_id == flow.bot)
+                                .view_of(flow.bot)
                                 .and_then(|v| v.cards.connection_mut(question))
                             {
                                 form.signin_url = Some(signin.url().to_owned());
@@ -204,8 +207,7 @@ impl ElseApp {
                 signin
                     .complete(|| {
                         this.update(cx, |app, cx| {
-                            let Some(view) = app.view.as_mut().filter(|v| v.bot_id == flow.bot)
-                            else {
+                            let Some(view) = app.view_of(flow.bot) else {
                                 return false;
                             };
                             if !view
@@ -231,9 +233,7 @@ impl ElseApp {
                 Ok(()) => {
                     let _ = this.update(cx, |app, cx| {
                         if let Some(form) = app
-                            .view
-                            .as_mut()
-                            .filter(|v| v.bot_id == flow.bot)
+                            .view_of(flow.bot)
                             .and_then(|v| v.cards.connection_mut(question))
                         {
                             form.phase = Phase::Confirming;
@@ -244,7 +244,9 @@ impl ElseApp {
                 }
                 Err(error) => (flow.recover().await, Some(error.to_string())),
             };
-            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.resolved(&flow, result, hint, window, cx)
+            });
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
@@ -274,9 +276,7 @@ impl ElseApp {
                     let _ = this.update_in(cx, |app, window, cx| {
                         input.update(cx, |state, cx| state.set_value("", window, cx));
                         if let Some(form) = app
-                            .view
-                            .as_mut()
-                            .filter(|v| v.bot_id == flow.bot)
+                            .view_of(flow.bot)
                             .and_then(|v| v.cards.connection_mut(question))
                         {
                             form.phase = Phase::Confirming;
@@ -287,7 +287,9 @@ impl ElseApp {
                 }
                 Err(error) => (flow.recover().await, Some(error.to_string())),
             };
-            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.resolved(&flow, result, hint, window, cx)
+            });
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
@@ -304,7 +306,7 @@ impl ElseApp {
         }
     }
 
-    fn cancel_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+    fn cancel_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self
             .view
             .as_mut()
@@ -320,12 +322,14 @@ impl ElseApp {
         }
         form.phase = Phase::Cancelling;
         let flow = form.flow.clone();
-        form.request = Some(cx.spawn(async move |this, cx| {
+        form.request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = flow.cancel().await.map(|resolution| match resolution {
                 Resolution::Recorded => Resolution::Cancelled,
                 other => other,
             });
-            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.resolved(&flow, result, None, window, cx)
+            });
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
@@ -608,28 +612,31 @@ impl ElseApp {
             Phase::Cancelled => None,
             Phase::SigningIn => None,
         };
-        let mut footer = h_flex()
-            .w_full()
-            .gap_2()
-            .flex_wrap()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .when_some(hint, |row, (icon, text)| {
-                        row.when_some(icon, |row, icon| row.child(Icon::new(icon).size_3()))
-                            .child(text)
-                    }),
-            )
-            .child(
-                Button::new(SharedString::from(format!("connection-cancel-{id}")))
-                    .control(Tier::Ghost, Scale::Compact, locked || !can_cancel, cx)
-                    .label("Cancel")
-                    .on_click(cx.listener(move |app, _, _, cx| app.cancel_connection(id, cx))),
-            );
+        let mut footer =
+            h_flex()
+                .w_full()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .when_some(hint, |row, (icon, text)| {
+                            row.when_some(icon, |row, icon| row.child(Icon::new(icon).size_3()))
+                                .child(text)
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("connection-cancel-{id}")))
+                        .control(Tier::Ghost, Scale::Compact, locked || !can_cancel, cx)
+                        .label("Cancel")
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.cancel_connection(id, window, cx)
+                        })),
+                );
         if matches!(phase, Phase::SigningIn) {
             let reopen = form.is_some_and(|f| f.signin_url.is_some());
             footer = footer.child(

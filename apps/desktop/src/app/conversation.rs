@@ -20,13 +20,29 @@ pub(super) struct ReplyLayout {
     pub bounds: Bounds<Pixels>,
 }
 
+/// Where the unread divider sits, and the timer that hides it once the
+/// owner has seen the replies below it.
+pub(super) struct Unread {
+    pub(super) since: ReplyPosition,
+    pub(super) dismissal: Option<Task<()>>,
+}
+
+impl Unread {
+    pub(super) fn since(since: ReplyPosition) -> Self {
+        Self {
+            since,
+            dismissal: None,
+        }
+    }
+}
+
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
-    pub(super) unread_since: Option<ReplyPosition>,
-    pub(super) _unread_dismissal: Option<Task<()>>,
+    pub(super) unread: Option<Unread>,
     pub(super) conversation: Option<Conversation>,
     pub(super) stream_problem: Option<String>,
-    pub(super) loading_older: bool,
+    /// The older page being loaded.
+    pub(super) older: Option<Task<()>>,
     pub(super) rows: Vec<TranscriptRow>,
     pub(super) list: ListState,
     pub(super) texts: HashMap<RowKey, RowText>,
@@ -71,7 +87,6 @@ pub(super) struct ConversationView {
     /// The gap row being loaded, by the loaded item just above it.
     pub(super) loading_gap: Option<(i64, Task<()>)>,
     pub(super) load: Load,
-    pub(super) _older: Option<Task<()>>,
 }
 
 /// Where a view stands with the server's newest page.
@@ -158,11 +173,10 @@ impl ConversationView {
         list.set_follow_mode(FollowMode::Tail);
         Self {
             bot_id,
-            unread_since: None,
-            _unread_dismissal: None,
+            unread: None,
             conversation: None,
             stream_problem: None,
-            loading_older: false,
+            older: None,
             rows: Vec::new(),
             list,
             texts: HashMap::new(),
@@ -189,7 +203,6 @@ impl ConversationView {
             find: None,
             loading_gap: None,
             load: Load::Settled,
-            _older: None,
         }
     }
 
@@ -199,10 +212,8 @@ impl ConversationView {
     pub(super) fn park(&mut self) {
         self.cards.park();
         self._reply_clock = None;
-        self.unread_since = None;
-        self._unread_dismissal = None;
-        self.loading_older = false;
-        self._older = None;
+        self.unread = None;
+        self.older = None;
         self.loading_gap = None;
         self.pending_reveal = None;
         self.revealed = None;
@@ -665,18 +676,17 @@ impl ElseApp {
         let Some(before) = view.conversation.as_ref().and_then(|c| c.older_before_seq) else {
             return;
         };
-        if view.loading_older {
+        if view.older.is_some() {
             return;
         }
-        view.loading_older = true;
         let bot = view.bot_id;
-        view._older = Some(cx.spawn_in(window, async move |this, cx| {
+        view.older = Some(cx.spawn_in(window, async move |this, cx| {
             let page = client.snapshot(bot, Some(before)).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                let Some(view) = app.view.as_mut().filter(|v| v.bot_id == bot) else {
+                let Some(view) = app.view_of(bot) else {
                     return;
                 };
-                view.loading_older = false;
+                view.older = None;
                 match page {
                     Ok(page) => {
                         if let Some(conversation) = view.conversation.as_mut() {
@@ -705,7 +715,7 @@ impl ElseApp {
         };
         let bot = view.bot_id;
         if self.bots.iter().any(|b| b.id == bot && b.silenced()) {
-            view.unread_since = None;
+            view.unread = None;
         }
         let conversation = view.conversation.as_ref();
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
@@ -723,7 +733,7 @@ impl ElseApp {
                 quiet: &view.open_quiet,
                 full_replies: &view.full_replies,
             },
-            view.unread_since,
+            view.unread.as_ref().map(|unread| unread.since),
             &Local,
         );
         let old = std::mem::take(&mut view.rows);

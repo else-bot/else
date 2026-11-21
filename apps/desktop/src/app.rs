@@ -31,6 +31,7 @@ mod question_card;
 mod quotes;
 mod reading;
 mod reply;
+mod request;
 mod row_text;
 mod rules;
 mod secret_card;
@@ -54,7 +55,7 @@ pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::BotSettings;
-use settings::model::{ModelDialog, ModelUpgrade};
+use settings::model::ModelDialog;
 use transcript::RowKey;
 
 use std::collections::{HashMap, HashSet};
@@ -366,13 +367,9 @@ pub struct ElseApp {
     deleting: HashSet<Uuid>,
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
-    _create_enter: Option<Subscription>,
     welcome: Option<Welcome>,
-    _welcome_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
     model_dialog: Option<Entity<ModelDialog>>,
-    model_upgrade: Option<ModelUpgrade>,
-    _category_enter: Option<Subscription>,
     moving: HashSet<Uuid>,
     category_notice: Option<String>,
     carrying_order: bool,
@@ -381,12 +378,9 @@ pub struct ElseApp {
     /// The width this view was last laid out at, measured because the server
     /// rail and a client-drawn window frame take part of the window.
     width: Option<f32>,
-    settings_open: bool,
-    details_tab: computer::DetailsTab,
+    details: settings::DetailsPanel,
     watcher_clock: Option<Task<()>>,
-    computer: Option<Entity<computer::ComputerView>>,
     image_viewer: Option<Entity<images::ImageViewer>>,
-    _computer_layout: Option<Subscription>,
     settings: HashMap<Uuid, BotSettings>,
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
@@ -483,25 +477,18 @@ impl ElseApp {
             deleting: HashSet::new(),
             notice: None,
             create: None,
-            _create_enter: None,
             welcome: None,
-            _welcome_enter: None,
             category_form: None,
             model_dialog: None,
-            model_upgrade: None,
-            _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
             carrying_order: false,
             preferences,
             _save_preferences: None,
             width: None,
-            settings_open: false,
-            details_tab: Default::default(),
+            details: Default::default(),
             watcher_clock: None,
-            computer: None,
             image_viewer: None,
-            _computer_layout: None,
             settings: HashMap::new(),
             rules: HashMap::new(),
             rules_dialog: None,
@@ -611,12 +598,7 @@ impl ElseApp {
                 self.sync_secret_cards(window, cx);
             }
             LiveEvent::Unauthorized => {
-                self.connection =
-                    Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-                self.clear_secret_forms(window, cx);
-                self.clear_social_forms(window, cx);
-                self.sync_skill_cards(window, cx);
-                self.sync_secret_cards(window, cx);
+                self.unauthorized(&ClientError::Unauthorized, window, cx);
             }
             LiveEvent::ServerPause(pause) => self.set_server_pause(pause, window, cx),
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
@@ -640,17 +622,32 @@ impl ElseApp {
                 }
                 self.caps = Some(caps);
             }
-            Err(ClientError::Unauthorized) => {
-                self.connection =
-                    Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-                self.clear_secret_forms(window, cx);
-                self.clear_social_forms(window, cx);
-                self.sync_skill_cards(window, cx);
-                self.sync_secret_cards(window, cx);
+            Err(err) => {
+                self.unauthorized(&err, window, cx);
             }
-            Err(_) => {}
         }
         cx.notify();
+    }
+
+    /// On a rejected owner token, marks the connection invalid and clears
+    /// every credential form. Returns whether `err` was that rejection, so
+    /// the caller stops handling the result.
+    pub(super) fn unauthorized(
+        &mut self,
+        err: &ClientError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(err, ClientError::Unauthorized) {
+            return false;
+        }
+        self.connection = Connection::InvalidCredentials(err.to_string());
+        self.clear_secret_forms(window, cx);
+        self.clear_social_forms(window, cx);
+        self.sync_skill_cards(window, cx);
+        self.sync_secret_cards(window, cx);
+        cx.notify();
+        true
     }
 
     pub(super) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -773,8 +770,8 @@ impl ElseApp {
         !self.hidden
             && self.welcome.is_none()
             && !self
-                .computer
-                .as_ref()
+                .details
+                .computer()
                 .is_some_and(|view| view.read(cx).expanded)
     }
 
@@ -796,8 +793,10 @@ impl ElseApp {
         if id == self.selected
             && let Some(view) = self.view.as_mut()
         {
-            if view.unread_since.is_none() && unread_since.is_some() {
-                view.unread_since = unread_since;
+            if view.unread.is_none()
+                && let Some(since) = unread_since
+            {
+                view.unread = Some(conversation::Unread::since(since));
                 self.sync_rows(window, cx);
             }
             return;
@@ -809,8 +808,7 @@ impl ElseApp {
                 .or_default()
                 .set_content(self.composer.read(cx).content());
         }
-        self.computer = None;
-        self._computer_layout = None;
+        self.details.drop_computer();
         self.selected = id;
         if id.is_some() && self.preferences.last_bot != id {
             self.preferences.last_bot = id;
@@ -835,7 +833,7 @@ impl ElseApp {
         self.clear_social_forms(window, cx);
         self.swap_view(id, cx);
         if let Some(view) = self.view.as_mut() {
-            view.unread_since = unread_since;
+            view.unread = unread_since.map(conversation::Unread::since);
         }
         self.ensure_settings(window, cx);
         if id.is_some() {

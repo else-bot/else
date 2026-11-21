@@ -7,6 +7,7 @@ use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::request::Request;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{SkillInstall, SkillInstallStatus, SkillScope};
@@ -16,8 +17,7 @@ pub(super) struct SkillCard {
     scope: SkillScope,
     keys: Option<Entity<SkillKeys>>,
     files: SkillFiles,
-    submitting: bool,
-    error: Option<String>,
+    request: Request<()>,
 }
 
 impl ElseApp {
@@ -66,8 +66,7 @@ impl ElseApp {
                     scope: SkillScope::All,
                     keys: None,
                     files: SkillFiles::default(),
-                    submitting: false,
-                    error: None,
+                    request: Request::Idle,
                 });
             if install.status == SkillInstallStatus::Pending {
                 if card.keys.is_none() && !install.env.is_empty() {
@@ -158,7 +157,7 @@ impl ElseApp {
             .cards
             .skills
             .get_mut(&id)
-            .filter(|card| !card.submitting)
+            .filter(|card| !card.request.busy())
         else {
             return;
         };
@@ -171,7 +170,7 @@ impl ElseApp {
             {
                 Ok(env) => env.flatten(),
                 Err(error) => {
-                    card.error = Some(error);
+                    card.request.reject(error);
                     self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
                     return;
                 }
@@ -183,8 +182,9 @@ impl ElseApp {
             None
         };
         let approval = approve.then_some((card.scope, env));
-        card.submitting = true;
-        card.error = None;
+        let Some(attempt) = card.request.begin(()) else {
+            return;
+        };
         if let Some(keys) = &card.keys {
             keys.update(cx, |keys, cx| {
                 keys.busy = true;
@@ -195,7 +195,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_skill_install(bot, id, approval).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.skill_answered(bot, id, result, window, cx)
+                app.skill_answered(bot, id, attempt, result, window, cx)
             });
         })
         .detach();
@@ -206,40 +206,43 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         id: Uuid,
+        attempt: Uuid,
         result: Result<SkillInstall, ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(&result, Err(ClientError::Unauthorized)) {
-            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-            self.clear_secret_forms(window, cx);
-            cx.notify();
+        if result
+            .as_ref()
+            .is_err_and(|err| self.unauthorized(err, window, cx))
+        {
             return;
         }
         let Some(view) = self.view_of(bot) else {
             return;
         };
+        // A card rebuilt after a disconnect no longer knows the attempt; it
+        // still shows the result.
         if let Some(card) = view.cards.skills.get_mut(&id) {
-            card.submitting = false;
-            match result {
-                Ok(install) => {
-                    if let Some(keys) = card.keys.take() {
-                        keys.update(cx, |keys, cx| keys.clear(window, cx));
-                    }
-                    if let Some(c) = view.conversation.as_mut() {
-                        c.apply_skill_install(install);
-                    }
-                }
-                Err(error) => {
-                    card.error = Some(error.to_string());
-                    if let Some(keys) = &card.keys {
-                        keys.update(cx, |keys, cx| {
-                            keys.busy = false;
-                            cx.notify();
-                        });
-                    }
-                }
+            if !card.request.settle(attempt, &result)
+                && let Err(err) = &result
+            {
+                card.request.reject(err.to_string());
             }
+            if result.is_ok() {
+                if let Some(keys) = card.keys.take() {
+                    keys.update(cx, |keys, cx| keys.clear(window, cx));
+                }
+            } else if let Some(keys) = &card.keys {
+                keys.update(cx, |keys, cx| {
+                    keys.busy = false;
+                    cx.notify();
+                });
+            }
+        }
+        if let Ok(install) = result
+            && let Some(c) = view.conversation.as_mut()
+        {
+            c.apply_skill_install(install);
         }
         self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
     }
@@ -313,7 +316,7 @@ impl ElseApp {
         let Some(card) = view.cards.skills.get(&id) else {
             return body.child("Connecting…").into_any_element();
         };
-        let busy = card.submitting || self.connection != Connection::Connected;
+        let busy = card.request.busy() || self.connection != Connection::Connected;
         let scripts = install.files.iter().filter(|file| file.script).count();
         let mut chips = h_flex().gap_2().flex_wrap().child(chip(
             format!(
@@ -394,12 +397,12 @@ impl ElseApp {
                 .text_color(theme.muted_foreground)
                 .child("You can skip the key and add it later in Settings → Skills."),
         );
-        if let Some(error) = &card.error {
+        if let Some(error) = card.request.error() {
             body = body.child(
                 div()
                     .text_xs()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(error.to_owned()),
             );
         }
         let label = match card.scope {

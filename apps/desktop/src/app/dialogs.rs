@@ -1,4 +1,5 @@
 use super::delete_dialog::DeleteTarget;
+use super::request::Request;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities};
 use crate::controls::{Control as _, Scale, Tier, text_field};
@@ -12,8 +13,8 @@ use uuid::Uuid;
 pub(super) struct Welcome {
     name: Entity<InputState>,
     picker: Entity<ProfilePicker>,
-    busy: bool,
-    error: Option<String>,
+    request: Request<()>,
+    _enter: Subscription,
 }
 
 impl ElseApp {
@@ -35,14 +36,11 @@ impl ElseApp {
         });
         let picker = self.profile_picker(caps, caps.defaults.as_ref(), cx);
         let picker = cx.new(|_| picker);
-        self._welcome_enter =
-            Some(
-                cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        app.submit_welcome(window, cx);
-                    }
-                }),
-            );
+        let enter = cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                app.submit_welcome(window, cx);
+            }
+        });
         // A background session must not pull focus from the shown one.
         if !self.hidden {
             name.read(cx).focus_handle(cx).focus(window, cx);
@@ -50,8 +48,8 @@ impl ElseApp {
         self.welcome = Some(Welcome {
             name,
             picker,
-            busy: false,
-            error: None,
+            request: Request::Idle,
+            _enter: enter,
         });
     }
 
@@ -59,22 +57,23 @@ impl ElseApp {
         let (client, Some(welcome)) = (self.client.clone(), self.welcome.as_mut()) else {
             return;
         };
-        if welcome.busy {
+        if welcome.request.busy() {
             return;
         }
         let name = welcome.name.read(cx).value().trim().to_owned();
         if name.is_empty() {
-            welcome.error = Some("Give your assistant a name.".into());
+            welcome.request.reject("Give your assistant a name.");
             cx.notify();
             return;
         }
         let Some(profile) = welcome.picker.read(cx).choice() else {
-            welcome.error = Some("Choose a model.".into());
+            welcome.request.reject("Choose a model.");
             cx.notify();
             return;
         };
-        welcome.busy = true;
-        welcome.error = None;
+        let Some(attempt) = welcome.request.begin(()) else {
+            return;
+        };
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.clone().onboard(name, profile).await;
@@ -83,23 +82,24 @@ impl ElseApp {
                 Err(_) => None,
             };
             let _ = this.update_in(cx, |app, window, cx| {
-                match result {
-                    Ok(main) => {
-                        app.welcome = None;
-                        app._welcome_enter = None;
-                        if let Some(caps) = caps {
-                            app.apply_caps(caps, window, cx);
-                        }
-                        app.refresh_now(window, cx);
-                        app.select(Some(main), window, cx);
-                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                let settled = app
+                    .welcome
+                    .as_mut()
+                    .is_some_and(|welcome| welcome.request.settle(attempt, &result));
+                let rejected = result
+                    .as_ref()
+                    .is_err_and(|err| app.unauthorized(err, window, cx));
+                if rejected || !settled {
+                    return;
+                }
+                if let Ok(main) = result {
+                    app.welcome = None;
+                    if let Some(caps) = caps {
+                        app.apply_caps(caps, window, cx);
                     }
-                    Err(err) => {
-                        if let Some(welcome) = app.welcome.as_mut() {
-                            welcome.busy = false;
-                            welcome.error = Some(err.to_string());
-                        }
-                    }
+                    app.refresh_now(window, cx);
+                    app.select(Some(main), window, cx);
+                    app.composer.read(cx).focus_handle(cx).focus(window, cx);
                 }
                 cx.notify();
             });
@@ -137,20 +137,25 @@ impl ElseApp {
                     .child(text_field(Input::new(&welcome.name), cx)),
             )
             .child(welcome.picker.clone());
-        if let Some(error) = &welcome.error {
+        if let Some(error) = welcome.request.error() {
             card = card.child(
                 div()
                     .text_sm()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(error.to_owned()),
             );
         }
         card = card.child(
             h_flex().justify_end().child(
                 Button::new("welcome-start")
-                    .control(Tier::Primary, Scale::Standard, welcome.busy || !ready, cx)
+                    .control(
+                        Tier::Primary,
+                        Scale::Standard,
+                        welcome.request.busy() || !ready,
+                        cx,
+                    )
                     .label("Get started")
-                    .loading(welcome.busy)
+                    .loading(welcome.request.busy())
                     .on_click(cx.listener(|app, _, window, cx| app.submit_welcome(window, cx))),
             ),
         );

@@ -207,7 +207,7 @@ impl CategoryFormHolder {
                     id,
                     format!("{label} {count}"),
                     self.filter == filter,
-                    self.busy,
+                    self.request.busy(),
                     cx,
                 )
                 .on_click(move |_, window, cx| {
@@ -229,7 +229,7 @@ impl CategoryFormHolder {
             let category = category_name(bot, &state.categories);
             let subtitle = if Some(id) == state.default_bot_id {
                 "Main assistant stays pinned".to_owned()
-            } else if state.moving.contains(&id) && !self.busy {
+            } else if state.moving.contains(&id) && !self.request.busy() {
                 "Moving…".to_owned()
             } else {
                 category

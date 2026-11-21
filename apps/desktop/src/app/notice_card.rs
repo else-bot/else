@@ -1,5 +1,4 @@
 use super::{Connection, ElseApp};
-use crate::api::ClientError;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
@@ -30,10 +29,7 @@ impl ElseApp {
                         }
                         app.sync_rows(window, cx);
                     }
-                    Err(ClientError::Unauthorized) => {
-                        app.connection =
-                            Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-                    }
+                    Err(err) if app.unauthorized(&err, window, cx) => {}
                     // The owner's message settled it first; the stream shows that.
                     Err(err) if err.code() == Some("owner_notice_settled") => {}
                     Err(err) => app.notice = Some(err.to_string()),
