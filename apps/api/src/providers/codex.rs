@@ -84,12 +84,8 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
                 std::env::var("CODEX_HOME").ok().as_deref(),
                 std::env::var("HOME").ok().as_deref(),
             );
-            ready(
-                Some(host),
-                super::executable(bin.as_deref(), "codex").await,
-                auth,
-            )
-            .await
+            let program = super::executable(&host, bin.as_deref(), "codex").await;
+            ready(Some(host), program, auth).await
         })
     });
     Box::pin(async move {

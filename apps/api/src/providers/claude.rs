@@ -91,9 +91,10 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
         Box::pin(async move {
             let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
             let home = std::env::var("HOME").ok();
+            let program = super::executable(&host, bin.as_deref(), "claude").await;
             ready(
                 Some(host),
-                super::executable(bin.as_deref(), "claude").await,
+                program,
                 claude_home::host_config(config_dir.as_deref(), home.as_deref()),
                 claude_home::host_account(config_dir.as_deref(), home.as_deref()),
             )

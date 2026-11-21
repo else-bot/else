@@ -59,6 +59,7 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
         let (host, bin) = (host.clone(), bin.clone());
         Box::pin(async move {
             let program = lookup(
+                &host,
                 bin.as_deref(),
                 std::env::var_os("HOME").map(PathBuf::from).as_deref(),
             )
@@ -82,14 +83,11 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
 /// `cursor-agent` on `PATH`. A link is kept, not resolved: an update points
 /// it at a new versioned directory and removes the old one.
 async fn lookup(
+    host: &Host,
     configured: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Option<super::Program>, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let runs = |file: &PathBuf| {
-        file.metadata()
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
+    let runs = |file: &PathBuf| super::is_executable(file);
     let path = std::env::var_os("PATH");
     let on_path = || {
         std::env::split_paths(path.as_deref()?)
@@ -106,7 +104,7 @@ async fn lookup(
     else {
         return Ok(None);
     };
-    super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN").await
+    super::executable_as(host, Some(&given), "cursor-agent", "ELSE_CURSOR_BIN").await
 }
 
 /// The models `cursor-agent models` prints after "Available models", one

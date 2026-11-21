@@ -15,12 +15,16 @@ fn live() -> bool {
 
 async fn codex_and_auth() -> (PathBuf, PathBuf) {
     let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
-    let codex = else_api::providers::executable::executable(configured.as_deref(), "codex")
-        .await
-        .expect("resolve Codex CLI")
-        .expect("Codex CLI on PATH or ELSE_CODEX_BIN")
-        .path()
-        .to_owned();
+    let codex = else_api::providers::executable::executable(
+        &Host::new(&std::env::temp_dir(), &std::env::temp_dir()),
+        configured.as_deref(),
+        "codex",
+    )
+    .await
+    .expect("resolve Codex CLI")
+    .expect("Codex CLI on PATH or ELSE_CODEX_BIN")
+    .path()
+    .to_owned();
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),

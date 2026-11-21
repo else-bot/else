@@ -12,12 +12,16 @@ use uuid::Uuid;
 
 async fn installed() -> PathBuf {
     let configured = std::env::var_os("ELSE_GROK_BIN").map(PathBuf::from);
-    else_api::providers::executable::executable(configured.as_deref(), "grok")
-        .await
-        .expect("resolve Grok CLI")
-        .expect("Grok CLI on PATH or ELSE_GROK_BIN")
-        .path()
-        .to_owned()
+    else_api::providers::executable::executable(
+        &Host::new(&std::env::temp_dir(), &std::env::temp_dir()),
+        configured.as_deref(),
+        "grok",
+    )
+    .await
+    .expect("resolve Grok CLI")
+    .expect("Grok CLI on PATH or ELSE_GROK_BIN")
+    .path()
+    .to_owned()
 }
 
 async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, String) {

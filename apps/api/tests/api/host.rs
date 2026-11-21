@@ -345,10 +345,14 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
 
 async fn codex_on_path() -> Option<PathBuf> {
     let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
-    else_api::providers::executable::executable(configured.as_deref(), "codex")
-        .await
-        .unwrap_or_else(|reason| panic!("Codex CLI resolution failed: {reason}"))
-        .map(|codex| codex.path().to_owned())
+    else_api::providers::executable::executable(
+        &Host::new(&std::env::temp_dir(), &std::env::temp_dir()),
+        configured.as_deref(),
+        "codex",
+    )
+    .await
+    .unwrap_or_else(|reason| panic!("Codex CLI resolution failed: {reason}"))
+    .map(|codex| codex.path().to_owned())
 }
 
 async fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
