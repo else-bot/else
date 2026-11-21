@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::transcript::CardKey;
 use crate::model::ItemKind;
 use crate::model::{Frame, Snapshot};
 use serde_json::{Value, json};
@@ -44,7 +45,7 @@ fn a_finished_handoff_turn_off_the_page_leaves_no_task_row() {
             "a {status} handoff turn without loaded items must not add a task row"
         );
         assert_eq!(c.open_handoff().map(|h| h.id), Some(id(300)));
-        assert!(crate::app::conversation::request_rows(&c).is_empty());
+        assert!(crate::app::transcript::request_rows(&c).is_empty());
     }
 }
 
@@ -957,7 +958,7 @@ type Rows = Vec<(RowKey, Option<Uuid>)>;
 
 fn placed(c: &Conversation) -> (HashMap<Uuid, TaskReply>, Rows) {
     let mut tasks = task_replies(c);
-    let rows = place_cards(c, &mut tasks, crate::app::conversation::turn_card_rows(c));
+    let rows = place_cards(c, &mut tasks, crate::app::transcript::turn_card_rows(c));
     (tasks, rows)
 }
 
@@ -983,8 +984,8 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
                 task.earlier(&c, &task.history, false),
                 [
                     Earlier::Reply(id(3)),
-                    Earlier::Card(RowKey::Question(id(210))),
-                    Earlier::Card(RowKey::Draft(id(310))),
+                    Earlier::Card(CardKey::Question(id(210))),
+                    Earlier::Card(CardKey::Draft(id(310))),
                 ],
                 "a working attempt's progress reply is folded itself, so it supersedes nothing"
             );
@@ -995,8 +996,8 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
             [
                 Earlier::Reply(id(2)),
                 Earlier::Reply(id(3)),
-                Earlier::Card(RowKey::Question(id(210))),
-                Earlier::Card(RowKey::Draft(id(310))),
+                Earlier::Card(CardKey::Question(id(210))),
+                Earlier::Card(CardKey::Draft(id(310))),
             ],
             "{status}: expanded progress keeps the cards after the reply they followed"
         );
@@ -1047,9 +1048,9 @@ fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
         task.earlier(&c, &task.history, true),
         [
             Earlier::Reply(id(2)),
-            Earlier::Card(RowKey::Question(id(210))),
+            Earlier::Card(CardKey::Question(id(210))),
             Earlier::Reply(id(3)),
-            Earlier::Card(RowKey::Draft(id(310))),
+            Earlier::Card(CardKey::Draft(id(310))),
         ],
         "each card follows the reply that asked for it"
     );
@@ -1124,7 +1125,7 @@ fn the_latest_attempts_reply_folds_what_came_before_it() {
         task.earlier(&working, &task.history, false),
         [
             Earlier::Reply(id(2)),
-            Earlier::Card(RowKey::Handoff(id(41)))
+            Earlier::Card(CardKey::Handoff(id(41)))
         ]
     );
 }
@@ -1160,8 +1161,8 @@ fn a_pending_card_keeps_its_row_below_the_reply_asking_for_it() {
     assert_eq!(
         rows,
         [
-            (RowKey::Question(id(210)), Some(id(3))),
-            (RowKey::Draft(id(310)), Some(id(3))),
+            (RowKey::Card(CardKey::Question(id(210))), Some(id(3))),
+            (RowKey::Card(CardKey::Draft(id(310))), Some(id(3))),
         ]
     );
 }
@@ -1184,7 +1185,7 @@ fn a_card_settled_after_a_single_attempts_last_reply_keeps_its_row() {
     let task = &tasks[&id(10)];
     assert!(task.cards.is_empty());
     assert!(task.earlier(&c, &task.history, true).is_empty());
-    assert_eq!(rows, [(RowKey::Draft(id(310)), Some(id(3)))]);
+    assert_eq!(rows, [(RowKey::Card(CardKey::Draft(id(310))), Some(id(3)))]);
 }
 
 #[test]
@@ -1298,7 +1299,7 @@ fn each_joined_message_keeps_the_answer_the_bot_gave_it() {
 }
 
 fn rows(c: &Conversation) -> Vec<RowKey> {
-    crate::app::conversation::transcript_rows(c, &task_replies(c), Vec::new())
+    crate::app::transcript::transcript_rows(c, &task_replies(c), Vec::new())
 }
 
 fn items_then_task(items: &[u128]) -> Vec<RowKey> {
@@ -1385,7 +1386,7 @@ fn an_answer_does_not_make_a_folded_update_look_like_an_attempts_end() {
 fn a_reply_reads_under_the_bots_name_unless_its_turns_reply_is_just_above() {
     let c = joined_reply("completed", 1, &[(2, 1), (4, 1)]);
     let item = |n| RowKey::Item(id(n));
-    let starts = |keys: &[RowKey]| crate::app::conversation::starts_runs(Some(&c), keys);
+    let starts = |keys: &[RowKey]| crate::app::transcript::starts_runs(Some(&c), keys);
     assert_eq!(starts(&[item(1), item(2), item(4)]), [true, true, false]);
     assert_eq!(
         starts(&[item(1), item(4)]),
@@ -1496,12 +1497,16 @@ fn a_card_after_a_folded_update_reads_after_the_reply_it_folds_under() {
     let (items, turns) = parked_then_joined("waiting", 2, &[]);
     let c = conversation(items, turns);
     let mut tasks = task_replies(&c);
-    let card = RowKey::Question(id(300));
-    let left = place_cards(&c, &mut tasks, vec![(id(20), card, Some(id(3)))]);
+    let card = RowKey::Card(CardKey::Question(id(300)));
+    let left = place_cards(
+        &c,
+        &mut tasks,
+        vec![(id(20), CardKey::Question(id(300)), Some(id(3)))],
+    );
     assert_eq!(left, [(card, Some(id(5)))]);
     assert!(tasks[&id(20)].cards.is_empty());
     assert_eq!(
-        crate::app::conversation::transcript_rows(&c, &tasks, left),
+        crate::app::transcript::transcript_rows(&c, &tasks, left),
         [
             RowKey::Item(id(1)),
             RowKey::Item(id(5)),

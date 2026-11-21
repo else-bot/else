@@ -1,4 +1,5 @@
 use crate::app::RowKey;
+use crate::app::transcript::CardKey;
 use crate::model::{Conversation, ItemKind, TurnStatus};
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
@@ -367,7 +368,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) struct TaskCard {
     pub after: Uuid,
-    pub key: RowKey,
+    pub key: CardKey,
     /// The attempt that raised it: a delegation's own, or else the attempt
     /// of the reply it follows (attempt 1 before any reply).
     pub attempt: i64,
@@ -377,7 +378,7 @@ pub(in crate::app) struct TaskCard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum Earlier {
     Reply(Uuid),
-    Card(RowKey),
+    Card(CardKey),
 }
 
 /// Moves each card of a task's turn that follows an item before the task's
@@ -389,7 +390,7 @@ pub(in crate::app) enum Earlier {
 pub(in crate::app) fn place_cards(
     conversation: &Conversation,
     tasks: &mut HashMap<Uuid, TaskReply>,
-    cards: Vec<(Uuid, RowKey, Option<Uuid>)>,
+    cards: Vec<(Uuid, CardKey, Option<Uuid>)>,
 ) -> Vec<(RowKey, Option<Uuid>)> {
     let seq = |id| conversation.item(id).map(|item| item.seq);
     let turn_of = |id| conversation.item(id).map(|item| item.turn_id);
@@ -397,7 +398,7 @@ pub(in crate::app) fn place_cards(
         .into_iter()
         .filter_map(|(turn, key, anchor)| {
             let Some((task, after)) = tasks.get_mut(&turn).zip(anchor) else {
-                return Some((key, anchor));
+                return Some((RowKey::Card(key), anchor));
             };
             let before_row = task
                 .anchor
@@ -416,10 +417,10 @@ pub(in crate::app) fn place_cards(
                 let folded_under = (task.folds.iter())
                     .find(|(_, folded)| folded.contains(&after))
                     .map(|(&reply, _)| reply);
-                return Some((key, folded_under.or(anchor)));
+                return Some((RowKey::Card(key), folded_under.or(anchor)));
             }
             let attempt = match key {
-                RowKey::Handoff(id) => conversation
+                CardKey::Handoff(id) => conversation
                     .turn(turn)
                     .and_then(|t| t.delegations.iter().find(|d| d.id == id))
                     .map(|d| d.attempt),

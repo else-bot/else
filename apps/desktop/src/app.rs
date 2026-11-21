@@ -4,6 +4,7 @@ mod bot_activity;
 mod bot_mention;
 mod bot_menu;
 mod card_markdown;
+mod cards;
 mod categories;
 mod clip;
 mod computer;
@@ -36,6 +37,7 @@ mod settings;
 mod skill_card;
 mod social_card;
 mod task_reply;
+mod transcript;
 mod usage;
 mod view;
 mod visuals;
@@ -44,13 +46,14 @@ mod warm;
 
 use crate::model::Phase;
 use categories::CategoryFormHolder;
-use conversation::{ConversationView, RowKey};
+use conversation::ConversationView;
 use create_bot::CreateFormHolder;
 use dialogs::Welcome;
 pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};
+use transcript::RowKey;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -582,8 +585,9 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                self.sync_secret_forms(window, cx);
-                self.sync_social_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
+                self.sync_social_cards(window, cx);
                 self.warm.for_each(|view| view.stream_problem = None);
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = None;
@@ -601,14 +605,16 @@ impl ElseApp {
                 }
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             LiveEvent::Unauthorized => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             LiveEvent::ServerPause(pause) => self.set_server_pause(pause, window, cx),
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
@@ -637,7 +643,8 @@ impl ElseApp {
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
                 self.clear_social_forms(window, cx);
-                self.sync_secret_forms(window, cx);
+                self.sync_skill_cards(window, cx);
+                self.sync_secret_cards(window, cx);
             }
             Err(_) => {}
         }

@@ -1,4 +1,5 @@
 use crate::app::clip;
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,6 +12,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
@@ -38,17 +40,20 @@ impl ElseApp {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let open: Vec<(Uuid, bool)> = view
+        let open: HashMap<Uuid, bool> = view
             .conversation
             .iter()
             .flat_map(|c| c.questions())
             .filter(|q| takes_write_in(q))
             .map(|q| (q.id, q.choices.is_empty()))
             .collect();
-        view.write_ins
-            .retain(|id, _| open.iter().any(|(open, _)| open == id));
+        for (id, card) in &mut view.cards.questions {
+            if !open.contains_key(id) {
+                card.write_in = None;
+            }
+        }
         for (id, reply) in open {
-            view.write_ins.entry(id).or_insert_with(|| {
+            view.cards.question_mut(id).write_in.get_or_insert_with(|| {
                 let input = cx.new(|cx| {
                     InputState::new(window, cx).placeholder(if reply {
                         "Write your answer"
@@ -61,7 +66,9 @@ impl ElseApp {
                     window,
                     move |app, _, event: &InputEvent, window, cx| match event {
                         InputEvent::PressEnter { .. } => app.send_write_in(id, window, cx),
-                        InputEvent::Change => app.remeasure_row(RowKey::Question(id), cx),
+                        InputEvent::Change => {
+                            app.remeasure_row(RowKey::Card(CardKey::Question(id)), cx)
+                        }
                         _ => {}
                     },
                 );
@@ -79,11 +86,14 @@ impl ElseApp {
             .as_ref()
             .and_then(|c| c.question(id))
             .is_some_and(takes_write_in)
-            && !view
-                .question_submits
-                .get(&id)
-                .is_some_and(QuestionForm::locks);
-        let Some(input) = view.write_ins.get(&id).map(|w| w.input.clone()) else {
+            && !view.cards.submit(id).is_some_and(QuestionForm::locks);
+        let Some(input) = view
+            .cards
+            .questions
+            .get(&id)
+            .and_then(|card| card.write_in.as_ref())
+            .map(|w| w.input.clone())
+        else {
             return;
         };
         let text = input.read(cx).value().trim().to_owned();
@@ -113,17 +123,15 @@ impl ElseApp {
             || !question.multiple
             || self.connection != Connection::Connected
             || !question.choices.iter().any(|c| c.id == choice)
-            || view
-                .question_submits
-                .get(&id)
-                .is_some_and(QuestionForm::locks)
+            || view.cards.submit(id).is_some_and(QuestionForm::locks)
         {
             return;
         }
         let form = view
-            .question_submits
-            .entry(id)
-            .or_insert_with(|| QuestionForm {
+            .cards
+            .question_mut(id)
+            .submit
+            .get_or_insert_with(|| QuestionForm {
                 answer: QuestionAnswer::Multiple(Vec::new()),
                 state: SubmitState::Choosing,
             });
@@ -136,7 +144,7 @@ impl ElseApp {
             selected.push(choice.to_owned());
         }
         form.state = SubmitState::Choosing;
-        self.remeasure_row(RowKey::Question(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
     pub(super) fn render_choice_card(
@@ -159,7 +167,11 @@ impl ElseApp {
                 .as_ref()
                 .and_then(|c| c.skipping_reply(question))
                 .map(|item| item.text.as_str());
-            let expanded = view.expanded_questions.contains(&id);
+            let expanded = view
+                .cards
+                .questions
+                .get(&id)
+                .is_some_and(|card| card.expanded);
             let settled = settled(question, form, reply);
             let color = if settled.resumed {
                 theme.success
@@ -349,7 +361,13 @@ impl ElseApp {
                 ));
             }
         }
-        if let Some(write_in) = view.write_ins.get(&id).filter(|_| takes_write_in(question)) {
+        if let Some(write_in) = view
+            .cards
+            .questions
+            .get(&id)
+            .and_then(|card| card.write_in.as_ref())
+            .filter(|_| takes_write_in(question))
+        {
             let index = question.choices.len();
             let row = self.render_write_in(id, question, write_in, locked, window, cx);
             rows = rows.child(separated(index, row.into_any_element()));
