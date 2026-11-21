@@ -28,7 +28,7 @@ use sqlx::SqlitePool;
 
 use super::chunks::{self, CHUNKS, ChunkKeys, ChunkRef, Encoding, INDEX, Index};
 use super::s3::{Put, S3, S3Error};
-use super::{BackupError, COMPLETE, Completion, MANIFEST};
+use super::{BackupError, COMPLETE, Completion, MANIFEST, runs};
 use crate::credentials::SecretKey;
 
 const PARALLEL: usize = 4;
@@ -58,6 +58,23 @@ pub struct Stats {
     pub swept: usize,
     pub completed: Vec<String>,
     pub removed: Vec<String>,
+}
+
+/// `backup_remote.state`: a set's replication to one destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum RemoteState {
+    Completed,
+    Failed,
+    /// Removed from the bucket by retention.
+    Retired,
+}
+
+/// How replicating one set ended.
+enum Recorded<'a> {
+    Completed { whole: bool, uploaded: u64 },
+    Failed(&'a BackupError),
 }
 
 /// A test hook run after the uploads and before final verification.
@@ -104,16 +121,28 @@ impl Replicator {
         self.s3.key(&format!("{}{id}", keys.root()))
     }
 
-    async fn record(
-        &self,
-        set_id: &str,
-        state: &str,
-        error: Option<&str>,
-        whole_assistant: bool,
-        uploaded_bytes: Option<u64>,
-    ) -> Result<(), BackupError> {
-        let error: Option<String> = error.map(|e| e.chars().take(500).collect());
-        sqlx::query(
+    /// Record how replicating `set_id` ended, here and on its local run,
+    /// in one transaction. A retired set stays retired, since its remote
+    /// objects are gone: false when the record was refused for that.
+    async fn record(&self, set_id: &str, recorded: Recorded<'_>) -> Result<bool, BackupError> {
+        let (state, outcome, error, whole_assistant, uploaded_bytes) = match recorded {
+            Recorded::Completed { whole, uploaded } => (
+                RemoteState::Completed,
+                runs::RemoteOutcome::Completed,
+                None,
+                whole,
+                Some(i64::try_from(uploaded).unwrap_or(i64::MAX)),
+            ),
+            Recorded::Failed(err) => (
+                RemoteState::Failed,
+                runs::RemoteOutcome::Failed,
+                Some(err.to_string().chars().take(500).collect::<String>()),
+                false,
+                None,
+            ),
+        };
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let moved = sqlx::query(
             "INSERT INTO backup_remote (destination, set_id, state, error, whole_assistant,
                  uploaded_bytes, updated_at, verified_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), CASE WHEN ?3 = 'completed' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END)
@@ -121,22 +150,26 @@ impl Replicator {
                  whole_assistant = ?5, uploaded_bytes = COALESCE(?6, backup_remote.uploaded_bytes),
                  updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  verified_at = CASE WHEN ?3 = 'completed' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                                    ELSE backup_remote.verified_at END",
+                                    ELSE backup_remote.verified_at END
+             WHERE backup_remote.state <> ?7",
         )
         .bind(self.s3.destination())
         .bind(set_id)
         .bind(state)
         .bind(&error)
         .bind(whole_assistant)
-        .bind(uploaded_bytes.map(|b| b as i64))
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("UPDATE backup_runs SET remote_status = ?2 WHERE set_id = ?1")
-            .bind(set_id)
-            .bind(state)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        .bind(uploaded_bytes)
+        .bind(RemoteState::Retired)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if moved == 0 {
+            tracing::warn!(set = %set_id, "a retired remote set was not recorded again");
+            return Ok(false);
+        }
+        runs::remote(&mut tx, set_id, outcome).await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn verified(&self) -> Result<Vec<(String, bool)>, BackupError> {
@@ -201,8 +234,7 @@ impl Replicator {
         .await;
         if let Err(err) = prepared {
             for set_id in &awaiting {
-                self.record(set_id, "failed", Some(&err.to_string()), false, None)
-                    .await?;
+                self.record(set_id, Recorded::Failed(&err)).await?;
             }
             return Err(err);
         }
@@ -212,14 +244,16 @@ impl Replicator {
             match self.replicate_set(&dir.join(&set_id), key, &mut run).await {
                 Ok(whole) => {
                     let uploaded = run.stats.uploaded_bytes - before;
-                    self.record(&set_id, "completed", None, whole, Some(uploaded))
-                        .await?;
-                    run.stats.completed.push(set_id);
+                    if self
+                        .record(&set_id, Recorded::Completed { whole, uploaded })
+                        .await?
+                    {
+                        run.stats.completed.push(set_id);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(set = %set_id, error = %err, "replication failed");
-                    self.record(&set_id, "failed", Some(&err.to_string()), false, None)
-                        .await?;
+                    self.record(&set_id, Recorded::Failed(&err)).await?;
                     first_error.get_or_insert(err);
                 }
             }
@@ -265,9 +299,7 @@ impl Replicator {
             Err(err) => return Err(err.into()),
         };
         let (keys, id) = (keys.clone(), id.to_owned());
-        tokio::task::spawn_blocking(move || keys.open(&id, &sealed).ok())
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))
+        super::blocking(move || Ok(keys.open(&id, &sealed).ok())).await
     }
 
     /// Of `ids`, the chunks that are missing or fail to verify.
@@ -484,11 +516,8 @@ impl Replicator {
             .map(|id| {
                 let store = store.clone();
                 async move {
-                    let read = {
-                        let id = id.clone();
-                        tokio::task::spawn_blocking(move || store.sealed(&id))
-                    };
-                    let sealed = read.await.map_err(|e| BackupError::Io(e.to_string()))??;
+                    let id_to_read = id.clone();
+                    let sealed = super::blocking(move || store.sealed(&id_to_read)).await?;
                     let bytes = sealed.len() as u64;
                     self.s3
                         .put(&self.chunk_key(keys, &id), sealed, true)
@@ -586,11 +615,13 @@ impl Replicator {
             }
             if old {
                 sqlx::query(
-                    "UPDATE backup_remote SET state = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                     WHERE destination = ?1 AND set_id = ?2",
+                    "UPDATE backup_remote SET state = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                     WHERE destination = ?1 AND set_id = ?2 AND state = ?4",
                 )
                 .bind(self.s3.destination())
                 .bind(id)
+                .bind(RemoteState::Retired)
+                .bind(RemoteState::Completed)
                 .execute(&self.pool)
                 .await?;
             }
@@ -813,7 +844,7 @@ async fn download_chunked(
         let rebuild = {
             let (target, identity, stored) =
                 (dir.join(&artifact.object), identity.clone(), stored.clone());
-            tokio::task::spawn_blocking(move || {
+            super::blocking(move || {
                 let chunks = std::iter::from_fn(|| rx.blocking_recv());
                 chunks::rebuild(&target, &identity, &stored, chunks, max_bytes)
             })
@@ -842,7 +873,7 @@ async fn download_chunked(
         if let Some(err) = failed {
             return Err(err);
         }
-        let sealed = sealed.map_err(|e| BackupError::Io(e.to_string()))??;
+        let sealed = sealed?;
         artifacts.push(chunks::rebuilt(artifact, stored, sealed)?);
     }
     chunks::publish_rebuilt(dir, index.manifest, artifacts, completion, &identity)
@@ -860,9 +891,7 @@ async fn fetch_for_restore(
         )
         .await?;
     let (keys, id) = (keys.clone(), chunk.id.clone());
-    let plain = tokio::task::spawn_blocking(move || keys.open(&id, &sealed))
-        .await
-        .map_err(|e| BackupError::Io(e.to_string()))??;
+    let plain = super::blocking(move || keys.open(&id, &sealed)).await?;
     if plain.len() != chunk.bytes as usize {
         return Err(BackupError::Invalid(format!(
             "chunk {} has the wrong length",
@@ -930,4 +959,87 @@ async fn fetch(s3: &S3, key: &str, bytes: u64, path: &Path) -> Result<(), Backup
     .await?;
     file.sync_all()
         .map_err(|e| BackupError::io(path.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn replicator() -> Replicator {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool).await.unwrap();
+        let s3 = S3::new(super::super::s3::S3Config {
+            endpoint: "http://127.0.0.1:9".into(),
+            region: "auto".into(),
+            bucket: "bucket".into(),
+            prefix: String::new(),
+            access_key_id: "id".into(),
+            secret_access_key: String::from("secret").into(),
+            path_style: true,
+        })
+        .unwrap();
+        Replicator::new(s3, pool, 1)
+    }
+
+    async fn states(r: &Replicator, set: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT r.state, b.remote_status FROM backup_remote r
+             JOIN backup_runs b ON b.set_id = r.set_id WHERE r.set_id = ?1",
+        )
+        .bind(set)
+        .fetch_one(&r.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_recorded_outcome_moves_both_rows_until_the_set_is_retired() {
+        let r = replicator().await;
+        let set = "20261121T000000000Z-0a1b2c3d";
+        runs::start(&r.pool, set).await.unwrap();
+        let failure = BackupError::Remote("down".into());
+        r.record(set, Recorded::Failed(&failure)).await.unwrap();
+        assert_eq!(
+            states(&r, set).await,
+            ("failed".into(), Some("failed".into()))
+        );
+        r.record(
+            set,
+            Recorded::Completed {
+                whole: true,
+                uploaded: 3,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            states(&r, set).await,
+            ("completed".into(), Some("completed".into()))
+        );
+        sqlx::query("UPDATE backup_remote SET state = 'retired' WHERE set_id = ?1")
+            .bind(set)
+            .execute(&r.pool)
+            .await
+            .unwrap();
+        assert!(
+            !r.record(
+                set,
+                Recorded::Completed {
+                    whole: true,
+                    uploaded: 1
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            states(&r, set).await,
+            ("retired".into(), Some("completed".into())),
+            "a retired set is never recorded again, and its run keeps its outcome"
+        );
+    }
 }

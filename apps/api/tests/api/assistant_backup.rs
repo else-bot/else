@@ -13,7 +13,9 @@ use common::{TestApp, TestDb};
 use else_api::backup::capture::{BackupConfig, Coordinator};
 use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, DatabaseParams};
+use else_api::backup::{
+    self, ArtifactKind, BackupError, Covered, DatabaseParams, ProjectState, ProviderState, VmState,
+};
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, Mount, RuntimeError,
     RuntimeState, Spec,
@@ -268,7 +270,6 @@ async fn setup_image(projects: bool, image: &str) -> Setup {
 fn worker(s: &Setup, drain: Duration) -> BackupWorker {
     BackupWorker::new(
         s.app.db.pool.clone(),
-        DatabaseParams::parse(s.app.db.url.expose()).unwrap(),
         Arc::new(key()),
         BackupConfig {
             dir: s.dir.path().join("backups"),
@@ -359,10 +360,10 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
     let manifest = &summary.manifest;
     assert!(manifest.coverage.whole_assistant, "{:?}", manifest.coverage);
-    assert_eq!(manifest.coverage.vm, "included");
+    assert_eq!(manifest.coverage.vm, Covered::Included);
     let entry = |id: Uuid| manifest.bots.iter().find(|b| b.id == id).unwrap().clone();
     let (ea, eb) = (entry(a_id), entry(b_id));
-    assert_eq!((ea.vm.as_str(), eb.vm.as_str()), ("included", "included"));
+    assert_eq!((ea.vm, eb.vm), (VmState::Included, VmState::Included));
     let (ca, cb) = (ea.computer.unwrap(), eb.computer.unwrap());
     assert!(ca.was_running && !cb.was_running);
     assert_eq!(
@@ -375,13 +376,13 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         !ea.provider_sessions.is_empty(),
         "sessions recorded, not included"
     );
-    assert_eq!(ea.provider_state, "omitted-reauth-required");
+    assert_eq!(ea.provider_state, ProviderState::OmittedReauthRequired);
     let main = manifest
         .bots
         .iter()
         .find(|b| b.name != "Alpha" && b.name != "Beta")
         .unwrap();
-    assert_eq!(main.vm, "none");
+    assert_eq!(main.vm, VmState::None);
     assert_eq!(
         manifest.artifacts.len(),
         4,
@@ -391,7 +392,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let vms: Vec<bool> = manifest
         .artifacts
         .iter()
-        .filter(|x| x.kind == "vm")
+        .filter(|x| x.kind == ArtifactKind::Vm)
         .map(|x| {
             let bot = x.bot_id.unwrap();
             entry(bot).computer.unwrap().carries_image
@@ -957,20 +958,24 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
     let manifest = &summary.manifest;
     assert!(manifest.coverage.whole_assistant, "{:?}", manifest.coverage);
-    assert_eq!(manifest.coverage.projects, "included");
+    assert_eq!(manifest.coverage.projects, Covered::Included);
     let entry = |id: Uuid| manifest.bots.iter().find(|e| e.id == id).unwrap().clone();
     let (ea, eb) = (entry(a_id), entry(b_id));
     assert_eq!(
-        (ea.project.as_str(), eb.project.as_str()),
-        ("included", "included")
+        (ea.project, eb.project),
+        (ProjectState::Included, ProjectState::Included)
     );
-    assert_eq!((ea.vm.as_str(), eb.vm.as_str()), ("included", "none"));
+    assert_eq!((ea.vm, eb.vm), (VmState::Included, VmState::None));
     let main = manifest
         .bots
         .iter()
         .find(|e| e.name != "Alpha" && e.name != "Beta")
         .unwrap();
-    assert_eq!(main.project, "none", "no directory, nothing to include");
+    assert_eq!(
+        main.project,
+        ProjectState::None,
+        "no directory, nothing to include"
+    );
     let mount = ea.computer.as_ref().unwrap().project_mount.clone().unwrap();
     assert_eq!(
         (mount.guest.as_str(), mount.uid),
@@ -983,7 +988,7 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
             manifest
                 .artifacts
                 .iter()
-                .any(|x| x.object == object && x.kind == "project")
+                .any(|x| x.object == object && x.kind == ArtifactKind::Project)
         );
     }
     for bytes in stored_chunks(&summary.path) {
@@ -1053,11 +1058,11 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let partial = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
         let manifest = &partial.manifest;
-        assert_eq!(manifest.coverage.projects, "partial");
+        assert_eq!(manifest.coverage.projects, Covered::Partial);
         assert!(!manifest.coverage.whole_assistant);
         assert_eq!(
             manifest.bots.iter().find(|e| e.id == b_id).unwrap().project,
-            "partial"
+            ProjectState::Partial
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -1087,13 +1092,13 @@ async fn shared_mcp_packages_survive_backup_restore_and_removal() {
     std::fs::create_dir(library.join(".pending-install")).unwrap();
     std::fs::write(library.join(".pending-install/README.md"), "unfinished").unwrap();
     let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
-    assert_eq!(summary.manifest.coverage.mcp, "included");
+    assert_eq!(summary.manifest.coverage.mcp, Covered::Included);
     assert!(summary.manifest.coverage.whole_assistant);
     let artifact = summary
         .manifest
         .artifacts
         .iter()
-        .find(|a| a.kind == "mcp")
+        .find(|a| a.kind == ArtifactKind::Mcp)
         .unwrap();
     assert!(
         artifact.bot_id.is_none(),
@@ -1204,7 +1209,7 @@ async fn backups_from_before_shared_mcp_support_still_restore() {
     })
     .await
     .unwrap();
-    assert_eq!(report.manifest.coverage.mcp, "omitted");
+    assert_eq!(report.manifest.coverage.mcp, Covered::Omitted);
 }
 
 /// Rewrite a set's manifest (and its completion record) with `edit`.

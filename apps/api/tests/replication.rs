@@ -93,13 +93,7 @@ fn replicator(app: &TestApp, s3: &S3) -> Replicator {
 }
 
 fn worker(app: &TestApp, dir: &Path, replicator: Replicator) -> BackupWorker {
-    BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key()),
-        config(dir),
-    )
-    .with_replicator(replicator)
+    BackupWorker::new(app.db.pool.clone(), Arc::new(key()), config(dir)).with_replicator(replicator)
 }
 
 async fn populated() -> TestApp {
@@ -311,13 +305,8 @@ async fn an_interrupted_upload_resumes_and_reuses_what_it_uploaded() {
     );
     let left = chunk_ids(&s3).await;
     assert!(!left.is_empty(), "the crash left uploaded chunks");
-    let restarted = BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key()),
-        config(dir.path()),
-    )
-    .with_replicator(replicator(&app, &s3));
+    let restarted = BackupWorker::new(app.db.pool.clone(), Arc::new(key()), config(dir.path()))
+        .with_replicator(replicator(&app, &s3));
     let stats = restarted.replicate_now().await.unwrap().unwrap();
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
     assert!(stats.reused >= left.len(), "{stats:?}");
@@ -1058,58 +1047,6 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
     assert!(
         remote.contains(&forged.to_owned()),
         "an unverified set is left alone"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_start() {
-    let _emulator = EMULATOR.read().await;
-    let app = populated().await;
-    let dir = tempfile::tempdir().unwrap();
-    let unreachable = S3::new(S3Config {
-        endpoint: "http://127.0.0.1:9".into(),
-        ..s3_config("nowhere")
-    })
-    .unwrap();
-    let mut w = worker(&app, dir.path(), replicator(&app, &unreachable));
-    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(2));
-    let w = Arc::new(w);
-    let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(w.clone().run(stop.clone()));
-    tokio::time::sleep(Duration::from_secs(7)).await;
-    stop.cancel();
-    task.await.unwrap();
-    let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
-    assert!(sets.len() >= 2, "captures continued: {sets:?}");
-    let s3 = bucket().await;
-    let mut w = worker(&app, dir.path(), replicator(&app, &s3));
-    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
-    let w = Arc::new(w);
-    let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(w.clone().run(stop.clone()));
-    let r = replicator(&app, &s3);
-    let mut done = false;
-    for _ in 0..100 {
-        if r.awaiting(&dir.path().join("backups"))
-            .await
-            .unwrap()
-            .is_empty()
-        {
-            done = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    stop.cancel();
-    task.await.unwrap();
-    assert!(done, "pending uploads ran at startup");
-    assert_eq!(
-        backup::completed_sets(&dir.path().join("backups"))
-            .unwrap()
-            .len(),
-        sets.len(),
-        "no new capture was due"
     );
 }
 

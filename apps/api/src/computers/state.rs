@@ -250,10 +250,11 @@ pub(super) async fn switch(
 
 /// After a restore: the computers whose disks it brought back (`disks`) are
 /// stopped, whatever the restored database recorded, and every other
-/// created computer is missing. Restore runs offline, before any manager
-/// uses the database. Returns how many of `disks` had a computer row; the
-/// caller refuses a restore where one did not.
-pub async fn restored(conn: &mut SqliteConnection, disks: &[Uuid]) -> Result<u64, sqlx::Error> {
+/// created computer is missing. Returns how many of `disks` had a row.
+pub(super) async fn restored(
+    conn: &mut SqliteConnection,
+    disks: &[Uuid],
+) -> Result<u64, sqlx::Error> {
     let restored = in_ids("bot_id", "?1");
     let stopped = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE bot_computers SET observed_state = ?2,

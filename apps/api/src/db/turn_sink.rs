@@ -19,6 +19,19 @@ mod steers;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 pub const FLUSH_BYTES: usize = 2048;
 
+/// On a restored database: retire every active provider session, since the
+/// native sessions are not in the backup and providers may need a fresh
+/// login.
+pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE status = 'active'",
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 struct OwnerTranscript {
     conversation_id: Uuid,
     last_seq: i64,

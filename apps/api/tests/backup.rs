@@ -9,7 +9,7 @@ use common::TestApp;
 use else_api::backup::capture::BackupConfig;
 use else_api::backup::restore::{RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, DatabaseParams};
+use else_api::backup::{self, BackupError, Covered, DatabaseParams, VmState};
 use else_api::credentials::SecretKey;
 use serde_json::json;
 use sqlx::Connection;
@@ -50,12 +50,7 @@ fn config(dir: &Path) -> BackupConfig {
 }
 
 fn worker(app: &TestApp, key: SecretKey, config: BackupConfig) -> BackupWorker {
-    BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key),
-        config,
-    )
+    BackupWorker::new(app.db.pool.clone(), Arc::new(key), config)
 }
 
 struct Target {
@@ -157,12 +152,12 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         !manifest.coverage.whole_assistant,
         "a database-only set says so"
     );
-    assert_eq!(manifest.coverage.vm, "omitted");
+    assert_eq!(manifest.coverage.vm, Covered::Omitted);
     assert!(
         manifest
             .bots
             .iter()
-            .all(|b| b.vm == "none" && b.computer.is_none())
+            .all(|b| b.vm == VmState::None && b.computer.is_none())
     );
     assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
     assert!(manifest.application.migration_version >= 1);
@@ -466,7 +461,6 @@ async fn a_set_id_collision_keeps_the_existing_set() {
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
-    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
     let coordinator = else_api::backup::capture::Coordinator::default();
     let set_id = backup::new_set_id();
@@ -474,7 +468,6 @@ async fn a_set_id_collision_keeps_the_existing_set() {
     let create = || {
         else_api::backup::capture::create_set(
             &app.db.pool,
-            &params,
             &key,
             &cfg,
             &set_id,
@@ -577,34 +570,104 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
         .count();
     assert_eq!(refused, 1, "{a:?} {b:?}");
     let empty = tempfile::tempdir().unwrap();
-    let mut cfg = config(empty.path());
-    cfg.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
-    let scheduled = Arc::new(BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key(1)),
-        cfg,
-    ));
+    let mut app_config = TestApp::config(&app.db);
+    app_config.backup = config(empty.path());
     let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(scheduled.clone().run(stop.clone()));
-    for _ in 0..200 {
-        if !backup::completed_sets(&empty.path().join("backups"))
-            .unwrap()
+    let (_service, task) = else_api::backup::service::Backups::start(
+        &app_config,
+        app.db.pool.clone(),
+        Arc::new(key(1)),
+        Default::default(),
+        stop.clone(),
+    )
+    .await
+    .unwrap();
+    let scheduled = empty.path().join("backups");
+    tokio::time::timeout(common::SETTLE, async {
+        while backup::completed_sets(&scheduled)
+            .unwrap_or_default()
             .is_empty()
         {
-            break;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        backup::completed_sets(&empty.path().join("backups"))
-            .unwrap()
-            .len(),
-        1
+        backup::completed_sets(&scheduled).unwrap().len(),
+        1,
+        "a missed set runs once at startup, then waits for its interval"
     );
     stop.cancel();
     task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_ends_every_lease_claim_and_native_session() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, id FROM conversations ORDER BY created_at LIMIT 1")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    for sql in [
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, observed_state)
+         VALUES (?1, 'restore-leases', 'image', 1, 512, 'running')",
+        "INSERT INTO computer_leases (id, bot_id, holder, generation, expires_at)
+         VALUES (randomblob(16), ?1, 'test:held', 0, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+        "INSERT OR IGNORE INTO memory_store (bot_id) VALUES (?1)",
+        "INSERT OR IGNORE INTO memory_generation (bot_id, generation, recipe) VALUES (?1, 1, '{}')",
+        "INSERT INTO memory_job (bot_id, generation, start_seq, span, lease_token, lease_until)
+         VALUES (?1, 1, 1024, 1, randomblob(16), strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+        "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id, native_session_id, fingerprint)
+         VALUES (randomblob(16), ?1, ?2, 'synthetic', 'native', 'fingerprint')",
+    ] {
+        sqlx::query(sql)
+            .bind(bot)
+            .bind(conversation)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target = Target::new(&app);
+    restore_into(&app, &summary.path, &key(1), &target, &dir.path().join("s"))
+        .await
+        .unwrap();
+    for (sql, expected) in [
+        (
+            "SELECT holder || ':' || end_reason FROM computer_leases WHERE released_at IS NOT NULL",
+            vec![r#"["test:held:restored"]"#],
+        ),
+        (
+            "SELECT holder FROM computer_leases WHERE released_at IS NULL",
+            vec![],
+        ),
+        (
+            "SELECT start_seq FROM memory_job WHERE lease_token IS NOT NULL",
+            vec![],
+        ),
+        (
+            "SELECT start_seq FROM memory_job WHERE start_seq = 1024",
+            vec!["[1024]"],
+        ),
+        (
+            "SELECT status FROM provider_sessions WHERE native_session_id = 'native'",
+            vec![r#"["retired"]"#],
+        ),
+        (
+            "SELECT observed_state FROM bot_computers",
+            vec![r#"["missing"]"#],
+        ),
+    ] {
+        assert_eq!(rows(&target.url(), sql).await, expected, "{sql}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1164,14 +1227,12 @@ async fn whole_sets_move_into_the_chunk_store_and_a_damaged_one_stays_whole() {
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
-    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
     let coordinator = else_api::backup::capture::Coordinator::default();
     let mut whole = Vec::new();
     for _ in 0..2 {
         let set = else_api::backup::capture::create_set(
             &app.db.pool,
-            &params,
             &key(1),
             &cfg,
             &backup::new_set_id(),

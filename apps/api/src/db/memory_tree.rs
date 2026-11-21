@@ -282,6 +282,18 @@ pub async fn defer(
     defer_counting(pool, job, reason, error, retry_in, false).await
 }
 
+/// On a restored database: release every leased job, since no worker that
+/// held a token survives a restore. Each job is queued again as it was.
+pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE memory_job SET lease_token = NULL, lease_until = NULL
+         WHERE lease_token IS NOT NULL",
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Release a job; `failure` counts a provider failure toward its backoff.
 pub async fn defer_counting(
     pool: &SqlitePool,

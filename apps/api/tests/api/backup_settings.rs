@@ -550,7 +550,6 @@ async fn restart_uploads_pending_sets_without_waiting_for_the_next_remote_interv
     let s3 = else_api::backup::s3::S3::new(settings.destination.unwrap().s3_config()).unwrap();
     let worker = else_api::backup::worker::BackupWorker::new(
         h.app.db.pool.clone(),
-        else_api::backup::DatabaseParams::parse(h.app.db.url.expose()).unwrap(),
         Arc::new(SecretKey::parse(KEY).unwrap()),
         h.config.backup.clone(),
     )
