@@ -93,8 +93,30 @@ pub async fn claim_connected(
     draft_id: Uuid,
     channels: Channels,
 ) -> Result<Claim, DraftError> {
+    let mut hash_any = false;
+    loop {
+        match try_claim(pool, turn_id, draft_id, channels, hash_any).await? {
+            Some(claim) => return Ok(claim),
+            // The draft became claimable after a read that skipped its files.
+            None => hash_any = true,
+        }
+    }
+}
+
+/// One claim of [`claim_connected`], or `None` when the draft became
+/// claimable after the read that skipped hashing it. With `hash_any`, the
+/// read hashes every draft and never returns `None`.
+async fn try_claim(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    draft_id: Uuid,
+    channels: Channels,
+    hash_any: bool,
+) -> Result<Option<Claim>, DraftError> {
     // Read and hash the files outside the write lock: a message may carry
-    // up to 100 MiB. The claim sends exactly the bytes checked here.
+    // up to 100 MiB. Only a draft this call may claim or resume is hashed,
+    // so a repeat on a settled draft returns its receipt without reading
+    // them. The claim sends exactly the bytes checked here.
     let (files, checked, observed) = {
         let mut conn = pool.acquire().await?;
         let snapshot: OutgoingDraft =
@@ -103,7 +125,15 @@ pub async fn claim_connected(
                 .fetch_optional(&mut *conn)
                 .await?
                 .ok_or(DraftError::NotFound)?;
-        let checked = send::approved(&mut conn, &snapshot).await;
+        let caller = caller(&mut conn, turn_id).await?;
+        let claimable = snapshot.bot_id == caller.bot_id
+            && snapshot.send_turn_id == Some(turn_id)
+            && matches!(snapshot.status, Status::Approved | Status::Sending);
+        let checked = if hash_any || claimable {
+            Some(send::approved(&mut conn, &snapshot).await)
+        } else {
+            None
+        };
         let observed = snapshot.claim_action_id;
         (snapshot.content.files().to_vec(), checked, observed)
     };
@@ -134,7 +164,7 @@ pub async fn claim_connected(
         .filter(|_| draft.send_turn_id == Some(turn_id));
     match (draft.status, earlier) {
         (Status::Sending, Some(action_id)) => {
-            return Ok(match checked {
+            return Ok(checked.map(|checked| match checked {
                 Ok(files) => Claim::Resumed(Claimed {
                     draft,
                     account_id,
@@ -143,10 +173,10 @@ pub async fn claim_connected(
                     files,
                 }),
                 Err(changed) => Claim::FileChangedAfterClaim(changed),
-            });
+            }));
         }
         (Status::Sent | Status::Failed | Status::Uncertain, Some(_)) => {
-            return Ok(Claim::Settled(draft));
+            return Ok(Some(Claim::Settled(draft)));
         }
         _ => {}
     }
@@ -162,6 +192,10 @@ pub async fn claim_connected(
         },
     };
     let draft = mark_sending(&mut tx, caller.bot_id, turn_id, draft, &delivery).await?;
+    // Without checked files, dropping the transaction undoes this claim.
+    let Some(checked) = checked else {
+        return Ok(None);
+    };
     let claim = match checked {
         Ok(files) => Claim::Fresh(Claimed {
             draft,
@@ -176,7 +210,7 @@ pub async fn claim_connected(
         },
     };
     tx.commit().await?;
-    Ok(claim)
+    Ok(Some(claim))
 }
 
 /// Move an approved draft of request `turn_id` to `sending` through
