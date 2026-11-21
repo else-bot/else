@@ -94,7 +94,7 @@ impl ElseApp {
         cx: &App,
     ) -> Option<QuotePrompt> {
         let bot = self.selected?;
-        let view = self.view.as_ref().filter(|view| view.bot_id == bot)?;
+        let view = self.shown(cx).filter(|view| view.bot_id == bot)?;
         let mut found = None;
         for (key, text) in &view.texts {
             let RowKey::Item(item) = key else { continue };
@@ -148,7 +148,6 @@ impl ElseApp {
             QuoteKind::Reply => draft.set_reply(quote),
             QuoteKind::Passage => draft.quotes.push(quote),
         }
-        self.paint_quotes(cx);
         if self.selected == Some(bot) {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
         }
@@ -169,7 +168,6 @@ impl ElseApp {
         if self.quote_editor.as_ref().is_some_and(|e| e.quote.id == id) {
             self.quote_editor = None;
         }
-        self.paint_quotes(cx);
         if self.selected == Some(bot) {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
         }
@@ -292,35 +290,6 @@ impl ElseApp {
         if self.quote_editor.take().is_some() {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
             cx.notify();
-        }
-    }
-
-    /// Paints every quote of the open conversation's draft over the message
-    /// it came from.
-    pub(super) fn paint_quotes(&mut self, cx: &mut App) {
-        if let Some(view) = self.view.as_mut() {
-            paint_view(view, &self.drafts, cx);
-        }
-    }
-
-    /// Paints the quotes on one row, as when its Markdown finishes parsing.
-    pub(super) fn paint_row_quotes(&mut self, key: RowKey, cx: &mut App) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let quotes = self
-            .drafts
-            .get(&view.bot_id)
-            .map_or(&[][..], |d| &d.quotes[..]);
-        if let Some(text) = view.texts.get_mut(&key) {
-            paint_text(
-                key,
-                text,
-                quotes,
-                view.revealed.as_mut(),
-                view.find.as_mut(),
-                cx,
-            );
         }
     }
 
@@ -749,21 +718,33 @@ fn ranges(quotes: &[Quote], key: RowKey) -> Vec<Range<usize>> {
         .collect()
 }
 
-pub(super) fn paint_view(
-    view: &mut ConversationView,
-    drafts: &std::collections::HashMap<Uuid, super::reply::Draft>,
-    cx: &mut App,
-) {
-    let quotes = drafts.get(&view.bot_id).map_or(&[][..], |d| &d.quotes[..]);
-    for (key, text) in view.texts.iter_mut() {
-        paint_text(
-            *key,
-            text,
-            quotes,
-            view.revealed.as_mut(),
-            view.find.as_mut(),
-            cx,
-        );
+impl ConversationView {
+    /// Paints every quote of the draft over the message it came from.
+    pub(super) fn paint_quotes(&mut self, cx: &mut App) {
+        for (key, text) in &mut self.texts {
+            paint_text(
+                *key,
+                text,
+                &self.inputs.quotes,
+                self.revealed.as_mut(),
+                self.find.as_mut(),
+                cx,
+            );
+        }
+    }
+
+    /// Paints the quotes on one row, as when its Markdown finishes parsing.
+    pub(super) fn paint_row_quotes(&mut self, key: RowKey, cx: &mut App) {
+        if let Some(text) = self.texts.get_mut(&key) {
+            paint_text(
+                key,
+                text,
+                &self.inputs.quotes,
+                self.revealed.as_mut(),
+                self.find.as_mut(),
+                cx,
+            );
+        }
     }
 }
 

@@ -2,8 +2,9 @@
 //! current theme. Each visual re-renders off the main thread when the width
 //! or theme changes and keeps showing its last render meanwhile.
 
-use super::{ElseApp, RowKey};
+use super::RowKey;
 use crate::api::Client;
+use crate::app::conversation::ConversationView;
 use else_wire::items::Attachment;
 use else_wire::items::MessagePart;
 use gpui_kit::assets::IconName;
@@ -283,7 +284,7 @@ impl Render for MessageVisuals {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn message_visuals(
         client: Arc<Client>,
         key: RowKey,

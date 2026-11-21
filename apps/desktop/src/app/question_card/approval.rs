@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::app::clip;
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier};
 use else_wire::questions::QuestionKind;
@@ -96,15 +97,12 @@ pub(super) fn preview(context: &str) -> Option<String> {
     Some(format!("{}{close}", &context[..words]))
 }
 
-impl ElseApp {
+impl ConversationView {
     fn choose_approval_scope(&mut self, question: Uuid, choice: String, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        if view.cards.submit(question).is_some_and(QuestionForm::locks) {
+        if self.cards.submit(question).is_some_and(QuestionForm::locks) {
             return;
         }
-        view.cards.question_mut(question).scope = Some(choice);
+        self.cards.question_mut(question).scope = Some(choice);
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
@@ -115,12 +113,9 @@ impl ElseApp {
         bot_name: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
         let theme = cx.theme().clone();
         let id = question.id;
-        let expanded = view
+        let expanded = self
             .cards
             .questions
             .get(&id)
@@ -177,8 +172,7 @@ impl ElseApp {
             }
             return card.into_any_element();
         }
-        let locked =
-            submit.is_some_and(QuestionForm::locks) || self.connection != Connection::Connected;
+        let locked = submit.is_some_and(QuestionForm::locks) || !self.inputs.connected;
         let destructive = question.kind == QuestionKind::Destructive;
         let attachments = question.mail_attachments();
         let icon = if destructive {
@@ -327,7 +321,7 @@ impl ElseApp {
         let selected = submit
             .filter(|s| s.locks())
             .and_then(|s| s.answer.single())
-            .or_else(|| view.cards.questions.get(&id)?.scope.as_deref())
+            .or_else(|| self.cards.questions.get(&id)?.scope.as_deref())
             .and_then(|chosen| grants.iter().find(|c| c.id == chosen))
             .or(grants.first())
             .copied();

@@ -1,3 +1,4 @@
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::collections::HashSet;
@@ -7,8 +8,8 @@ use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::RowKey;
 use super::request::Request;
-use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
 use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
@@ -20,16 +21,13 @@ pub(super) struct SkillCard {
     request: Request<()>,
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn sync_skill_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connection != Connection::Connected {
+        if !self.inputs.connected {
             self.clear_skill_cards(window, cx);
             return;
         }
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let installs: Vec<_> = view
+        let installs: Vec<_> = self
             .conversation
             .iter()
             .flat_map(|c| c.turns_in_order())
@@ -37,7 +35,7 @@ impl ElseApp {
             .cloned()
             .collect();
         let ids: HashSet<_> = installs.iter().map(|i| i.id).collect();
-        view.cards.skills.retain(|id, card| {
+        self.cards.skills.retain(|id, card| {
             if ids.contains(id) {
                 return true;
             }
@@ -49,7 +47,7 @@ impl ElseApp {
         let mut unopened = Vec::new();
         for install in installs {
             if install.status == SkillInstallStatus::Pending
-                && view
+                && self
                     .cards
                     .skills
                     .get(&install.id)
@@ -58,7 +56,7 @@ impl ElseApp {
             {
                 unopened.push(install.id);
             }
-            let card = view
+            let card = self
                 .cards
                 .skills
                 .entry(install.id)
@@ -82,11 +80,9 @@ impl ElseApp {
     }
 
     pub(super) fn clear_skill_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
-            for (_, card) in view.cards.skills.drain() {
-                if let Some(keys) = card.keys {
-                    keys.update(cx, |keys, cx| keys.clear(window, cx));
-                }
+        for (_, card) in self.cards.skills.drain() {
+            if let Some(keys) = card.keys {
+                keys.update(cx, |keys, cx| keys.clear(window, cx));
             }
         }
     }
@@ -98,11 +94,8 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let Some(card) = view.cards.skills.get_mut(&id) else {
+        let bot = self.bot_id;
+        let Some(card) = self.cards.skills.get_mut(&id) else {
             return;
         };
         card.files.selected = Some(path);
@@ -116,7 +109,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_install(bot, id).await;
             let _ = this.update_in(cx, |app, _, cx| {
-                let Some(card) = app.view_of(bot).and_then(|v| v.cards.skills.get_mut(&id)) else {
+                let Some(card) = app.cards.skills.get_mut(&id) else {
                     return;
                 };
                 card.files.loading = false;
@@ -138,13 +131,10 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.connection != Connection::Connected {
+        if !self.inputs.connected {
             return;
         }
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        if !view
+        if !self
             .conversation
             .as_ref()
             .and_then(|c| c.skill_install(id))
@@ -152,8 +142,8 @@ impl ElseApp {
         {
             return;
         }
-        let bot = view.bot_id;
-        let Some(card) = view
+        let bot = self.bot_id;
+        let Some(card) = self
             .cards
             .skills
             .get_mut(&id)
@@ -195,7 +185,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_skill_install(bot, id, approval).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.skill_answered(bot, id, attempt, result, window, cx)
+                app.skill_answered(id, attempt, result, window, cx)
             });
         })
         .detach();
@@ -204,25 +194,18 @@ impl ElseApp {
 
     fn skill_answered(
         &mut self,
-        bot: Uuid,
         id: Uuid,
         attempt: Uuid,
         result: Result<SkillInstall, ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if result
-            .as_ref()
-            .is_err_and(|err| self.unauthorized(err, window, cx))
-        {
+        if result.as_ref().is_err_and(|err| self.unauthorized(err, cx)) {
             return;
         }
-        let Some(view) = self.view_of(bot) else {
-            return;
-        };
         // A card rebuilt after a disconnect no longer knows the attempt; it
         // still shows the result.
-        if let Some(card) = view.cards.skills.get_mut(&id) {
+        if let Some(card) = self.cards.skills.get_mut(&id) {
             if !card.request.settle(attempt, &result)
                 && let Err(err) = &result
             {
@@ -240,7 +223,7 @@ impl ElseApp {
             }
         }
         if let Ok(install) = result
-            && let Some(c) = view.conversation.as_mut()
+            && let Some(c) = self.conversation.as_mut()
         {
             c.apply_skill_install(install);
         }
@@ -248,17 +231,15 @@ impl ElseApp {
     }
 
     pub(super) fn render_skill_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let Some(view) = &self.view else {
-            return div().into_any_element();
-        };
-        let Some(install) = view.conversation.as_ref().and_then(|c| c.skill_install(id)) else {
+        let Some(install) = self.conversation.as_ref().and_then(|c| c.skill_install(id)) else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
         let bot = self
+            .inputs
             .bots
             .iter()
-            .find(|b| b.id == view.bot_id)
+            .find(|b| b.id == self.bot_id)
             .map(|b| b.name.as_str())
             .unwrap_or("Bot");
         let mut body = super::action_card::surface(v_flex(), &theme)
@@ -300,7 +281,7 @@ impl ElseApp {
                         Button::new(SharedString::from(format!("skill-settings-{id}")))
                             .control(Tier::Ghost, Scale::Compact, false, cx)
                             .label("Open in Settings")
-                            .on_click(cx.listener(|app, _, window, cx| {
+                            .on_click(self.on_app(|app, _, window, cx| {
                                 // A click leaves nothing focused, and an action
                                 // without focus never reaches the Shell's handler.
                                 app.sidebar_focus.focus(window, cx);
@@ -313,10 +294,10 @@ impl ElseApp {
             }
             return body.child(settled).into_any_element();
         }
-        let Some(card) = view.cards.skills.get(&id) else {
+        let Some(card) = self.cards.skills.get(&id) else {
             return body.child("Connecting…").into_any_element();
         };
-        let busy = card.request.busy() || self.connection != Connection::Connected;
+        let busy = card.request.busy() || !self.inputs.connected;
         let scripts = install.files.iter().filter(|file| file.script).count();
         let mut chips = h_flex().gap_2().flex_wrap().child(chip(
             format!(
@@ -345,14 +326,15 @@ impl ElseApp {
         for var in &install.env {
             chips = chips.child(chip(format!("Needs {var}"), theme.muted_foreground));
         }
-        let app = cx.weak_entity();
+        let view = cx.weak_entity();
         body = body
             .child(chips)
             .child(card.files.render(
                 &id.to_string(),
                 &install.files,
                 move |path, window, cx| {
-                    let _ = app.update(cx, |app, cx| app.select_skill_file(id, path, window, cx));
+                    let _ =
+                        view.update(cx, |view, cx| view.select_skill_file(id, path, window, cx));
                 },
                 cx,
             ))
@@ -371,8 +353,7 @@ impl ElseApp {
                     cx,
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(card) = app.view.as_mut().and_then(|v| v.cards.skills.get_mut(&id))
-                    {
+                    if let Some(card) = app.cards.skills.get_mut(&id) {
                         card.scope = scope;
                     }
                     app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
@@ -442,9 +423,9 @@ impl ElseApp {
             if event.keystroke.key == "escape" {
                 // Declining is final; Esc while typing a key would lose it.
                 let typing = app
-                    .view
-                    .as_ref()
-                    .and_then(|view| view.cards.skills.get(&id))
+                    .cards
+                    .skills
+                    .get(&id)
                     .and_then(|card| card.keys.as_ref())
                     .is_some_and(|keys| !keys.read(cx).is_empty(cx));
                 if typing {

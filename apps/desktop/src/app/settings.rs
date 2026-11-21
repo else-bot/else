@@ -93,7 +93,7 @@ impl EventEmitter<PanelEvent> for BotPanel {}
 /// Hands a rejected owner token to the window, even after the panel that
 /// sent the request is gone.
 fn report_unauthorized(app: &WeakEntity<ElseApp>, err: &ClientError, cx: &mut AsyncWindowContext) {
-    let _ = app.update_in(cx, |app, window, cx| app.unauthorized(err, window, cx));
+    let _ = app.update(cx, |app, cx| app.unauthorized(err, cx));
 }
 
 /// A bot's panel and its event subscription.
@@ -299,12 +299,14 @@ impl Render for BotPanel {
 }
 
 impl ElseApp {
-    fn apply_routine(&mut self, bot: Uuid, saved: Routine) {
-        if let Some(conversation) = self
-            .view_of(bot)
-            .and_then(|view| view.conversation.as_mut())
-        {
-            conversation.apply_routine(saved);
+    fn apply_routine(&mut self, bot: Uuid, saved: Routine, cx: &mut App) {
+        if let Some(view) = self.view_of(bot, cx) {
+            view.update(cx, |view, cx| {
+                if let Some(conversation) = view.conversation.as_mut() {
+                    conversation.apply_routine(saved);
+                    cx.notify();
+                }
+            });
         }
     }
 
@@ -352,7 +354,7 @@ impl ElseApp {
             return;
         }
         let client = self.client.clone();
-        let inputs = self.panel_inputs(bot.id);
+        let inputs = self.panel_inputs(bot.id, cx);
         let width = self.details_panel_width(window) - 1.;
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| BotPanel::new(&bot, client, app, inputs, width, window, cx));
@@ -378,7 +380,7 @@ impl ElseApp {
     ) {
         match event {
             PanelEvent::RoutineSaved(saved) => {
-                self.apply_routine(bot, (**saved).clone());
+                self.apply_routine(bot, (**saved).clone(), cx);
                 cx.notify();
             }
             PanelEvent::ChangeModel => self.open_model_dialog(bot, window, cx),
@@ -413,13 +415,13 @@ impl ElseApp {
             .map(|viewport| self.details_panel_width_in(viewport) - 1.)
     }
 
-    fn panel_inputs(&self, bot: Uuid) -> PanelInputs {
+    fn panel_inputs(&self, bot: Uuid, cx: &App) -> PanelInputs {
         let shown =
             (self.selected == Some(bot) && self.settings_shown()).then(|| self.details.tab());
         PanelInputs {
             connected: self.connection == Connection::Connected,
             caps: self.caps.clone(),
-            automations: self.automations(bot).cloned(),
+            automations: self.automations(bot, cx).cloned(),
             rules: self.rules_summary(bot),
             shown,
             computer: shown.and(self.details.computer().cloned()),
@@ -427,9 +429,8 @@ impl ElseApp {
         }
     }
 
-    fn automations(&self, bot: Uuid) -> Option<&BotExtras> {
-        self.view
-            .as_ref()
+    fn automations<'a>(&self, bot: Uuid, cx: &'a App) -> Option<&'a BotExtras> {
+        self.shown(cx)
             .filter(|view| view.bot_id == bot)
             .and_then(|view| view.conversation.as_ref())
             .map(Conversation::extras)
@@ -446,7 +447,7 @@ impl ElseApp {
             let rules = self.rules_summary(bot);
             if current.connected == (self.connection == Connection::Connected)
                 && current.caps == self.caps
-                && current.automations.as_ref() == self.automations(bot)
+                && current.automations.as_ref() == self.automations(bot, cx)
                 && current.rules == rules
                 && current.shown == shown
                 && current.computer.as_ref() == shown.and(self.details.computer())
@@ -454,7 +455,7 @@ impl ElseApp {
             {
                 continue;
             }
-            let inputs = self.panel_inputs(bot);
+            let inputs = self.panel_inputs(bot, cx);
             slot.panel
                 .update(cx, |panel, cx| panel.set_inputs(inputs, cx));
         }

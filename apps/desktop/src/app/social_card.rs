@@ -1,10 +1,11 @@
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use else_wire::socials::SetupStatus;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::{Connection, ElseApp, RowKey};
+use super::RowKey;
 
 pub(super) struct SocialCard {
     view: Entity<crate::socials::SocialsView>,
@@ -12,24 +13,19 @@ pub(super) struct SocialCard {
     _layout: Subscription,
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn clear_social_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = &mut self.view {
-            for (_, card) in view.cards.socials.drain() {
-                card.view.update(cx, |form, cx| form.clear(window, cx));
-            }
+        for (_, card) in self.cards.socials.drain() {
+            card.view.update(cx, |form, cx| form.clear(window, cx));
         }
     }
 
     pub(super) fn sync_social_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.hidden || self.connection != Connection::Connected {
+        if self.inputs.hidden || !self.inputs.connected {
             self.clear_social_forms(window, cx);
             return;
         }
-        let Some(view) = &mut self.view else {
-            return;
-        };
-        let setups: Vec<_> = view
+        let setups: Vec<_> = self
             .conversation
             .iter()
             .flat_map(|c| c.turns_in_order())
@@ -37,7 +33,7 @@ impl ElseApp {
             .filter(|s| s.is_pending() || s.status == SetupStatus::Connected)
             .cloned()
             .collect();
-        view.cards.socials.retain(|id, card| {
+        self.cards.socials.retain(|id, card| {
             let keep = setups.iter().any(|s| s.id == *id);
             if !keep {
                 card.view.update(cx, |form, cx| form.clear(window, cx));
@@ -45,7 +41,7 @@ impl ElseApp {
             keep
         });
         for setup in setups {
-            if let Some(card) = view.cards.socials.get_mut(&setup.id) {
+            if let Some(card) = self.cards.socials.get_mut(&setup.id) {
                 if card.status != setup.status {
                     card.status = setup.status;
                     if let Some(connection) = setup
@@ -84,7 +80,7 @@ impl ElseApp {
                 let layout = cx.observe_in(&form, window, move |app, _, _, cx| {
                     app.remeasure_row(RowKey::Card(CardKey::SocialSetup(id)), cx);
                 });
-                view.cards.socials.insert(
+                self.cards.socials.insert(
                     id,
                     SocialCard {
                         view: form,
@@ -97,10 +93,7 @@ impl ElseApp {
     }
 
     pub(super) fn render_social_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let Some(view) = &self.view else {
-            return div().into_any_element();
-        };
-        let Some(setup) = view.conversation.as_ref().and_then(|c| c.social_setup(id)) else {
+        let Some(setup) = self.conversation.as_ref().and_then(|c| c.social_setup(id)) else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
@@ -108,7 +101,7 @@ impl ElseApp {
         if setup.is_pending() {
             row = row.child(div().text_sm().child(setup.reason.clone()));
         }
-        if let Some(card) = view.cards.socials.get(&id) {
+        if let Some(card) = self.cards.socials.get(&id) {
             return row.child(card.view.clone()).into_any_element();
         }
         let text = match setup.status {

@@ -383,7 +383,7 @@ impl ElseApp {
                     app.clear_pending_create(request_id);
                 }
                 if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
+                    app.unauthorized(err, cx);
                 }
                 if !settled {
                     return;

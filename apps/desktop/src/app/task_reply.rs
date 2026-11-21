@@ -6,6 +6,7 @@ use super::message_row::CardPlacement;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
 use crate::ambient::looping;
+use crate::app::conversation::ConversationView;
 use crate::avatar::bot_avatar;
 use chrono::{DateTime, Utc};
 use else_wire::notices::OwnerNoticeStatus;
@@ -20,7 +21,7 @@ use gpui_kit::*;
 use std::time::Duration;
 use uuid::Uuid;
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn render_task_reply(
         &self,
         task: &TaskReply,
@@ -28,12 +29,11 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
-        let conversation = view.conversation.as_ref()?;
+        let conversation = self.conversation.as_ref()?;
         let turn = conversation.turn(task.turn)?;
-        let bot = self.bots.iter().find(|bot| bot.id == view.bot_id);
+        let bot = self.inputs.bots.iter().find(|bot| bot.id == self.bot_id);
         let theme = cx.theme().clone();
-        let expanded = view.expanded_tasks.contains(&task.turn);
+        let expanded = self.expanded_tasks.contains(&task.turn);
         let working = task.state == ReplyState::Working;
         let complete = task.state == ReplyState::Complete;
         let (status, error) = super::message_row::turn_label(turn);
@@ -57,12 +57,14 @@ impl ElseApp {
             } else {
                 Vec::new()
             };
-        let delegate_faces = self.face_stack(
+        let delegate_faces = super::view::face_stack(
+            &self.inputs.bots,
             &format!("task-delegates-{}", task.turn),
             delegates.iter().copied(),
             px(16.),
         );
-        let delegate_badge = self.face_stack(
+        let delegate_badge = super::view::face_stack(
+            &self.inputs.bots,
             &format!("task-badge-{}", task.turn),
             delegates.first().copied(),
             px(12.),
@@ -248,10 +250,8 @@ impl ElseApp {
                     ))
                     .child(status)
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(view) = app.view.as_mut()
-                            && !view.expanded_tasks.remove(&id)
-                        {
-                            view.expanded_tasks.insert(id);
+                        if !app.expanded_tasks.remove(&id) {
+                            app.expanded_tasks.insert(id);
                         }
                         app.remeasure_row(RowKey::Task(id), cx);
                     }))
@@ -316,8 +316,8 @@ impl ElseApp {
         // Earlier replies always read before the current one. A completed,
         // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
-            let remedy = super::message_row::model_remedy(turn, view.bot_id, cx);
-            let retry = self.routine_retry(turn, view.bot_id, cx);
+            let remedy = self.model_remedy(turn, cx);
+            let retry = self.routine_retry(turn, cx);
             card.children(earlier)
                 .children(reply)
                 .children(explanation)
@@ -333,7 +333,7 @@ impl ElseApp {
             card.children(status).children(earlier).children(reply)
         };
         let animate = !cx.reduce_motion()
-            && view
+            && self
                 .reply_transitions
                 .get(&task.turn)
                 .is_some_and(|at| at.elapsed() < Duration::from_millis(320));
@@ -355,7 +355,7 @@ impl ElseApp {
 
     /// An earlier update, under the time it was written.
     fn update_entry(&self, id: Uuid, cx: &mut Context<Self>) -> Option<Div> {
-        let conversation = self.view.as_ref()?.conversation.as_ref()?;
+        let conversation = self.conversation.as_ref()?;
         let meta = super::message_row::meta_color(cx.theme());
         let stamp = conversation.item(id).and_then(|item| item.created_at);
         let reaction = conversation.reaction_for(id);
@@ -382,7 +382,7 @@ impl ElseApp {
         folded: &[Uuid],
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let expanded = self.view.as_ref()?.expanded_folds.contains(&reply);
+        let expanded = self.expanded_folds.contains(&reply);
         let theme = cx.theme().clone();
         let count = folded.len();
         let label = format!("{count} {}", if count == 1 { "update" } else { "updates" });
@@ -419,10 +419,8 @@ impl ElseApp {
                     ),
             )
             .on_click(cx.listener(move |app, _, _, cx| {
-                if let Some(view) = app.view.as_mut()
-                    && !view.expanded_folds.remove(&reply)
-                {
-                    view.expanded_folds.insert(reply);
+                if !app.expanded_folds.remove(&reply) {
+                    app.expanded_folds.insert(reply);
                 }
                 app.remeasure_row(RowKey::Item(reply), cx);
             }));
@@ -449,12 +447,11 @@ impl ElseApp {
         reaction: Option<else_wire::items::ReactionKind>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
-        let conversation = view.conversation.as_ref()?;
+        let conversation = self.conversation.as_ref()?;
         let item = conversation.item(id)?;
-        let text = view.texts.get(&RowKey::Item(id))?;
-        let bot = view.bot_id;
-        let owner = cx.entity().downgrade();
+        let text = self.texts.get(&RowKey::Item(id))?;
+        let bot = self.bot_id;
+        let owner = self.app.clone();
         let mut body = div()
             .id(SharedString::from(format!("task-message-{id}")))
             .relative()
@@ -468,13 +465,13 @@ impl ElseApp {
                     .child(text.render(cx)),
             )
             .context_menu(move |menu, window, cx| {
-                Self::message_menu(owner.clone(), bot, id, Author::Bot, menu, window, cx)
+                ElseApp::message_menu(owner.clone(), bot, id, Author::Bot, menu, window, cx)
             });
         if conversation
             .latest_reply()
             .is_some_and(|reply| reply.id == id)
         {
-            let owner = cx.entity().downgrade();
+            let owner = self.app.clone();
             let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
@@ -495,7 +492,7 @@ impl ElseApp {
                 .right_0()
                 .invisible()
                 .group_hover("message-bubble", |this| this.visible())
-                .child(self.message_actions(bot, id, cx)),
+                .child(self.message_actions(bot, id)),
         );
         Some(match reaction {
             Some(kind) => super::message_row::with_reaction(body.into_any_element(), kind, cx),

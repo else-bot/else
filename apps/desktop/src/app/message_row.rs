@@ -1,4 +1,4 @@
-use super::conversation::Spot;
+use super::conversation::{ConversationView, ReplyLayout, Spot, on_app};
 use super::pending_send::{Delivery, PROVIDER_UNAVAILABLE};
 use super::reply::Author;
 use super::reply::Feedback as _;
@@ -8,19 +8,21 @@ use crate::app::transcript::CardKey;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
+use else_wire::bots::{Bot, ReplyPosition};
 use else_wire::items::ItemKind;
 use else_wire::items::ReactionKind;
 use else_wire::outgoing::DraftStatus;
-use else_wire::routines::RoutineRun;
-use else_wire::turns::TurnStatus;
+use else_wire::routines::{Routine, RoutineRun};
+use else_wire::turns::{Turn, TurnStatus};
 use gpui_kit::assets::IconName;
-use gpui_kit::base::ElementExt as _;
+use gpui_kit::base::ElementExt;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use uuid::Uuid;
 
 /// Bot-side cards use the full shared reading column.
 pub(super) const BOT_GUTTER: Pixels = px(0.);
@@ -44,52 +46,30 @@ pub(super) fn meta_color(theme: &Theme) -> Hsla {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn render_row(
         &mut self,
         ix: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(row) = self
-            .view
-            .as_ref()
-            .and_then(|view| view.rows.get(ix))
-            .cloned()
-        else {
+        let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
         if let RowKey::Gap(above) = row.key {
             return self.render_gap(above, cx);
         }
         if let RowKey::Item(id) = row.key
-            && let Some(view) = self.view.as_ref()
-            && let Some(conversation) = view.conversation.as_ref()
+            && let Some(conversation) = self.conversation.as_ref()
             && let Some(item) = conversation.item(id)
             && conversation.is_feedback_acknowledgement(item)
         {
-            let bot = view.bot_id;
             let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: item.text.len() as i64,
             };
-            let owner = cx.entity().downgrade();
-            return div()
-                .w_full()
-                .h_0()
-                .on_prepaint(move |bounds, window, cx| {
-                    let owner = owner.clone();
-                    window.defer(cx, move |window, cx| {
-                        let _ = owner.update(cx, |app, cx| {
-                            app.reply_laid_out(
-                                bot,
-                                super::conversation::ReplyLayout { position, bounds },
-                                window,
-                                cx,
-                            );
-                        });
-                    });
-                })
+            return self
+                .report_reply_layout(div().w_full().h_0(), position)
                 .into_any_element();
         }
         let body = if row.activity.is_some() {
@@ -103,11 +83,12 @@ impl ElseApp {
             return div().into_any_element();
         };
         let banner = self
-            .view
+            .conversation
             .as_ref()
-            .and_then(|view| view.conversation.as_ref())
             .and_then(|c| super::transcript::opened_mail(c, row.opens_turn))
-            .and_then(|turn| super::email_reader::mail_banner(turn, &self.bots, cx));
+            .and_then(|turn| {
+                super::email_reader::mail_banner(turn, &self.inputs.bots, &self.app, cx)
+            });
         let body = match banner {
             Some(banner) => gpui_kit::component::v_flex()
                 .w_full()
@@ -119,9 +100,8 @@ impl ElseApp {
             None => body,
         };
         let sender = self
-            .view
+            .conversation
             .as_ref()
-            .and_then(|view| view.conversation.as_ref())
             .and_then(|c| row.key.task_sender(c));
         let body = match sender {
             Some(sender) => gpui_kit::component::v_flex()
@@ -137,7 +117,7 @@ impl ElseApp {
                 .into_any_element(),
             None => body,
         };
-        let body = match self.view.as_ref().and_then(|view| view.revealed.as_ref()) {
+        let body = match self.revealed.as_ref() {
             Some(reveal) if row.contains(reveal.row) => match reveal.spot {
                 Spot::Row => div()
                     .w_full()
@@ -147,7 +127,7 @@ impl ElseApp {
                     .into_any_element(),
                 Spot::Passage { .. } => CenterReveal {
                     body,
-                    list: self.view.as_ref().map(|view| view.list.clone()),
+                    list: self.list.clone(),
                 }
                 .into_any_element(),
             },
@@ -161,12 +141,11 @@ impl ElseApp {
                     .pr(BOT_GUTTER)
                     .gap_2()
                     .children(
-                        self.view
+                        self.conversation
                             .as_ref()
-                            .and_then(|view| view.conversation.as_ref())
                             .and_then(|conversation| conversation.turn(task.turn))
                             .and_then(|turn| Some((turn.id, turn.routine.as_ref()?)))
-                            .map(|(turn, run)| routine_run(turn, run, true, cx)),
+                            .map(|(turn, run)| routine_run(turn, run, true, &self.app, cx)),
                     )
                     .child(body)
                     .into_any_element()
@@ -182,18 +161,16 @@ impl ElseApp {
                 .child(body)
                 .into_any_element();
         };
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(conversation) = view.conversation.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(turn) = conversation.turn(group.turn) else {
+        let Some(turn) = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.turn(group.turn))
+        else {
             return div().into_any_element();
         };
         let follows_task = ix
             .checked_sub(1)
-            .and_then(|ix| view.rows.get(ix))
+            .and_then(|ix| self.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
         let follows_name = self.follows_name(ix);
         let actionable = matches!(row.key, RowKey::Card(card) if card.needs_owner());
@@ -204,7 +181,7 @@ impl ElseApp {
                 turn.routine
                     .as_ref()
                     .filter(|_| group.first && !follows_task)
-                    .map(|run| routine_run(turn.id, run, true, cx)),
+                    .map(|run| routine_run(turn.id, run, true, &self.app, cx)),
             )
             .child(div().w_full().child(body));
         column
@@ -227,75 +204,47 @@ impl ElseApp {
             .into_any_element()
     }
 
-    pub(super) fn render_turn_status(
+    /// Reports where `element`, the latest reply, was laid out, so the
+    /// window can tell whether the owner saw it.
+    pub(super) fn report_reply_layout<E: ElementExt>(
         &self,
-        turn: &else_wire::turns::Turn,
-        bot: uuid::Uuid,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let (label, error) = turn_label(turn);
-        if label.is_empty() {
-            return None;
-        }
-        let theme = cx.theme();
-        let active = turn.status.is_working();
-        Some(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .children(self.bots.iter().find(|b| active && b.id == bot).map(|bot| {
-                    bot_avatar(
-                        SharedString::from(format!("working-{}", turn.id)),
-                        bot.avatar,
-                        px(20.),
-                    )
-                    .working()
-                }))
-                .child(
-                    h_flex()
-                        .text_xs()
-                        .text_color(if error {
-                            theme.danger
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(label),
-                )
-                .children(model_remedy(turn, bot, cx))
-                .children(self.routine_retry(turn, bot, cx)),
+        element: E,
+        position: ReplyPosition,
+    ) -> E {
+        let (app, bot) = (self.app.clone(), self.bot_id);
+        element.on_prepaint(move |bounds, window, cx| {
+            let app = app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| {
+                    app.reply_laid_out(bot, ReplyLayout { position, bounds }, window, cx);
+                });
+            });
+        })
+    }
+
+    fn routines(&self) -> &[Routine] {
+        self.conversation.as_ref().map_or(&[], |c| c.routines())
+    }
+
+    fn render_turn_status(&self, turn: &Turn, cx: &App) -> Option<Div> {
+        turn_status(
+            turn,
+            self.bot_id,
+            &self.inputs.bots,
+            self.routines(),
+            self.inputs.connected,
+            &self.app,
+            cx,
         )
     }
 
-    /// Retry beside the failure of a routine's latest run, as in bot
-    /// details, which it opens to show how the retry goes.
-    pub(super) fn routine_retry(
-        &self,
-        turn: &else_wire::turns::Turn,
-        bot: uuid::Uuid,
-        cx: &Context<Self>,
-    ) -> Option<Button> {
-        let run = turn.routine.as_ref()?;
-        let conversation = self.view.as_ref()?.conversation.as_ref()?;
-        let routine = (conversation.routines().iter()).find(|r| r.id == run.routine_id)?;
-        let latest = (routine.last_run.as_ref()).is_some_and(|last| last.due_at == run.due_at);
-        let id = routine.id;
-        (latest && super::settings::routines::retryable(routine)).then(|| {
-            Button::new(SharedString::from(format!("routine-retry-{}", turn.id)))
-                .control(
-                    Tier::Ghost,
-                    Scale::Compact,
-                    self.connection != super::Connection::Connected,
-                    cx,
-                )
-                .label("Retry")
-                .accessibility_label(format!("Retry {} now", routine.name))
-                .on_click(cx.listener(move |app, event, window, cx| {
-                    if let Some(panel) = app.panel(bot).cloned() {
-                        panel.update(cx, |panel, cx| panel.retry_routine(id, window, cx));
-                    }
-                    open_routines(app, event, window, cx);
-                }))
-        })
+    pub(super) fn model_remedy(&self, turn: &Turn, cx: &App) -> Option<Button> {
+        model_remedy(turn, self.bot_id, &self.app, cx)
+    }
+
+    pub(super) fn routine_retry(&self, turn: &Turn, cx: &App) -> Option<Button> {
+        let connected = self.inputs.connected;
+        routine_retry(turn, self.bot_id, self.routines(), connected, &self.app, cx)
     }
 
     pub(super) fn render_row_content(
@@ -304,7 +253,7 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
+        let view = &*self;
         let key = row.key;
         let grouped = row.routine.is_some();
         let footer = row.footer_stamp.filter(|_| !grouped).map(clock);
@@ -351,7 +300,7 @@ impl ElseApp {
             RowKey::Gap(_) => return None,
             RowKey::QuietRun(turn) => {
                 let run = view.conversation.as_ref()?.turn(turn)?.routine.as_ref()?;
-                routine_run(turn, run, false, cx).into_any_element()
+                routine_run(turn, run, false, &self.app, cx).into_any_element()
             }
             RowKey::QuietRuns(first) => {
                 let open = super::transcript::group_open(&row.quiet_runs, &view.open_quiet);
@@ -380,6 +329,7 @@ impl ElseApp {
                                 &theme,
                                 super::action_card::EventEnd::Actions(vec![routine_details(
                                     SharedString::from(format!("routine-update-{id}")),
+                                    &self.app,
                                     cx,
                                 )]),
                                 super::action_card::Disclosure::None,
@@ -406,7 +356,7 @@ impl ElseApp {
                 if !user
                     && row.starts_run
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
-                    && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id)
+                    && let Some(bot) = self.inputs.bots.iter().find(|b| b.id == view.bot_id)
                 {
                     column = column.child(
                         h_flex()
@@ -426,32 +376,19 @@ impl ElseApp {
                     .latest_reply()
                     .is_some_and(|reply| reply.id == id)
                 {
-                    let owner = cx.entity().downgrade();
-                    let bot = view.bot_id;
                     let position = else_wire::bots::ReplyPosition {
                         item_seq: item.seq,
                         text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
                     };
-                    card.relative().on_prepaint(move |bounds, window, cx| {
-                        window.defer(cx, move |window, cx| {
-                            let _ = owner.update(cx, |app, cx| {
-                                app.reply_laid_out(
-                                    bot,
-                                    super::conversation::ReplyLayout { position, bounds },
-                                    window,
-                                    cx,
-                                );
-                            });
-                        });
-                    })
+                    self.report_reply_layout(card.relative(), position)
                 } else {
                     card
                 };
                 let card = match Author::of(item.kind) {
                     Some(author) => {
-                        let (owner, bot) = (cx.entity().downgrade(), view.bot_id);
+                        let (owner, bot) = (self.app.clone(), view.bot_id);
                         card.context_menu(move |menu, window, cx| {
-                            Self::message_menu(owner.clone(), bot, id, author, menu, window, cx)
+                            ElseApp::message_menu(owner.clone(), bot, id, author, menu, window, cx)
                         })
                         .into_any_element()
                     }
@@ -474,7 +411,7 @@ impl ElseApp {
                                 .right_0()
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
-                                .child(self.message_actions(view.bot_id, id, cx)),
+                                .child(self.message_actions(view.bot_id, id)),
                         )
                         .into_any_element(),
                     Some(Author::Owner) => div()
@@ -505,16 +442,13 @@ impl ElseApp {
                 gpui_kit::component::v_flex()
                     .w_full()
                     .gap_1()
-                    .child(self.render_turn_status(turn, view.bot_id, cx)?)
+                    .child(self.render_turn_status(turn, cx)?)
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
             RowKey::Card(card) => self.render_card(card, CardPlacement::Row, window, cx)?,
             RowKey::Pending(request_id) => {
-                let pending = self
-                    .selected
-                    .and_then(|bot| self.pending.get(&bot))
-                    .and_then(|list| list.iter().find(|p| p.request_id == request_id))?;
+                let pending = (self.inputs.pending.iter()).find(|p| p.request_id == request_id)?;
                 let text = view.texts.get(&key)?;
                 let mark = pending.reaction.map(|r| r.kind.mark());
                 let settled = matches!(
@@ -571,23 +505,28 @@ impl ElseApp {
                                 .gap_x_2()
                                 .child(div().text_color(theme.muted_foreground).child("·"))
                                 .children(retry.then(|| {
-                                    action("retry", "Retry").on_click(cx.listener(
+                                    action("retry", "Retry").on_click(self.on_app(
                                         move |app, _, window, cx| {
                                             app.retry_pending(request_id, window, cx)
                                         },
                                     ))
                                 }))
                                 .children(switch.then(|| {
-                                    switch_model(format!("switch-model-{request_id}"), bot, cx)
+                                    switch_model(
+                                        format!("switch-model-{request_id}"),
+                                        bot,
+                                        &self.app,
+                                        cx,
+                                    )
                                 }))
                                 .children((mark.is_none() && pending.is_rejected()).then(|| {
-                                    action("restore", "Edit").on_click(cx.listener(
+                                    action("restore", "Edit").on_click(self.on_app(
                                         move |app, _, window, cx| {
                                             app.take_failed(request_id, true, window, cx)
                                         },
                                     ))
                                 }))
-                                .child(action("dismiss", "Dismiss").on_click(cx.listener(
+                                .child(action("dismiss", "Dismiss").on_click(self.on_app(
                                     move |app, _, window, cx| {
                                         app.take_failed(request_id, false, window, cx)
                                     },
@@ -628,6 +567,78 @@ impl ElseApp {
     }
 }
 
+/// A turn's status line: the bot at work, or how the turn ended, with what
+/// the owner can do about a failure.
+pub(super) fn turn_status(
+    turn: &Turn,
+    bot: Uuid,
+    bots: &[Bot],
+    routines: &[Routine],
+    connected: bool,
+    app: &WeakEntity<ElseApp>,
+    cx: &App,
+) -> Option<Div> {
+    let (label, error) = turn_label(turn);
+    if label.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let active = turn.status.is_working();
+    Some(
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .children(bots.iter().find(|b| active && b.id == bot).map(|bot| {
+                bot_avatar(
+                    SharedString::from(format!("working-{}", turn.id)),
+                    bot.avatar,
+                    px(20.),
+                )
+                .working()
+            }))
+            .child(
+                h_flex()
+                    .text_xs()
+                    .text_color(if error {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(label),
+            )
+            .children(model_remedy(turn, bot, app, cx))
+            .children(routine_retry(turn, bot, routines, connected, app, cx)),
+    )
+}
+
+/// Retry beside the failure of a routine's latest run, as in bot details,
+/// which it opens to show how the retry goes.
+fn routine_retry(
+    turn: &Turn,
+    bot: Uuid,
+    routines: &[Routine],
+    connected: bool,
+    app: &WeakEntity<ElseApp>,
+    cx: &App,
+) -> Option<Button> {
+    let run = turn.routine.as_ref()?;
+    let routine = routines.iter().find(|r| r.id == run.routine_id)?;
+    let latest = (routine.last_run.as_ref()).is_some_and(|last| last.due_at == run.due_at);
+    let id = routine.id;
+    (latest && super::settings::routines::retryable(routine)).then(|| {
+        Button::new(SharedString::from(format!("routine-retry-{}", turn.id)))
+            .control(Tier::Ghost, Scale::Compact, !connected, cx)
+            .label("Retry")
+            .accessibility_label(format!("Retry {} now", routine.name))
+            .on_click(on_app(app, move |app, _, window, cx| {
+                if let Some(panel) = app.panel(bot).cloned() {
+                    panel.update(cx, |panel, cx| panel.retry_routine(id, window, cx));
+                }
+                open_routines(app, window, cx);
+            }))
+    })
+}
+
 /// Where an owner action card renders: as its own transcript row, or inside
 /// its task's card after the reply it followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -636,7 +647,7 @@ pub(super) enum CardPlacement {
     InTask,
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn render_card(
         &self,
         key: CardKey,
@@ -662,11 +673,7 @@ impl ElseApp {
     }
 }
 
-pub(super) fn with_reaction(
-    message: AnyElement,
-    kind: ReactionKind,
-    cx: &mut Context<ElseApp>,
-) -> AnyElement {
+pub(super) fn with_reaction(message: AnyElement, kind: ReactionKind, cx: &App) -> AnyElement {
     const SIZE: f32 = 30.;
     let theme = cx.theme();
     div()
@@ -699,7 +706,8 @@ fn routine_run(
     turn: uuid::Uuid,
     run: &RoutineRun,
     shown: bool,
-    cx: &mut Context<ElseApp>,
+    app: &WeakEntity<ElseApp>,
+    cx: &mut Context<ConversationView>,
 ) -> Button {
     let theme = cx.theme();
     let (meta, disclosure, action) = if run.no_news {
@@ -748,9 +756,11 @@ fn routine_run(
     );
     if run.no_news {
         let key = RowKey::QuietRun(turn);
-        button.on_click(cx.listener(move |app, _, window, cx| app.toggle_quiet(key, window, cx)))
+        button.on_click(cx.listener(move |view, _, window, cx| view.toggle_quiet(key, window, cx)))
     } else {
-        button.on_click(cx.listener(open_routines))
+        button.on_click(on_app(app, |app, _, window, cx| {
+            open_routines(app, window, cx)
+        }))
     }
 }
 
@@ -761,7 +771,7 @@ fn quiet_runs(
     first: uuid::Uuid,
     runs: &[uuid::Uuid],
     open: bool,
-    cx: &mut Context<ElseApp>,
+    cx: &mut Context<ConversationView>,
 ) -> Option<Button> {
     let theme = cx.theme();
     let run = conversation.turn(*runs.last()?)?.routine.as_ref()?;
@@ -793,25 +803,22 @@ fn quiet_runs(
                         },
                     )),
             )
-            .on_click(cx.listener(move |app, _, window, cx| app.toggle_quiet(key, window, cx))),
+            .on_click(cx.listener(move |view, _, window, cx| view.toggle_quiet(key, window, cx))),
     )
 }
 
-fn open_routines(
-    app: &mut ElseApp,
-    _: &ClickEvent,
-    window: &mut Window,
-    cx: &mut Context<ElseApp>,
-) {
+fn open_routines(app: &mut ElseApp, window: &mut Window, cx: &mut Context<ElseApp>) {
     if !app.details.open() {
         app.toggle_settings(window, cx);
     }
 }
 
-fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
+fn routine_details(id: SharedString, app: &WeakEntity<ElseApp>, cx: &App) -> Button {
     super::action_card::event_action(id, "View", false, cx)
         .accessibility_label("View routines in bot details")
-        .on_click(cx.listener(open_routines))
+        .on_click(on_app(app, |app, _, window, cx| {
+            open_routines(app, window, cx)
+        }))
 }
 
 /// The two families of one-line activity rows. A run of one family reads
@@ -836,10 +843,9 @@ const EVENT_PAD: Pixels = px(2.);
 const EVENT_GROUP_GAP: Pixels = px(16.);
 const LABEL_GAP: Pixels = px(8.);
 
-impl ElseApp {
+impl ConversationView {
     fn event_kind(&self, ix: usize) -> Option<EventKind> {
-        let view = self.view.as_ref()?;
-        let row = view.rows.get(ix)?;
+        let row = self.rows.get(ix)?;
         if row.routine.is_some() {
             return None;
         }
@@ -858,7 +864,7 @@ impl ElseApp {
         let RowKey::Item(id) = row.key else {
             return None;
         };
-        let item = view.conversation.as_ref()?.item(id)?;
+        let item = self.conversation.as_ref()?.item(id)?;
         (item.routine_update.is_some() || item.bot_created.is_some() || item.rules_update.is_some())
             .then_some(EventKind::Change)
     }
@@ -882,13 +888,10 @@ impl ElseApp {
     /// Whether row `ix` sits right under a task row that shows only its
     /// bot's name; the row then reads as that name's content, 8 px below it.
     fn follows_name(&self, ix: usize) -> bool {
-        let Some(view) = self.view.as_ref() else {
+        let Some(above) = ix.checked_sub(1).and_then(|above| self.rows.get(above)) else {
             return false;
         };
-        let Some(above) = ix.checked_sub(1).and_then(|above| view.rows.get(above)) else {
-            return false;
-        };
-        let (Some(task), Some(conversation)) = (above.task.as_ref(), view.conversation.as_ref())
+        let (Some(task), Some(conversation)) = (above.task.as_ref(), self.conversation.as_ref())
         else {
             return false;
         };
@@ -898,33 +901,30 @@ impl ElseApp {
     }
 
     fn is_card(&self, ix: usize) -> bool {
-        self.view
-            .as_ref()
-            .and_then(|view| view.rows.get(ix))
+        self.rows
+            .get(ix)
             .is_some_and(|row| matches!(row.key, RowKey::Card(card) if card.is_boxed()))
     }
 }
 
 /// A Switch model action for a turn that failed because its provider
 /// cannot run now.
-pub(super) fn model_remedy(
-    turn: &else_wire::turns::Turn,
-    bot: uuid::Uuid,
-    cx: &Context<ElseApp>,
-) -> Option<Button> {
+fn model_remedy(turn: &Turn, bot: Uuid, app: &WeakEntity<ElseApp>, cx: &App) -> Option<Button> {
     (turn.status == TurnStatus::Failed
         && turn
             .error
             .as_ref()
             .is_some_and(|e| e.code == PROVIDER_UNAVAILABLE))
-    .then(|| switch_model(format!("switch-model-{}", turn.id), bot, cx))
+    .then(|| switch_model(format!("switch-model-{}", turn.id), bot, app, cx))
 }
 
-fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
+fn switch_model(id: String, bot: Uuid, app: &WeakEntity<ElseApp>, cx: &App) -> Button {
     Button::new(SharedString::from(id))
         .control(Tier::Ghost, Scale::Compact, false, cx)
         .label("Switch model")
-        .on_click(cx.listener(move |app, _, window, cx| app.switch_model(bot, window, cx)))
+        .on_click(on_app(app, move |app, _, window, cx| {
+            app.switch_model(bot, window, cx)
+        }))
 }
 
 pub(super) fn turn_label(turn: &else_wire::turns::Turn) -> (String, bool) {
@@ -1129,7 +1129,7 @@ where
 /// instead.
 struct CenterReveal {
     body: AnyElement,
-    list: Option<ListState>,
+    list: ListState,
 }
 
 impl IntoElement for CenterReveal {
@@ -1172,9 +1172,8 @@ impl Element for CenterReveal {
         cx: &mut App,
     ) {
         self.body.prepaint(window, cx);
-        if let Some(line) = window.take_autoscroll()
-            && let Some(list) = self.list.clone()
-        {
+        if let Some(line) = window.take_autoscroll() {
+            let list = self.list.clone();
             let distance = line.center().y - window.content_mask().bounds.center().y;
             if distance.abs() > px(1.) {
                 window.defer(cx, move |_, _| list.scroll_by(distance));

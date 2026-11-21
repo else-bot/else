@@ -352,7 +352,7 @@ impl ElseApp {
             };
             let _ = this.update_in(cx, |app, window, cx| {
                 if let Err(err) = &result {
-                    app.unauthorized(err, window, cx);
+                    app.unauthorized(err, cx);
                 }
                 if let Some((routine, routine_attempt)) = routine_attempt {
                     panel.update(cx, |panel, cx| {
@@ -369,7 +369,7 @@ impl ElseApp {
                                 panel.update(cx, |panel, cx| panel.saved_profile(saved, cx));
                             }
                             SavedModel::Routine(saved) => {
-                                app.apply_routine(bot, *saved);
+                                app.apply_routine(bot, *saved, cx);
                             }
                         }
                         if app.model_dialog.as_ref() == Some(&holder) {

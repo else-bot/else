@@ -1,3 +1,4 @@
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use else_wire::outgoing::{DraftContent, DraftFile, DraftStatus, OutgoingDraft};
@@ -9,10 +10,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::RowKey;
 use super::images::{MessageImages, is_image};
 use super::message_row::{CardPlacement, short_stamp};
 use super::request::Request;
-use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::attachments::byte_size;
 use crate::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
@@ -52,7 +53,7 @@ fn image_parts(files: &[DraftFile]) -> Vec<MessagePart> {
 }
 
 impl DraftImages {
-    fn sync(&self, files: &[DraftFile], cx: &mut Context<ElseApp>) {
+    fn sync(&self, files: &[DraftFile], cx: &mut App) {
         self.gallery
             .update(cx, |images, cx| images.sync(&image_parts(files), cx));
     }
@@ -68,7 +69,7 @@ pub(super) struct DraftForm {
 }
 
 impl DraftForm {
-    fn new(draft: &OutgoingDraft, window: &mut Window, cx: &mut Context<ElseApp>) -> Self {
+    fn new(draft: &OutgoingDraft, window: &mut Window, cx: &mut Context<ConversationView>) -> Self {
         let subject = draft.content.subject().map(|text| {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
             input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
@@ -80,16 +81,20 @@ impl DraftForm {
         });
         let id = draft.id;
         let subject_change = subject.as_ref().map(|subject| {
-            cx.subscribe_in(subject, window, move |app, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
-                }
-            })
+            cx.subscribe_in(
+                subject,
+                window,
+                move |view, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        view.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
+                    }
+                },
+            )
         });
         let body_change =
-            cx.subscribe_in(&body, window, move |app, _, event: &InputEvent, _, cx| {
+            cx.subscribe_in(&body, window, move |view, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
+                    view.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }
             });
         Self {
@@ -132,23 +137,23 @@ impl DraftForm {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn sync_draft_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let drafts: Vec<_> = view
+        let drafts: Vec<_> = self
             .conversation
             .iter()
             .flat_map(|c| c.turns_in_order())
             .flat_map(|t| &t.outgoing_drafts)
             .cloned()
             .collect();
-        view.cards
+        self.cards
             .drafts
             .retain(|id, _| drafts.iter().any(|d| d.id == *id));
+        let client = self.client.clone();
+        let app = self.app.clone();
+        let bot = self.bot_id;
         for draft in &drafts {
-            let card = view.cards.drafts.entry(draft.id).or_default();
+            let card = self.cards.drafts.entry(draft.id).or_default();
             if !draft.is_open() {
                 card.form = None;
             } else {
@@ -179,9 +184,10 @@ impl ElseApp {
                 images.sync(files, cx);
             } else if !parts.is_empty() {
                 let (gallery, _observe) = Self::message_images(
-                    self.client.clone(),
+                    client.clone(),
                     RowKey::Card(CardKey::Draft(draft.id)),
-                    view.bot_id,
+                    bot,
+                    app.clone(),
                     &parts,
                     window,
                     cx,
@@ -192,16 +198,15 @@ impl ElseApp {
     }
 
     pub(super) fn outgoing_attachment(&self, cx: &App) -> Option<DraftAttachment> {
-        let view = self.view.as_ref()?;
-        let draft = view.conversation.as_ref()?.open_draft()?;
-        if view
+        let draft = self.conversation.as_ref()?.open_draft()?;
+        if self
             .cards
             .draft_form(draft.id)
             .is_some_and(DraftForm::locked)
         {
             return None;
         }
-        let edit = view
+        let edit = self
             .cards
             .draft_form(draft.id)
             .map_or_else(|| draft.edit(), |form| form.edit(cx));
@@ -209,14 +214,9 @@ impl ElseApp {
     }
 
     fn draft_in_flight(&self, id: Uuid) -> bool {
-        self.selected
-            .and_then(|bot| self.pending.get(&bot))
-            .is_some_and(|list| {
-                list.iter().any(|pending| {
-                    !pending.is_rejected()
-                        && pending.open_draft.as_ref().is_some_and(|a| a.id == id)
-                })
-            })
+        self.inputs.pending.iter().any(|pending| {
+            !pending.is_rejected() && pending.open_draft.as_ref().is_some_and(|a| a.id == id)
+        })
     }
 
     fn act_on_draft(
@@ -226,11 +226,8 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let sent = match (view.cards.draft_form_mut(id), choice) {
+        let bot = self.bot_id;
+        let sent = match (self.cards.draft_form_mut(id), choice) {
             (Some(form), _) if form.request.unconfirmed() => form.request.retry(),
             (Some(form), Choice::Approve | Choice::ApproveAlways)
                 if !form.body.read(cx).value().trim().is_empty() =>
@@ -261,8 +258,8 @@ impl ElseApp {
                 }
                 Operation::Discard => client.discard_draft(bot, id).await,
             };
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.draft_acted(bot, id, Some(attempt), result, window, cx)
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.draft_acted(id, Some(attempt), result, window, cx)
             });
         })
         .detach();
@@ -273,16 +270,13 @@ impl ElseApp {
     /// request it settles; `None` for an action the form does not track.
     fn draft_acted(
         &mut self,
-        bot: Uuid,
         id: Uuid,
         attempt: Option<Uuid>,
         result: Result<OutgoingDraft, ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let form = self
-            .view_of(bot)
-            .and_then(|view| view.cards.draft_form_mut(id));
+        let form = self.cards.draft_form_mut(id);
         let tracked = match (form, attempt) {
             (Some(form), Some(attempt)) => Some(form.request.settle(attempt, &result)),
             (Some(form), None) => {
@@ -295,26 +289,19 @@ impl ElseApp {
             }
             (None, _) => None,
         };
-        if result
-            .as_ref()
-            .is_err_and(|err| self.unauthorized(err, window, cx))
-            || tracked == Some(false)
-        {
+        if result.as_ref().is_err_and(|err| self.unauthorized(err, cx)) || tracked == Some(false) {
             return;
         }
         match result {
             Ok(draft) => {
-                if let Some(conversation) = self
-                    .view_of(bot)
-                    .and_then(|view| view.conversation.as_mut())
-                {
+                if let Some(conversation) = self.conversation.as_mut() {
                     conversation.update_draft(draft);
                 }
                 self.sync_rows(window, cx);
             }
             Err(err) => {
                 if tracked.is_none() {
-                    self.notice = Some(err.to_string());
+                    self.notice(err.to_string(), cx);
                 }
                 self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
             }
@@ -322,15 +309,13 @@ impl ElseApp {
     }
 
     fn stop_approving_always(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bot) = self.view.as_ref().map(|v| v.bot_id) else {
-            return;
-        };
+        let bot = self.bot_id;
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.stop_approving_always(bot, id).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update_in(cx, |view, window, cx| {
                 if let Err(err) = result {
-                    app.draft_acted(bot, id, None, Err(err), window, cx);
+                    view.draft_acted(id, None, Err(err), window, cx);
                 }
             });
         })
@@ -339,13 +324,12 @@ impl ElseApp {
 
     fn reload_draft_form(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self
-            .view
+            .conversation
             .as_ref()
-            .and_then(|v| v.conversation.as_ref())
             .and_then(|c| c.outgoing_draft(id))
             .cloned();
-        if let (Some(draft), Some(view)) = (draft, self.view.as_mut()) {
-            let card = view.cards.drafts.entry(id).or_default();
+        if let Some(draft) = draft {
+            let card = self.cards.drafts.entry(id).or_default();
             let fresh = DraftForm::new(&draft, window, cx);
             card.form = Some(match card.form.as_mut() {
                 Some(old) => fresh.keeping(old),
@@ -396,10 +380,7 @@ impl ElseApp {
                                 .control(Tier::Ghost, Scale::Compact, busy, cx)
                                 .label("Remove")
                                 .accessibility_label(format!("Remove attachment {}", file.name))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    let Some(view) = app.view.as_mut() else {
-                                        return;
-                                    };
+                                .on_click(cx.listener(move |view, _, _, cx| {
                                     let Some(card) = view.cards.drafts.get_mut(&id) else {
                                         return;
                                     };
@@ -410,15 +391,16 @@ impl ElseApp {
                                     if let Some(images) = &card.images {
                                         images.sync(&form.files, cx);
                                     }
-                                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
+                                    view.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                                 })),
                         )
                     })
             }))
             .when_some(
-                self.view
-                    .as_ref()
-                    .and_then(|view| view.cards.drafts.get(&id)?.images.as_ref()),
+                self.cards
+                    .drafts
+                    .get(&id)
+                    .and_then(|card| card.images.as_ref()),
                 |column, images| column.child(images.gallery.clone()),
             )
             .into_any_element()
@@ -430,10 +412,7 @@ impl ElseApp {
         placement: CardPlacement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(draft) = view
+        let Some(draft) = self
             .conversation
             .as_ref()
             .and_then(|c| c.outgoing_draft(id))
@@ -482,7 +461,7 @@ impl ElseApp {
             .rounded(theme.radius_lg)
             .bg(theme.secondary)
             .overflow_hidden();
-        let expanded = view.cards.drafts.get(&id).is_some_and(|card| card.expanded);
+        let expanded = self.cards.drafts.get(&id).is_some_and(|card| card.expanded);
         if !draft.is_open() {
             let color = match draft.status {
                 DraftStatus::Sent => theme.success,
@@ -559,10 +538,8 @@ impl ElseApp {
                     .text_color(theme.muted_foreground),
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(view) = app.view.as_mut() {
-                        let card = view.cards.drafts.entry(id).or_default();
-                        card.expanded = !card.expanded;
-                    }
+                    let card = app.cards.drafts.entry(id).or_default();
+                    card.expanded = !card.expanded;
                     app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }));
             card = card.child(header);
@@ -598,12 +575,12 @@ impl ElseApp {
                 );
             }
             if readable
-                && view
+                && self
                     .conversation
                     .as_ref()
                     .is_some_and(|c| c.approves_always(draft))
             {
-                let connected = self.connection == Connection::Connected;
+                let connected = self.inputs.connected;
                 card = card.child(
                     h_flex()
                         .px_4()
@@ -653,10 +630,10 @@ impl ElseApp {
             }
             return row.child(card).into_any_element();
         }
-        let Some(form) = view.cards.draft_form(id) else {
+        let Some(form) = self.cards.draft_form(id) else {
             return row.into_any_element();
         };
-        let connected = self.connection == Connection::Connected;
+        let connected = self.inputs.connected;
         let busy = form.locked() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
         let approve_enabled = connected

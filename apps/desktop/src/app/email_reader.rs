@@ -908,7 +908,8 @@ impl ElseApp {
 pub(super) fn mail_banner(
     turn: &else_wire::turns::Turn,
     bots: &[else_wire::bots::Bot],
-    cx: &mut Context<ElseApp>,
+    app: &WeakEntity<ElseApp>,
+    cx: &App,
 ) -> Option<Div> {
     let first = turn.mail.first()?;
     let theme = cx.theme().clone();
@@ -956,7 +957,7 @@ pub(super) fn mail_banner(
             cx,
         )
         .on_hover({
-            let app = cx.entity().downgrade();
+            let app = app.clone();
             move |hovered, _, cx| {
                 if let (true, Some(app)) = (*hovered, app.upgrade()) {
                     let client = app.read(cx).client.clone();
@@ -964,9 +965,10 @@ pub(super) fn mail_banner(
                 }
             }
         })
-        .on_click(
-            cx.listener(move |app, _, window, cx| app.open_email(openable.clone(), window, cx)),
-        )
+        .on_click(super::conversation::on_app(
+            app,
+            move |app, _, window, cx| app.open_email(openable.clone(), window, cx),
+        ))
     });
     Some(
         super::action_card::event_row(&theme)

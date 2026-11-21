@@ -1,4 +1,5 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
+use super::conversation::ConversationView;
 use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::reply::{Author, Passage, QuotedReply};
@@ -188,6 +189,7 @@ pub(super) struct RowText {
     parts: Vec<MessagePart>,
     files: HashMap<Uuid, Attachment>,
     owner: WeakEntity<ElseApp>,
+    view: WeakEntity<ConversationView>,
     bot: Uuid,
     key: RowKey,
     images: Entity<MessageImages>,
@@ -204,16 +206,26 @@ enum Widget {
     },
 }
 
+/// The conversation a row belongs to: where its files load from and the
+/// window its links act on.
+#[derive(Clone)]
+pub(super) struct RowHost {
+    pub(super) client: Arc<crate::api::Client>,
+    pub(super) bot: Uuid,
+    pub(super) app: WeakEntity<ElseApp>,
+}
+
 impl RowText {
     pub(super) fn new(
         key: RowKey,
         source: RowSource,
-        client: Arc<crate::api::Client>,
+        host: &RowHost,
         bots: &Arc<MentionRegistry>,
-        bot: Uuid,
         window: &mut Window,
-        cx: &mut Context<ElseApp>,
+        cx: &mut Context<ConversationView>,
     ) -> Self {
+        let RowHost { client, bot, app } = host;
+        let (client, bot, owner) = (client.clone(), *bot, app.clone());
         let RowSource {
             text: source,
             parts,
@@ -225,8 +237,7 @@ impl RowText {
             format,
         }
         .split_quote();
-        let quote = quote
-            .map(|quote| Box::new(Self::new(key, quote, client.clone(), bots, bot, window, cx)));
+        let quote = quote.map(|quote| Box::new(Self::new(key, quote, host, bots, window, cx)));
         let (visible, visible_parts) = without_images(&body.text, &body.parts);
         let format = body.format;
         let mut mentions = format.mentions(&visible, bots);
@@ -251,31 +262,32 @@ impl RowText {
                 let state = cx.new(|cx| TextViewState::markdown(&display.text, cx));
                 // Markdown parses in the background, so the row's height is
                 // only known once the state notifies.
-                let _observe = cx.observe_in(&state, window, move |app, state, window, cx| {
-                    let Some(view) = app.view.as_ref() else {
-                        return;
-                    };
+                let _observe = cx.observe_in(&state, window, move |view, state, window, cx| {
                     let current = view.texts.get(&key).and_then(Self::markdown_state);
                     if current != Some(&state) {
                         return;
                     }
-                    app.paint_row_quotes(key, cx);
-                    let Some(view) = app.view.as_ref() else {
-                        return;
-                    };
+                    view.paint_row_quotes(key, cx);
                     if let Some(ix) = view.row_index(key) {
                         view.list.remeasure_items(ix..ix + 1);
-                        app.check_reading(window, cx);
+                        view.check_reading(window, cx);
                         cx.notify();
                     }
                 });
                 Widget::Markdown { state, _observe }
             }
         };
-        let (images, observe_images) =
-            ElseApp::message_images(client.clone(), key, bot, &parts, window, cx);
+        let (images, observe_images) = ConversationView::message_images(
+            client.clone(),
+            key,
+            bot,
+            owner.clone(),
+            &parts,
+            window,
+            cx,
+        );
         let (visuals, observe_visuals) =
-            ElseApp::message_visuals(client, key, bot, &parts, window, cx);
+            ConversationView::message_visuals(client, key, bot, &parts, window, cx);
         Self {
             source,
             painted: None,
@@ -287,7 +299,8 @@ impl RowText {
             quote,
             files,
             parts,
-            owner: cx.entity().downgrade(),
+            owner,
+            view: cx.entity().downgrade(),
             bot,
             key,
             images,
@@ -657,6 +670,7 @@ impl RowText {
         let link_source = self.display.text.clone();
         let owner = self.owner.clone();
         let link_owner = owner.clone();
+        let link_view = self.view.clone();
         let bot = self.bot;
         let key = self.key;
         let passages = Passage::parse_all(&self.source)
@@ -774,9 +788,8 @@ impl RowText {
                         }
                         if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
                             let passage = passage.clone();
-                            let _ = link_owner.update(cx, |app, cx| {
-                                app.reveal_quoted(
-                                    bot,
+                            let _ = link_view.update(cx, |view, cx| {
+                                view.reveal_quoted(
                                     key,
                                     passage.author,
                                     &passage.original,
@@ -831,8 +844,7 @@ impl RowText {
     fn render_quote_preview(&self, cx: &App) -> Option<AnyElement> {
         let reply = QuotedReply::parse(&self.source)?;
         let original = reply.original();
-        let owner = self.owner.clone();
-        let bot = self.bot;
+        let view = self.view.clone();
         let from = self.key;
         let author_kind = reply.author;
         let (author, excerpt) = self.quote_line()?;
@@ -868,8 +880,8 @@ impl RowText {
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     let original = original.clone();
-                    let _ = owner.update(cx, |app, cx| {
-                        app.reveal_quoted(bot, from, author_kind, &original, window, cx)
+                    let _ = view.update(cx, |view, cx| {
+                        view.reveal_quoted(from, author_kind, &original, window, cx)
                     });
                 })
                 .into_any_element(),

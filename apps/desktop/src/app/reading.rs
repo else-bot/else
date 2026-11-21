@@ -22,55 +22,79 @@ const UNREAD_DIVIDER_DELAY: Duration = Duration::from_secs(5);
 
 impl ElseApp {
     pub(super) fn check_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
+        let Some(view) = &self.view else {
+            return;
+        };
+        view.update(cx, |view, _| {
             if let Some(unread) = &mut view.unread {
                 unread.dismissal = None;
             }
             view.reply_layout = None;
             view.latest_seen = false;
-            window.refresh();
-            cx.notify();
-        }
+        });
+        // Lays the cached transcript out again, so the latest reply reports
+        // where it is.
+        window.refresh();
+        cx.notify();
     }
 
     fn dismiss_unread_after_viewing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let attending = self.viewing_transcript(window, cx);
-        let latest = self.latest_loaded();
-        let Some(view) = self.view.as_mut() else {
+        let latest = self.latest_loaded(cx);
+        let Some(view) = self.view.clone() else {
             return;
+        };
+        let dismissal = |cx: &mut Context<Self>| {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(UNREAD_DIVIDER_DELAY).await;
+                let _ = this.update_in(cx, |app, window, cx| {
+                    if !app.viewing_transcript(window, cx) {
+                        return;
+                    }
+                    let Some(view) = app.view.clone() else {
+                        return;
+                    };
+                    if view.read(cx).latest_seen {
+                        view.update(cx, |view, _| view.unread = None);
+                        app.sync_rows(window, cx);
+                    }
+                });
+            })
+        };
+        let (latest_seen, waiting) = {
+            let view = view.read(cx);
+            (
+                view.latest_seen,
+                view.unread
+                    .as_ref()
+                    .map(|unread| (unread.since, unread.dismissal.is_some())),
+            )
         };
         // A kept view can show its old tail before the unread reply arrives.
-        let latest_seen = view.latest_seen;
-        let Some(unread) = &mut view.unread else {
+        let Some((since, dismissing)) = waiting else {
             return;
         };
-        if !attending || !latest_seen || latest <= Some(unread.since) {
-            unread.dismissal = None;
-            return;
-        }
-        if unread.dismissal.is_some() {
-            return;
-        }
-        let bot = view.bot_id;
-        unread.dismissal = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(UNREAD_DIVIDER_DELAY).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if !app.viewing_transcript(window, cx) {
-                    return;
-                }
-                let Some(view) = app.view_of(bot) else {
-                    return;
-                };
-                if view.latest_seen {
-                    view.unread = None;
-                    app.sync_rows(window, cx);
+        if !attending || !latest_seen || latest <= Some(since) {
+            view.update(cx, |view, _| {
+                if let Some(unread) = &mut view.unread {
+                    unread.dismissal = None;
                 }
             });
-        }));
+            return;
+        }
+        if dismissing {
+            return;
+        }
+        let task = dismissal(cx);
+        view.update(cx, |view, _| {
+            if let Some(unread) = &mut view.unread {
+                unread.dismissal = Some(task);
+            }
+        });
     }
 
-    fn latest_loaded(&self) -> Option<ReplyPosition> {
-        let item = self.view.as_ref()?.conversation.as_ref()?.latest_reply()?;
+    fn latest_loaded(&self, cx: &App) -> Option<ReplyPosition> {
+        let item = self.shown(cx)?.conversation.as_ref()?.latest_reply()?;
         Some(ReplyPosition {
             item_seq: item.seq,
             text_bytes: item.text.len() as i64,
@@ -85,15 +109,15 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         if self
-            .latest_loaded()
+            .latest_loaded(cx)
             .is_none_or(|position| position.item_seq != layout.position.item_seq)
         {
             return;
         }
-        let Some(view) = self.view.as_mut().filter(|view| view.bot_id == bot) else {
+        let Some(view) = self.view_of(bot, cx).filter(|_| self.shows(bot, cx)) else {
             return;
         };
-        view.reply_layout = Some(layout);
+        view.update(cx, |view, _| view.reply_layout = Some(layout));
         self.acknowledge_visible(window, cx);
     }
 
@@ -111,28 +135,28 @@ impl ElseApp {
     }
 
     fn acknowledge_visible(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(position) = self.latest_loaded() else {
+        let Some(position) = self.latest_loaded(cx) else {
             return;
         };
-        let Some(view) = self.view.as_mut() else {
+        let Some(view) = self.view.clone() else {
             return;
         };
-        let Some(layout) = view
-            .reply_layout
-            .filter(|layout| layout.position.item_seq == position.item_seq)
-        else {
+        let Some((layout, viewport, bot_id)) = view.read_with(cx, |view, _| {
+            let layout = view
+                .reply_layout
+                .filter(|layout| layout.position.item_seq == position.item_seq)?;
+            Some((layout, view.list.viewport_bounds(), view.bot_id))
+        }) else {
             return;
         };
-        let viewport = view.list.viewport_bounds();
         let seen = viewport.size.height > px(0.)
             && layout.bounds.bottom() > viewport.top()
             && layout.bounds.bottom() <= viewport.bottom() + px(1.);
         let latest_seen = seen && layout.position == position;
-        if view.latest_seen != latest_seen {
-            view.latest_seen = latest_seen;
+        if view.read(cx).latest_seen != latest_seen {
+            view.update(cx, |view, _| view.latest_seen = latest_seen);
             cx.notify();
         }
-        let bot_id = view.bot_id;
         if seen
             && layout.position.text_bytes > 0
             && self.attending(window)
@@ -149,8 +173,8 @@ impl ElseApp {
         self.dismiss_unread_after_viewing(window, cx);
     }
 
-    pub(super) fn unseen_below(&self) -> bool {
-        let (Some(view), Some(position)) = (self.view.as_ref(), self.latest_loaded()) else {
+    pub(super) fn unseen_below(&self, cx: &App) -> bool {
+        let (Some(view), Some(position)) = (self.shown(cx), self.latest_loaded(cx)) else {
             return false;
         };
         !view.latest_seen
@@ -163,9 +187,7 @@ impl ElseApp {
     }
 
     pub(super) fn jump_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_ref() {
-            view.list.set_follow_mode(FollowMode::Tail);
-        }
+        self.update_view(cx, |view, _| view.list.set_follow_mode(FollowMode::Tail));
         self.check_reading(window, cx);
         cx.notify();
     }
@@ -252,8 +274,7 @@ impl ElseApp {
         let viewing = self
             .attending(window)
             .then_some(
-                self.view
-                    .as_ref()
+                self.shown(cx)
                     .filter(|v| {
                         v.latest_seen
                             || (v.list.is_following_tail()
@@ -310,16 +331,12 @@ impl ElseApp {
         if hidden {
             self.requested = None;
             self.details.drop_computer();
-            self.clear_social_forms(window, cx);
         } else {
-            self.sync_skill_cards(window, cx);
-            self.sync_social_cards(window, cx);
-        }
-        if !hidden {
             self.ensure_settings(window, cx);
             self.check_reading(window, cx);
         }
-        // Releases the computer view the details panel was showing.
+        // Releases the computer view the details panel was showing, and
+        // hands the transcript its new reach, which syncs its cards.
         cx.notify();
     }
 

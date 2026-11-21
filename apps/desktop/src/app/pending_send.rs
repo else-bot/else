@@ -13,7 +13,7 @@ use else_wire::items::Reaction;
 pub(super) const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 
 /// An owner message the server has not yet confirmed, frozen under one request ID.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct PendingSend {
     pub(super) request_id: Uuid,
     pub(super) text: String,

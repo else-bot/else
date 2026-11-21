@@ -247,12 +247,16 @@ fn quote(words: &str, cx: &App) -> Div {
 }
 
 impl ElseApp {
-    fn rules_version_of(&self, bot: Uuid) -> Option<i64> {
-        self.view
-            .as_ref()
+    fn rules_version_of(&self, bot: Uuid, cx: &App) -> Option<i64> {
+        self.shown(cx)
             .filter(|view| view.bot_id == bot)
             .and_then(|view| view.conversation.as_ref())
             .map(|conversation| conversation.rules_version())
+    }
+
+    /// Whether an undo of `bot`'s rules is in flight.
+    pub(super) fn restoring_rules(&self, bot: Uuid) -> bool {
+        self.rules.get(&bot).is_some_and(|cache| cache.restoring)
     }
 
     fn rules_file(&self, bot: Uuid) -> Option<&RulesFile> {
@@ -262,7 +266,7 @@ impl ElseApp {
     /// Load the open bot's rules when the stream reports a version the cache
     /// does not have yet.
     pub(super) fn ensure_rules(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(version) = self.rules_version_of(bot) else {
+        let Some(version) = self.rules_version_of(bot, cx) else {
             return;
         };
         let cache = self.rules.entry(bot).or_default();
@@ -474,84 +478,6 @@ impl ElseApp {
         )
     }
 
-    pub(super) fn render_rules_update(
-        &self,
-        item: Uuid,
-        bot: Uuid,
-        update: &RulesUpdate,
-        stamp: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let author = self.bots.iter().find(|b| b.id == bot);
-        let current =
-            self.rules_version_of(bot) == Some(update.version) && update.undone_at.is_none();
-        let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
-        let section = update.section.clone();
-        let shown = update.version;
-        let view = super::action_card::event_action(
-            SharedString::from(format!("rules-view-{item}")),
-            "View",
-            false,
-            cx,
-        )
-        .accessibility_label(format!("View the change to {}", update.section))
-        .on_click(cx.listener(move |app, _, window, cx| {
-            app.open_rules(
-                bot,
-                Some(section.clone()),
-                RulesTab::History,
-                Some(shown),
-                window,
-                cx,
-            )
-        }));
-        let previous = update.version - 1;
-        let undo = current.then(|| {
-            super::action_card::event_action(
-                SharedString::from(format!("rules-undo-{item}")),
-                "Undo",
-                restoring,
-                cx,
-            )
-            .loading(restoring)
-            .accessibility_label(format!("Undo the change to {}", update.section))
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.restore_rules(bot, previous, shown, window, cx)
-            }))
-        });
-        let undone = update.undone_at;
-        let line = super::action_card::event_row(&theme)
-            .id(SharedString::from(format!("message-{item}")))
-            .child(self.event_faces(&format!("rules-{item}"), author.map(|b| b.id)))
-            .child(
-                super::action_card::event_verb(&theme, change_label(update.change))
-                    .when(undone.is_some(), |verb| verb.line_through()),
-            )
-            .child(
-                super::action_card::event_object(&theme, update.section.clone())
-                    .when(undone.is_some(), |object| {
-                        object.line_through().text_color(theme.muted_foreground)
-                    }),
-            )
-            .when_some(undone, |row, at| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.5))
-                        .text_color(super::message_row::meta_color(&theme))
-                        .child(format!("Undone · {}", when(at))),
-                )
-            })
-            .child(super::action_card::event_end(
-                &theme,
-                super::action_card::EventEnd::Actions(std::iter::once(view).chain(undo).collect()),
-                super::action_card::Disclosure::None,
-            ));
-        let _ = stamp;
-        line.into_any_element()
-    }
-
     fn render_rules_dialog(
         &self,
         bot: Uuid,
@@ -734,7 +660,7 @@ impl ElseApp {
             .and_then(|v| file.history.iter().find(|h| h.version == v))
             .or_else(|| file.history.first())?;
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring)
-            || self.rules_version_of(bot) != Some(file.version);
+            || self.rules_version_of(bot, cx) != Some(file.version);
         let expected = file.version;
         let current = picked.version == file.version;
         let target = if current {
@@ -1056,6 +982,86 @@ impl BotPanel {
                     ),
             );
         body.child(card).into_any_element()
+    }
+}
+
+impl super::conversation::ConversationView {
+    pub(super) fn render_rules_update(
+        &self,
+        item: Uuid,
+        bot: Uuid,
+        update: &RulesUpdate,
+        stamp: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let author = self.inputs.bots.iter().find(|b| b.id == bot);
+        let current = self.conversation.as_ref().map(|c| c.rules_version()) == Some(update.version)
+            && update.undone_at.is_none();
+        let restoring = self.inputs.restoring_rules;
+        let section = update.section.clone();
+        let shown = update.version;
+        let view = super::action_card::event_action(
+            SharedString::from(format!("rules-view-{item}")),
+            "View",
+            false,
+            cx,
+        )
+        .accessibility_label(format!("View the change to {}", update.section))
+        .on_click(self.on_app(move |app, _, window, cx| {
+            app.open_rules(
+                bot,
+                Some(section.clone()),
+                RulesTab::History,
+                Some(shown),
+                window,
+                cx,
+            )
+        }));
+        let previous = update.version - 1;
+        let undo = current.then(|| {
+            super::action_card::event_action(
+                SharedString::from(format!("rules-undo-{item}")),
+                "Undo",
+                restoring,
+                cx,
+            )
+            .loading(restoring)
+            .accessibility_label(format!("Undo the change to {}", update.section))
+            .on_click(self.on_app(move |app, _, window, cx| {
+                app.restore_rules(bot, previous, shown, window, cx)
+            }))
+        });
+        let undone = update.undone_at;
+        let line = super::action_card::event_row(&theme)
+            .id(SharedString::from(format!("message-{item}")))
+            .child(self.event_faces(&format!("rules-{item}"), author.map(|b| b.id)))
+            .child(
+                super::action_card::event_verb(&theme, change_label(update.change))
+                    .when(undone.is_some(), |verb| verb.line_through()),
+            )
+            .child(
+                super::action_card::event_object(&theme, update.section.clone())
+                    .when(undone.is_some(), |object| {
+                        object.line_through().text_color(theme.muted_foreground)
+                    }),
+            )
+            .when_some(undone, |row, at| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.5))
+                        .text_color(super::message_row::meta_color(&theme))
+                        .child(format!("Undone · {}", when(at))),
+                )
+            })
+            .child(super::action_card::event_end(
+                &theme,
+                super::action_card::EventEnd::Actions(std::iter::once(view).chain(undo).collect()),
+                super::action_card::Disclosure::None,
+            ));
+        let _ = stamp;
+        line.into_any_element()
     }
 }
 
