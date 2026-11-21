@@ -49,9 +49,10 @@ fn checked_purpose(name: &str, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Only computer tools declare `effect`, all of them parking tools. Any other
-/// tool given one is refused before approval: its card would park the turn
-/// under a name no provider treats as parking.
+/// The computer tools whose row declares `effect` are all parking tools. A
+/// computer tool given an undeclared effect is refused before approval: its
+/// card would park the turn under a name no provider treats as parking.
+/// (`mcp_request` and `mcp_wait` take an effect too and check it themselves.)
 fn declared_effect(tool: &ToolDef, args: &Value) -> Result<Option<Effect>, String> {
     let name = tool.name;
     if !tool.effect.declared() && args.get("effect").is_some_and(|e| !e.is_null()) {
