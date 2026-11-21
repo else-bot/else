@@ -118,7 +118,7 @@ fn delegated_rules(input: &TurnInput, sender: Option<&(Uuid, String)>) -> String
             Origin::RoutineRun => "A routine run",
             _ => "A webhook wake",
         };
-        let saved = if input.grant_reach() != crate::app::questions::GrantReach::Nothing {
+        let saved = if input.grant_reach() != crate::grants::policy::GrantReach::Nothing {
             "Your saved task permissions apply here to the host actions or computer \
              tool calls each one covers, declaring the same task_scope: call ask_permission \
              before each sensitive host action, with the saved task and target when the work fits."

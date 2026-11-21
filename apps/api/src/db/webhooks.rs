@@ -24,6 +24,7 @@ use crate::app::providers::WebhookRun;
 use crate::app::routines::{RoutineName, RoutinePrompt};
 use crate::app::webhooks::{InvalidPace, MAX_PER_BOT, Pace, WINDOW, new_token, token_digest};
 use crate::providers::Registry;
+use crate::scheduler::pump::Tick;
 
 /// Requested webhooks admitted per scheduler scan.
 pub const ADMIT_BATCH: i64 = 8;
@@ -515,6 +516,13 @@ static UNFINISHED: LazyLock<String> = LazyLock::new(|| {
     WHERE r.webhook_id = w.id AND t.status NOT IN {ENDED_STATUSES})"
     )
 });
+
+/// Queue the wakes of requested webhooks whose pace allows them now.
+pub async fn pump(tick: &Tick<'_>) {
+    if let Err(err) = admit_requested(tick.pool, tick.registry, tick.now, ADMIT_BATCH).await {
+        tracing::warn!(error = %err, "admitting webhook wakes failed");
+    }
+}
 
 /// Admit up to `limit` requested webhooks whose wake may run at `now`.
 /// Returns how many turns were queued. The caller holds a maintenance

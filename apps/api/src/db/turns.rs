@@ -1340,7 +1340,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .filter_map(|p| p.target)
         .filter(|t| reach.covers(t))
         .collect();
-    if reach != crate::app::questions::GrantReach::Nothing {
+    if reach != crate::grants::policy::GrantReach::Nothing {
         input.draft_tasks = draft_tasks
             .into_iter()
             .filter(|kind| kind.task.is_some())

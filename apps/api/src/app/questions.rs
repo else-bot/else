@@ -84,44 +84,6 @@ pub enum Standing {
     Task,
 }
 
-/// Which saved grants a turn may use, by what started it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrantReach {
-    /// The owner's own chat request: every saved grant.
-    OwnerChat,
-    /// A scheduled routine run, or work delegated for an owner request or
-    /// a routine run.
-    Tasks,
-    /// Webhook wakes, events, and work delegated for them.
-    Nothing,
-}
-
-impl GrantReach {
-    pub fn of(origin: crate::app::providers::Origin, owner_chat: bool) -> Self {
-        use crate::app::providers::Origin;
-        match origin {
-            Origin::OwnerRequest if owner_chat => Self::OwnerChat,
-            Origin::OwnerRequest | Origin::RoutineRun => Self::Tasks,
-            Origin::WebhookWake | Origin::ConnectorEvent | Origin::SocialEvent | Origin::Other => {
-                Self::Nothing
-            }
-        }
-    }
-
-    pub fn covers(self, target: &PermissionTarget) -> bool {
-        match self {
-            Self::OwnerChat => true,
-            Self::Tasks => matches!(
-                target,
-                PermissionTarget::Task { .. }
-                    | PermissionTarget::McpTool { .. }
-                    | PermissionTarget::ComputerTool { .. }
-            ),
-            Self::Nothing => false,
-        }
-    }
-}
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
 )]
@@ -1088,39 +1050,6 @@ impl Spec {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn a_routine_run_and_its_tasks_reach_task_grants_and_webhooks_reach_none() {
-        use crate::app::providers::Origin;
-        let reach = |origin, owner_chat| GrantReach::of(origin, owner_chat);
-        assert_eq!(reach(Origin::OwnerRequest, true), GrantReach::OwnerChat);
-        assert_eq!(reach(Origin::OwnerRequest, false), GrantReach::Tasks);
-        for owner_chat in [true, false] {
-            assert_eq!(
-                reach(Origin::RoutineRun, owner_chat),
-                GrantReach::Tasks,
-                "a routine's own turn sits in the owner chat yet never reaches every grant"
-            );
-            for origin in [
-                Origin::WebhookWake,
-                Origin::ConnectorEvent,
-                Origin::SocialEvent,
-                Origin::Other,
-            ] {
-                assert_eq!(reach(origin, owner_chat), GrantReach::Nothing, "{origin:?}");
-            }
-        }
-        let routine = PermissionTarget::Routine {
-            routine_id: uuid::Uuid::nil(),
-            prompt_revision: 1,
-            kind: Kind::Destructive,
-        };
-        assert!(
-            !GrantReach::Tasks.covers(&routine)
-                && !GrantReach::Tasks.covers(&PermissionTarget::Bot),
-            "a routine's destructive grant never carries over to its tasks"
-        );
-    }
 
     #[test]
     fn only_a_bare_always_allow_reply_answers_a_card() {

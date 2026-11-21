@@ -4,9 +4,10 @@ use uuid::Uuid;
 use super::{QuestionInfo, RequestError, find_same, info, insert, turns};
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, GrantReach, MAX_CONTEXT,
-    PermissionTarget, Spec,
+    APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, MAX_CONTEXT, PermissionTarget,
+    Spec,
 };
+use crate::grants::policy::GrantReach;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfirmError {

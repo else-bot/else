@@ -46,6 +46,7 @@ use crate::app::routines::{
 use crate::computers::ComputerManager;
 use crate::db::bots::{self, BotStatus};
 use crate::providers::Registry;
+use crate::scheduler::pump::Tick;
 
 mod checks;
 
@@ -1257,6 +1258,38 @@ async fn review(
     }
     tx.commit().await?;
     Ok(false)
+}
+
+/// Review ended routine runs. The scheduler runs this before each claim
+/// pass, so a run that ended before the pass has its failure notice and
+/// session rewind before the conversation's next turn starts.
+pub async fn pump_review(tick: &Tick<'_>) {
+    if let Err(err) = review_ended(tick.pool, tick.registry, tick.now, REVIEW_BATCH).await {
+        tracing::warn!(error = %err, "reviewing ended routine runs failed");
+    }
+}
+
+/// Settle routine checks that finished.
+pub async fn pump_settle(tick: &Tick<'_>) {
+    if let Err(err) = settle_checks(tick.pool, tick.registry, SETTLE_BATCH).await {
+        tracing::warn!(error = %err, "settling routine checks failed");
+    }
+}
+
+/// Admit due routines and launch the checks they reserve.
+pub async fn pump_admit(tick: &Tick<'_>) {
+    match admit_due(
+        tick.pool,
+        tick.registry,
+        tick.computers,
+        tick.now,
+        ADMIT_BATCH,
+    )
+    .await
+    {
+        Ok(admitted) => admitted.checks.into_iter().for_each(tick.launch),
+        Err(err) => tracing::warn!(error = %err, "admitting due routines failed"),
+    }
 }
 
 /// What one scan of due routines did.

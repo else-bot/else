@@ -123,6 +123,15 @@ impl Pause {
 /// Admitted work; the gate cannot close until it is dropped.
 pub struct Admission(Arc<Gate>);
 
+impl Admission {
+    /// Admit work this admission hands off, such as a task it spawns. A
+    /// closer already waits for this admission, so it waits for the share.
+    pub fn share(&self) -> Self {
+        self.0.state.fetch_add(1, Ordering::AcqRel);
+        Self(self.0.clone())
+    }
+}
+
 impl Drop for Admission {
     fn drop(&mut self) {
         if self.0.state.fetch_sub(1, Ordering::AcqRel) & ADMITTED == 1 {
@@ -270,6 +279,26 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_closer_waits_for_a_share_its_admission_handed_off() {
+        let gate = Arc::new(Gate::default());
+        let admission = gate.enter().unwrap();
+        let share = admission.share();
+        drop(admission);
+        assert!(
+            gate.close(Duration::from_millis(50), Pause::backup(None))
+                .await
+                .is_err(),
+            "the share keeps the gate from closing"
+        );
+        drop(share);
+        assert!(matches!(
+            gate.close(Duration::from_secs(1), Pause::backup(None))
+                .await,
+            Ok(Some(_))
+        ));
+    }
 
     #[tokio::test]
     async fn the_next_closer_keeps_its_capture_and_pause() {

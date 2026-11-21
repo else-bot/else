@@ -164,7 +164,7 @@ fn draft_tasks(input: &TurnInput) -> String {
 }
 
 pub(crate) fn permissions_block(input: &TurnInput) -> String {
-    if input.grant_reach() == crate::app::questions::GrantReach::Nothing {
+    if input.grant_reach() == crate::grants::policy::GrantReach::Nothing {
         return String::new();
     }
     format!(
