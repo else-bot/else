@@ -2,6 +2,7 @@
 //! asks the shell for what only the shell can do through [`PaneEvent`].
 
 use super::*;
+use settings::SettingsSection;
 
 /// What a pane asks of the shell.
 pub(super) enum PaneEvent {
@@ -23,7 +24,7 @@ impl Shell {
     pub(super) fn mount<V: EventEmitter<PaneEvent>>(
         &self,
         view: Entity<V>,
-        section: settings::SettingsSection,
+        section: SettingsSection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Mounted<V> {
@@ -42,7 +43,7 @@ impl Shell {
     fn pane_event(
         &mut self,
         event: &PaneEvent,
-        section: settings::SettingsSection,
+        section: SettingsSection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -61,5 +62,176 @@ impl Shell {
             }
             PaneEvent::Reload => self.reload_pane(section, window, cx),
         }
+    }
+}
+
+/// The settings pane that is open besides the two kept warm. Panes that
+/// hold typed secrets wipe them in [`Pane::close`], which runs whenever a
+/// pane is replaced through [`Settings::show`].
+#[derive(Default)]
+pub(super) enum Pane {
+    #[default]
+    None,
+    Mcp(Mounted<mcp::View>),
+    Skills(Mounted<skills::View>),
+    Vault(Entity<vault::View>),
+    Usage(Mounted<usage::View>),
+    Computers(Mounted<computers::View>),
+    Socials(Entity<crate::socials::SocialsView>),
+}
+
+impl Pane {
+    pub(super) fn section(&self) -> Option<SettingsSection> {
+        Some(match self {
+            Self::None => return None,
+            Self::Mcp(_) => SettingsSection::Mcp,
+            Self::Skills(_) => SettingsSection::Skills,
+            Self::Vault(_) => SettingsSection::Vault,
+            Self::Usage(_) => SettingsSection::Usage,
+            Self::Computers(_) => SettingsSection::Computers,
+            Self::Socials(_) => SettingsSection::Socials,
+        })
+    }
+
+    fn close(self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Skills(pane) => pane.view.update(cx, |view, cx| view.clear_keys(window, cx)),
+            Self::Vault(view) => view.update(cx, |view, cx| view.close(window, cx)),
+            Self::Socials(view) => view.update(cx, |view, cx| view.clear(window, cx)),
+            Self::None | Self::Mcp(_) | Self::Usage(_) | Self::Computers(_) => {}
+        }
+    }
+
+    fn has_unsaved_work(&self, cx: &App) -> bool {
+        match self {
+            Self::Mcp(pane) => pane.view.read(cx).has_unsaved_work(),
+            Self::Skills(pane) => pane.view.read(cx).has_unsaved_work(cx),
+            Self::Vault(view) => view.read(cx).has_unsaved_work(),
+            Self::Socials(view) => view.read(cx).has_unsaved_work(),
+            Self::None | Self::Usage(_) | Self::Computers(_) => false,
+        }
+    }
+
+    /// The pane's page, which fills the settings column.
+    pub(super) fn element(&self) -> AnyElement {
+        match self {
+            Self::None => div().into_any_element(),
+            Self::Mcp(pane) => pane.view.clone().into_any_element(),
+            Self::Skills(pane) => pane.view.clone().into_any_element(),
+            Self::Usage(pane) => pane.view.clone().into_any_element(),
+            Self::Computers(pane) => pane.view.clone().into_any_element(),
+            Self::Vault(view) => div().child(view.clone()).into_any_element(),
+            Self::Socials(view) => div().child(view.clone()).into_any_element(),
+        }
+    }
+}
+
+/// The server's settings panes: the open one, and Backups and Email,
+/// which stay warm while other sections show.
+#[derive(Default)]
+pub(super) struct Settings {
+    /// Private, so a pane can only leave through [`Settings::show`].
+    pane: Pane,
+    pub backups: Option<Mounted<backups::View>>,
+    pub email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
+}
+
+impl Settings {
+    pub(super) fn pane(&self) -> &Pane {
+        &self.pane
+    }
+
+    /// Replaces the open pane. Every pane leaves through here, so its
+    /// secrets are wiped before it drops.
+    pub(super) fn show(&mut self, pane: Pane, window: &mut Window, cx: &mut App) {
+        std::mem::replace(&mut self.pane, pane).close(window, cx);
+    }
+
+    /// Drops every pane, the warm ones too.
+    pub(super) fn clear(&mut self, window: &mut Window, cx: &mut App) {
+        self.show(Pane::None, window, cx);
+        self.backups = None;
+        self.email = None;
+    }
+
+    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
+        self.pane.has_unsaved_work(cx)
+            || self
+                .backups
+                .as_ref()
+                .is_some_and(|pane| pane.view.read(cx).has_unsaved_work(cx))
+            || self
+                .email
+                .as_ref()
+                .is_some_and(|(view, _)| view.read(cx).has_unsaved_work(cx))
+    }
+}
+
+impl Shell {
+    /// A fresh pane for `section`, or [`Pane::None`] for a section without
+    /// one or without a server.
+    pub(super) fn new_pane(
+        &self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Pane {
+        let Some(active) = &self.active else {
+            return Pane::None;
+        };
+        let (client, app) = (active.client.clone(), active.app.clone());
+        match section {
+            SettingsSection::Mcp => {
+                let view = cx.new(|cx| mcp::View::new(client, window, cx));
+                Pane::Mcp(self.mount(view, section, window, cx))
+            }
+            SettingsSection::Skills => {
+                let connected = app.read(cx).connected();
+                let view = cx.new(|cx| skills::View::new(client, connected, window, cx));
+                Pane::Skills(self.mount(view, section, window, cx))
+            }
+            SettingsSection::Vault => {
+                Pane::Vault(cx.new(|cx| vault::View::new(client, window, cx)))
+            }
+            SettingsSection::Usage => {
+                let view = cx.new(|cx| usage::View::new(client, app, window, cx));
+                Pane::Usage(self.mount(view, section, window, cx))
+            }
+            SettingsSection::Computers => {
+                let view = cx.new(|cx| computers::View::new(client, app, window, cx));
+                Pane::Computers(self.mount(view, section, window, cx))
+            }
+            SettingsSection::Socials => {
+                let (client, available) = {
+                    let app = app.read(cx);
+                    (app.social_client(), app.social_network_available())
+                };
+                let view = cx.new(|cx| crate::socials::SocialsView::new(client, None, window, cx));
+                if !available {
+                    view.update(cx, |view, cx| view.set_available(false, window, cx));
+                }
+                Pane::Socials(view)
+            }
+            SettingsSection::Server
+            | SettingsSection::Email
+            | SettingsSection::Backups
+            | SettingsSection::Updates => Pane::None,
+        }
+    }
+
+    /// Replaces a pane with a fresh one, as its retry after a failed load.
+    pub(super) fn reload_pane(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if section == SettingsSection::Backups {
+            self.open_backups(window, cx);
+            return;
+        }
+        let pane = self.new_pane(section, window, cx);
+        self.settings.show(pane, window, cx);
+        cx.notify();
     }
 }

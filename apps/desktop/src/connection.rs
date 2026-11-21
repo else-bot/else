@@ -228,14 +228,7 @@ pub struct Shell {
     setup: Option<Setup>,
     settings_focus: FocusHandle,
     updates: updates::View,
-    backups: Option<pane::Mounted<backups::View>>,
-    mcp: Option<pane::Mounted<mcp::View>>,
-    skills: Option<pane::Mounted<skills::View>>,
-    vault: Option<Entity<vault::View>>,
-    usage: Option<pane::Mounted<usage::View>>,
-    computers: Option<pane::Mounted<computers::View>>,
-    socials: Option<Entity<crate::socials::SocialsView>>,
-    email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
+    settings: pane::Settings,
     switcher: Option<switcher::Switcher>,
     recall: switcher::Recall,
 }
@@ -330,14 +323,7 @@ impl Shell {
             setup: None,
             settings_focus,
             updates,
-            backups: None,
-            mcp: None,
-            skills: None,
-            vault: None,
-            usage: None,
-            computers: None,
-            socials: None,
-            email: None,
+            settings: pane::Settings::default(),
             switcher: None,
             recall,
         };
@@ -410,14 +396,7 @@ impl Shell {
             .active
             .as_ref()
             .map(|active| active.app.read(cx).panel_widths());
-        self.clear_skills(window, cx);
-        self.clear_vault(window, cx);
-        self.usage = None;
-        self.computers = None;
-        self.clear_socials(window, cx);
-        self.backups = None;
-        self.mcp = None;
-        self.email = None;
+        self.settings.clear(window, cx);
         if let Some(mut previous) = self.active.take() {
             previous.last_focus = window
                 .focused(cx)
@@ -505,20 +484,8 @@ impl Shell {
                 if let Some(bot) = app.read(cx).selected_bot_id() {
                     shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
                 }
-                let connected = app.read(cx).connected();
-                if let Some(skills) = &shell.skills {
-                    skills
-                        .view
-                        .update(cx, |view, cx| view.set_connected(connected, window, cx));
-                }
-                if !connected {
-                    shell.clear_vault(window, cx);
-                } else if shell.settings_section() == Some(settings::SettingsSection::Vault)
-                    && shell.vault.is_none()
-                {
-                    shell.open_vault(window, cx);
-                }
-                if let Some(socials) = &shell.socials {
+                shell.connection_changed(app.read(cx).connected(), window, cx);
+                if let pane::Pane::Socials(socials) = shell.settings.pane() {
                     let available = app.read(cx).social_network_available();
                     socials.update(cx, |view, cx| view.set_available(available, window, cx));
                 }
@@ -940,18 +907,12 @@ impl Shell {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_skills(window, cx);
-        self.clear_vault(window, cx);
-        self.usage = None;
-        self.computers = None;
-        self.clear_socials(window, cx);
+        self.settings.show(pane::Pane::None, window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();
             self.server_updates.dismiss();
             self.server_editor = None;
-            self.backups = None;
-            self.mcp = None;
-            self.email = None;
+            self.settings.clear(window, cx);
             self.setup = None;
             active
                 .app

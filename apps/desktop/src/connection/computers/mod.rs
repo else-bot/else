@@ -137,20 +137,6 @@ impl View {
     }
 }
 
-impl Shell {
-    pub(in crate::connection) fn open_computers(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = &self.active else { return };
-        let (client, app) = (active.client.clone(), active.app.clone());
-        let view = cx.new(|cx| View::new(client, app, window, cx));
-        self.computers = Some(self.mount(view, settings::SettingsSection::Computers, window, cx));
-        cx.notify();
-    }
-}
-
 impl Render for View {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_page(cx)

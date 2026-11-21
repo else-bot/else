@@ -81,7 +81,7 @@ impl Shell {
         let Some(active) = &self.active else { return };
         let client = active.client.clone();
         let view = cx.new(|cx| View::new(client, window, cx));
-        self.backups =
+        self.settings.backups =
             Some(self.mount(view, super::settings::SettingsSection::Backups, window, cx));
         cx.notify();
     }

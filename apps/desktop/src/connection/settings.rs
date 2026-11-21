@@ -73,7 +73,7 @@ impl Shell {
                 }
             },
         );
-        self.email = Some((view, subscription));
+        self.settings.email = Some((view, subscription));
         cx.notify();
     }
 
@@ -152,20 +152,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if section != SettingsSection::Socials {
-            self.clear_socials(window, cx);
-        } else if self.socials.is_none()
-            && let Some(active) = &self.active
-        {
-            let client = active.app.read(cx).social_client();
-            self.socials =
-                Some(cx.new(|cx| crate::socials::SocialsView::new(client, None, window, cx)));
-            if !active.app.read(cx).social_network_available() {
-                self.socials
-                    .as_ref()
-                    .unwrap()
-                    .update(cx, |view, cx| view.set_available(false, window, cx));
-            }
+        if self.settings.pane().section() != Some(section) {
+            let pane = self.new_pane(section, window, cx);
+            self.settings.show(pane, window, cx);
         }
         if let Some(setup) = &mut self.setup {
             setup.presentation = Presentation::Settings(section);
@@ -184,45 +173,10 @@ impl Shell {
             .focus(window, cx);
             cx.notify();
         }
-        if section == SettingsSection::Vault {
-            if self.vault.is_none() {
-                self.open_vault(window, cx);
-            }
-        } else {
-            self.clear_vault(window, cx);
-        }
-        if section == SettingsSection::Skills {
-            if self.skills.is_none() {
-                self.open_skills(window, cx);
-            }
-        } else {
-            self.clear_skills(window, cx);
-        }
-        if section == SettingsSection::Usage {
-            if self.usage.is_none() {
-                self.open_usage(window, cx);
-            }
-        } else {
-            self.usage = None;
-        }
-        if section == SettingsSection::Computers {
-            if self.computers.is_none() {
-                self.open_computers(window, cx);
-            }
-        } else {
-            self.computers = None;
-        }
-        if section == SettingsSection::Mcp {
-            if self.mcp.is_none() {
-                self.open_mcp(window, cx);
-            }
-        } else {
-            self.mcp = None;
-        }
-        if section == SettingsSection::Backups && self.backups.is_none() {
+        if section == SettingsSection::Backups && self.settings.backups.is_none() {
             self.open_backups(window, cx);
         }
-        if section == SettingsSection::Email && self.email.is_none() {
+        if section == SettingsSection::Email && self.settings.email.is_none() {
             self.open_email(None, window, cx);
         }
         if section == SettingsSection::Server {
@@ -234,24 +188,28 @@ impl Shell {
         }
     }
 
-    pub(super) fn reload_pane(
+    /// Follows the active server's connection: losing it wipes typed
+    /// skill keys and closes the Vault, which reopens once it is back.
+    pub(super) fn connection_changed(
         &mut self,
-        section: SettingsSection,
+        connected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match section {
-            SettingsSection::Computers => self.open_computers(window, cx),
-            SettingsSection::Mcp => self.open_mcp(window, cx),
-            SettingsSection::Skills => self.open_skills(window, cx),
-            SettingsSection::Backups => self.open_backups(window, cx),
+        match self.settings.pane() {
+            pane::Pane::Skills(skills) => skills
+                .view
+                .update(cx, |view, cx| view.set_connected(connected, window, cx)),
+            pane::Pane::Vault(_) if !connected => {
+                self.settings.show(pane::Pane::None, window, cx);
+            }
+            pane::Pane::None
+                if connected && self.settings_section() == Some(SettingsSection::Vault) =>
+            {
+                let pane = self.new_pane(SettingsSection::Vault, window, cx);
+                self.settings.show(pane, window, cx);
+            }
             _ => {}
-        }
-    }
-
-    pub(super) fn clear_socials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.socials.take() {
-            view.update(cx, |view, cx| view.clear(window, cx));
         }
     }
 
@@ -383,20 +341,18 @@ impl Shell {
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
             SettingsSection::Email => div()
-                .children(self.email.as_ref().map(|(view, _)| view.clone()))
+                .children(self.settings.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
-            SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
-            SettingsSection::Mcp => pane_element(self.mcp.as_ref()),
-            SettingsSection::Skills => pane_element(self.skills.as_ref()),
-            SettingsSection::Vault => match &self.vault {
-                Some(view) => div().child(view.clone()).into_any_element(),
-                None => div()
-                    .child("Reconnect to the server to open the Vault.")
-                    .into_any_element(),
-            },
-            SettingsSection::Usage => pane_element(self.usage.as_ref()),
-            SettingsSection::Computers => pane_element(self.computers.as_ref()),
-            SettingsSection::Backups => match &self.backups {
+            SettingsSection::Vault if self.settings.pane().section().is_none() => div()
+                .child("Reconnect to the server to open the Vault.")
+                .into_any_element(),
+            SettingsSection::Socials
+            | SettingsSection::Mcp
+            | SettingsSection::Skills
+            | SettingsSection::Vault
+            | SettingsSection::Usage
+            | SettingsSection::Computers => self.settings.pane().element(),
+            SettingsSection::Backups => match &self.settings.backups {
                 Some(pane) => pane.view.clone().into_any_element(),
                 None => div()
                     .p_8()
@@ -839,14 +795,6 @@ impl Shell {
                 },
             ))
             .into_any_element()
-    }
-}
-
-/// A pane's page, which fills the settings column like the page it replaced.
-fn pane_element<V: Render>(pane: Option<&pane::Mounted<V>>) -> AnyElement {
-    match pane {
-        Some(pane) => pane.view.clone().into_any_element(),
-        None => div().into_any_element(),
     }
 }
 

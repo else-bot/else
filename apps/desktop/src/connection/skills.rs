@@ -32,26 +32,8 @@ pub(super) struct View {
 
 impl EventEmitter<PaneEvent> for View {}
 
-impl Shell {
-    pub(super) fn clear_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.skills.take() {
-            pane.view.update(cx, |view, cx| view.clear_keys(window, cx));
-        }
-    }
-
-    pub(super) fn open_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_skills(window, cx);
-        let Some(active) = &self.active else { return };
-        let client = active.client.clone();
-        let connected = active.app.read(cx).connected();
-        let view = cx.new(|cx| View::new(client, connected, window, cx));
-        self.skills = Some(self.mount(view, settings::SettingsSection::Skills, window, cx));
-        cx.notify();
-    }
-}
-
 impl View {
-    fn new(
+    pub(super) fn new(
         client: Arc<Client>,
         connected: bool,
         window: &mut Window,
@@ -110,7 +92,7 @@ impl View {
                 .is_some_and(|keys| !keys.read(cx).is_empty(cx))
     }
 
-    fn clear_keys(&mut self, window: &mut Window, cx: &mut App) {
+    pub(super) fn clear_keys(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(keys) = self.keys.take() {
             keys.update(cx, |keys, cx| keys.clear(window, cx));
         }

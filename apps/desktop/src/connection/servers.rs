@@ -686,31 +686,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        let dirty = self
-            .skills
-            .as_ref()
-            .is_some_and(|pane| pane.view.read(cx).has_unsaved_work(cx))
-            || self
-                .vault
-                .as_ref()
-                .is_some_and(|view| view.read(cx).has_unsaved_work())
-            || self.server_editor.is_some()
-            || self
-                .mcp
-                .as_ref()
-                .is_some_and(|pane| pane.view.read(cx).has_unsaved_work())
-            || self
-                .backups
-                .as_ref()
-                .is_some_and(|pane| pane.view.read(cx).has_unsaved_work(cx))
-            || self
-                .email
-                .as_ref()
-                .is_some_and(|(view, _)| view.read(cx).has_unsaved_work(cx))
-            || self
-                .socials
-                .as_ref()
-                .is_some_and(|view| view.read(cx).has_unsaved_work());
+        let dirty = self.settings.has_unsaved_work(cx) || self.server_editor.is_some();
         if dirty {
             let shell = cx.weak_entity();
             window.open_dialog(cx, move |dialog, _, cx| {

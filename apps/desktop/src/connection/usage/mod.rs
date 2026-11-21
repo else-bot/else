@@ -46,23 +46,15 @@ pub(super) struct View {
 impl EventEmitter<PaneEvent> for View {}
 
 impl Shell {
-    pub(super) fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = &self.active else { return };
-        let (client, app) = (active.client.clone(), active.app.clone());
-        let view = cx.new(|cx| View::new(client, app, window, cx));
-        self.usage = Some(self.mount(view, settings::SettingsSection::Usage, window, cx));
-        cx.notify();
-    }
-
     pub(super) fn focus_usage(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
-        if let Some(pane) = &self.usage {
+        if let super::pane::Pane::Usage(pane) = self.settings.pane() {
             pane.view.update(cx, |view, cx| view.focus(bot, cx));
         }
     }
 }
 
 impl View {
-    fn new(
+    pub(super) fn new(
         client: Arc<Client>,
         app: Entity<ElseApp>,
         window: &mut Window,

@@ -46,22 +46,8 @@ struct Editor {
     fields: Entity<CredentialFields>,
 }
 
-impl Shell {
-    pub(super) fn open_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = &self.active else { return };
-        let client = active.client.clone();
-        self.vault = Some(cx.new(|cx| View::new(client, window, cx)));
-    }
-
-    pub(super) fn clear_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.vault.take() {
-            view.update(cx, |view, cx| view.close(window, cx));
-        }
-    }
-}
-
 impl View {
-    fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             client,
             entries: None,
@@ -82,7 +68,7 @@ impl View {
         )
     }
 
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear(window, cx);
         self.load = None;
         self.phase = Phase::Closed;

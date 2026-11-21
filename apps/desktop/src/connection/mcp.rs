@@ -29,18 +29,8 @@ pub(super) struct View {
 
 impl EventEmitter<PaneEvent> for View {}
 
-impl Shell {
-    pub(super) fn open_mcp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = &self.active else { return };
-        let client = active.client.clone();
-        let view = cx.new(|cx| View::new(client, window, cx));
-        self.mcp = Some(self.mount(view, settings::SettingsSection::Mcp, window, cx));
-        cx.notify();
-    }
-}
-
 impl View {
-    fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let poll_client = client.clone();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search installed MCPs"));
         let subscription = cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
