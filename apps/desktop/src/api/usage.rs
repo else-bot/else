@@ -7,7 +7,6 @@ impl Client {
     pub async fn usage(self: Arc<Self>) -> Result<UsageReport, ClientError> {
         self.call::<UsageReport>(Method::GET, "/v1/usage".into(), None)
             .await
-            .map(|(_, report)| report)
     }
 }
 

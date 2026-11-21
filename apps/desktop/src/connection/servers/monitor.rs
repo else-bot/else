@@ -105,7 +105,7 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 this.send_json::<Report>(this.request(Method::GET, "/v1/maintenance/update")),
                 this.send_json::<else_wire::bots::BotList>(this.request(Method::GET, "/v1/bots")),
             );
-            let (_, caps) = caps.map_err(|err| match err {
+            let caps = caps.map_err(|err| match err {
                 ClientError::Unauthorized => (
                     Health::Unauthorized,
                     "The server rejected the saved owner token.".into(),
@@ -131,13 +131,13 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ));
             }
             let (version, working) = match report {
-                Ok((_, report)) if report.version.is_some() => (
+                Ok(report) if report.version.is_some() => (
                     report.version,
                     Some(report.active_turns.saturating_add(report.running_commands)),
                 ),
                 _ => (None, None),
             };
-            let list = bots.ok().map(|(_, list)| list.bots);
+            let list = bots.ok().map(|list| list.bots);
             let attention = list
                 .as_ref()
                 .map(|bots| crate::attention::Attention::of(bots, crate::inbox::saved_unread));

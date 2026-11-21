@@ -34,20 +34,17 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, r)| r.connections)
+        .map(|r| r.connections)
     }
 
-    pub async fn social_connection(
-        self: Arc<Self>,
-        id: Uuid,
-    ) -> Result<ConnectionEnvelope, ClientError> {
-        self.call(
+    pub async fn social_connection(self: Arc<Self>, id: Uuid) -> Result<Connection, ClientError> {
+        self.call::<ConnectionEnvelope>(
             Method::GET,
             format!("/v1/connectors/socials/connections/{id}"),
             None,
         )
         .await
-        .map(|(_, r)| r)
+        .map(|r| r.connection)
     }
 
     pub async fn connect_social(
@@ -61,7 +58,7 @@ impl Client {
             Some(json!({"provider": provider, "token": token})),
         )
         .await
-        .map(|(_, r)| r.connection)
+        .map(|r| r.connection)
     }
 
     pub async fn set_social_trigger_enabled(
@@ -76,7 +73,7 @@ impl Client {
             Some(json!({"enabled": enabled})),
         )
         .await
-        .map(|(_, response)| response.trigger)
+        .map(|response| response.trigger)
     }
 
     pub async fn delete_social_trigger(
@@ -84,13 +81,12 @@ impl Client {
         bot: Uuid,
         id: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/bots/{bot}/social-triggers/{id}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn set_social_active(
@@ -104,7 +100,7 @@ impl Client {
             Some(json!({"active": active})),
         )
         .await
-        .map(|(_, r)| r.connection)
+        .map(|r| r.connection)
     }
 
     pub async fn replace_social_token(
@@ -112,23 +108,21 @@ impl Client {
         id: Uuid,
         token: String,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::PUT,
             format!("/v1/connectors/socials/connections/{id}/credentials"),
             Some(json!({"token": token})),
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn disconnect_social(self: Arc<Self>, id: Uuid) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/connectors/socials/connections/{id}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn complete_social_setup(
@@ -137,7 +131,7 @@ impl Client {
         connection: Uuid,
         note: Option<String>,
     ) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::POST,
             format!("/v1/connectors/socials/setups/{id}/complete"),
             Some(match note {
@@ -146,7 +140,6 @@ impl Client {
             }),
         )
         .await
-        .map(|_| ())
     }
 
     /// Start pairing a device, or rejoin the pairing already running.
@@ -156,7 +149,7 @@ impl Client {
     ) -> Result<PairingView, ClientError> {
         self.call::<PairingEnvelope>(Method::POST, target.path(), None)
             .await
-            .map(|(_, body)| body.pairing)
+            .map(|body| body.pairing)
     }
 
     /// The pairing once it changes past `after`, or as it is after the API's
@@ -172,27 +165,25 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, body)| body.pairing)
+        .map(|body| body.pairing)
     }
 
     pub async fn stop_social_pairing(self: Arc<Self>, connection: Uuid) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             PairingTarget::Connection(connection).path(),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn cancel_social_setup(self: Arc<Self>, id: Uuid) -> Result<(), ClientError> {
-        self.call::<serde_json::Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/connectors/socials/setups/{id}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 }
 

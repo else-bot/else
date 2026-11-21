@@ -205,7 +205,7 @@ impl Client {
         let this = self.clone();
         self.run(async move {
             let request = this.request(Method::GET, &format!("/v1/bots/{bot}/computer"));
-            this.send_json(request).await.map(|(_, state)| state)
+            this.send_json(request).await
         })
         .await
     }

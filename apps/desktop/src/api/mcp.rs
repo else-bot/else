@@ -7,7 +7,7 @@ impl Client {
     pub async fn installed_mcps(self: Arc<Self>) -> Result<Vec<InstalledMcp>, ClientError> {
         self.call::<Library>(Method::GET, "/v1/settings/mcp".into(), None)
             .await
-            .map(|(_, library)| library.mcps)
+            .map(|library| library.mcps)
     }
 
     /// The service's favicon as PNG bytes, or `None` when no candidate
@@ -39,9 +39,8 @@ impl Client {
     }
 
     pub async fn remove_mcp(self: Arc<Self>, id: String) -> Result<(), ClientError> {
-        self.call::<()>(Method::DELETE, format!("/v1/settings/mcp/{id}"), None)
+        self.call_unit(Method::DELETE, format!("/v1/settings/mcp/{id}"), None)
             .await
-            .map(|_| ())
     }
 }
 
@@ -218,9 +217,7 @@ impl Client {
                 )
                 .timeout(std::time::Duration::from_secs(90))
                 .json(&serde_json::json!({"redirect_uri":redirect_uri}));
-            this.send_json::<McpAuthorization>(request)
-                .await
-                .map(|(_, body)| body)
+            this.send_json::<McpAuthorization>(request).await
         })
         .await
     }
@@ -240,9 +237,9 @@ impl Client {
                 )
                 .timeout(std::time::Duration::from_secs(60))
                 .json(&callback);
-            this.send_json::<serde_json::Value>(request)
+            this.send_json::<serde::de::IgnoredAny>(request)
                 .await
-                .map(|_| ())
+                .map(drop)
         })
         .await
     }
@@ -250,7 +247,7 @@ impl Client {
     pub fn cancel_mcp(self: Arc<Self>, bot: uuid::Uuid, id: String, request: uuid::Uuid) {
         self.clone().runtime.spawn(async move {
             let _ = self
-                .call::<()>(
+                .call_unit(
                     Method::DELETE,
                     format!("/v1/bots/{bot}/mcp/{id}/oauth/{request}"),
                     None,
@@ -272,7 +269,6 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, body)| body)
     }
 
     pub async fn cancel_pending_mcp(
@@ -286,7 +282,6 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, body)| body)
     }
 }
 

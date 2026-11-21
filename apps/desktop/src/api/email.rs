@@ -13,7 +13,7 @@ impl Client {
         let runtime = self.runtime.clone();
         runtime.spawn(async move {
             let _ = self
-                .call::<Value>(
+                .call_unit(
                     Method::DELETE,
                     format!("/v1/connectors/email/oauth/{request_id}"),
                     None,
@@ -40,19 +40,18 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, body)| body)
     }
 
     pub async fn email_accounts(self: Arc<Self>) -> Result<Vec<EmailAccount>, ClientError> {
         self.call::<Accounts>(Method::GET, "/v1/connectors/email/accounts".into(), None)
             .await
-            .map(|(_, body)| body.accounts)
+            .map(|body| body.accounts)
     }
 
     pub async fn email_presets(self: Arc<Self>) -> Result<Vec<EmailPreset>, ClientError> {
         self.call::<Definitions>(Method::GET, "/v1/connectors".into(), None)
             .await
-            .map(|(_, body)| {
+            .map(|body| {
                 body.connectors
                     .into_iter()
                     .flat_map(|d| d.providers)
@@ -74,7 +73,7 @@ impl Client {
                 .request(method, &path)
                 .timeout(std::time::Duration::from_secs(60))
                 .json(&body);
-            this.send_json::<T>(request).await.map(|(_, body)| body)
+            this.send_json::<T>(request).await
         })
         .await
     }
@@ -99,13 +98,13 @@ impl Client {
         account: Uuid,
         password: String,
     ) -> Result<(), ClientError> {
-        self.sign_in::<Value>(
+        self.sign_in::<serde::de::IgnoredAny>(
             Method::PUT,
             format!("/v1/connectors/email/accounts/{account}/credentials"),
             json!({"kind":"password","password":password}),
         )
         .await
-        .map(|_| ())
+        .map(drop)
     }
 
     pub async fn authorize_email(
@@ -118,7 +117,7 @@ impl Client {
     ) -> Result<EmailAuthorization, ClientError> {
         self.call(Method::POST, "/v1/connectors/email/oauth/start".into(),
             Some(json!({"provider":provider,"address":address,"client_id":client_id,"client_secret":client_secret,"redirect_uri":redirect_uri})))
-            .await.map(|(_, body)| body)
+            .await
     }
 
     pub async fn complete_email(
@@ -142,24 +141,22 @@ impl Client {
         bot: Uuid,
         wake: bool,
     ) -> Result<(), ClientError> {
-        self.call::<Value>(
+        self.call_unit(
             Method::PUT,
             format!("/v1/connectors/email/accounts/{account}/bots/{bot}/wake"),
             Some(json!({"wake":wake})),
         )
         .await
-        .map(|_| ())
     }
 
     /// Remove an inbox for every bot. Its messages stay in the mailbox.
     pub async fn remove_email(self: Arc<Self>, account: Uuid) -> Result<(), ClientError> {
-        self.call::<Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/connectors/email/accounts/{account}"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     /// Delete a bot's trigger on an inbox. The bot still reads the inbox.
@@ -168,13 +165,12 @@ impl Client {
         account: Uuid,
         bot: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<Value>(
+        self.call_unit(
             Method::DELETE,
             format!("/v1/connectors/email/accounts/{account}/bots/{bot}/trigger"),
             None,
         )
         .await
-        .map(|_| ())
     }
 
     pub async fn introduce_email(
@@ -183,12 +179,11 @@ impl Client {
         bot: Uuid,
         request: Uuid,
     ) -> Result<(), ClientError> {
-        self.call::<Value>(
+        self.call_unit(
             Method::POST,
             format!("/v1/connectors/email/accounts/{account}/introduction"),
             Some(json!({"bot_id":bot,"request_id":request})),
         )
         .await
-        .map(|_| ())
     }
 }

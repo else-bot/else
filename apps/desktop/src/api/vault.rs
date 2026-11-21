@@ -25,7 +25,7 @@ impl Client {
     pub async fn vault(self: Arc<Self>) -> Result<Vec<VaultEntry>, ClientError> {
         self.call::<List>(Method::GET, "/v1/task-secrets".into(), None)
             .await
-            .map(|(_, list)| list.secrets)
+            .map(|list| list.secrets)
     }
 
     /// Create an entry; the server refuses a taken name with a conflict.
@@ -40,7 +40,6 @@ impl Client {
             Some(serde_json::json!(body)),
         )
         .await
-        .map(|(_, result)| result)
     }
 
     pub async fn patch_secret(
@@ -54,7 +53,6 @@ impl Client {
             Some(serde_json::json!(body)),
         )
         .await
-        .map(|(_, result)| result)
     }
 
     pub async fn reveal_secret(
@@ -67,13 +65,11 @@ impl Client {
             None,
         )
         .await
-        .map(|(_, result)| result)
     }
 
     pub async fn delete_secret(self: Arc<Self>, name: String) -> Result<(), ClientError> {
-        self.call::<()>(Method::DELETE, format!("/v1/task-secrets/{name}"), None)
+        self.call_unit(Method::DELETE, format!("/v1/task-secrets/{name}"), None)
             .await
-            .map(|_| ())
     }
 }
 

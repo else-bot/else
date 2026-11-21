@@ -96,7 +96,6 @@ impl Remote {
                     .timeout(self.settings.work_limit),
             )
             .await
-            .map(|(_, status)| status)
     }
 
     async fn check(&mut self) {
@@ -143,10 +142,8 @@ impl Remote {
             )
             .await;
         let work = match result {
-            Ok((_, report)) if report.active_turns == 0 && report.running_commands == 0 => {
-                Work::Idle
-            }
-            Ok((_, report)) => Work::Busy {
+            Ok(report) if report.active_turns == 0 && report.running_commands == 0 => Work::Idle,
+            Ok(report) => Work::Busy {
                 turns: report.active_turns,
                 commands: report.running_commands,
             },
@@ -297,7 +294,7 @@ impl Remote {
             .timeout(self.settings.work_limit)
             .json(&serde_json::json!({"request_id":request_id,"version":version.plain()}));
         match self.client.send_json::<Status>(request).await {
-            Ok((_, status)) => self.apply(status),
+            Ok(status) => self.apply(status),
             Err(error) => match self.status().await {
                 Ok(status)
                     if status
