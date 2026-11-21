@@ -4,7 +4,11 @@ use super::reply::Author;
 use super::row_text::{RowFormat, RowSource};
 use super::task_reply::state::{TaskReply, place_cards, task_replies};
 use crate::api::ReplyPosition;
-use crate::model::{Conversation, ItemKind};
+use crate::api::socials::SetupStatus;
+use crate::model::{
+    Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, ItemKind, OwnerNotice,
+    QuestionStatus, SecretRequestStatus, SkillInstallStatus, TurnStatus,
+};
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -103,7 +107,7 @@ impl CardKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) unread_start: bool,
@@ -125,7 +129,7 @@ pub(super) struct TranscriptRow {
     pub(super) quiet_runs: Vec<Uuid>,
     routine_status: Option<(String, bool)>,
     reaction: Option<crate::model::ReactionKind>,
-    state: Option<String>,
+    state: Option<RowState>,
 }
 
 impl TranscriptRow {
@@ -508,38 +512,80 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
         .collect()
 }
 
-fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
-    match key {
-        RowKey::Card(CardKey::Question(id)) => c.question(id).map(|q| format!("{:?}", q.status)),
-        RowKey::Card(CardKey::Draft(id)) => c.outgoing_draft(id).map(|d| {
-            format!(
-                "{}:{}:{:?}:{}:{}",
-                d.version, d.updated_at, d.status, d.can_approve, d.in_reply
-            )
-        }),
-        RowKey::Card(CardKey::SkillInstall(id)) => {
-            c.skill_install(id).map(|r| format!("{:?}", r.status))
+/// What a row draws from the conversation beyond its key; a row whose
+/// state changes measures again.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RowState {
+    /// A message, by its turn's status.
+    Item(TurnStatus),
+    /// A task also changes when a card inside it does.
+    Task(TurnStatus, Vec<CardState>),
+    Card(CardState),
+    Gap(GapSize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum CardState {
+    Question(QuestionStatus),
+    Draft {
+        version: i64,
+        updated_at: DateTime<Utc>,
+        status: DraftStatus,
+        can_approve: bool,
+        in_reply: bool,
+    },
+    SkillInstall(SkillInstallStatus),
+    SecretRequest(SecretRequestStatus),
+    SocialSetup(SetupStatus),
+    OwnerNotice(Box<OwnerNotice>),
+    ComputerHandoff(HandoffStatus),
+    /// Each task of the handoff's attempt.
+    Handoff(Vec<DelegationStatus>),
+}
+
+impl CardState {
+    fn of(c: &Conversation, key: CardKey) -> Option<Self> {
+        Some(match key {
+            CardKey::Question(id) => Self::Question(c.question(id)?.status),
+            CardKey::Draft(id) => {
+                let d = c.outgoing_draft(id)?;
+                Self::Draft {
+                    version: d.version,
+                    updated_at: d.updated_at,
+                    status: d.status,
+                    can_approve: d.can_approve,
+                    in_reply: d.in_reply,
+                }
+            }
+            CardKey::SkillInstall(id) => Self::SkillInstall(c.skill_install(id)?.status),
+            CardKey::SecretRequest(id) => Self::SecretRequest(c.secret_request(id)?.status),
+            CardKey::SocialSetup(id) => Self::SocialSetup(c.social_setup(id)?.status),
+            CardKey::OwnerNotice(id) => Self::OwnerNotice(Box::new(c.owner_notice(id)?.clone())),
+            CardKey::ComputerHandoff(id) => Self::ComputerHandoff(c.computer_handoff(id)?.status),
+            CardKey::Handoff(id) => {
+                Self::Handoff(c.handoff(id)?.1.iter().map(|d| d.status).collect())
+            }
+        })
+    }
+}
+
+impl RowState {
+    fn of(c: &Conversation, key: RowKey, tasks: &HashMap<Uuid, TaskReply>) -> Option<Self> {
+        match key {
+            RowKey::Item(id) => Some(Self::Item(c.turn(c.item(id)?.turn_id)?.status)),
+            RowKey::Task(id) => Some(Self::Task(
+                c.turn(id)?.status,
+                tasks
+                    .get(&id)
+                    .into_iter()
+                    .flat_map(|task| &task.cards)
+                    .filter_map(|card| CardState::of(c, card.key))
+                    .collect(),
+            )),
+            RowKey::Card(card) => CardState::of(c, card).map(Self::Card),
+            RowKey::Gap(above) => c.gap_below(above).map(Self::Gap),
+            RowKey::Pending(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => None,
         }
-        RowKey::Card(CardKey::SecretRequest(id)) => {
-            c.secret_request(id).map(|r| format!("{:?}", r.status))
-        }
-        RowKey::Card(CardKey::SocialSetup(id)) => {
-            c.social_setup(id).map(|s| format!("{:?}", s.status))
-        }
-        RowKey::Card(CardKey::OwnerNotice(id)) => c.owner_notice(id).map(|n| format!("{n:?}")),
-        RowKey::Card(CardKey::ComputerHandoff(id)) => {
-            c.computer_handoff(id).map(|h| format!("{:?}", h.status))
-        }
-        RowKey::Card(CardKey::Handoff(id)) => c
-            .handoff(id)
-            .map(|(_, group)| format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())),
-        RowKey::Item(id) => c
-            .item(id)
-            .and_then(|i| c.turn(i.turn_id))
-            .map(|t| format!("{:?}", t.status)),
-        RowKey::Task(id) => c.turn(id).map(|t| format!("{:?}", t.status)),
-        RowKey::Gap(above) => c.gap_below(above).map(|size| format!("{size:?}")),
-        RowKey::Pending(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => None,
     }
 }
 
@@ -766,18 +812,7 @@ pub(super) fn build<Tz: TimeZone>(
         .map(|((key, footer_stamp), routine)| {
             let routine_turn = routine.and_then(|r| conversation?.turn(r.turn));
             let routine_status = routine_turn.map(super::message_row::turn_label);
-            let state = conversation.and_then(|c| match key {
-                // A task row also changes when a card inside it does.
-                RowKey::Task(id) => c.turn(id).map(|t| {
-                    tasks
-                        .get(&id)
-                        .into_iter()
-                        .flat_map(|task| &task.cards)
-                        .filter_map(|card| card_state(c, RowKey::Card(card.key)))
-                        .fold(format!("{:?}", t.status), |state, card| state + ":" + &card)
-                }),
-                _ => card_state(c, key),
-            });
+            let state = conversation.and_then(|c| RowState::of(c, key, &tasks));
             TranscriptRow {
                 key,
                 unread_start: Some(key) == unread_start,
@@ -2037,6 +2072,30 @@ mod tests {
             "folded reply shows an excerpt: {excerpt:?}"
         );
         assert_eq!(text(built(&c, &[], &[1])), full);
+    }
+
+    #[test]
+    fn a_card_row_changes_state_when_its_card_settles() {
+        let question = RowKey::Card(CardKey::Question(Uuid::from_u128(210)));
+        let state = |status: &str| {
+            let c = Conversation::from_snapshot(question_page(status, 1, "2026-11-01T00:00:00Z"))
+                .unwrap();
+            built(&c, &[], &[])
+                .rows
+                .into_iter()
+                .find(|row| row.key == question)
+                .and_then(|row| row.state)
+        };
+        assert_eq!(
+            state("pending"),
+            Some(RowState::Card(CardState::Question(QuestionStatus::Pending)))
+        );
+        assert_eq!(
+            state("answered"),
+            Some(RowState::Card(CardState::Question(
+                QuestionStatus::Answered
+            )))
+        );
     }
 
     #[test]
