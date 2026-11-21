@@ -30,7 +30,6 @@ use crate::app::watchers::{
 use crate::computers::ComputerManager;
 use crate::computers::jobs::{JobStatus, MAX_JOBS, SECRETS_UNREADABLE};
 use crate::providers::Registry;
-use crate::scheduler::pump::Tick;
 
 /// Due watchers admitted, checks settled, and wakes queued per scan.
 pub const BATCH: i64 = 8;
@@ -302,21 +301,6 @@ async fn end(
     .bind(sqlx::types::Json(from))
     .fetch_optional(conn)
     .await
-}
-
-/// Advance watchers one tick: settle finished checks, admit due checks,
-/// launching each reserved check at once, then queue the wakes of
-/// watchers that ended.
-pub async fn pump(tick: &Tick<'_>) {
-    if let Err(err) = settle_checks(tick.pool, tick.now, BATCH).await {
-        tracing::warn!(error = %err, "settling watcher checks failed");
-    }
-    if let Err(err) = admit_due(tick.pool, tick.computers, tick.now, BATCH, tick.launch).await {
-        tracing::warn!(error = %err, "admitting due watchers failed");
-    }
-    if let Err(err) = deliver_wakes(tick.pool, tick.registry, tick.now, BATCH).await {
-        tracing::warn!(error = %err, "queueing watcher wakes failed");
-    }
 }
 
 /// End every watcher whose deadline passed as expired, then reserve a

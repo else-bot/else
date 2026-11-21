@@ -16,7 +16,7 @@ use crate::db::turns;
 use crate::grants::{Grants, Tool, policy};
 use crate::providers::Registry;
 
-pub(crate) mod pump;
+mod pump;
 
 const TOOL_GRANT_TTL: Duration = Duration::from_secs(40 * 60);
 
@@ -229,7 +229,7 @@ impl Scheduler {
         loop {
             if let Some(admission) = self.gate.enter() {
                 let launch = |check| self.launch_check(&admission, check);
-                pump::all(&self.tick(&launch)).await;
+                pump::all(self, &launch).await;
                 self.claim.notify_one();
             }
             tokio::select! {
@@ -299,19 +299,13 @@ impl Scheduler {
         Ok(())
     }
 
-    fn tick<'a>(&'a self, launch: &'a (dyn Fn(pump::Check) + Send + Sync)) -> pump::Tick<'a> {
-        pump::Tick {
-            pool: &self.pool,
-            registry: &self.registry,
-            computers: self.computers.as_deref(),
-            now: chrono::Utc::now(),
-            launch,
-        }
-    }
-
     /// Launch a reserved check under a share of the pass's admission, so a
     /// backup waits until the check holds its computer.
-    fn launch_check(&self, admission: &crate::maintenance::Admission, check: pump::Check) {
+    fn launch_check(
+        &self,
+        admission: &crate::maintenance::Admission,
+        check: crate::db::routines::Check,
+    ) {
         // Checks are reserved only when computers exist.
         let Some(computers) = self.computers.clone() else {
             return;
