@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::actor::Actor;
@@ -38,7 +37,6 @@ pub struct Scheduler {
     /// one of these, so a slot stays free for the owner when the cap is
     /// above 1.
     background: Arc<Semaphore>,
-    summaries: AtomicUsize,
     gate: Arc<crate::maintenance::Gate>,
     mcp_root: std::path::PathBuf,
     computers: Option<Arc<crate::computers::ComputerManager>>,
@@ -65,7 +63,6 @@ pub struct SummaryPermit {
 
 impl Drop for SummaryPermit {
     fn drop(&mut self) {
-        self.scheduler.summaries.fetch_sub(1, Ordering::AcqRel);
         drop(self.slot.take());
         self.scheduler.wake();
     }
@@ -96,7 +93,6 @@ impl Scheduler {
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(max_active)),
             background: Arc::new(Semaphore::new(max_active.saturating_sub(1).max(1))),
-            summaries: AtomicUsize::new(0),
             gate,
             mcp_root,
             computers,
@@ -137,17 +133,11 @@ impl Scheduler {
     }
 
     /// Take a provider slot for one memory summary if one is free. Summaries
-    /// are low priority: the caller checks first that no turn is waiting,
-    /// and at most `limit` run at once.
-    pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
+    /// are low priority: the caller checks first that no turn is waiting.
+    pub fn try_begin_summary(self: &Arc<Self>) -> Option<SummaryPermit> {
         let admission = self.gate.enter()?;
         let background = self.background.clone().try_acquire_owned().ok()?;
         let slot = self.slots.clone().try_acquire_owned().ok()?;
-        self.summaries
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < limit).then_some(n + 1)
-            })
-            .ok()?;
         Some(SummaryPermit {
             scheduler: self.clone(),
             slot: Some((slot, background)),

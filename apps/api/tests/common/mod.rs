@@ -13,6 +13,13 @@ pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 /// [`SETTLE`] for a live test, whose turns run a real model.
 pub const LIVE: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Run copies and joins until no memory job is available.
+pub async fn compact(pool: &sqlx::SqlitePool) -> Result<usize, sqlx::Error> {
+    else_api::memory_worker::Compactor::deterministic(pool.clone())
+        .drain()
+        .await
+}
+
 /// The packet a fresh native session receives for `input`.
 pub fn fresh_packet(input: &else_api::app::providers::TurnInput) -> String {
     use else_api::providers::cli::session::{Opened, PreparedTurn};

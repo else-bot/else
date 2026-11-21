@@ -9,11 +9,10 @@ use common::recorder::{GATE, harness, tool};
 use else_api::app::memory_tree::NodeId;
 use else_api::db::memory::{self, Kind, NewEntry};
 use else_api::db::memory_tree::{self, Completion, Wait};
-use else_api::memory_worker;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// These tests drive compaction with `memory_worker::drain`, so the API
+/// These tests drive compaction with `common::compact`, so the API
 /// runs no compactor of its own.
 fn manual() -> common::Builder {
     TestApp::builder().memory(else_api::runtime::Memory::Manual)
@@ -97,7 +96,7 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
             let n = batch * 10 + i;
             add(&app, bot, &format!("k{n}"), &format!("m{n}")).await;
         }
-        memory_worker::drain(&app.db.pool).await.unwrap();
+        common::compact(&app.db.pool).await.unwrap();
         let saved = assert_exact_coverage(&app, bot).await;
         assert_eq!(
             saved.published_seq,
@@ -144,7 +143,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
     add(app, bot_id, "a", "short one").await;
     add(app, bot_id, "b", &"long ".repeat(40)).await;
     add(app, bot_id, "c", "after the long one").await;
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let saved = assert_exact_coverage(app, bot_id).await;
     assert_eq!(
         saved.published_seq, 0,
@@ -188,7 +187,7 @@ async fn a_retried_job_is_not_reported_blocked_while_leased() {
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Retry").await.parse().unwrap();
     add(&app, bot, "long", &"long ".repeat(40)).await;
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
     assert_eq!(saved.blocked, vec![(Wait::SummaryUnavailable, 1)]);
 
@@ -280,10 +279,10 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
     let mut workers = tokio::task::JoinSet::new();
     for _ in 0..3 {
         let pool = app.db.pool.clone();
-        workers.spawn(async move { memory_worker::drain(&pool).await.unwrap() });
+        workers.spawn(async move { common::compact(&pool).await.unwrap() });
     }
     while workers.join_next().await.is_some() {}
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let saved = assert_exact_coverage(&app, bot).await;
     assert_eq!(saved.published_seq, 79);
 
@@ -324,7 +323,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     for n in 0..40 {
         add(&app, bot_id, &format!("s{n}"), &format!("s{n}")).await;
     }
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let before = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -368,7 +367,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
         still["generation"], 1,
         "the old view serves until the switch"
     );
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let rebuilt = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -423,7 +422,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
     let bot_id: Uuid = bot.parse().unwrap();
     let long = "w".repeat(10_009);
     add(app, bot_id, "long", &long).await;
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let (_, token) = h.running(&bot, GATE).await;
     let view = tool(app, &token, "memory_view", json!({})).await.result;
     let node = &view["nodes"][0];
@@ -466,7 +465,7 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
     assert_eq!(
         saved.published_seq, 10049,
@@ -494,7 +493,7 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
         .body;
     assert_eq!(view["generation"], 1);
     assert_eq!(view["building_generation"], 2);
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let view = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -507,7 +506,7 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
         .owner("POST", &format!("/v1/bots/{bot}/memory/rebuild"), None)
         .await;
     assert_eq!(started.body["building_generation"], 3);
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let view = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -536,7 +535,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
     for n in 0..60 {
         add(&app, bot_id, &format!("c{n}"), &format!("c{n}")).await;
     }
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let saved = memory_tree::load_view(&app.db.pool, bot_id).await.unwrap();
     assert!(saved.valid);
     assert!(else_api::app::memory_tree::covers(&saved.context, 60));
@@ -575,7 +574,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
             .valid
     );
     add(&app, bot_id, "after", "after").await;
-    memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let kept: Value = sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = ?1")
         .bind(bot_id)
         .fetch_one(&app.db.pool)

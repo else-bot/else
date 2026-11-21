@@ -99,10 +99,10 @@ fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {
     Compactor::with_summaries(app.db.pool.clone(), summarizer, app.scheduler.clone())
 }
 
-async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::SummaryPermit {
+async fn summary_slot(app: &TestApp) -> else_api::scheduler::SummaryPermit {
     common::until(
         "the scheduler to release a summary slot",
-        common::poll(|| std::future::ready(app.scheduler.try_begin_summary(limit))),
+        common::poll(|| std::future::ready(app.scheduler.try_begin_summary())),
     )
     .await
 }
@@ -238,7 +238,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     )
     .await;
     app.wait_turn(&turn, &["interrupted"]).await;
-    let permit = summary_slot(&app, 1).await;
+    let permit = summary_slot(&app).await;
     let next = app
         .send(&bot, Uuid::new_v4(), "after the summary", Some("synthetic"))
         .await;
@@ -269,7 +269,7 @@ async fn new_sessions_get_bounded_memory_once() {
     for n in 0..400 {
         add(&app, bot_id, &format!("m{n}"), &format!("fact number {n}")).await;
     }
-    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let memory = memory_tree::session_context(&app.db.pool, bot_id)
         .await
         .unwrap()
@@ -297,7 +297,7 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
     let app = app(4).await;
     let bot: Uuid = app.create_bot("GitHub").await.parse().unwrap();
     add(&app, bot, "owner", "Keep the repositories tidy.").await;
-    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let before = memory_tree::session_context(&app.db.pool, bot)
         .await
         .unwrap()
@@ -327,7 +327,7 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let after = memory_tree::session_context(&app.db.pool, bot)
         .await
         .unwrap()
@@ -366,9 +366,10 @@ async fn copies_continue_while_a_summary_runs() {
     let fake = Arc::new(Scripted::default());
     *fake.delay.lock().unwrap() = Duration::from_secs(2);
     let worker = compactor(&app, fake.clone());
+    let never = tokio_util::sync::CancellationToken::new();
     let mut started = false;
     for _ in 0..10 {
-        if worker.step().await.unwrap() == Step::Summarizing {
+        if worker.step(&never).await.unwrap() == Step::Summarizing {
             started = true;
             break;
         }
@@ -376,7 +377,7 @@ async fn copies_continue_while_a_summary_runs() {
     assert!(started);
     add(&app, quick, "q", "quick one").await;
     for _ in 0..10 {
-        worker.step().await.unwrap();
+        worker.step(&never).await.unwrap();
     }
     assert_eq!(
         memory_tree::load_view(&app.db.pool, quick)
@@ -437,7 +438,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
     let mut held = Vec::new();
-    while let Some(permit) = app.scheduler.try_begin_summary(4) {
+    while let Some(permit) = app.scheduler.try_begin_summary() {
         held.push(permit);
     }
     assert!(!held.is_empty());
@@ -487,7 +488,7 @@ async fn a_node_larger_than_the_session_budget_is_reported_omitted() {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let bot: Uuid = app.create_bot("Huge").await.parse().unwrap();
     add(&app, bot, "huge", &"h".repeat(30_000)).await;
-    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    common::compact(&app.db.pool).await.unwrap();
     let memory = memory_tree::session_context(&app.db.pool, bot)
         .await
         .unwrap()
