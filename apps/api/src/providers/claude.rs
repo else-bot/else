@@ -58,7 +58,7 @@ use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::Listed;
 use super::prompt;
 use super::{attachments, claude_home};
-use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
@@ -341,18 +341,6 @@ impl Adapter for ClaudeCode {
             ToolSet::Elsebot => "tools:elsebot-v2",
             ToolSet::None => "tools:none",
         }
-    }
-
-    async fn run(
-        &self,
-        cli: &Cli<Self>,
-        ready: &Ready<Login>,
-        profile: &Profile,
-        input: &TurnInput,
-        sink: &dyn TurnSink,
-        stop: Stop,
-    ) -> TurnOutcome {
-        cli.stream(ready, profile, input, sink, stop).await
     }
 
     async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {

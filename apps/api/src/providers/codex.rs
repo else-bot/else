@@ -35,8 +35,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::cli::files::GRANT_ENV;
-use super::cli::turn::{Adapter, Cli, ToolSet};
+use super::cli::turn::{Adapter, Cli, ToolSet, Transport};
 use super::codex_home;
 use super::codex_rpc::AppServer;
 use super::definitions::Definition;
@@ -191,36 +190,16 @@ impl Codex {
             .host
             .bot_dirs(input.bot_id, ID)
             .map_err(|e| unavailable(e.to_string()))?;
-        let program = ready
-            .program
-            .current()
-            .await
-            .map_err(|why| unavailable(format!("Could not start Codex: {why}")))?;
         let host_tools = input.delegation.host_tools();
         codex_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
             .map_err(|e| unavailable(e.to_string()))?;
-        super::attachments::stage(&dirs.project, &input.files)
-            .await
-            .map_err(|err| {
-                TurnOutcome::failed(
-                    FailureCode::AttachmentUnavailable,
-                    format!("The attached files could not be prepared: {err}"),
-                )
-            })?;
-        let mut env = vec![(
+        let env = vec![(
             "CODEX_HOME".into(),
             dirs.provider_home.to_string_lossy().into_owned(),
         )];
-        if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
-            env.push((GRANT_ENV.into(), grant.into()));
-        }
-        let mut spec = LaunchSpec {
-            turn_id: input.turn_id,
-            program,
-            args: vec![OsString::from("app-server")],
-            env,
-            dirs,
-        };
+        let mut spec = self
+            .prepare_launch(ready, input, dirs, vec![OsString::from("app-server")], env)
+            .await?;
         if !host_tools {
             let mut args = tokio::select! {
                 () = stop.requested() => {
@@ -258,22 +237,7 @@ pub(crate) fn deferred_tools() -> String {
 }
 
 #[async_trait]
-impl Adapter for CodexServer {
-    type Login = PathBuf;
-
-    const DEFINITION: &'static Definition = &DEFINITION;
-    const PRODUCT: &'static str = "Codex";
-    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
-
-    fn tool_tag(&self, tools: ToolSet) -> &'static str {
-        match tools {
-            ToolSet::HostAndElsebot => "tools:host+elsebot-v5",
-            ToolSet::Host => "tools:host",
-            ToolSet::Elsebot => "tools:elsebot-only-v3",
-            ToolSet::None => "tools:none",
-        }
-    }
-
+impl Transport for CodexServer {
     async fn run(
         &self,
         cli: &Codex,
@@ -297,6 +261,24 @@ impl Adapter for CodexServer {
             .converse(ready, &mut server, input, profile, sink, &stop)
             .await;
         server.conclude(ended, sink).await
+    }
+}
+
+#[async_trait]
+impl Adapter for CodexServer {
+    type Login = PathBuf;
+
+    const DEFINITION: &'static Definition = &DEFINITION;
+    const PRODUCT: &'static str = "Codex";
+    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
+
+    fn tool_tag(&self, tools: ToolSet) -> &'static str {
+        match tools {
+            ToolSet::HostAndElsebot => "tools:host+elsebot-v5",
+            ToolSet::Host => "tools:host",
+            ToolSet::Elsebot => "tools:elsebot-only-v3",
+            ToolSet::None => "tools:none",
+        }
     }
 
     async fn list_models(&self, ready: &Ready) -> Result<Vec<Listed>, String> {

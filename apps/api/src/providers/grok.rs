@@ -26,7 +26,7 @@ use super::definitions::Definition;
 use super::host::{BotDirs, Host, Run};
 use super::models::Listed;
 use super::{grok_home, prompt};
-use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{FailureCode, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
@@ -190,18 +190,6 @@ impl Adapter for GrokCli {
             ToolSet::Elsebot => "tools:elsebot-v1",
             ToolSet::None => "tools:none",
         }
-    }
-
-    async fn run(
-        &self,
-        cli: &Cli<Self>,
-        ready: &Ready<PathBuf>,
-        profile: &Profile,
-        input: &TurnInput,
-        sink: &dyn TurnSink,
-        stop: Stop,
-    ) -> TurnOutcome {
-        cli.stream(ready, profile, input, sink, stop).await
     }
 
     async fn list_models(&self, ready: &Ready<PathBuf>) -> Result<Vec<Listed>, String> {

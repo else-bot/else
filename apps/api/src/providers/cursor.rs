@@ -33,7 +33,7 @@ use super::definitions::Definition;
 use super::host::{BotDirs, Host, Run};
 use super::models::Listed;
 use super::prompt;
-use crate::app::providers::{Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{Stop, TurnInput, TurnSink};
 use protocol::{Message, Tracker};
 
 pub const ID: &str = "cursor";
@@ -277,18 +277,6 @@ impl Adapter for CursorCli {
             ToolSet::Elsebot => "tools:elsebot-v1",
             ToolSet::None => "tools:none",
         }
-    }
-
-    async fn run(
-        &self,
-        cli: &Cli<Self>,
-        ready: &Ready<Login>,
-        profile: &Profile,
-        input: &TurnInput,
-        sink: &dyn TurnSink,
-        stop: Stop,
-    ) -> TurnOutcome {
-        cli.stream(ready, profile, input, sink, stop).await
     }
 
     async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
