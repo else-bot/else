@@ -319,13 +319,16 @@ pub async fn start(
         social,
     ));
     background.spawn("socials", socials.clone().run(shutdown.clone()));
-    let mcps = crate::mcp::Library::new(mcp_root, gate.clone())
-        .with_oauth_key(Some(secret_key.clone()))
-        .with_oauth_client(config.github_oauth.clone())
-        .with_task_secrets(crate::mcp::TaskSecrets::new(
+    let mcps = crate::mcp::Library::new(crate::mcp::Config {
+        root: mcp_root,
+        gate: gate.clone(),
+        oauth_key: Some(secret_key.clone()),
+        oauth_client: config.github_oauth.clone(),
+        task_secrets: Some(crate::mcp::TaskSecrets::new(
             pool.clone(),
             Some(secret_key.clone()),
-        ));
+        )),
+    });
 
     let state = Arc::new(AppState {
         owner_token,

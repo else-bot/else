@@ -1,3 +1,4 @@
+use super::library::Admit;
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -16,12 +17,22 @@ fn input(id: &str) -> Installation {
     }
 }
 
+fn new_library(root: PathBuf, gate: Arc<crate::maintenance::Gate>) -> Library {
+    Library::new(Config {
+        root,
+        gate,
+        oauth_key: None,
+        oauth_client: None,
+        task_secrets: None,
+    })
+}
+
 #[tokio::test]
 async fn packages_survive_restart_and_are_private_shared_and_removable() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
     let gate = Arc::new(crate::maintenance::Gate::default());
-    let library = Library::new(root.clone(), gate.clone());
+    let library = new_library(root.clone(), gate.clone());
     let input = input("t3-code");
     let installed = library
         .install(input.clone(), "Maple".into())
@@ -33,7 +44,7 @@ async fn packages_survive_restart_and_are_private_shared_and_removable() {
         .unwrap();
     assert_eq!(installed.installed_at, repeated.installed_at);
     assert_eq!(repeated.installed_by, "Maple");
-    let reopened = Library::new(root.clone(), gate);
+    let reopened = new_library(root.clone(), gate);
     assert_eq!(reopened.list().await.unwrap().len(), 1);
     let package = reopened.read(&input.id).await.unwrap();
     assert_eq!(package.skill, input.skill);
@@ -75,7 +86,7 @@ async fn packages_survive_restart_and_are_private_shared_and_removable() {
 #[tokio::test]
 async fn simultaneous_same_id_installs_publish_one_complete_package() {
     let temp = tempfile::tempdir().unwrap();
-    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let library = new_library(temp.path().join("mcp"), Arc::default());
     let a = input("shared");
     let mut b = a.clone();
     b.skill = "Different instructions".into();
@@ -110,7 +121,7 @@ async fn unsafe_paths_links_and_reserved_credentials_are_rejected() {
     }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
-    let library = Library::new(root.clone(), Arc::default());
+    let library = new_library(root.clone(), Arc::default());
     let mut bad = input("bad");
     bad.config = Transport::Stdio {
         command: "env".into(),
@@ -138,7 +149,7 @@ async fn unsafe_paths_links_and_reserved_credentials_are_rejected() {
 #[tokio::test]
 async fn nonexistent_probes_and_removed_packages_do_not_exhaust_actors() {
     let temp = tempfile::tempdir().unwrap();
-    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let library = new_library(temp.path().join("mcp"), Arc::default());
     for i in 0..1030 {
         let id = PackageId::try_from(format!("missing-{i}")).unwrap();
         assert!(matches!(library.read(&id).await, Err(Error::NotFound)));
@@ -161,7 +172,7 @@ async fn nonexistent_probes_and_removed_packages_do_not_exhaust_actors() {
 #[tokio::test]
 async fn a_removed_package_refuses_requests() {
     let temp = tempfile::tempdir().unwrap();
-    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let library = new_library(temp.path().join("mcp"), Arc::default());
     let id = input("removed").id;
     library
         .install(input("removed"), "Maple".into())
@@ -175,7 +186,7 @@ async fn a_removed_package_refuses_requests() {
 #[tokio::test]
 async fn a_slot_looked_up_before_a_removal_does_not_reach_a_reinstall() {
     let temp = tempfile::tempdir().unwrap();
-    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let library = new_library(temp.path().join("mcp"), Arc::default());
     let id = input("again").id;
     library
         .install(input("again"), "Maple".into())
@@ -188,7 +199,7 @@ async fn a_slot_looked_up_before_a_removal_does_not_reach_a_reinstall() {
         .await
         .unwrap();
     let ran = stale
-        .live(library.shared.clone(), Admit::Turn, |live, _| {
+        .live(library.config.clone(), Admit::Turn, |live, _| {
             Box::pin(live.package())
         })
         .await;
@@ -203,7 +214,7 @@ async fn a_slot_looked_up_before_a_removal_does_not_reach_a_reinstall() {
 async fn discovery_ignores_stray_directories_and_can_remove_a_damaged_config() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
-    let library = Library::new(root.clone(), Arc::default());
+    let library = new_library(root.clone(), Arc::default());
     library
         .install(input("valid"), "Maple".into())
         .await
@@ -240,7 +251,7 @@ fn startup_cleanup_removes_only_unpublished_or_retired_package_files() {
 async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
     let temp = tempfile::tempdir().unwrap();
     let gate = Arc::new(crate::maintenance::Gate::default());
-    let library = Library::new(temp.path().join("mcp"), gate.clone());
+    let library = new_library(temp.path().join("mcp"), gate.clone());
     library
         .install(input("shared"), "Maple".into())
         .await
@@ -302,7 +313,7 @@ for line in sys.stdin:
 #[tokio::test]
 async fn new_connection_values_close_the_old_connection_even_when_the_call_fails() {
     let dir = tempfile::tempdir().unwrap();
-    let library = Library::new(dir.path().join("mcp"), Arc::default());
+    let library = new_library(dir.path().join("mcp"), Arc::default());
     let mut package = input("stdio-rotated");
     package.config = counter();
     let id = package.id.clone();
@@ -320,9 +331,10 @@ async fn new_connection_values_close_the_old_connection_even_when_the_call_fails
         env: BTreeMap::from([("TOKEN".into(), "rotated".into())]),
     };
     let failed = library
-        .with_session(&id, Admit::Turn, Installed, move |session, ()| {
+        .on_installed(&id, Admit::Turn, move |live, config| {
             Box::pin(async move {
-                session
+                live.installed_session(config)
+                    .await?
                     .request(&rotated, "unsupported".into(), serde_json::json!({}))
                     .await
             })
@@ -343,7 +355,7 @@ async fn new_connection_values_close_the_old_connection_even_when_the_call_fails
 #[tokio::test]
 async fn disconnect_closes_the_shared_stdio_session() {
     let dir = tempfile::tempdir().unwrap();
-    let library = Library::new(dir.path().join("mcp"), Arc::default());
+    let library = new_library(dir.path().join("mcp"), Arc::default());
     let mut package = input("stdio-counter");
     package.config = counter();
     let id = package.id.clone();
@@ -380,7 +392,7 @@ async fn disconnect_closes_the_shared_stdio_session() {
 async fn approved_replacement_keeps_sign_ins_only_for_the_same_connection() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("mcp");
-    let library = Library::new(root.clone(), Arc::new(crate::maintenance::Gate::default()));
+    let library = new_library(root.clone(), Arc::new(crate::maintenance::Gate::default()));
     let original = input("github");
     library
         .install(original.clone(), "Maple".into())
@@ -461,7 +473,7 @@ async fn approved_replacement_keeps_sign_ins_only_for_the_same_connection() {
 #[tokio::test]
 async fn owner_listings_name_the_http_origin_without_credentials() {
     let temp = tempfile::tempdir().unwrap();
-    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let library = new_library(temp.path().join("mcp"), Arc::default());
     let mut http = input("sentry");
     http.config = Transport::Http {
         secrets: Vec::new(),
