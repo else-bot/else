@@ -264,15 +264,16 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_token_fails_and_unlocks() {
+    fn a_rejected_token_unlocks_without_an_error() {
         let mut request = Request::Idle;
         let attempt = request.begin(()).unwrap();
         assert!(request.settle(attempt, &Err::<(), _>(ClientError::Unauthorized)));
-        assert_eq!(
-            request,
-            Request::Failed(ClientError::Unauthorized.to_string())
+        assert_eq!(request, Request::Idle);
+        assert_eq!(request.error(), None);
+        assert!(
+            request.begin(()).is_some(),
+            "a rejected token leaves the card free to send again"
         );
-        assert!(!request.busy());
     }
 
     #[test]
