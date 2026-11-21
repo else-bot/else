@@ -1677,7 +1677,7 @@ async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
         .execute(&db.pool)
         .await
         .unwrap();
-        // The task's turn ends; the delegation trigger settles its task.
+        // The task's turn ends after its result was delivered; the trigger requeues an unheld root.
         sqlx::query(
             "UPDATE turns SET status = 'completed',
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",

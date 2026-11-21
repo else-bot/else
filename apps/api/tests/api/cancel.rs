@@ -546,7 +546,7 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         .interrupt(turn_id(&queued).parse().unwrap())
         .await;
     app.wait_turn(&turn_id(&queued), &["interrupted"]).await;
-    // Put back the running row an interrupt lost in a crash leaves.
+    // A running row with no live provider task, which orphan settlement ends.
     sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = ?1")
         .bind(turn_id(&queued).parse::<Uuid>().unwrap())
         .execute(&app.db.pool)

@@ -572,7 +572,7 @@ async fn a_refusal_while_sending_puts_the_handoff_back_to_prepared() {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    // Put back the sending row a crash mid-send leaves.
+    // Hold the turn mid-send so the provider can refuse it there.
     sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = ?1")
         .bind(turn)
         .execute(&app.db.pool)

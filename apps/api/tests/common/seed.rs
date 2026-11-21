@@ -65,7 +65,6 @@ pub struct Turn {
     created_at: Option<String>,
 }
 
-/// Start a turn of `bot`.
 pub fn turn(bot: Uuid) -> Turn {
     Turn {
         id: Uuid::new_v4(),
@@ -120,11 +119,11 @@ impl Turn {
 
     pub async fn insert<'c>(self, db: impl Acquire<'c, Database = Sqlite>) -> Uuid {
         let owner_item = Uuid::new_v4();
-        let mut conn = db.acquire().await.unwrap();
+        let mut tx = db.begin().await.unwrap();
         let (conversation, turn_no): (Uuid, i64) = sqlx::query_as(
             "WITH c AS (
                  SELECT id, last_turn_no FROM conversations
-                 WHERE id = ?3 OR (?3 IS NULL AND bot_id = ?2 AND kind = 'owner')
+                 WHERE bot_id = ?2 AND (id = ?3 OR (?3 IS NULL AND kind = 'owner'))
              )
              INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
                  owner_item_id, provider_id, status, attempt, created_at)
@@ -142,19 +141,19 @@ impl Turn {
         .bind(self.status)
         .bind(self.attempt)
         .bind(self.created_at)
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
         sqlx::query("UPDATE conversations SET last_turn_no = max(last_turn_no, ?2) WHERE id = ?1")
             .bind(conversation)
             .bind(turn_no)
-            .execute(&mut *conn)
+            .execute(&mut *tx)
             .await
             .unwrap();
         if let Some((kind, text)) = self.message {
             sqlx::query("UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1")
                 .bind(conversation)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await
                 .unwrap();
             sqlx::query(
@@ -166,10 +165,11 @@ impl Turn {
             .bind(self.id)
             .bind(kind)
             .bind(text)
-            .execute(&mut *conn)
+            .execute(&mut *tx)
             .await
             .unwrap();
         }
+        tx.commit().await.unwrap();
         self.id
     }
 }
