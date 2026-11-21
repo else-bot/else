@@ -159,7 +159,7 @@ async fn view_message(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     query: Result<axum::extract::Query<MessageRef>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::EmailMessage>, ApiError> {
     let axum::extract::Query(message) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use folder, uid_validity and uid."))?;
     let manager = &state.connectors;
@@ -171,7 +171,7 @@ async fn view_message(
                 Some((status, message)) => ApiError::new(status, error.code.as_str(), message),
                 None => ApiError::from(error),
             })?;
-    Ok(Json(json!(view)))
+    Ok(Json(view))
 }
 async fn account(
     State(state): State<Arc<AppState>>,
@@ -339,7 +339,7 @@ async fn permissions(
     State(state): State<Arc<AppState>>,
     ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
     ApiJson(request): ApiJson<Permissions>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::PermissionsEnvelope>, ApiError> {
     if (request.wake || request.write || request.send) && !request.read
         || request.send && !request.write
     {
@@ -351,9 +351,9 @@ async fn permissions(
     store::set_permissions(&state.db, id, bot, &request)
         .await
         .map_err(unavailable)?;
-    Ok(Json(
-        json!({"permissions":email::Permissions::from(&request)}),
-    ))
+    Ok(Json(email::PermissionsEnvelope {
+        permissions: email::Permissions::from(&request),
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
