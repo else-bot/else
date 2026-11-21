@@ -6,12 +6,15 @@ use super::request::Settle;
 use super::row_text::{RowHost, RowText};
 use super::task_reply::state::ReplyState;
 use super::transcript::{self, CardKey, Folds, RowKey, Transcript, TranscriptRow, group_open};
+use super::view::TRANSCRIPT_FADE;
 use crate::api::Client;
 use crate::model::Conversation;
 use chrono::Local;
 use else_wire::bots::Bot;
 use else_wire::bots::ReplyPosition;
 use else_wire::items::ItemKind;
+use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -618,5 +621,81 @@ impl ConversationView {
         self.sync_cards(window, cx);
         self.check_reading(window, cx);
         cx.notify();
+    }
+}
+
+/// The fade over a scrolled transcript edge: an opaque band taller than a
+/// 22 px body line, so a line sliced at the edge is hidden whole, then a
+/// gradient.
+const TRANSCRIPT_EDGE: Pixels = px(48.);
+const TRANSCRIPT_EDGE_OPAQUE: Pixels = px(24.);
+impl Render for ConversationView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(debug_assertions)]
+        count_transcript_render();
+        self.sightings.clear();
+        let page = cx.theme().background;
+        // Rows dissolve under the header and above the composer only where
+        // rows have actually scrolled past that edge; a resting transcript
+        // shows every row at full strength. The band next to each edge is
+        // opaque and taller than a line, so a sliced line never shows as
+        // half-legible text. Plain divs take no pointer input.
+        // The list draws rows into its top padding but clips them at its
+        // bottom padding, so the bottom fade starts its opaque band at that
+        // clip line.
+        let fade = |angle: f32, inset: Pixels| {
+            let height = inset + TRANSCRIPT_EDGE;
+            let opaque = f32::from(inset + TRANSCRIPT_EDGE_OPAQUE) / f32::from(height);
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(height)
+                .bg(linear_gradient(
+                    angle,
+                    linear_color_stop(page, opaque),
+                    linear_color_stop(page.opacity(0.), 1.),
+                ))
+        };
+        let past_top = self.list.scroll_px_offset_for_scrollbar().y < px(0.);
+        let past_bottom = self.list.is_scrolled_to_end() == Some(false);
+        div()
+            .relative()
+            .size_full()
+            .child(
+                list(
+                    self.list.clone(),
+                    cx.processor(|view, ix, window, cx| {
+                        let row = h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .justify_center()
+                            .child(view.render_row(ix, window, cx));
+                        view.center_row(ix, row, cx).into_any_element()
+                    }),
+                )
+                .size_full()
+                .py(TRANSCRIPT_FADE),
+            )
+            .when(past_top, |transcript| {
+                transcript.child(fade(180., px(0.)).top_0())
+            })
+            .when(past_bottom, |transcript| {
+                transcript.child(fade(0., TRANSCRIPT_FADE).bottom_0())
+            })
+    }
+}
+
+/// Counts transcript draws in a debug build and, with `ELSE_COUNT_RENDERS`
+/// set, logs each one, to check what redraws the transcript.
+#[cfg(debug_assertions)]
+fn count_transcript_render() {
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RENDERS: AtomicUsize = AtomicUsize::new(0);
+    static LOG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ELSE_COUNT_RENDERS").is_some());
+    let count = RENDERS.fetch_add(1, Ordering::Relaxed) + 1;
+    if *LOG {
+        eprintln!("transcript render {count}");
     }
 }
