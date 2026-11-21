@@ -230,7 +230,7 @@ pub struct Shell {
     updates: updates::View,
     backups: Option<backups::View>,
     mcp: Option<pane::Mounted<mcp::View>>,
-    skills: Option<skills::View>,
+    skills: Option<pane::Mounted<skills::View>>,
     vault: Option<Entity<vault::View>>,
     usage: Option<pane::Mounted<usage::View>>,
     computers: Option<pane::Mounted<computers::View>>,
@@ -505,8 +505,13 @@ impl Shell {
                 if let Some(bot) = app.read(cx).selected_bot_id() {
                     shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
                 }
-                if !app.read(cx).connected() {
-                    shell.clear_skill_keys(window, cx);
+                let connected = app.read(cx).connected();
+                if let Some(skills) = &shell.skills {
+                    skills
+                        .view
+                        .update(cx, |view, cx| view.set_connected(connected, window, cx));
+                }
+                if !connected {
                     shell.clear_vault(window, cx);
                 } else if shell.settings_section() == Some(settings::SettingsSection::Vault)
                     && shell.vault.is_none()

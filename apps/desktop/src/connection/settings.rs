@@ -243,6 +243,7 @@ impl Shell {
         match section {
             SettingsSection::Computers => self.open_computers(window, cx),
             SettingsSection::Mcp => self.open_mcp(window, cx),
+            SettingsSection::Skills => self.open_skills(window, cx),
             _ => {}
         }
     }
@@ -387,7 +388,9 @@ impl Shell {
             SettingsSection::Mcp => div()
                 .children(self.mcp.as_ref().map(|pane| pane.view.clone()))
                 .into_any_element(),
-            SettingsSection::Skills => self.render_skills(cx),
+            SettingsSection::Skills => div()
+                .children(self.skills.as_ref().map(|pane| pane.view.clone()))
+                .into_any_element(),
             SettingsSection::Vault => match &self.vault {
                 Some(view) => div().child(view.clone()).into_any_element(),
                 None => div()

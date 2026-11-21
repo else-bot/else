@@ -11,24 +11,97 @@ use gpui_kit::component::{
 };
 use std::time::Duration;
 
+use super::loaded::Loaded;
+use super::pane::PaneEvent;
+
 pub(super) struct View {
-    id: Uuid,
     client: Arc<Client>,
-    entries: Option<Vec<InstalledSkill>>,
+    /// Whether the server is reachable; key inputs are wiped when it is not.
+    connected: bool,
+    entries: Loaded<Vec<InstalledSkill>>,
     search: Entity<InputState>,
     expanded: Option<String>,
     files: HashMap<String, SkillFiles>,
     keys: Option<Entity<SkillKeys>>,
     replacing: bool,
-    revision: u64,
     busy: bool,
     error: Option<String>,
-    poll_error: Option<String>,
     _search: Subscription,
     _poll: Task<()>,
 }
 
+impl EventEmitter<PaneEvent> for View {}
+
+impl Shell {
+    pub(super) fn clear_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.skills.take() {
+            pane.view.update(cx, |view, cx| view.clear_keys(window, cx));
+        }
+    }
+
+    pub(super) fn open_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_skills(window, cx);
+        let Some(active) = &self.active else { return };
+        let client = active.client.clone();
+        let connected = active.app.read(cx).connected();
+        let view = cx.new(|cx| View::new(client, connected, window, cx));
+        self.skills = Some(self.mount(view, settings::SettingsSection::Skills, window, cx));
+        cx.notify();
+    }
+}
+
 impl View {
+    fn new(
+        client: Arc<Client>,
+        connected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let poll_client = client.clone();
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search installed skills"));
+        let subscription = cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let poll = cx.spawn_in(window, async move |this, cx| {
+            // A key write or removal outdates the list, so no fetch starts
+            // while one runs.
+            while let Ok(attempt) = this.update_in(cx, |view, window, cx| {
+                if !view.connected {
+                    view.clear_keys(window, cx);
+                }
+                (!view.busy).then(|| view.entries.begin())
+            }) {
+                if let Some(attempt) = attempt {
+                    let result = poll_client.clone().installed_skills().await;
+                    let open = this.update_in(cx, |view, window, cx| {
+                        view.apply(attempt, result, window, cx)
+                    });
+                    if open.is_err() {
+                        break;
+                    }
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
+        });
+        Self {
+            client,
+            connected,
+            entries: Loaded::default(),
+            search,
+            expanded: None,
+            files: HashMap::new(),
+            keys: None,
+            replacing: false,
+            busy: false,
+            error: None,
+            _search: subscription,
+            _poll: poll,
+        }
+    }
+
     pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
         self.busy
             || self
@@ -43,148 +116,91 @@ impl View {
         }
         self.replacing = false;
     }
-}
 
-impl Shell {
-    pub(super) fn clear_skill_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.skills.as_mut() {
-            view.clear_keys(window, cx);
+    /// Losing the connection wipes typed keys.
+    pub(super) fn set_connected(
+        &mut self,
+        connected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !connected {
+            self.clear_keys(window, cx);
+        }
+        if self.connected != connected {
+            self.connected = connected;
+            cx.notify();
         }
     }
 
-    pub(super) fn clear_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(mut view) = self.skills.take() {
-            view.clear_keys(window, cx);
+    fn apply(
+        &mut self,
+        attempt: Uuid,
+        result: Result<Vec<InstalledSkill>, ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.entries.awaits(attempt) {
+            return;
         }
-    }
-
-    pub(super) fn open_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_skills(window, cx);
-        let Some(active) = &self.active else { return };
-        let client = active.client.clone();
-        let poll_client = client.clone();
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search installed skills"));
-        let subscription = cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        });
-        let id = Uuid::new_v4();
-        let poll = cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let revision = this.update_in(cx, |shell, window, cx| {
-                    let connected = shell
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.app.read(cx).connected());
-                    let view = shell.skills.as_mut().filter(|view| view.id == id)?;
-                    if !connected {
-                        view.clear_keys(window, cx);
-                    }
-                    Some(view.revision)
+        match result {
+            Ok(entries) => {
+                let old = self.entries.value();
+                self.files.retain(|id, _| {
+                    old.into_iter()
+                        .flatten()
+                        .find(|old| old.id == *id)
+                        .zip(entries.iter().find(|new| new.id == *id))
+                        .is_some_and(|(old, new)| {
+                            old.installed_at == new.installed_at && old.source == new.source
+                        })
                 });
-                let Ok(Some(revision)) = revision else { break };
-                let result = poll_client.clone().installed_skills().await;
-                let active = this.update_in(cx, |shell, window, cx| {
-                    let connected = shell
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.app.read(cx).connected());
-                    let Some(view) = shell.skills.as_mut().filter(|view| view.id == id) else {
-                        return false;
-                    };
-                    if view.revision == revision && !view.busy {
-                        match result {
-                            Ok(entries) => {
-                                view.files.retain(|id, _| {
-                                    view.entries
-                                        .iter()
-                                        .flatten()
-                                        .find(|old| old.id == *id)
-                                        .zip(entries.iter().find(|new| new.id == *id))
-                                        .is_some_and(|(old, new)| {
-                                            old.installed_at == new.installed_at
-                                                && old.source == new.source
-                                        })
-                                });
-                                if let Some(expanded) = view.expanded.clone() {
-                                    let replaced = view
-                                        .entries
-                                        .iter()
-                                        .flatten()
-                                        .find(|old| old.id == expanded)
-                                        .zip(entries.iter().find(|new| new.id == expanded))
-                                        .is_some_and(|(old, new)| {
-                                            old.installed_at != new.installed_at
-                                                || old.source != new.source
-                                        });
-                                    if replaced {
-                                        view.clear_keys(window, cx);
-                                        view.expanded = None;
-                                    }
-                                }
-                                if let Some(expanded) = &view.expanded {
-                                    let current =
-                                        entries.iter().find(|entry| entry.id == *expanded);
-                                    if current.is_none()
-                                        || current.is_some_and(|entry| entry.key_stored)
-                                            && !view.replacing
-                                    {
-                                        view.clear_keys(window, cx);
-                                    }
-                                    if connected
-                                        && let Some(entry) = current.filter(|entry| {
-                                            !entry.key_stored && !entry.env.is_empty()
-                                        })
-                                        && view.keys.is_none()
-                                    {
-                                        view.keys = Some(
-                                            cx.new(|cx| SkillKeys::new(&entry.env, window, cx)),
-                                        );
-                                    }
-                                    if current.is_none() {
-                                        view.expanded = None;
-                                    }
-                                }
-                                view.entries = Some(entries);
-                                view.poll_error = None;
-                            }
-                            Err(error) => view.poll_error = Some(error.to_string()),
-                        }
-                        cx.notify();
+                if let Some(expanded) = self.expanded.clone() {
+                    let replaced = old
+                        .into_iter()
+                        .flatten()
+                        .find(|old| old.id == expanded)
+                        .zip(entries.iter().find(|new| new.id == expanded))
+                        .is_some_and(|(old, new)| {
+                            old.installed_at != new.installed_at || old.source != new.source
+                        });
+                    if replaced {
+                        self.clear_keys(window, cx);
+                        self.expanded = None;
                     }
-                    true
-                });
-                if !matches!(active, Ok(true)) {
-                    break;
                 }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if let Some(expanded) = &self.expanded {
+                    let current = entries.iter().find(|entry| entry.id == *expanded);
+                    if current.is_none()
+                        || current.is_some_and(|entry| entry.key_stored) && !self.replacing
+                    {
+                        self.clear_keys(window, cx);
+                    }
+                    if self.connected
+                        && let Some(entry) =
+                            current.filter(|entry| !entry.key_stored && !entry.env.is_empty())
+                        && self.keys.is_none()
+                    {
+                        self.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
+                    }
+                    if current.is_none() {
+                        self.expanded = None;
+                    }
+                }
+                self.entries.settle(attempt, Ok(entries));
             }
-        });
-        self.skills = Some(View {
-            id,
-            client,
-            entries: None,
-            search,
-            expanded: None,
-            files: HashMap::new(),
-            keys: None,
-            replacing: false,
-            revision: 0,
-            busy: false,
-            error: None,
-            poll_error: None,
-            _search: subscription,
-            _poll: poll,
-        });
+            Err(error) => {
+                self.entries.settle(attempt, Err(error.to_string()));
+            }
+        }
         cx.notify();
     }
 
-    fn expand_skill(&mut self, entry: InstalledSkill, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.skills.as_mut().filter(|view| !view.busy) else {
+    fn expand(&mut self, entry: InstalledSkill, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
             return;
-        };
+        }
+        let view = self;
         view.clear_keys(window, cx);
         if view.expanded.as_ref() == Some(&entry.id) {
             view.expanded = None;
@@ -211,15 +227,11 @@ impl Shell {
         }
         files.loading = true;
         files.error = None;
-        let view_id = view.id;
         let client = view.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_detail(entry.id.clone()).await;
-            let _ = this.update_in(cx, |shell, _, cx| {
-                let Some(view) = shell.skills.as_mut().filter(|view| view.id == view_id) else {
-                    return;
-                };
-                if !view.entries.iter().flatten().any(|current| {
+            let _ = this.update(cx, |view, cx| {
+                if !view.entries.value().into_iter().flatten().any(|current| {
                     current.id == entry.id
                         && current.installed_at == entry.installed_at
                         && current.source == entry.source
@@ -243,31 +255,28 @@ impl Shell {
         cx.notify();
     }
 
-    fn edit_skill_key(
-        &mut self,
-        entry: InstalledSkill,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(view) = self.skills.as_mut().filter(|view| !view.busy) else {
+    fn edit_key(&mut self, entry: InstalledSkill, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
             return;
-        };
+        }
+        let view = self;
         view.clear_keys(window, cx);
         view.replacing = true;
         view.keys = Some(cx.new(|cx| SkillKeys::new(&entry.env, window, cx)));
         cx.notify();
     }
 
-    fn write_skill_key(
+    fn write_key(
         &mut self,
         entry: InstalledSkill,
         save: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.skills.as_mut().filter(|view| !view.busy) else {
+        if self.busy {
             return;
-        };
+        }
+        let view = self;
         let env = if save {
             let Some(keys) = &view.keys else { return };
             match keys.read(cx).values(false, cx) {
@@ -282,7 +291,7 @@ impl Shell {
             None
         };
         view.busy = true;
-        view.revision += 1;
+        view.entries.supersede();
         view.error = None;
         if let Some(keys) = &view.keys {
             keys.update(cx, |keys, cx| {
@@ -290,22 +299,18 @@ impl Shell {
                 cx.notify();
             });
         }
-        let view_id = view.id;
         let client = view.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.save_skill_key(entry.secret, env).await;
-            let _ = this.update_in(cx, |shell, window, cx| {
-                let Some(view) = shell.skills.as_mut().filter(|view| view.id == view_id) else {
-                    return;
-                };
+            let _ = this.update_in(cx, |view, window, cx| {
                 view.busy = false;
-                view.revision += 1;
                 match result {
                     Ok(()) => {
                         view.clear_keys(window, cx);
                         if let Some(current) = view
                             .entries
-                            .iter_mut()
+                            .value_mut()
+                            .into_iter()
                             .flatten()
                             .find(|current| current.id == entry.id)
                         {
@@ -327,25 +332,24 @@ impl Shell {
         cx.notify();
     }
 
-    fn confirm_remove_skill(
+    fn confirm_remove(
         &mut self,
         entry: InstalledSkill,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.skills.as_mut().filter(|view| !view.busy) else {
+        if self.busy {
             return;
-        };
-        view.clear_keys(window, cx);
-        let view_id = view.id;
-        let shell = cx.weak_entity();
+        }
+        self.clear_keys(window, cx);
+        let view = cx.weak_entity();
         let cancel = cx.focus_handle();
         let focus_once = std::cell::Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
             if focus_once.replace(false) {
                 cancel.focus(window, cx);
             }
-            let shell = shell.clone();
+            let view = view.clone();
             let id = entry.id.clone();
             let shared = entry.scope == SkillScope::All;
             let title = if shared {
@@ -382,8 +386,8 @@ impl Shell {
                                 .label(if shared { "Delete for all bots" } else { "Delete" })
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    let _ = shell.update(cx, |shell, cx| {
-                                        shell.remove_skill(view_id, id.clone(), window, cx);
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.remove(id.clone(), window, cx);
                                     });
                                 }),
                         ),
@@ -391,35 +395,22 @@ impl Shell {
         });
     }
 
-    fn remove_skill(
-        &mut self,
-        view_id: Uuid,
-        id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(view) = self
-            .skills
-            .as_mut()
-            .filter(|view| view.id == view_id && !view.busy)
-        else {
+    fn remove(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
             return;
-        };
+        }
+        let view = self;
         view.busy = true;
-        view.revision += 1;
+        view.entries.supersede();
         view.error = None;
         let client = view.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.remove_skill(id.clone()).await;
-            let _ = this.update_in(cx, |shell, window, cx| {
-                let Some(view) = shell.skills.as_mut().filter(|view| view.id == view_id) else {
-                    return;
-                };
+            let _ = this.update_in(cx, |view, window, cx| {
                 view.busy = false;
-                view.revision += 1;
                 match result {
                     Ok(()) => {
-                        if let Some(entries) = &mut view.entries {
+                        if let Some(entries) = view.entries.value_mut() {
                             entries.retain(|entry| entry.id != id);
                         }
                         view.files.remove(&id);
@@ -437,22 +428,16 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn render_skills(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut body = v_flex().gap_5().child(settings::section_heading(
             "Skills",
             "Installed once. Shared skills are available to every bot.",
             cx,
         ));
-        let connected = self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.app.read(cx).connected());
-        let Some(view) = &self.skills else {
-            return body.child("Loading installed skills…").into_any_element();
-        };
-        let busy = view.busy || !connected;
-        let Some(entries) = &view.entries else {
+        let view = self;
+        let busy = view.busy || !view.connected;
+        let Some(entries) = view.entries.value() else {
             return body.child("Loading installed skills…").into_any_element();
         };
         if entries.is_empty() {
@@ -466,10 +451,7 @@ impl Shell {
                         .control(Tier::Secondary, Scale::Standard, false, cx)
                         .icon(IconName::MessageSquare)
                         .label("Ask a bot in chat")
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            window.close_dialog(cx);
-                            shell.cancel(window, cx);
-                        })),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Leave))),
                     cx,
                 ))
                 .into_any_element();
@@ -482,7 +464,7 @@ impl Shell {
                     .prefix(Icon::new(IconName::Search).size_3()),
             ),
         );
-        if let Some(error) = view.error.as_ref().or(view.poll_error.as_ref()) {
+        if let Some(error) = view.error.as_ref().or(view.entries.error()) {
             body = body.child(
                 h_flex()
                     .gap_3()
@@ -497,9 +479,7 @@ impl Shell {
                         Button::new("skills-retry")
                             .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Retry")
-                            .on_click(
-                                cx.listener(|shell, _, window, cx| shell.open_skills(window, cx)),
-                            ),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Reload))),
                     ),
             );
         }
@@ -621,8 +601,8 @@ impl Shell {
                                 )
                                 .child(access),
                         )
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.expand_skill(expand.clone(), window, cx)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.expand(expand.clone(), window, cx)
                         })),
                 )
                 .child(
@@ -635,8 +615,8 @@ impl Shell {
                         .text_color(theme.danger)
                         .accessibility_label(format!("Delete {}", entry.name))
                         .disabled(busy)
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.confirm_remove_skill(remove.clone(), window, cx)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.confirm_remove(remove.clone(), window, cx)
                         })),
                 );
             let mut row = v_flex()
@@ -667,18 +647,14 @@ impl Shell {
                             )),
                     );
                 if let Some(files) = view.files.get(&entry.id) {
-                    let shell = cx.weak_entity();
+                    let this = cx.weak_entity();
                     let id = entry.id.clone();
                     detail = detail.child(files.render(
                         &entry.id,
                         &entry.files,
                         move |path, _, cx| {
-                            let _ = shell.update(cx, |shell, cx| {
-                                if let Some(files) = shell
-                                    .skills
-                                    .as_mut()
-                                    .and_then(|view| view.files.get_mut(&id))
-                                {
+                            let _ = this.update(cx, |view, cx| {
+                                if let Some(files) = view.files.get_mut(&id) {
                                     files.selected = Some(path);
                                     cx.notify();
                                 }
@@ -716,16 +692,16 @@ impl Shell {
                                     Button::new("skill-key-replace")
                                         .control(Tier::Secondary, Scale::Standard, busy, cx)
                                         .label("Replace")
-                                        .on_click(cx.listener(move |shell, _, window, cx| {
-                                            shell.edit_skill_key(replace.clone(), window, cx)
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.edit_key(replace.clone(), window, cx)
                                         })),
                                 )
                                 .child(
                                     Button::new("skill-key-clear")
                                         .control(Tier::Secondary, Scale::Standard, busy, cx)
                                         .label("Clear")
-                                        .on_click(cx.listener(move |shell, _, window, cx| {
-                                            shell.write_skill_key(clear.clone(), false, window, cx)
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.write_key(clear.clone(), false, window, cx)
                                         })),
                                 ),
                         );
@@ -735,8 +711,8 @@ impl Shell {
                                 Button::new("skill-key-save")
                                     .control(Tier::Primary, Scale::Standard, busy, cx)
                                     .label("Save")
-                                    .on_click(cx.listener(move |shell, _, window, cx| {
-                                        shell.write_skill_key(save.clone(), true, window, cx)
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.write_key(save.clone(), true, window, cx)
                                     })),
                             ),
                         );
@@ -745,8 +721,8 @@ impl Shell {
                             Button::new("skill-key-edit")
                                 .control(Tier::Secondary, Scale::Standard, busy, cx)
                                 .label("Add key")
-                                .on_click(cx.listener(move |shell, _, window, cx| {
-                                    shell.edit_skill_key(replace.clone(), window, cx)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.edit_key(replace.clone(), window, cx)
                                 })),
                         );
                     }
@@ -772,5 +748,11 @@ impl Shell {
                     .child("Removing a shared skill removes it for every bot."),
             )
             .into_any_element()
+    }
+}
+
+impl Render for View {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_page(cx)
     }
 }
