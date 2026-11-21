@@ -165,7 +165,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         "not booted"
     );
     manager.release(other_lease).await.unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
 
     let report = manager.upgrade_image(bot, "img:new", None).await.unwrap();
     let spec = fake.specs.lock().unwrap().last().cloned().unwrap();

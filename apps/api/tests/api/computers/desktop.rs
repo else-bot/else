@@ -115,7 +115,7 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
         .unwrap();
 
     manager.release(lease_a).await.unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     assert_eq!(observed(&app, a).await, "stopped");
     assert!(matches!(
         manager.acquire_desktop(b, "test:b").await.unwrap(),

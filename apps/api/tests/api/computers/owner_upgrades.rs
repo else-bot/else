@@ -475,7 +475,7 @@ async fn upgrade_all_waits_for_busy_computers_and_the_budget_then_upgrades_each(
     );
 
     manager.release(held).await.unwrap();
-    manager.tick(&never()).await.unwrap();
+    manager.tick(&no_cancel()).await.unwrap();
     let (body, _) = computers_when(&app, |by_bot| {
         bots.iter()
             .all(|bot| by_bot[bot]["image"] == "img:new" && by_bot[bot]["upgrade"].is_null())

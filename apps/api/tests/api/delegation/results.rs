@@ -4,35 +4,13 @@
 use super::*;
 
 async fn settle_with_messages(db: &TestDb, child: Uuid, messages: &[&str], status: &str) {
-    let (target, conversation): (Uuid, Uuid) = sqlx::query_as(
-        "SELECT t.bot_id, c.id FROM turns t
-         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
-    )
-    .bind(child)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    for text in messages {
-        let seq: i64 = sqlx::query_scalar(
-            "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
-             RETURNING last_item_seq",
-        )
-        .bind(conversation)
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(conversation)
-        .bind(seq)
-        .bind(child)
-        .bind(text)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    for text in messages {
+        common::seed::item(&db.pool, child, ItemKind::Assistant, text).await;
     }
     common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
     // End the task's turn as its provider does; the trigger records the result.

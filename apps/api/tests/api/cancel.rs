@@ -467,7 +467,7 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
         .await
         .unwrap();
     let request = Uuid::new_v4();
-    let stop_task = {
+    let mut stop_task = {
         let router = app.router.clone();
         tokio::spawn(async move {
             use tower::ServiceExt;
@@ -482,22 +482,13 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
             router.oneshot(request).await.unwrap().status()
         })
     };
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let turn_id = Uuid::new_v4();
-    let conversation: Uuid = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = last_turn_no + 1, last_item_seq = last_item_seq + 1
-         WHERE bot_id = ?1 RETURNING id",
+    common::never(
+        "the stop to answer while the send holds the write lock",
+        Duration::from_millis(300),
+        &mut stop_task,
     )
-    .bind(bot_id)
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
-    common::seed::turn(bot_id)
-        .id(turn_id)
-        .conversation(conversation)
-        .turn_no(1)
-        .insert(&mut *tx)
-        .await;
+    .await;
+    let turn_id = common::seed::turn(bot_id).insert(&mut *tx).await;
     tx.commit().await.unwrap();
     assert_eq!(
         common::until("the stop to finish after the send commits", stop_task)

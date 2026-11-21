@@ -378,7 +378,7 @@ async fn manager(app: &TestApp, fake: &Arc<Fake>, config: ComputerConfig) -> Com
     manager
 }
 
-fn never() -> tokio_util::sync::CancellationToken {
+fn no_cancel() -> tokio_util::sync::CancellationToken {
     tokio_util::sync::CancellationToken::new()
 }
 
@@ -412,7 +412,7 @@ async fn computer(app: &TestApp, bot: Uuid) -> (String, String, String) {
 }
 
 async fn wait_for_idle_stop(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
-    let cancel = never();
+    let cancel = no_cancel();
     common::until(
         &format!("idle computer {bot} to stop"),
         common::poll(|| async {
