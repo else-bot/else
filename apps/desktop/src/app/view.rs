@@ -795,7 +795,7 @@ impl ElseApp {
                     .child("Updating…"),
             );
         }
-        if let Some(problem) = view.and_then(|v| v.stream_problem.clone()) {
+        if let Some(problem) = view.and_then(|v| v.stream_problem()).map(str::to_owned) {
             notices = notices.child(div().text_xs().text_color(theme.warning).child(problem));
         }
         if let Some(notice) = &self.notice {

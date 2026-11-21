@@ -1,5 +1,6 @@
-use super::conversation::{ConversationView, ReplyLayout, Spot, on_app};
+use super::conversation::{ConversationView, Spot, on_app};
 use super::pending_send::{Delivery, PROVIDER_UNAVAILABLE};
+use super::reading::ReplyLayout;
 use super::reply::Author;
 use super::reply::Feedback as _;
 use super::row_text::RowText;

@@ -1,8 +1,8 @@
 pub(super) mod state;
 
 use self::state::{Earlier, ReplyState, TaskReply};
-use super::conversation::ReplyLayout;
 use super::message_row::CardPlacement;
+use super::reading::ReplyLayout;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
 use crate::ambient::looping;
