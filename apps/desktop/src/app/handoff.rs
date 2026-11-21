@@ -1,6 +1,6 @@
 use super::ElseApp;
-use super::conversation::RowKey;
 use super::task_reply::state::format_elapsed;
+use super::transcript::RowKey;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;

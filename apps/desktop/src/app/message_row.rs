@@ -100,7 +100,7 @@ impl ElseApp {
             .view
             .as_ref()
             .and_then(|view| view.conversation.as_ref())
-            .and_then(|c| super::conversation::opened_mail(c, row.opens_turn))
+            .and_then(|c| super::transcript::opened_mail(c, row.opens_turn))
             .and_then(|turn| super::email_reader::mail_banner(turn, &self.bots, cx));
         let body = match banner {
             Some(banner) => gpui_kit::component::v_flex()
@@ -298,7 +298,7 @@ impl ElseApp {
 
     pub(super) fn render_row_content(
         &mut self,
-        row: &super::conversation::TranscriptRow,
+        row: &super::transcript::TranscriptRow,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -352,7 +352,7 @@ impl ElseApp {
                 routine_run(turn, run, false, cx).into_any_element()
             }
             RowKey::QuietRuns(first) => {
-                let open = super::conversation::group_open(&row.quiet_runs, &view.open_quiet);
+                let open = super::transcript::group_open(&row.quiet_runs, &view.open_quiet);
                 quiet_runs(
                     view.conversation.as_ref()?,
                     first,

@@ -5,7 +5,8 @@
 //! nothing from the owner sits on one line until opened.
 
 use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
-use super::conversation::{ReplyLayout, Reveal, Spot, TranscriptRow};
+use super::conversation::{ReplyLayout, Reveal, Spot};
+use super::transcript::TranscriptRow;
 use super::{ElseApp, RowKey};
 use crate::attachments::MessagePart;
 use crate::controls::{Control as _, Scale, Tier};

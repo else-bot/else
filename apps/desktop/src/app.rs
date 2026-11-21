@@ -36,6 +36,7 @@ mod settings;
 mod skill_card;
 mod social_card;
 mod task_reply;
+mod transcript;
 mod usage;
 mod view;
 mod visuals;
@@ -44,13 +45,14 @@ mod warm;
 
 use crate::model::Phase;
 use categories::CategoryFormHolder;
-use conversation::{ConversationView, RowKey};
+use conversation::ConversationView;
 use create_bot::CreateFormHolder;
 use dialogs::Welcome;
 pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};
+use transcript::RowKey;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

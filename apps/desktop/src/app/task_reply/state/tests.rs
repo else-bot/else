@@ -44,7 +44,7 @@ fn a_finished_handoff_turn_off_the_page_leaves_no_task_row() {
             "a {status} handoff turn without loaded items must not add a task row"
         );
         assert_eq!(c.open_handoff().map(|h| h.id), Some(id(300)));
-        assert!(crate::app::conversation::request_rows(&c).is_empty());
+        assert!(crate::app::transcript::request_rows(&c).is_empty());
     }
 }
 
@@ -957,7 +957,7 @@ type Rows = Vec<(RowKey, Option<Uuid>)>;
 
 fn placed(c: &Conversation) -> (HashMap<Uuid, TaskReply>, Rows) {
     let mut tasks = task_replies(c);
-    let rows = place_cards(c, &mut tasks, crate::app::conversation::turn_card_rows(c));
+    let rows = place_cards(c, &mut tasks, crate::app::transcript::turn_card_rows(c));
     (tasks, rows)
 }
 
@@ -1298,7 +1298,7 @@ fn each_joined_message_keeps_the_answer_the_bot_gave_it() {
 }
 
 fn rows(c: &Conversation) -> Vec<RowKey> {
-    crate::app::conversation::transcript_rows(c, &task_replies(c), Vec::new())
+    crate::app::transcript::transcript_rows(c, &task_replies(c), Vec::new())
 }
 
 fn items_then_task(items: &[u128]) -> Vec<RowKey> {
@@ -1385,7 +1385,7 @@ fn an_answer_does_not_make_a_folded_update_look_like_an_attempts_end() {
 fn a_reply_reads_under_the_bots_name_unless_its_turns_reply_is_just_above() {
     let c = joined_reply("completed", 1, &[(2, 1), (4, 1)]);
     let item = |n| RowKey::Item(id(n));
-    let starts = |keys: &[RowKey]| crate::app::conversation::starts_runs(Some(&c), keys);
+    let starts = |keys: &[RowKey]| crate::app::transcript::starts_runs(Some(&c), keys);
     assert_eq!(starts(&[item(1), item(2), item(4)]), [true, true, false]);
     assert_eq!(
         starts(&[item(1), item(4)]),
@@ -1501,7 +1501,7 @@ fn a_card_after_a_folded_update_reads_after_the_reply_it_folds_under() {
     assert_eq!(left, [(card, Some(id(5)))]);
     assert!(tasks[&id(20)].cards.is_empty());
     assert_eq!(
-        crate::app::conversation::transcript_rows(&c, &tasks, left),
+        crate::app::transcript::transcript_rows(&c, &tasks, left),
         [
             RowKey::Item(id(1)),
             RowKey::Item(id(5)),

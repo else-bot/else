@@ -2,8 +2,8 @@
 //! and the transcript loads only a window around the one shown.
 
 use super::ElseApp;
-use super::conversation::RowKey;
 use super::row_text::{Highlights, RowText};
+use super::transcript::RowKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::model::{GapSize, SearchHit};
 use else_plain_text::find::Needle;
