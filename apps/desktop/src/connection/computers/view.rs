@@ -3,15 +3,13 @@ use crate::ambient::looping;
 use chrono::{DateTime, Utc};
 use gpui_kit::component::tooltip::Tooltip;
 
-impl Shell {
-    pub(in super::super) fn render_computers(&self, cx: &mut Context<Self>) -> AnyElement {
+impl View {
+    pub(super) fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (view, report, error) = match self.computers.as_ref().map(|view| (view, &view.state)) {
-            None | Some((_, Loaded::Loading(_))) => (None, None, None),
-            Some((view, Loaded::Failed(error))) => (Some(view), None, Some(error)),
-            Some((view, Loaded::Ready { value, error, .. })) => {
-                (Some(view), Some(value), error.as_ref())
-            }
+        let (view, report, error) = if self.state.pending() {
+            (None, None, None)
+        } else {
+            (Some(self), self.state.value(), self.state.error())
         };
         let available = match report {
             Some(Availability::Available(report)) => Some(report),
@@ -51,9 +49,9 @@ impl Shell {
                     } else {
                         format!("Upgrade all ({count})")
                     })
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.computer_command(command, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |view, _, window, cx| view.command(command, window, cx)),
+                    )
                     .into_any_element(),
             );
         }
@@ -79,9 +77,7 @@ impl Shell {
                         Button::new("computers-refresh-retry")
                             .control(Tier::Secondary, Scale::Compact, false, cx)
                             .label("Retry")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.refresh_computers(window, cx)
-                            })),
+                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
                     ),
             );
         }
@@ -108,8 +104,8 @@ impl Shell {
                         Button::new("computers-command-retry")
                             .control(Tier::Secondary, Scale::Compact, view.pending.is_some(), cx)
                             .label("Retry")
-                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                shell.computer_command(command, window, cx)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.command(command, window, cx)
                             })),
                     ),
             );
@@ -133,10 +129,7 @@ impl Shell {
                     Button::new("computers-empty-chat")
                         .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Back to chat")
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            window.close_dialog(cx);
-                            shell.cancel(window, cx);
-                        })),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Leave))),
                     cx,
                 ))
                 .into_any_element();
@@ -199,7 +192,9 @@ impl Shell {
         let upgrading = matches!(action(computer), Action::Running);
         let (status, status_color) = status(computer, &theme);
         let avatar = self
-            .known_bots(cx)
+            .app
+            .read(cx)
+            .bots()
             .iter()
             .find(|bot| bot.id == id)
             .map(|bot| bot.avatar)
@@ -257,9 +252,7 @@ impl Shell {
             .cursor_pointer()
             .role(Role::Button)
             .aria_label(format!("Open {name}"))
-            .on_click(
-                cx.listener(move |shell, _, window, cx| shell.open_computer_bot(id, window, cx)),
-            )
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PaneEvent::OpenBot(id))))
             .child(
                 crate::avatar::bot_avatar(
                     SharedString::from(format!("computer-avatar-{id}")),
@@ -294,8 +287,8 @@ impl Shell {
                     } else {
                         "Upgrade"
                     })
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.computer_command(Command::Upgrade(id), window, cx)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.command(Command::Upgrade(id), window, cx)
                     }))
                     .into_any_element()
             }

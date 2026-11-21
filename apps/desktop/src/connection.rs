@@ -5,7 +5,9 @@
 mod backups;
 mod computers;
 mod icon_editor;
+mod loaded;
 mod mcp;
+mod pane;
 mod server_keys;
 mod server_rail;
 mod server_views;
@@ -227,11 +229,11 @@ pub struct Shell {
     settings_focus: FocusHandle,
     updates: updates::View,
     backups: Option<backups::View>,
-    mcp: Option<mcp::View>,
+    mcp: Option<pane::Mounted<mcp::View>>,
     skills: Option<skills::View>,
     vault: Option<Entity<vault::View>>,
-    usage: Option<usage::View>,
-    computers: Option<computers::View>,
+    usage: Option<pane::Mounted<usage::View>>,
+    computers: Option<pane::Mounted<computers::View>>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
     switcher: Option<switcher::Switcher>,

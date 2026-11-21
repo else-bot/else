@@ -698,7 +698,7 @@ impl Shell {
             || self
                 .mcp
                 .as_ref()
-                .is_some_and(|view| view.has_unsaved_work())
+                .is_some_and(|pane| pane.view.read(cx).has_unsaved_work())
             || self
                 .backups
                 .as_ref()

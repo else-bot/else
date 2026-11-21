@@ -1,7 +1,6 @@
 use super::{Palette, View};
 use crate::api::{BotUsage, ProviderUsage, UsageWindow};
 use crate::avatar::bot_avatar;
-use crate::connection::Shell;
 use crate::controls::{hugging_segment, segment_track};
 use crate::usage_ui::{initial, percent, share, share_bar, source_summary};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -11,16 +10,16 @@ const AVATAR: f32 = 24.;
 const NAME: f32 = 180.;
 const SHARE: f32 = 64.;
 
-impl Shell {
+impl View {
     pub(super) fn usage_table(
         &self,
         provider: &ProviderUsage,
         window: &UsageWindow,
         name: &str,
         palette: &Palette,
-        view: &View,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let view = self;
         let theme = cx.theme().clone();
         let mut bots: Vec<&BotUsage> = window.bots.iter().collect();
         bots.sort_by(|a, b| b.share.total_cmp(&a.share));
@@ -49,13 +48,11 @@ impl Shell {
                     false,
                     cx,
                 )
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    if let Some(view) = &mut shell.usage {
-                        view.window_minutes = Some(minutes);
-                        view.expanded = None;
-                        view.show_more = false;
-                        cx.notify();
-                    }
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.window_minutes = Some(minutes);
+                    view.expanded = None;
+                    view.show_more = false;
+                    cx.notify();
                 }))
             })));
         }
@@ -123,11 +120,9 @@ impl Shell {
                 .border_b_1()
                 .border_color(theme.border.opacity(0.5))
                 .hover(|row| row.bg(theme.muted_foreground.opacity(0.06)))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    if let Some(view) = &mut shell.usage {
-                        view.expanded = (view.expanded != Some(id)).then_some(id);
-                        cx.notify();
-                    }
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.expanded = (view.expanded != Some(id)).then_some(id);
+                    cx.notify();
                 }))
                 .child(
                     h_flex().w(px(AVATAR)).flex_none().justify_center().child(
@@ -204,11 +199,9 @@ impl Shell {
                             share(small_share)
                         )
                     })
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        if let Some(view) = &mut shell.usage {
-                            view.show_more = !view.show_more;
-                            cx.notify();
-                        }
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.show_more = !view.show_more;
+                        cx.notify();
                     })),
             );
         }

@@ -234,6 +234,19 @@ impl Shell {
         }
     }
 
+    pub(super) fn reload_pane(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match section {
+            SettingsSection::Computers => self.open_computers(window, cx),
+            SettingsSection::Mcp => self.open_mcp(window, cx),
+            _ => {}
+        }
+    }
+
     pub(super) fn clear_socials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.socials.take() {
             view.update(cx, |view, cx| view.clear(window, cx));
@@ -371,7 +384,9 @@ impl Shell {
                 .children(self.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
-            SettingsSection::Mcp => self.render_mcp(window, cx),
+            SettingsSection::Mcp => div()
+                .children(self.mcp.as_ref().map(|pane| pane.view.clone()))
+                .into_any_element(),
             SettingsSection::Skills => self.render_skills(cx),
             SettingsSection::Vault => match &self.vault {
                 Some(view) => div().child(view.clone()).into_any_element(),
@@ -379,8 +394,12 @@ impl Shell {
                     .child("Reconnect to the server to open the Vault.")
                     .into_any_element(),
             },
-            SettingsSection::Usage => self.render_usage(cx),
-            SettingsSection::Computers => self.render_computers(cx),
+            SettingsSection::Usage => div()
+                .children(self.usage.as_ref().map(|pane| pane.view.clone()))
+                .into_any_element(),
+            SettingsSection::Computers => div()
+                .children(self.computers.as_ref().map(|pane| pane.view.clone()))
+                .into_any_element(),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
