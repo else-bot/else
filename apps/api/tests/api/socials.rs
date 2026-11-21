@@ -869,6 +869,62 @@ async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
 }
 
 #[tokio::test]
+async fn a_queued_send_whose_caller_gave_up_is_never_delivered() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "queued").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let fake = Arc::new(Fake::default());
+    fake.blocked.store(true, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let send = |destination: &str, id: Uuid| {
+        let manager = manager.clone();
+        let message = SendMessage {
+            destination: destination.into(),
+            body: "body".into(),
+            reply_to: None,
+            files: Vec::new(),
+        };
+        tokio::spawn(async move { manager.send(c.id, bot, turn, id, message).await })
+    };
+    let first = send("100", Uuid::new_v4());
+    tokio::time::timeout(common::SETTLE, fake.started.notified())
+        .await
+        .unwrap();
+    let abandoned = Uuid::new_v4();
+    let queued = send("200", abandoned);
+    // Long enough for the send to queue behind the first; if it has not, the
+    // abort only drops it sooner and the assertions still hold.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    queued.abort();
+    fake.blocked.store(false, Ordering::SeqCst);
+    fake.release.notify_one();
+    tokio::time::timeout(common::SETTLE, first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(common::SETTLE, send("100", Uuid::new_v4()))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(*fake.sent_to.lock().unwrap(), ["100", "100"]);
+    assert_eq!(
+        store::ACTIONS
+            .receipt(&db.pool, c.id, bot, abandoned)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn restored_connections_are_passive_and_credentials_are_removed_on_disconnect() {
     let db = TestDb::migrated().await;
     let c = account(&db, "restore").await;
