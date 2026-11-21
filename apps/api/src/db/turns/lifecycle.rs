@@ -797,13 +797,18 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
 }
 
 /// End the unfinished turns that restored email deliveries started, on a
-/// restored database before any API serves it, so there is no live
-/// follow-up to run. A turn that may have acted becomes `uncertain`.
+/// restored database before any API serves it, and stop the tasks they
+/// delegated, in one transaction. A turn that may have acted becomes
+/// `uncertain`.
 pub async fn end_restored_mail(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE turns SET status=CASE WHEN status IN ('queued','preparing') THEN 'interrupted' ELSE 'uncertain' END, effect_uncertain=effect_uncertain OR status NOT IN ('queued','preparing'), error_code='connector_restored', error_message='Restored email work will not resume automatically. Inspect action receipts for prior effects.', finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE status IN {UNFINISHED_STATUSES} AND EXISTS (SELECT 1 FROM connector_deliveries d WHERE d.turn_id=turns.id)")))
-        .execute(&mut *conn)
+    let mut tx = sqlx::Connection::begin_with(conn, "BEGIN IMMEDIATE").await?;
+    let restored: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE turns SET status=CASE WHEN status IN ('queued','preparing') THEN 'interrupted' ELSE 'uncertain' END, effect_uncertain=effect_uncertain OR status NOT IN ('queued','preparing'), error_code='connector_restored', error_message='Restored email work will not resume automatically. Inspect action receipts for prior effects.', finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE status IN {UNFINISHED_STATUSES} AND EXISTS (SELECT 1 FROM connector_deliveries d WHERE d.turn_id=turns.id) RETURNING id, bot_id")))
+        .fetch_all(&mut *tx)
         .await?;
-    Ok(())
+    for (turn, bot) in restored {
+        ended(&mut tx, bot, turn).await?;
+    }
+    tx.commit().await
 }
 
 /// End the queued and waiting turns that restored social deliveries

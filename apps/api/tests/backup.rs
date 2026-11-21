@@ -58,7 +58,10 @@ struct Target {
 }
 impl Target {
     fn new(app: &TestApp) -> Self {
-        let p = DatabaseParams::parse(app.db.url.expose()).unwrap();
+        Self::beside(&app.db)
+    }
+    fn beside(db: &common::TestDb) -> Self {
+        let p = DatabaseParams::parse(db.url.expose()).unwrap();
         Self {
             name: p
                 .options
@@ -92,7 +95,17 @@ async fn restore_into(
     target: &Target,
     staging: &Path,
 ) -> Result<else_api::backup::restore::RestoreReport, BackupError> {
-    let server = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    restore_from(&app.db, set, key, target, staging).await
+}
+
+async fn restore_from(
+    db: &common::TestDb,
+    set: &Path,
+    key: &SecretKey,
+    target: &Target,
+    staging: &Path,
+) -> Result<else_api::backup::restore::RestoreReport, BackupError> {
+    let server = DatabaseParams::parse(db.url.expose()).unwrap();
     restore(RestoreRequest {
         set_dir: set,
         key,
@@ -668,6 +681,106 @@ async fn a_restore_ends_every_lease_claim_and_native_session() {
         ),
     ] {
         assert_eq!(rows(&target.url(), sql).await, expected, "{sql}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_stops_the_tasks_of_the_email_turns_it_ends() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    app.create_bot("Helper").await;
+    let db = app.stop().await;
+    let conversation = |name: &'static str| {
+        sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT c.bot_id, c.id FROM conversations c JOIN bots b ON b.id = c.bot_id
+             WHERE b.name = ?1 AND c.kind = 'owner'",
+        )
+        .bind(name)
+        .fetch_one(&db.pool)
+    };
+    let (parent, parent_conversation) = conversation("Planner").await.unwrap();
+    let (target, target_conversation) = conversation("Helper").await.unwrap();
+    let (account, event, root, child) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let turn = "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                    owner_item_id, provider_id, status)
+                VALUES (?1, ?2, ?3, randomblob(16), randomblob(32), 100, randomblob(16), 'synthetic', ?4)";
+    for (id, bot, conversation, status) in [
+        (root, parent, parent_conversation, "waiting"),
+        (child, target, target_conversation, "queued"),
+    ] {
+        sqlx::query(turn)
+            .bind(id)
+            .bind(bot)
+            .bind(conversation)
+            .bind(status)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    for sql in [
+        "INSERT INTO connector_accounts (id, address, config, state, removed_at)
+         VALUES (?1, 'inbox@example.test', '{}', 'removed', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
+        "INSERT INTO connector_events (id, account_id, folder, uid_validity, uid, generation)
+         VALUES (?2, ?1, 'INBOX', 1, 1, 1)",
+        "INSERT INTO connector_deliveries (event_id, bot_id, account_id, binding_id, status, turn_id, settled_at)
+         VALUES (?2, ?3, ?1, randomblob(16), 'delivered', ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
+        "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id, task,
+             task_hash, conversation_id, child_turn_id)
+         VALUES (randomblob(16), ?4, 1, ?3, ?5, 'Summarize the email', randomblob(32), ?6, ?7)",
+    ] {
+        sqlx::query(sql)
+            .bind(account)
+            .bind(event)
+            .bind(parent)
+            .bind(root)
+            .bind(target)
+            .bind(target_conversation)
+            .bind(child)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let summary = BackupWorker::new(db.pool.clone(), Arc::new(key(1)), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target_db = Target::beside(&db);
+    restore_from(
+        &db,
+        &summary.path,
+        &key(1),
+        &target_db,
+        &dir.path().join("s"),
+    )
+    .await
+    .unwrap();
+    for (sql, expected) in [
+        (
+            format!(
+                "SELECT status, error_code FROM turns WHERE id = x'{}'",
+                root.simple()
+            ),
+            r#"["uncertain","connector_restored"]"#,
+        ),
+        (
+            format!("SELECT status FROM turns WHERE id = x'{}'", child.simple()),
+            r#"["interrupted"]"#,
+        ),
+        (
+            format!(
+                "SELECT status FROM delegations WHERE child_turn_id = x'{}'",
+                child.simple()
+            ),
+            r#"["cancelled"]"#,
+        ),
+    ] {
+        assert_eq!(rows(&target_db.url(), &sql).await, [expected], "{sql}");
     }
 }
 
