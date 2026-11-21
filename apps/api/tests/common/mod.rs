@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 pub mod guest;
 pub mod recorder;
+pub mod seed;
 pub mod steer;
 
 /// The `SECRET_KEY` every test app seals Vault entries with.

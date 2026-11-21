@@ -1,5 +1,6 @@
 use crate::common::{self, TestDb};
 use crate::socials::{bot, http, key, turn};
+use else_api::db::turns::ItemKind;
 
 use async_trait::async_trait;
 use else_api::socials::{
@@ -141,7 +142,7 @@ async fn stores(db: &TestDb) -> Vec<(Uuid, Option<Uuid>)> {
 
 async fn whatsapp_setup(db: &TestDb) -> (Uuid, store::Setup) {
     let bot = bot(db).await;
-    let turn = turn(db, bot, "user").await;
+    let turn = turn(db, bot, ItemKind::User).await;
     let setup = store::request_setup(&db.pool, turn, Provider::WhatsApp, "Watch the Family group")
         .await
         .unwrap();
@@ -278,7 +279,7 @@ async fn only_a_pending_pairing_setup_starts_a_pairing() {
     let phone = Phone::new("33612345678");
     let m = manager(&db, &phone);
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = turn(&db, bot, ItemKind::User).await;
     let telegram = store::request_setup(&db.pool, turn, Provider::Telegram, "Team support")
         .await
         .unwrap();
@@ -385,7 +386,7 @@ async fn synced_history_is_readable_but_never_wakes_a_trigger() {
     let m = manager(&db, &phone);
     let (_, c) = paired(&db, &m, &phone).await;
     let bot = bot(&db).await;
-    let owner = turn(&db, bot, "user").await;
+    let owner = turn(&db, bot, ItemKind::User).await;
     store::set_trigger(
         &db.pool,
         owner,
@@ -453,7 +454,7 @@ async fn creating_a_group_is_a_whatsapp_mutation_with_a_durable_receipt() {
     let m = manager(&db, &phone);
     let (_, c) = paired(&db, &m, &phone).await;
     let bot = bot(&db).await;
-    let owner = turn(&db, bot, "user").await;
+    let owner = turn(&db, bot, ItemKind::User).await;
     let create = Command::CreateGroup {
         name: "Sunday lunch".into(),
         participants: vec!["+49 151 12345678".into()],

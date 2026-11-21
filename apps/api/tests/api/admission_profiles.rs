@@ -8,17 +8,6 @@ use else_api::{
     db::bot_profiles,
     providers::{Registry, codex::Codex, synthetic::Synthetic},
 };
-use uuid::Uuid;
-
-async fn bot(db: &TestDb) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots(id,name) VALUES(?1,'Admission test')")
-        .bind(id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    id
-}
 
 fn synthetic() -> Arc<Synthetic> {
     Arc::new(Synthetic::new(Duration::from_millis(1)))
@@ -35,7 +24,7 @@ async fn default_provider(db: &TestDb, provider: &str) {
 #[tokio::test]
 async fn admission_snapshots_bot_override_before_installation_default() {
     let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
+    let bot = common::seed::bot(&db.pool, "Admission test").await.id;
     let registry = Registry::new(vec![synthetic(), Arc::new(ProfiledFake)]);
     default_provider(&db, "codex").await;
     sqlx::query("INSERT INTO provider_profiles(provider_id,model,reasoning_effort,service_tier,revision) VALUES('codex','gpt-6.1-sol','medium','default',7)")
@@ -75,7 +64,7 @@ async fn admission_snapshots_bot_override_before_installation_default() {
 #[tokio::test]
 async fn missing_or_unknown_choice_uses_registry_default_without_requiring_a_profile() {
     let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
+    let bot = common::seed::bot(&db.pool, "Admission test").await.id;
     let registry = Registry::new(vec![synthetic()]);
     for choice in [None, Some("removed-provider")] {
         if let Some(choice) = choice {
@@ -104,7 +93,7 @@ async fn missing_or_unknown_choice_uses_registry_default_without_requiring_a_pro
 #[tokio::test]
 async fn known_choice_waits_when_its_profile_or_provider_is_unavailable() {
     let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
+    let bot = common::seed::bot(&db.pool, "Admission test").await.id;
     default_provider(&db, "codex").await;
     let missing_profile = Registry::new(vec![synthetic(), Arc::new(ProfiledFake)]);
     let unavailable = Registry::new(vec![

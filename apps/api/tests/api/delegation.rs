@@ -5,6 +5,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use common::recorder::{GATE, GATE_AFTER_OPENING, GATE_EVERY_ATTEMPT, Harness, harness, tool};
 use common::{TestApp, TestDb};
+use else_api::db::turns::{ItemKind, TurnStatus};
 use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -1056,38 +1057,12 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let target = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, 'Target')")
-        .bind(target)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
-        .bind(Uuid::new_v4())
-        .bind(target)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let conversation: Uuid = sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1")
-        .bind(main)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    let root = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, status, attempt)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'synthetic', 'running', 1)",
-    )
-    .bind(root)
-    .bind(main)
-    .bind(conversation)
-    .bind(Uuid::new_v4())
-    .bind(vec![0u8; 32])
-    .bind(Uuid::new_v4())
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    let target = common::seed::bot(&db.pool, "Target").await.id;
+    let root = common::seed::turn(main)
+        .status(TurnStatus::Running)
+        .attempt(1)
+        .insert(&db.pool)
+        .await;
     let accepted =
         else_api::db::delegations::create(&db.pool, root, target, "seeded task", None, &[], None)
             .await
@@ -1124,14 +1099,9 @@ async fn the_delegating_turn_shows_its_handoff_as_the_child_progresses() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    for status in ["running", "completed"] {
+    for status in [TurnStatus::Running, TurnStatus::Completed] {
         let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-        sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
-            .bind(status)
-            .bind(child)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        common::seed::force_status(&mut *tx, child, status).await;
         else_api::db::events::turn_changed(&mut tx, target, child)
             .await
             .unwrap();
@@ -1169,11 +1139,7 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
     };
     assert_eq!(waiting_on().await, Value::Null, "a running turn is working");
 
-    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
-        .bind(root)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let shown = waiting_on().await;
     assert_eq!(
         shown["bots"],
@@ -1208,14 +1174,9 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
         .unwrap();
     assert_eq!(waiting_on().await, shown, "a stopped wait no longer counts");
 
-    for status in ["running", "completed"] {
-        sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
-            .bind(status)
-            .bind(child)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        if status == "running" {
+    for status in [TurnStatus::Running, TurnStatus::Completed] {
+        common::seed::force_status(&db.pool, child, status).await;
+        if status == TurnStatus::Running {
             assert_eq!(waiting_on().await["bots"][0]["tasks"], 1, "a running task");
         }
     }
@@ -1226,35 +1187,17 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
     );
 }
 
-/// A bot with an owner conversation, for seeded chains.
-async fn seed_bot(db: &TestDb, name: &str) -> Uuid {
-    let bot = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
-        .bind(bot)
-        .bind(name)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
-        .bind(Uuid::new_v4())
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    bot
-}
-
 /// Seed main -> Target, then Target's running task hands work to Third.
 /// Returns (main, root, child, first delegation, grandchild, second delegation, Third).
 async fn seed_chain(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
     let (main, root, child, first) = seed(db).await;
-    set_status(db, child, "running").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
     sqlx::query("UPDATE turns SET attempt = 1 WHERE id = ?1")
         .bind(child)
         .execute(&db.pool)
         .await
         .unwrap();
-    let third = seed_bot(db, "Third").await;
+    let third = common::seed::bot(&db.pool, "Third").await.id;
     let second =
         else_api::db::delegations::create(&db.pool, child, third, "sub task", None, &[], None)
             .await
@@ -1308,7 +1251,7 @@ async fn a_task_hands_part_of_its_work_on_and_reports_once_it_returns() {
     assert!(!leaf.can_delegate());
     assert_eq!(leaf.delegated_by.map(|(id, _)| id), Some(target));
 
-    let fourth = seed_bot(&db, "Fourth").await;
+    let fourth = common::seed::bot(&db.pool, "Fourth").await.id;
     assert_eq!(
         create(&db.pool, child, main, "back to the top", None, &[], None).await,
         Err(DelegateError::UpstreamTarget)
@@ -1317,14 +1260,15 @@ async fn a_task_hands_part_of_its_work_on_and_reports_once_it_returns() {
         council(&db.pool, child, &[fourth], "a council from a task", None).await,
         Err(DelegateError::NotAllowed)
     );
-    set_status(&db, grandchild, "running").await;
+    common::seed::force_status(&db.pool, grandchild, TurnStatus::Running).await;
     assert_eq!(
         create(&db.pool, grandchild, fourth, "a third hop", None, &[], None).await,
         Err(DelegateError::NotAllowed)
     );
 
-    set_status(&db, child, "waiting").await;
-    set_status(&db, root, "waiting").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Waiting).await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
+    // The task's turn ends; the delegation trigger settles its task.
     sqlx::query(
         "UPDATE turns SET status = 'completed',
              finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1353,6 +1297,7 @@ async fn a_task_hands_part_of_its_work_on_and_reports_once_it_returns() {
         .unwrap();
     assert_eq!(root_status, "waiting", "the top still waits on the task");
 
+    // The task's turn ends; the delegation trigger settles its task.
     sqlx::query(
         "UPDATE turns SET status = 'completed',
              finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1379,7 +1324,7 @@ async fn a_task_hands_part_of_its_work_on_and_reports_once_it_returns() {
 async fn cancelling_a_task_stops_the_work_it_handed_on() {
     let db = TestDb::migrated().await;
     let (_, root, child, first, grandchild, second, _) = seed_chain(&db).await;
-    set_status(&db, child, "waiting").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Waiting).await;
     else_api::db::delegations::cancel(&db.pool, root, first)
         .await
         .unwrap();
@@ -1535,7 +1480,8 @@ async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_ru
     .execute(&db.pool)
     .await
     .unwrap();
-    set_status(&db, grandchild, "running").await;
+    common::seed::force_status(&db.pool, grandchild, TurnStatus::Running).await;
+    // The task's turn ends; the delegation trigger settles its task.
     sqlx::query(
         "UPDATE turns SET status = 'completed',
              finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1668,6 +1614,7 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
         .unwrap();
     let pool = db.pool.clone();
     let mut child_end = tokio::spawn(async move {
+        // The task's turn ends; the delegation trigger settles its task.
         sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
             .bind(child)
             .execute(&pool)
@@ -1680,11 +1627,7 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
         &mut child_end,
     )
     .await;
-    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
-        .bind(root)
-        .execute(&mut *parent)
-        .await
-        .unwrap();
+    common::seed::force_status(&mut *parent, root, TurnStatus::Waiting).await;
     parent.commit().await.unwrap();
     common::until("the child to settle after the parent's decision", child_end)
         .await
@@ -1724,11 +1667,7 @@ async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
             .await
             .unwrap();
         }
-        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
-            .bind(root)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
         sqlx::query(
             "UPDATE delegations SET status = 'completed', delivered_attempt = 1,
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -1738,6 +1677,7 @@ async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
         .execute(&db.pool)
         .await
         .unwrap();
+        // The task's turn ends after its result was delivered; the trigger requeues an unheld root.
         sqlx::query(
             "UPDATE turns SET status = 'completed',
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1782,44 +1722,16 @@ async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
 /// chat runs at once, and the waiting request continues after it.
 #[tokio::test(flavor = "multi_thread")]
 async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_it() {
-    for kind in ["connector", "routine"] {
+    for kind in [ItemKind::Connector, ItemKind::Routine] {
         let db = TestDb::migrated().await;
         let (main, root, child, _) = seed(&db).await;
-        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
-            .bind(root)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-            .bind(child)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        let event = Uuid::new_v4();
-        let item = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-                 owner_item_id, provider_id)
-             SELECT ?1, bot_id, conversation_id, ?2, ?3, 2, ?4, 'synthetic' FROM turns WHERE id = ?5",
-        )
-        .bind(event)
-        .bind(Uuid::new_v4())
-        .bind(vec![0u8; 32])
-        .bind(item)
-        .bind(root)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-             SELECT ?1, conversation_id, 1000, id, ?2, 'New mail arrived.' FROM turns WHERE id = ?3",
-        )
-        .bind(item)
-        .bind(kind)
-        .bind(event)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
+        common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
+        let event = common::seed::turn(main)
+            .turn_no(2)
+            .message(kind, "New mail arrived.")
+            .insert(&db.pool)
+            .await;
 
         let claimed = else_api::db::turns::claim_next(&db.pool, &[], true)
             .await
@@ -1828,9 +1740,10 @@ async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_
         assert_eq!(
             claimed,
             Some((event, true)),
-            "{kind} runs while {main} waits"
+            "{kind:?} runs while {main} waits"
         );
 
+        // The task's turn ends; the delegation trigger settles its task.
         sqlx::query(
             "UPDATE turns SET status = 'completed',
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1856,6 +1769,7 @@ async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_
             "one active turn per bot"
         );
 
+        // The background turn ends without a provider.
         sqlx::query(
             "UPDATE turns SET status = 'completed',
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
@@ -1871,7 +1785,7 @@ async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_
         assert_eq!(
             next,
             Some(root),
-            "the continuation runs after the {kind} turn"
+            "the continuation runs after the {kind:?} turn"
         );
     }
 }
@@ -1883,7 +1797,7 @@ async fn background_work_leaves_a_waiting_requests_cards_to_the_owner() {
     use else_api::app::outgoing::{Content, Email};
     use else_api::db::{computer_handoffs, outgoing_drafts};
     let db = TestDb::migrated().await;
-    let (_, root, _, _) = seed(&db).await;
+    let (main, root, _, _) = seed(&db).await;
     let email = |body: &str| {
         Content::Email(Email {
             from: "me@example.com".into(),
@@ -1915,22 +1829,13 @@ async fn background_work_leaves_a_waiting_requests_cards_to_the_owner() {
     .execute(&db.pool)
     .await
     .unwrap();
-    set_status(&db, root, "waiting").await;
-    let event = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, status, attempt)
-         SELECT ?1, bot_id, conversation_id, ?2, ?3, 2, ?4, 'synthetic', 'running', 1
-         FROM turns WHERE id = ?5",
-    )
-    .bind(event)
-    .bind(Uuid::new_v4())
-    .bind(vec![0u8; 32])
-    .bind(Uuid::new_v4())
-    .bind(root)
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
+    let event = common::seed::turn(main)
+        .turn_no(2)
+        .status(TurnStatus::Running)
+        .attempt(1)
+        .insert(&db.pool)
+        .await;
 
     let revised =
         outgoing_drafts::propose(&db.pool, event, &email("Saturday?"), Some(draft.id)).await;
@@ -1964,18 +1869,7 @@ async fn background_work_leaves_a_waiting_requests_cards_to_the_owner() {
 async fn the_same_task_to_another_bot_is_a_different_child() {
     let db = TestDb::migrated().await;
     let (main, root, _, first) = seed(&db).await;
-    let other = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, 'Other')")
-        .bind(other)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
-        .bind(Uuid::new_v4())
-        .bind(other)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    let other = common::seed::bot(&db.pool, "Other").await.id;
     let _ = main;
     sqlx::query("UPDATE turns SET attempt = 2 WHERE id = ?1")
         .bind(root)
@@ -1998,6 +1892,7 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
+    // The task's turn ends; the delegation trigger settles its task.
     sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(child)
         .execute(&db.pool)
@@ -2632,11 +2527,7 @@ async fn parent_replies(db: &TestDb, main: Uuid) -> (Vec<(String, String, Uuid)>
 async fn a_failed_child_shows_its_error_once_however_often_it_is_settled() {
     let db = TestDb::migrated().await;
     let (main, root, child, _) = seed(&db).await;
-    sqlx::query("UPDATE turns SET status = 'preparing' WHERE id = ?1")
-        .bind(child)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::force_status(&db.pool, child, TurnStatus::Preparing).await;
     else_api::db::turns::fail_unstarted(&db.pool, child, "no input")
         .await
         .unwrap();
@@ -2694,11 +2585,8 @@ async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_pro
     else {
         panic!("the deadline fails the turn");
     };
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(child)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
+    // Fail the task's turn as its provider deadline does.
     sqlx::query(
         "UPDATE turns SET status = 'failed', error_code = ?2, error_message = ?3 WHERE id = ?1",
     )
@@ -2778,11 +2666,7 @@ async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty(
 
     let db = TestDb::migrated().await;
     let (main, root, child, _) = seed(&db).await;
-    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
-        .bind(child)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::force_status(&db.pool, child, TurnStatus::Completed).await;
     let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
         .bind(child)
         .fetch_one(&db.pool)
@@ -2874,20 +2758,11 @@ async fn follow_up_with(
     accepted.turn.id
 }
 
-async fn set_status(db: &TestDb, turn: Uuid, status: &str) {
-    sqlx::query("UPDATE turns SET status = ?2 WHERE id = ?1")
-        .bind(turn)
-        .bind(status)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-}
-
 #[tokio::test]
 async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
     let db = TestDb::migrated().await;
     let (_main, _root, child, _outbound) = seed(&db).await;
-    set_status(&db, child, "waiting").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Waiting).await;
     sqlx::query("UPDATE turns SET provider_id = 'synthetic' WHERE id = ?1")
         .bind(child)
         .execute(&db.pool)
@@ -2942,7 +2817,7 @@ async fn joining_a_reply_leaves_another_replys_handoff_pending() {
     let db = TestDb::migrated().await;
     let (main, root, _child, _outbound) = seed(&db).await;
     owner_reply(&db, root).await;
-    set_status(&db, root, "waiting").await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let handoff = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason)
@@ -2973,8 +2848,8 @@ async fn a_follow_up_joins_the_reply_that_receives_its_tasks_outcome() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
     owner_reply(&db, root).await;
-    set_status(&db, root, "waiting").await;
-    set_status(&db, child, "completed").await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Completed).await;
     let follow = follow_up(&db, main).await;
     assert_eq!(steered_into(&db, follow).await, Some(root));
     let (carrier, delivered, root_status): (Uuid, Option<i64>, String) = sqlx::query_as(
@@ -3008,34 +2883,19 @@ async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
     let db = TestDb::migrated().await;
     let (main, root, child, outbound) = seed(&db).await;
     owner_reply(&db, root).await;
-    set_status(&db, root, "waiting").await;
-    set_status(&db, child, "waiting").await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Waiting).await;
     let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
         .bind(child)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let target_chat: Uuid =
-        sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1 AND kind = 'owner'")
-            .bind(target)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    let asker = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, status, attempt)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'synthetic', 'running', 1)",
-    )
-    .bind(asker)
-    .bind(target)
-    .bind(target_chat)
-    .bind(Uuid::new_v4())
-    .bind(vec![0u8; 32])
-    .bind(Uuid::new_v4())
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    let asker = common::seed::turn(target)
+        .turn_no(1)
+        .status(TurnStatus::Running)
+        .attempt(1)
+        .insert(&db.pool)
+        .await;
     let inbound = else_api::db::delegations::create(
         &db.pool,
         asker,
@@ -3053,7 +2913,7 @@ async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    set_status(&db, asking, "waiting").await;
+    common::seed::force_status(&db.pool, asking, TurnStatus::Waiting).await;
     let question = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
@@ -3206,8 +3066,8 @@ async fn an_owner_message_does_not_join_a_routine_run() {
         .execute(&db.pool)
         .await
         .unwrap();
-    set_status(&db, child, "running").await;
-    set_status(&db, root, "waiting").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let follow = follow_up(&db, main).await;
     assert_eq!(
         steered_into(&db, follow).await,
@@ -3437,7 +3297,7 @@ async fn a_message_sent_during_a_pause_joins_only_once_it_ends() {
     );
 
     // During the pause the running turn parks on its task and asks the owner.
-    set_status(&db, root, "waiting").await;
+    common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let question = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
@@ -3449,7 +3309,7 @@ async fn a_message_sent_during_a_pause_joins_only_once_it_ends() {
     .execute(&db.pool)
     .await
     .unwrap();
-    set_status(&db, child, "completed").await;
+    common::seed::force_status(&db.pool, child, TurnStatus::Completed).await;
     sqlx::query("UPDATE delegations SET status = 'completed' WHERE id = ?1")
         .bind(delegation)
         .execute(&db.pool)
@@ -4008,11 +3868,8 @@ async fn settle_with_messages(db: &TestDb, child: Uuid, messages: &[&str], statu
         .await
         .unwrap();
     }
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(child)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
+    // End the task's turn as its provider does; the trigger records the result.
     sqlx::query(
         "UPDATE turns SET status = ?2,
              error_code = CASE WHEN ?2 = 'failed' THEN 'provider_error' END,

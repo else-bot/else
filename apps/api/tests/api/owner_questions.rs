@@ -774,6 +774,7 @@ async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
         .unwrap_or_else(|| panic!("the card records when the call ran: {card}"));
     assert_eq!(journaled(app, &main, question).await["used"], card["used"]);
 
+    // End the turn as a provider policy failure does.
     sqlx::query(
         "UPDATE turns SET status = 'failed', error_code = 'provider_policy',
              error_message = 'Claude reported native agent activity (task_started)'

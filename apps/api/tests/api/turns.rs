@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use common::recorder::{self, GATE};
 use common::{TestApp, TestDb};
+use else_api::db::turns::{ItemKind, TurnStatus};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -679,13 +680,9 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .send(&bot, Uuid::new_v4(), "after restart", Some("synthetic"))
         .await;
     let waiting_id = waiting.body["turn"]["id"].as_str().unwrap().to_owned();
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(hang_id.parse::<Uuid>().unwrap())
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
     let db = common::until("the old app to stop", app.stop()).await;
     let pool = &db.pool;
+    // Put back the running row a crash leaves, which a clean stop interrupts.
     sqlx::query(
         "UPDATE turns SET status = 'running', finished_at = NULL, error_code = NULL WHERE id = ?1",
     )
@@ -974,36 +971,14 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let mut queued = Vec::new();
-    for (bot, name) in [(Uuid::new_v4(), "First"), (Uuid::new_v4(), "Second")] {
-        sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
-            .bind(bot)
-            .bind(name)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        let conversation = Uuid::new_v4();
-        sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
-            .bind(conversation)
-            .bind(bot)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+    for name in ["First", "Second"] {
+        let bot = common::seed::bot(&db.pool, name).await;
         for turn_no in [1, 2] {
-            let turn = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-                                    owner_item_id, provider_id, status, created_at)
-                 VALUES (?1, ?2, ?3, ?1, zeroblob(32), ?4, ?5, 'synthetic', 'queued', ?6)",
-            )
-            .bind(turn)
-            .bind(bot)
-            .bind(conversation)
-            .bind(turn_no)
-            .bind(Uuid::new_v4())
-            .bind(format!("2026-01-01T00:00:0{}.000+00:00", queued.len()))
-            .execute(&db.pool)
-            .await
-            .unwrap();
+            let turn = common::seed::turn(bot.id)
+                .turn_no(turn_no)
+                .created_at(format!("2026-01-01T00:00:0{}.000+00:00", queued.len()))
+                .insert(&db.pool)
+                .await;
             queued.push(turn);
         }
     }
@@ -1024,11 +999,8 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
         None,
         "the finishing turn and the later turn of its bot both wait"
     );
-    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
-        .bind(queued[2])
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    // The claimed turn ends without running a provider.
+    common::seed::force_status(&db.pool, queued[2], TurnStatus::Completed).await;
     assert_eq!(
         else_api::db::turns::claim_next(&db.pool, &[], true)
             .await
@@ -1044,124 +1016,71 @@ async fn an_owner_message_is_claimed_past_its_bots_queued_background_task() {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let pool = &db.pool;
-    let bot = |name: &'static str| async move {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
-            .bind(id)
-            .bind(name)
-            .execute(pool)
-            .await
-            .unwrap();
-        id
-    };
-    let conversation = |bot: Uuid, kind: &'static str| async move {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES (?1, ?2, ?3)")
-            .bind(id)
-            .bind(bot)
-            .bind(kind)
-            .execute(pool)
-            .await
-            .unwrap();
-        id
-    };
     let turn = |bot: Uuid,
                 conversation: Uuid,
                 turn_no: i64,
-                kind: &'static str,
-                status: &'static str,
-                at: &'static str| async move {
-        let (id, item) = (Uuid::new_v4(), Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-                                owner_item_id, provider_id, status, created_at)
-             VALUES (?1, ?2, ?3, ?1, zeroblob(32), ?4, ?5, 'synthetic', ?6, ?7)",
-        )
-        .bind(id)
-        .bind(bot)
-        .bind(conversation)
-        .bind(turn_no)
-        .bind(item)
-        .bind(status)
-        .bind(at)
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO items (id, conversation_id, seq, turn_id, kind, text) VALUES (?1, ?2, ?3, ?4, ?5, 'x')")
-            .bind(item)
-            .bind(conversation)
-            .bind(turn_no)
-            .bind(id)
-            .bind(kind)
-            .execute(pool)
-            .await
-            .unwrap();
-        id
+                kind: ItemKind,
+                status: TurnStatus,
+                at: &'static str| {
+        common::seed::turn(bot)
+            .conversation(conversation)
+            .turn_no(turn_no)
+            .message(kind, "x")
+            .status(status)
+            .created_at(at)
+            .insert(pool)
     };
 
-    let scout = bot("Scout").await;
-    let scout_owner = conversation(scout, "owner").await;
+    let scout = common::seed::bot(pool, "Scout").await;
     let routine = turn(
-        scout,
-        scout_owner,
+        scout.id,
+        scout.owner,
         1,
-        "routine",
-        "waiting",
+        ItemKind::Routine,
+        TurnStatus::Waiting,
         "2026-01-01T00:00:00.000+00:00",
     )
     .await;
-    let bento = bot("Bento").await;
-    let task = conversation(bento, "task").await;
+    let bento = common::seed::bot(pool, "Bento").await;
+    let task = common::seed::task_conversation(pool, bento.id).await;
     let delegated = turn(
-        bento,
+        bento.id,
         task,
         1,
-        "user",
-        "queued",
+        ItemKind::User,
+        TurnStatus::Queued,
         "2026-01-01T00:00:01.000+00:00",
     )
     .await;
-    sqlx::query(
-        "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id,
-                                  task, task_hash, conversation_id, child_turn_id)
-         VALUES (?1, ?2, 1, ?3, ?4, 'sweep', zeroblob(32), ?5, ?6)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(routine)
-    .bind(scout)
-    .bind(bento)
-    .bind(task)
-    .bind(delegated)
-    .execute(pool)
-    .await
-    .unwrap();
-    let bento_owner = conversation(bento, "owner").await;
+    common::seed::delegation(routine, scout.id, bento.id, task, delegated)
+        .task("sweep")
+        .insert(pool)
+        .await;
     let message = turn(
-        bento,
-        bento_owner,
+        bento.id,
+        bento.owner,
         2,
-        "user",
-        "queued",
+        ItemKind::User,
+        TurnStatus::Queued,
         "2026-01-01T00:00:02.000+00:00",
     )
     .await;
-    let auto = bot("Auto").await;
-    let auto_owner = conversation(auto, "owner").await;
+    let auto = common::seed::bot(pool, "Auto").await;
     turn(
-        auto,
-        auto_owner,
+        auto.id,
+        auto.owner,
         1,
-        "routine",
-        "queued",
+        ItemKind::Routine,
+        TurnStatus::Queued,
         "2026-01-01T00:00:03.000+00:00",
     )
     .await;
     turn(
-        auto,
-        auto_owner,
+        auto.id,
+        auto.owner,
         2,
-        "user",
-        "queued",
+        ItemKind::User,
+        TurnStatus::Queued,
         "2026-01-01T00:00:04.000+00:00",
     )
     .await;
@@ -1186,7 +1105,7 @@ async fn an_owner_message_is_claimed_past_its_bots_queued_background_task() {
 
 #[tokio::test]
 async fn turn_status_matches_the_stored_vocabulary_and_sql_lists() {
-    use else_api::db::turns::{ACTIVE_STATUSES, ENDED_STATUSES, TurnStatus, UNFINISHED_STATUSES};
+    use else_api::db::turns::{ACTIVE_STATUSES, ENDED_STATUSES, UNFINISHED_STATUSES};
     let db = TestDb::migrated().await;
     let table: String =
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'")

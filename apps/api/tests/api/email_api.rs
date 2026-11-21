@@ -1,4 +1,5 @@
 use crate::common;
+use else_api::db::turns::TurnStatus;
 
 use axum::http::StatusCode;
 use common::{
@@ -1624,11 +1625,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         .unwrap();
         let action_id = Uuid::new_v4();
         if in_flight {
-            sqlx::query("UPDATE turns SET status='running' WHERE id=?1")
-                .bind(mail_turn)
-                .execute(&app.db.pool)
-                .await
-                .unwrap();
+            common::seed::force_status(&app.db.pool, mail_turn, TurnStatus::Running).await;
             store::begin_action(
                 &app.db.pool,
                 account.id,

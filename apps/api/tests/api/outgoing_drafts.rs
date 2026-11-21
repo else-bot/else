@@ -1,4 +1,5 @@
 use crate::common;
+use else_api::db::turns::TurnStatus;
 
 use std::sync::Arc;
 
@@ -3294,13 +3295,8 @@ async fn a_send_its_stopped_request_failed_is_never_admitted_after_the_request_r
     else {
         panic!("the first call claims the email");
     };
-    for status in ["cancelling", "running"] {
-        sqlx::query("UPDATE turns SET status = ?2 WHERE id = ?1")
-            .bind(turn)
-            .bind(status)
-            .execute(&app.db.pool)
-            .await
-            .unwrap();
+    for status in [TurnStatus::Cancelling, TurnStatus::Running] {
+        common::seed::force_status(&app.db.pool, turn, status).await;
     }
     let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
         .bind(id)

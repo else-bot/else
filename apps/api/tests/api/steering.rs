@@ -1,5 +1,6 @@
 use crate::common;
 use else_api::app::providers::FailureCode;
+use else_api::db::turns::TurnStatus;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -397,6 +398,7 @@ async fn setup_running() -> (TestDb, Uuid, Uuid) {
         .await
         .unwrap();
     let (first, _) = accept(&db.pool, bot, "Patch the sender script.").await;
+    // Start the accepted turn's first attempt without a scheduler.
     sqlx::query("UPDATE turns SET status = 'running', attempt = 1 WHERE id = ?1")
         .bind(first)
         .execute(&db.pool)
@@ -483,11 +485,7 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
             .unwrap()
     );
 
-    sqlx::query("UPDATE turns SET status = 'queued' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Queued).await;
     let mut conn = pool.acquire().await.unwrap();
     else_api::db::steers::settle(&mut conn).await.unwrap();
     drop(conn);
@@ -523,11 +521,7 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
         "only the reply continues"
     );
 
-    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Completed).await;
     let mut conn = pool.acquire().await.unwrap();
     else_api::db::steers::settle(&mut conn).await.unwrap();
     drop(conn);
@@ -543,11 +537,7 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
 async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
     let (db, bot, first) = setup_running().await;
     let pool = &db.pool;
-    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Waiting).await;
     let question = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
@@ -616,11 +606,7 @@ async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
     assert_eq!(steer_status().await, "delivered");
     let input = else_api::db::turns::input(pool, first).await.unwrap();
     assert!(input.steered[0].seen, "a later attempt has seen it");
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Running).await;
     assert!(
         !else_api::db::steers::refuse(pool, later, first)
             .await
@@ -655,11 +641,7 @@ async fn a_refused_message_waits_for_the_reply_to_continue() {
             .unwrap()
     );
 
-    sqlx::query("UPDATE turns SET status = 'queued' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Queued).await;
     let mut conn = pool.acquire().await.unwrap();
     else_api::db::steers::settle(&mut conn).await.unwrap();
     drop(conn);
@@ -684,11 +666,7 @@ async fn a_message_the_reply_took_is_history_of_that_reply() {
             .await
             .unwrap()
     );
-    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
-        .bind(first)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::seed::force_status(pool, first, TurnStatus::Completed).await;
     else_api::db::steers::settle(&mut pool.acquire().await.unwrap())
         .await
         .unwrap();

@@ -3,7 +3,7 @@ use crate::common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::TestDb;
+use common::{TestDb, seed};
 use else_api::connector_core::actions::{Outcome, Start};
 use else_api::connectors::delivery;
 use else_api::connectors::store::{self, StoreError};
@@ -12,6 +12,7 @@ use else_api::connectors::types::{
     MessageRef, Permissions, Provider, Scan,
 };
 use else_api::credentials::SecretKey;
+use else_api::db::turns::TurnStatus;
 use else_api::providers::Registry;
 use else_api::providers::synthetic::Synthetic;
 use serde_json::json;
@@ -42,7 +43,7 @@ async fn deleting_a_bot_revokes_mail_and_releases_its_grant_slots() {
     )
     .await
     .unwrap();
-    let bot = bot(&db, "Temporary").await;
+    let bot = seed::bot(&db.pool, "Temporary").await.id;
     store::set_permissions(&db.pool, account.id, bot, &all())
         .await
         .unwrap();
@@ -94,8 +95,8 @@ async fn unavailable_providers_do_not_starve_other_mail_when_admission_is_limite
     )
     .await
     .unwrap();
-    let blocked = bot(&db, "Blocked").await;
-    let ready = bot(&db, "Ready").await;
+    let blocked = seed::bot(&db.pool, "Blocked").await.id;
+    let ready = seed::bot(&db.pool, "Ready").await.id;
     sqlx::query("INSERT INTO bot_profiles (bot_id,provider_id,model,reasoning_effort,service_tier) VALUES (?1,'codex','test','medium','default')").bind(blocked).execute(&db.pool).await.unwrap();
     for bot in [blocked, ready] {
         store::set_permissions(&db.pool, account.id, bot, &all())
@@ -202,65 +203,6 @@ fn scan(uid_validity: u32, last_uid: u32, uids: &[u32]) -> Scan {
             .collect(),
         more: false,
     }
-}
-
-async fn bot(db: &TestDb, name: &str) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
-        .bind(id)
-        .bind(name)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
-        .bind(Uuid::new_v4())
-        .bind(id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    id
-}
-
-async fn turn(db: &TestDb, bot: Uuid, status: &str) -> Uuid {
-    let id = Uuid::new_v4();
-    let (conversation, last): (Uuid, i64) = sqlx::query_as(
-        "SELECT id, last_turn_no FROM conversations WHERE bot_id = ?1 AND kind = 'owner'",
-    )
-    .bind(bot)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, status)
-         VALUES (?1, ?2, ?3, ?4, zeroblob(32), ?5, ?6, 'synthetic', ?7)",
-    )
-    .bind(id)
-    .bind(bot)
-    .bind(conversation)
-    .bind(Uuid::new_v4())
-    .bind(last + 1)
-    .bind(Uuid::new_v4())
-    .bind(status)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_turn_no = ?2 WHERE id = ?1")
-        .bind(conversation)
-        .bind(last + 1)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    id
-}
-
-async fn set_turn(db: &TestDb, turn: Uuid, status: &str) {
-    sqlx::query("UPDATE turns SET status = ?2 WHERE id = ?1")
-        .bind(turn)
-        .bind(status)
-        .execute(&db.pool)
-        .await
-        .unwrap();
 }
 
 async fn deliveries(db: &TestDb, bot: Uuid) -> Vec<(i64, String)> {
@@ -484,7 +426,7 @@ async fn accounts_and_grants_are_bounded() {
     let accounts = store::accounts(&db.pool).await.unwrap();
     let mut granted = 0;
     'grant: for i in 0..5 {
-        let bot = bot(&db, &format!("Bot {i}")).await;
+        let bot = seed::bot(&db.pool, &format!("Bot {i}")).await.id;
         for account in &accounts {
             if granted == 128 {
                 assert!(matches!(
@@ -513,7 +455,10 @@ async fn accounts_and_grants_are_bounded() {
 async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mail() {
     let db = TestDb::migrated().await;
     let (account, generation) = watched(&db, "inbox@example.test").await;
-    let (waker, reader) = (bot(&db, "Waker").await, bot(&db, "Reader").await);
+    let (waker, reader) = (
+        seed::bot(&db.pool, "Waker").await.id,
+        seed::bot(&db.pool, "Reader").await.id,
+    );
     assert!(matches!(
         store::set_permissions(
             &db.pool,
@@ -577,7 +522,10 @@ async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mai
         "read without wake is never woken"
     );
 
-    let running = turn(&db, reader, "running").await;
+    let running = seed::turn(reader)
+        .status(TurnStatus::Running)
+        .insert(&db.pool)
+        .await;
     let move_it = MailCommand::Move {
         message: message(7, 11),
         folder: "Archive".into(),
@@ -601,8 +549,11 @@ async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mai
     store::authorize(&db.pool, account, generation, reader, running, &read)
         .await
         .unwrap();
-    let stranger = bot(&db, "Stranger").await;
-    let stranger_turn = turn(&db, stranger, "running").await;
+    let stranger = seed::bot(&db.pool, "Stranger").await.id;
+    let stranger_turn = seed::turn(stranger)
+        .status(TurnStatus::Running)
+        .insert(&db.pool)
+        .await;
     store::authorize(
         &db.pool,
         account,
@@ -710,7 +661,7 @@ async fn scans_are_fenced_bounded_and_quiet_at_first() {
     )
     .await
     .unwrap();
-    let bot = bot(&db, "Waker").await;
+    let bot = seed::bot(&db.pool, "Waker").await.id;
     store::set_permissions(&db.pool, account.id, bot, &all())
         .await
         .unwrap();
@@ -853,7 +804,7 @@ async fn scans_are_fenced_bounded_and_quiet_at_first() {
 async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
     let db = TestDb::migrated().await;
     let (account, generation) = watched(&db, "queue@example.test").await;
-    let bot = bot(&db, "Waker").await;
+    let bot = seed::bot(&db.pool, "Waker").await.id;
     store::set_permissions(&db.pool, account, bot, &all())
         .await
         .unwrap();
@@ -921,11 +872,16 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
         0,
         "and does not repeat"
     );
-    set_turn(&db, turns[0].0, "completed").await;
+    seed::force_status(&db.pool, turns[0].0, TurnStatus::Completed).await;
 
     let mut queued = Vec::new();
     for _ in 0..4 {
-        queued.push(turn(&db, bot, "queued").await);
+        queued.push(
+            seed::turn(bot)
+                .status(TurnStatus::Queued)
+                .insert(&db.pool)
+                .await,
+        );
     }
     assert_eq!(
         delivery::admit_pending(&db.pool, &registry(), 8)
@@ -935,7 +891,7 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
         "queue full"
     );
     for id in queued {
-        set_turn(&db, id, "completed").await;
+        seed::force_status(&db.pool, id, TurnStatus::Completed).await;
     }
     store::set_active(&db.pool, account, false).await.unwrap();
     assert_eq!(
@@ -970,7 +926,7 @@ async fn admission_batches_mail_and_leaves_it_pending_under_backpressure() {
 async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     let db = TestDb::migrated().await;
     let (account, generation) = watched(&db, "act@example.test").await;
-    let bot = bot(&db, "Actor").await;
+    let bot = seed::bot(&db.pool, "Actor").await.id;
     store::set_permissions(
         &db.pool,
         account,
@@ -982,7 +938,10 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     )
     .await
     .unwrap();
-    let running = turn(&db, bot, "running").await;
+    let running = seed::turn(bot)
+        .status(TurnStatus::Running)
+        .insert(&db.pool)
+        .await;
     let archive = MailCommand::Archive {
         message: message(7, 3),
     };
@@ -1111,7 +1070,7 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
         .execute(&db.pool)
         .await
         .unwrap();
-    set_turn(&db, running, "completed").await;
+    seed::force_status(&db.pool, running, TurnStatus::Completed).await;
     assert!(matches!(
         begin(Uuid::new_v4(), archive.clone()).await,
         Err(StoreError::NotRunning)
@@ -1122,7 +1081,7 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
 async fn a_restored_database_stays_passive_until_resumed() {
     let db = TestDb::migrated().await;
     let (account, generation) = watched(&db, "restore@example.test").await;
-    let bot = bot(&db, "Waker").await;
+    let bot = seed::bot(&db.pool, "Waker").await.id;
     store::set_permissions(&db.pool, account, bot, &all())
         .await
         .unwrap();
@@ -1141,7 +1100,10 @@ async fn a_restored_database_stays_passive_until_resumed() {
         .await
         .unwrap()
     );
-    let running = turn(&db, bot, "running").await;
+    let running = seed::turn(bot)
+        .status(TurnStatus::Running)
+        .insert(&db.pool)
+        .await;
     let action = Uuid::new_v4();
     let flag = MailCommand::SetFlagged {
         message: message(7, 11),
