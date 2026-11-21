@@ -1475,6 +1475,133 @@ mod tests {
         }
     }
 
+    /// The columns a card stores, so pending cards and their retries keep
+    /// matching across upgrades.
+    fn stored(spec: &Spec) -> Value {
+        json!({
+            "kind": spec.kind.as_str(),
+            "title": spec.title,
+            "context": spec.context,
+            "choices": spec.choices.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            "multiple": spec.multiple,
+            "action": spec.approval.as_ref().map(|a| &a.action),
+            "hash": spec.approval.as_ref().map(|a| hex::encode(a.hash)),
+        })
+    }
+
+    #[test]
+    fn every_card_keeps_its_stored_row() {
+        let routine = Uuid::from_u128(7);
+        let target = |value: Value| serde_json::from_value::<PermissionTarget>(value).unwrap();
+        let specs = [
+            Spec::mcp_connection(
+                serde_json::from_value(json!({"id": "github", "provider": "github", "scopes": ["repo"]}))
+                    .unwrap(),
+                "Connect GitHub".into(),
+                "Reads repos".into(),
+            ),
+            Spec::email_connection(
+                serde_json::from_value(json!({"provider": "gmail", "address": "a@b.c", "replaces": 3}))
+                    .unwrap(),
+                "Connect a@b.c".into(),
+                "Reads mail".into(),
+            ),
+            Spec::bot_deletion(
+                serde_json::from_value(json!({"bot_id": Uuid::from_u128(1), "name": "Scout",
+                    "avatar": {"shape": "star", "color": "red"}, "model": null, "category": null}))
+                .unwrap(),
+                "Stops 2 routines".into(),
+            ),
+            Spec::email_removal(
+                serde_json::from_value(json!({"account_id": Uuid::from_u128(2), "address": "a@b.c"}))
+                    .unwrap(),
+                "Stops triggers".into(),
+            ),
+            Spec::mail_attachments(
+                serde_json::from_value(json!({"account_id": Uuid::from_u128(2), "address": "a@b.c",
+                    "message": {"folder": "INBOX", "uid_validity": 9, "uid": 4},
+                    "subject": "Invoice", "from": ["x@y.z"],
+                    "files": [{"part": 3, "name": "b.pdf", "media_type": "application/pdf", "size": 10},
+                              {"part": 1, "name": "a.txt", "media_type": "text/plain", "size": 5}]}))
+                .unwrap(),
+            ),
+            Spec::standing_permission(PermissionTarget::Bot, "always allow"),
+            Spec::standing_permission(
+                target(json!({"scope": "routine", "routine_id": routine, "prompt_revision": 2})),
+                "allow it",
+            ),
+            Spec::standing_permission(
+                target(json!({"scope": "routine", "routine_id": routine, "prompt_revision": 2,
+                    "kind": "external"})),
+                "allow it",
+            ),
+            Spec::standing_permission(
+                target(json!({"scope": "mcp_tool", "mcp_id": "github", "tool": "create_issue",
+                    "kind": "external"})),
+                "allow it",
+            ),
+            Spec::standing_permission(
+                target(json!({"scope": "computer_tool", "tool": "computer_run", "kind": "external"})),
+                "allow it",
+            ),
+            Spec::standing_permission(
+                target(json!({"scope": "task", "task": "Deploy", "target": "web", "kind": "destructive",
+                    "covers": "host"})),
+                "allow it",
+            ),
+            Spec::standing_permission(
+                target(json!({"scope": "task", "task": "Deploy", "target": "web", "kind": "external",
+                    "covers": "both"})),
+                "allow it",
+            ),
+            Spec::permission(&json!({"kind": "external", "action": "curl -X POST x"})).unwrap(),
+            Spec::permission(&json!({"kind": "destructive", "action": "rm a", "reason": "Clean up",
+                "task_scope": {"task": "Clean", "target": "/tmp"}}))
+            .unwrap(),
+            Spec::tool_approval(
+                Kind::Destructive,
+                "computer_run",
+                &json!({"command": "rm a", "effect": "destructive"}),
+                None,
+                "Run rm".into(),
+                "rm a".into(),
+            ),
+            Spec::tool_approval(
+                Kind::External,
+                "computer_run",
+                &json!({"command": "./send", "effect": "external"}),
+                TaskScope::new("Send", "list"),
+                "Run send".into(),
+                "./send".into(),
+            ),
+            Spec::choice(&json!({"question": "Which?", "choices": ["x", "y"], "multiple": true}))
+                .unwrap(),
+        ];
+        let expected: Vec<Value> = STORED_ROWS
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(specs.iter().map(stored).collect::<Vec<_>>(), expected);
+    }
+
+    const STORED_ROWS: &str = r#"{"kind":"external","title":"Connect GitHub","context":"Reads repos","choices":["approve","deny"],"multiple":false,"action":{"mcp_connection":{"id":"github","provider":"github","scopes":["repo"]}},"hash":"bc0db640bb7ab0532d06ec44671a7e7bf5d6c167b2910474b0df68b13b6a83d0"}
+{"kind":"external","title":"Connect a@b.c","context":"Reads mail","choices":["approve","deny"],"multiple":false,"action":{"email_connection":{"provider":"gmail","address":"a@b.c","replaces":3}},"hash":"c43c6b03fd0806f4e80e376a699eb73c147465a0fb9a9972d81f70b4e8e0189e"}
+{"kind":"destructive","title":"Delete Scout","context":"Stops 2 routines","choices":["approve","deny"],"multiple":false,"action":{"bot_deletion":{"bot_id":"00000000-0000-0000-0000-000000000001","name":"Scout","avatar":{"shape":"star","color":"red"},"model":null,"category":null}},"hash":"9d48149230629ac9fb3f72143cef81d9e508810248fc93d3223e68ecc9458499"}
+{"kind":"destructive","title":"Remove a@b.c","context":"Stops triggers","choices":["approve","deny"],"multiple":false,"action":{"email_removal":{"account_id":"00000000-0000-0000-0000-000000000002","address":"a@b.c"}},"hash":"6eed2abb4a6680e14ae6143f6920f2e29a2dbac50aa6cadabbca7c8cc9c9985f"}
+{"kind":"external","title":"Open 2 attachments","context":"The bot reads and searches the text of these files. Nothing else in a@b.c changes.\nEmail: Invoice\nFrom: x@y.z\n- b.pdf (application/pdf, 10 bytes)\n- a.txt (text/plain, 5 bytes)","choices":["approve","deny"],"multiple":false,"action":{"mail_attachments":{"account_id":"00000000-0000-0000-0000-000000000002","address":"a@b.c","message":{"folder":"INBOX","uid_validity":9,"uid":4},"subject":"Invoice","from":["x@y.z"],"files":[{"part":3,"name":"b.pdf","media_type":"application/pdf","size":10},{"part":1,"name":"a.txt","media_type":"text/plain","size":5}]}},"hash":"294ce1fe5c57995fef186f31e8906cb7c35546623b677a22cf38de36ea62b56c"}
+{"kind":"destructive","title":"Always allow destructive actions for this bot","context":"always allow","choices":["approve","deny","approve_forever"],"multiple":false,"action":{"permission":{"scope":"bot"}},"hash":"96f00f24602555c2960d9ce7bfd6631284016f7e71eafb4b1152b52e323c310b"}
+{"kind":"destructive","title":"Allow destructive actions for this routine","context":"allow it","choices":["approve","deny","approve_routine"],"multiple":false,"action":{"permission":{"scope":"routine","routine_id":"00000000-0000-0000-0000-000000000007","prompt_revision":2,"kind":"destructive"}},"hash":"96742b5daf10cee886d1725c8bc3ca63522b5126bd4fe9bc8c20774d19867323"}
+{"kind":"external","title":"Allow external actions for this routine","context":"allow it","choices":["approve","deny","approve_routine"],"multiple":false,"action":{"permission":{"scope":"routine","routine_id":"00000000-0000-0000-0000-000000000007","prompt_revision":2,"kind":"external"}},"hash":"6e21e61eda03132e64acd5dc8dc0daa7d3b105fe72dfef7b0b62890f7a5dc42d"}
+{"kind":"external","title":"Always allow external actions with github/create_issue","context":"allow it","choices":["approve","deny","approve_tool"],"multiple":false,"action":{"permission":{"scope":"mcp_tool","mcp_id":"github","tool":"create_issue","kind":"external"}},"hash":"0090c9125814f2719824db382c2b71e85947e5b0cd0d7a685c250fd5db661edd"}
+{"kind":"external","title":"Always allow external actions with computer_run","context":"allow it","choices":["approve","deny","approve_tool"],"multiple":false,"action":{"permission":{"scope":"computer_tool","tool":"computer_run","kind":"external"}},"hash":"f7853895683b008dcf71bec1ae911979741742893374ef4db2d03d1c9f8268db"}
+{"kind":"destructive","title":"Always allow destructive host actions: Deploy on web","context":"allow it","choices":["approve","deny","approve_task"],"multiple":false,"action":{"permission":{"scope":"task","task":"Deploy","target":"web","kind":"destructive","covers":"host"}},"hash":"768100d3a2831aa311993036c16ef40714cb3a0d0ba711aecdbb410df937c7b2"}
+{"kind":"external","title":"Always allow external actions: Deploy on web","context":"allow it","choices":["approve","deny","approve_task"],"multiple":false,"action":{"permission":{"scope":"task","task":"Deploy","target":"web","kind":"external","covers":"both"}},"hash":"d5630360d03f60b2c6af701e98a67c4b1f2f135efb3433b57f663db31077623f"}
+{"kind":"external","title":"Allow this action that reaches outside your machine?","context":"curl -X POST x","choices":["approve","deny"],"multiple":false,"action":{"host":"curl -X POST x"},"hash":"98d17570b68e6c87a6a76a8e2c0200d10cc487c00e3ef55dad70d69e0def3c6e"}
+{"kind":"destructive","title":"Clean up","context":"rm a","choices":["approve","deny","approve_task"],"multiple":false,"action":{"host":"rm a","task_scope":{"task":"Clean","target":"/tmp"}},"hash":"1cea4a109501402ef7146a703ee05d7d10a6345d18c6519e4de19c9913cae5cc"}
+{"kind":"destructive","title":"Run rm","context":"rm a","choices":["approve","deny","approve_forever"],"multiple":false,"action":{"tool":"computer_run","args":{"command":"rm a","effect":"destructive"}},"hash":"0c9da9dfc6569accc0b96242c2c8dae45fcdf8d791e46ec3e09bb507fbd40b92"}
+{"kind":"external","title":"Run send","context":"./send","choices":["approve","deny","approve_task"],"multiple":false,"action":{"tool":"computer_run","args":{"command":"./send","effect":"external"},"task_scope":{"task":"Send","target":"list"}},"hash":"529720a3ed624055c8c0a2f722a23c62ce14f86f646813a4a3ea34baa23182c6"}
+{"kind":"choice","title":"Which?","context":null,"choices":["a","b"],"multiple":true,"action":null,"hash":null}"#;
+
     #[test]
     fn a_tool_approval_hashes_the_exact_arguments_regardless_of_key_order() {
         let a = Spec::tool_approval(
