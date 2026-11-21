@@ -1,4 +1,5 @@
 use super::owner_tools::{Card, Declined, ask};
+use super::tool_defs::Call;
 use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use axum::{
     Json, Router,
@@ -683,8 +684,14 @@ async fn approve_trigger(
     Ok(ask(state, grant, &spec, card, declined).await.map(drop))
 }
 
-async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    let result = if name == "mail_trigger_set" {
+async fn trigger_call(
+    state: &AppState,
+    grant: &Grant,
+    op: Op,
+    name: &str,
+    args: &Value,
+) -> ToolResult {
+    let result = if matches!(op, Op::TriggerSet) {
         let request: TriggerSet = tool_result::args(args, || {
             Refusal::text("Use account_id and instructions only.")
         })?;
@@ -859,18 +866,32 @@ fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
     }
 }
 
-pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    if name == "mail_connect" {
-        return connect_inbox(state, grant, args).await;
-    }
-    if name == "mail_disconnect" {
-        return disconnect_inbox(state, grant, args).await;
-    }
-    if name.starts_with("mail_trigger_") {
-        return trigger_call(state, grant, name, args).await;
-    }
-    if name == "mail_action" {
-        match args["command"]["operation"].as_str() {
+/// The email tools, each bound to its name in `tool_defs`.
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    Accounts,
+    Connect,
+    Disconnect,
+    Action,
+    ActionStatus,
+    TriggerSet,
+    TriggerDelete,
+}
+
+pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
+    let Call {
+        state,
+        grant,
+        args,
+        tool,
+    } = c;
+    match op {
+        Op::Connect => return connect_inbox(state, grant, args).await,
+        Op::Disconnect => return disconnect_inbox(state, grant, args).await,
+        Op::TriggerSet | Op::TriggerDelete => {
+            return trigger_call(state, grant, op, tool.name, args).await;
+        }
+        Op::Action => match args["command"]["operation"].as_str() {
             Some("open_attachments") => {
                 return super::mail_attachments::open(state, grant, args).await;
             }
@@ -878,9 +899,10 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 return super::mail_attachments::query(state, grant, args).await;
             }
             _ => {}
-        }
+        },
+        Op::Accounts | Op::ActionStatus => {}
     }
-    let result = tool_call(state, grant, name, args).await;
+    let result = tool_call(state, grant, op, args).await;
     match result {
         Ok(value) => Ok(Done::json(value).logged("Email tool completed.")),
         Err(error) if error.code == MailErrorCode::MailAuthenticationFailed => {
@@ -905,11 +927,11 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
 async fn tool_call(
     state: &AppState,
     grant: &Grant,
-    name: &str,
+    op: Op,
     args: &Value,
 ) -> Result<Value, MailError> {
     let manager = &state.connectors;
-    if name == "mail_accounts" {
+    if matches!(op, Op::Accounts) {
         if !args.is_null() && args.as_object().is_none_or(|object| !object.is_empty()) {
             return Err(MailError::new(MailErrorCode::InvalidMailRequest));
         }
@@ -928,7 +950,7 @@ async fn tool_call(
         .await
         .map_err(|_| MailError::new(MailErrorCode::MailUnavailable))?;
     let in_scope = |account_id: Uuid| source.is_none_or(|id| id == account_id);
-    if name == "mail_action_status" {
+    if matches!(op, Op::ActionStatus) {
         let request: StatusRequest = serde_json::from_value(args.clone())
             .map_err(|_| MailError::new(MailErrorCode::InvalidMailRequest))?;
         if !in_scope(request.account_id) {

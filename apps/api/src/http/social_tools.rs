@@ -1,5 +1,6 @@
 use super::AppState;
 use super::owner_tools::{Card, Declined, ask};
+use super::tool_defs::Call;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
     app::questions::{Kind, Spec},
@@ -57,18 +58,35 @@ struct Status {
     connection_id: Uuid,
     action_id: Uuid,
 }
-pub async fn call(s: &AppState, g: &Grant, name: &str, args: &Value) -> ToolResult {
-    let result = match name {
-        "social_connect" => connect(s, g, args).await,
-        "social_connections" => connections(s, g, args).await,
-        "social_action" => action(s, g, args).await,
-        "social_action_status" => status(s, g, args).await,
-        "social_trigger_set" => set_trigger(s, g, args).await,
-        "social_trigger_list" => list_triggers(s, g, args).await,
-        "social_trigger_delete" => delete_trigger(s, g, args).await,
-        _ => Err(Error::Unsupported.into()),
+/// The native social tools, each bound to its name in `tool_defs`.
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    Connect,
+    Connections,
+    Action,
+    ActionStatus,
+    TriggerSet,
+    TriggerList,
+    TriggerDelete,
+}
+
+pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
+    let Call {
+        state: s,
+        grant: g,
+        args,
+        tool,
+    } = c;
+    let result = match op {
+        Op::Connect => connect(s, g, args).await,
+        Op::Connections => connections(s, g, args).await,
+        Op::Action => action(s, g, args).await,
+        Op::ActionStatus => status(s, g, args).await,
+        Op::TriggerSet => set_trigger(s, g, args).await,
+        Op::TriggerList => list_triggers(s, g, args).await,
+        Op::TriggerDelete => delete_trigger(s, g, args).await,
     };
-    result.map(|done| done.logged(format!("native social tool {name}")))
+    result.map(|done| done.logged(format!("native social tool {}", tool.name)))
 }
 
 async fn connect(s: &AppState, g: &Grant, args: &Value) -> ToolResult {

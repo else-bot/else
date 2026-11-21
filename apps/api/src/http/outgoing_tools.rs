@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
+use super::tool_defs::Call;
 use crate::app::outgoing::send::{self, Connected, SendError};
 use crate::app::outgoing::{
     self, ApprovalSource, Channels, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
@@ -23,15 +24,6 @@ use crate::connectors::{
 use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
 use crate::grants::{Grant, Tool};
 use crate::socials::types::{self as socials, SendMessage};
-
-pub const TOOL_NAMES: &[&str] = &[
-    "draft_email",
-    "draft_message",
-    "confirm_draft_approval",
-    "start_draft_send",
-    "send_draft",
-    "report_draft_send",
-];
 
 fn draft_id() -> Value {
     json!({ "type": "string", "format": "uuid", "description": "The draft's id." })
@@ -259,21 +251,35 @@ fn only(args: &Value, allowed: &[&str]) -> Result<(), Refusal> {
     }
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
-    match name {
-        "draft_email" => {
+/// The draft tools, each bound to its name in `tool_defs`.
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    DraftEmail,
+    DraftMessage,
+    ConfirmApproval,
+    StartSend,
+    Send,
+    ReportSend,
+}
+
+pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
+    let Call {
+        state, grant, args, ..
+    } = c;
+    match op {
+        Op::DraftEmail => {
             let account = sender(state, grant, args).await?;
             let email = Email::parse(args, account.as_deref()).map(Content::Email);
             draft(state, grant, args, email).await
         }
-        "draft_message" => {
+        Op::DraftMessage => {
             let content = social_destination(state, grant, Message::parse(args)).await?;
             draft(state, grant, args, content).await
         }
-        "confirm_draft_approval" => confirm(state, grant, args).await,
-        "start_draft_send" => start(state, grant, args).await,
-        "send_draft" => send(state, grant, args).await,
-        _ => report(state, grant, args).await,
+        Op::ConfirmApproval => confirm(state, grant, args).await,
+        Op::StartSend => start(state, grant, args).await,
+        Op::Send => send(state, grant, args).await,
+        Op::ReportSend => report(state, grant, args).await,
     }
 }
 
@@ -671,7 +677,7 @@ pub(super) async fn claim_for_tool(
     let id = id_arg(args, "approved_draft")?;
     let delivery = Delivery::Tool {
         tool: name.to_owned(),
-        args: crate::app::tools::loggable_args(name, args),
+        args: crate::http::tool_defs::loggable_args(name, args),
     };
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
         .await

@@ -162,37 +162,6 @@ pub fn target<'a>(all: &[Value], args: &'a Value) -> Result<(&'a str, &'a Value)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tools::PARKING_TOOLS;
-
-    #[test]
-    fn no_deferred_tool_parks() {
-        for name in DEFERRED_TOOLS {
-            assert!(!PARKING_TOOLS.contains(name), "{name} parks");
-        }
-    }
-
-    #[test]
-    fn every_tool_is_listed_or_deferred_exactly_once() {
-        let all = super::super::mcp::all_tools();
-        let names: Vec<&str> = all.iter().filter_map(|t| t["name"].as_str()).collect();
-        for name in &names {
-            assert!(
-                TOOL_NAMES.contains(name) ^ DEFERRED_TOOLS.contains(name),
-                "{name}"
-            );
-        }
-        for name in TOOL_NAMES.iter().chain(DEFERRED_TOOLS) {
-            assert!(
-                names.contains(name) || [FIND, USE].contains(name),
-                "{name} has no schema"
-            );
-        }
-        let listed: Vec<String> = listed(all)
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(listed.len(), TOOL_NAMES.len());
-    }
 
     #[test]
     fn find_returns_matching_deferred_schemas_only() {

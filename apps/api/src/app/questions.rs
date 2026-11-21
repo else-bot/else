@@ -263,10 +263,9 @@ impl Action {
     }
 }
 
-/// A computer tool whose calls one standing grant per tool and effect may
-/// cover. A resize takes host memory, so only a grant for its size does.
+/// A tool whose calls one standing grant per tool and effect may cover.
 fn computer_tool(tool: &str) -> bool {
-    tool != "computer_resize" && crate::http::guest_tools::TOOL_NAMES.contains(&tool)
+    crate::http::tool_defs::get(tool).is_some_and(|tool| tool.standing)
 }
 
 /// Whether an owner message says only to always allow the card it answers,
@@ -1037,7 +1036,7 @@ impl Spec {
             approval: Some(Approval {
                 action: Action::Tool {
                     tool: tool.to_owned(),
-                    args: crate::app::tools::loggable_args(tool, args),
+                    args: crate::http::tool_defs::loggable_args(tool, args),
                     task_scope,
                 },
                 hash: hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()]),
