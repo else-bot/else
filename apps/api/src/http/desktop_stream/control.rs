@@ -2,21 +2,18 @@
 //! controller, and the input-only RFB connection its input travels on.
 
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::extract::ws::Message;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{CLOSE_LIMIT, End, disconnected, error_message, refused, release_abandoned, stopping};
+use super::end::{End, disconnected, error_message, refused, release_abandoned, stopping};
+use super::link::GuestLink;
 use crate::computers::ComputerManager;
 use crate::computers::viewer::{self, Event};
 
 const MAX_HELD_KEYS: usize = 32;
-const GUEST_WRITE_LIMIT: Duration = Duration::from_secs(5);
 
 /// Input the stream pressed is released over the link before it closes, so
 /// the guest never keeps a key or button down after control ends.
@@ -75,7 +72,7 @@ impl Controlling {
 
     pub(super) async fn end(mut self, computers: &ComputerManager) {
         let _ = self.release_input().await;
-        close(self.link.writer, self.link.reader, self.link.bridge).await;
+        self.link.link.close().await;
         self.claim.release(computers).await;
     }
 }
@@ -141,35 +138,22 @@ pub(super) fn control_failed() -> Message {
 
 /// The input-only connection to the guest's controlling VNC server.
 pub(super) struct Control {
-    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    events: mpsc::Receiver<Event>,
-    reader: JoinHandle<Result<(), viewer::ViewerError>>,
-    bridge: JoinHandle<()>,
+    link: GuestLink,
     pub(super) connected: Instant,
     pub(super) clipboard_utf8: bool,
 }
 
 impl Control {
     pub(super) fn open(connection: viewer::Connection) -> Self {
-        let (tx, events) = mpsc::channel(4);
-        let reader = tokio::spawn(viewer::read_events(
-            connection.reader,
-            connection.width,
-            connection.height,
-            Some(tx),
-        ));
         Self {
-            writer: connection.writer,
-            events,
-            reader,
-            bridge: connection.bridge,
+            link: GuestLink::open(connection, 4),
             connected: Instant::now(),
             clipboard_utf8: false,
         }
     }
 
     pub(super) async fn input(&mut self, bytes: &[u8]) -> Result<(), End> {
-        if !write_guest(&mut self.writer, bytes).await {
+        if !self.link.write(bytes).await {
             return Err(disconnected());
         }
         Ok(())
@@ -178,17 +162,11 @@ impl Control {
     /// The next event the connection announces on its own (it requests no
     /// screen updates), or `None` once the connection closed.
     pub(super) async fn update(&mut self) -> Option<Event> {
-        if self.bridge.is_finished() {
-            return None;
-        }
-        tokio::select! {
-            Some(event) = self.events.recv() => Some(event),
-            _ = &mut self.bridge => None,
-        }
+        self.link.update().await
     }
 
     pub(super) async fn wait_for_utf8(&mut self) {
-        while let Some(event) = self.events.recv().await {
+        while let Some(event) = self.link.event().await {
             if matches!(event, Event::ClipboardUtf8) {
                 self.clipboard_utf8 = true;
                 return;
@@ -196,27 +174,4 @@ impl Control {
         }
         std::future::pending().await
     }
-}
-
-pub(super) async fn close(
-    mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    reader: JoinHandle<Result<(), viewer::ViewerError>>,
-    bridge: JoinHandle<()>,
-) {
-    let _ = tokio::time::timeout(GUEST_WRITE_LIMIT, writer.shutdown()).await;
-    drop(writer);
-    if !bridge.is_finished() {
-        let _ = tokio::time::timeout(CLOSE_LIMIT, bridge).await;
-    }
-    reader.abort();
-}
-
-pub(super) async fn write_guest(
-    writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    bytes: &[u8],
-) -> bool {
-    matches!(
-        tokio::time::timeout(GUEST_WRITE_LIMIT, writer.write_all(bytes)).await,
-        Ok(Ok(()))
-    )
 }
