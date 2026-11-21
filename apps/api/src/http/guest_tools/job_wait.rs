@@ -48,30 +48,51 @@ pub(super) async fn wait_job(
         Ok(None) => return refused(CreateError::NoSuchJob),
         Err(err) => return Err(err.into()),
     }
-    match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
-        Ok(Created::Waiting(wait_id)) => {
-            state.grants.park(grant.turn_id).await;
-            let next = if caller.owner_conversation {
-                "Tell the owner briefly what the job does and end this attempt now. Do not poll \
-                 or call more tools; else.bot continues this request when the job ends."
-            } else {
+    let owner = caller.owner_conversation;
+    let (status, wait_id, next) =
+        match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
+            Ok(Created::Waiting(wait_id)) if owner => (
+                "waiting",
+                wait_id,
+                "Tell the owner briefly what the job does and end this attempt now. Do not poll or \
+             call more tools; else.bot continues this request when the job ends.",
+            ),
+            Ok(Created::Waiting(wait_id)) => (
+                "waiting",
+                wait_id,
                 "End this attempt now without a reply. Do not poll or call more tools; else.bot \
-                 continues this task when the job ends."
-            };
-            Ok(Done::json(json!({
-                "status": "waiting",
-                "parked": true,
-                "job_id": id,
-                "wait_id": wait_id,
-                "next": next,
-            }))
-            .logged(format!("computer_job wait {id}: waiting {wait_id}")))
-        }
-        Ok(Created::Ended) => match computers.job(grant.bot_id, id).await {
-            Ok(Some(job)) => ended(job).await,
-            Ok(None) => refused(CreateError::NoSuchJob),
-            Err(err) => Err(err.into()),
-        },
-        Err(error) => refused(error),
-    }
+             continues this task when the job ends.",
+            ),
+            Ok(Created::Carried(wait_id)) if owner => (
+                "already_waiting",
+                wait_id,
+                "This request already waits on this job; no new wait was added. Answer the owner \
+             briefly and end this attempt now. Do not poll or call more tools; else.bot \
+             continues this request when the job ends.",
+            ),
+            Ok(Created::Carried(wait_id)) => (
+                "already_waiting",
+                wait_id,
+                "This task already waits on this job; no new wait was added. End this attempt now \
+             without a reply. Do not poll or call more tools; else.bot continues this task \
+             when the job ends.",
+            ),
+            Ok(Created::Ended) => {
+                return match computers.job(grant.bot_id, id).await {
+                    Ok(Some(job)) => ended(job).await,
+                    Ok(None) => refused(CreateError::NoSuchJob),
+                    Err(err) => Err(err.into()),
+                };
+            }
+            Err(error) => return refused(error),
+        };
+    state.grants.park(grant.turn_id).await;
+    Ok(Done::json(json!({
+        "status": status,
+        "parked": true,
+        "job_id": id,
+        "wait_id": wait_id,
+        "next": next,
+    }))
+    .logged(format!("computer_job wait {id}: {status} {wait_id}")))
 }

@@ -16,7 +16,7 @@ use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
 use crate::app::questions::{Effect, Kind};
-use crate::db::mcp_waits::{self, Check, CreateError, Due, Spec};
+use crate::db::mcp_waits::{self, Check, CreateError, Created, Due, Spec};
 use crate::grants::Grant;
 use crate::mcp::{Error, Library, PackageId};
 
@@ -334,28 +334,47 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         }
         Some(Check::Running(result)) => result,
     };
-    let next = if caller.owner_conversation {
-        "Tell the owner briefly what you are waiting for and end this attempt now. Do not \
-         poll or call more tools; else.bot checks the job and continues this request with \
-         its result."
-    } else {
-        "End this attempt now without a reply. Do not poll or call more tools; else.bot \
-         checks the job and continues this task with its result. The delegating bot keeps \
-         waiting and receives your reply only when the task ends."
-    };
-    match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
-        Ok(wait_id) => {
-            state.grants.park(grant.turn_id).await;
-            Ok(Done::json(json!({
-                "status": "waiting",
-                "parked": true,
-                "wait_id": wait_id,
-                "next": next,
-            }))
-            .logged(format!("{log} waiting {wait_id}{note}")))
-        }
-        Err(error) => refused(error, &log),
-    }
+    let owner = caller.owner_conversation;
+    let (status, wait_id, next) =
+        match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
+            Ok(Created::Waiting(wait_id)) if owner => (
+                "waiting",
+                wait_id,
+                "Tell the owner briefly what you are waiting for and end this attempt now. Do not \
+             poll or call more tools; else.bot checks the job and continues this request with \
+             its result.",
+            ),
+            Ok(Created::Waiting(wait_id)) => (
+                "waiting",
+                wait_id,
+                "End this attempt now without a reply. Do not poll or call more tools; else.bot \
+             checks the job and continues this task with its result. The delegating bot keeps \
+             waiting and receives your reply only when the task ends.",
+            ),
+            Ok(Created::Carried(wait_id)) if owner => (
+                "already_waiting",
+                wait_id,
+                "This request already waits on this job; no new wait was added. Answer the owner \
+             briefly and end this attempt now. Do not poll or call more tools; else.bot checks \
+             the job and continues this request with its result.",
+            ),
+            Ok(Created::Carried(wait_id)) => (
+                "already_waiting",
+                wait_id,
+                "This task already waits on this job; no new wait was added. End this attempt now \
+             without a reply. Do not poll or call more tools; else.bot checks the job and \
+             continues this task with its result.",
+            ),
+            Err(error) => return refused(error, &log),
+        };
+    state.grants.park(grant.turn_id).await;
+    Ok(Done::json(json!({
+        "status": status,
+        "parked": true,
+        "wait_id": wait_id,
+        "next": next,
+    }))
+    .logged(format!("{log} {status} {wait_id}{note}")))
 }
 
 fn refused(error: CreateError, log: &str) -> ToolResult {
