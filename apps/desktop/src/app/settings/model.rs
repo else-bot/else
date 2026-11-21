@@ -22,6 +22,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use std::rc::Rc;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// How far a clickable row's hover fill reaches past the text column.
@@ -400,7 +401,10 @@ impl ElseApp {
                     app.unauthorized(err, window, cx);
                 }
                 if let (Ok(info), Some(caps)) = (&answer, app.caps.as_mut())
-                    && let Some(slot) = caps.providers.iter_mut().find(|p| p.state.id == id)
+                    && let Some(slot) = Arc::make_mut(caps)
+                        .providers
+                        .iter_mut()
+                        .find(|p| p.state.id == id)
                 {
                     *slot = info.clone();
                     cx.notify();
