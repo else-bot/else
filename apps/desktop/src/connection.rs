@@ -524,6 +524,25 @@ impl Shell {
     }
 }
 
+/// Leaves the settings sheet through [`Shell::cancel`], which wipes what
+/// its panes typed. macOS hides the window instead of closing it, so a
+/// sheet left open would come back with its secrets still typed.
+pub(crate) fn close_settings(window: &mut Window, cx: &mut App) {
+    let Some(shell) = window
+        .root::<gpui_kit::base::Root>()
+        .flatten()
+        .and_then(|root| root.read(cx).view().clone().downcast::<Shell>().ok())
+    else {
+        return;
+    };
+    shell.update(cx, |shell, cx| {
+        if shell.settings_section().is_some() {
+            window.close_all_dialogs(cx);
+            shell.cancel(window, cx);
+        }
+    });
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();

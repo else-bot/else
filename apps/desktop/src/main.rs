@@ -269,7 +269,8 @@ fn main() {
             gpui_kit::open_window(options, cx, |window, cx| {
                 appearance::observe_window(window, cx);
                 if cfg!(target_os = "macos") {
-                    window.on_window_should_close(cx, |_, cx| {
+                    window.on_window_should_close(cx, |window, cx| {
+                        connection::close_settings(window, cx);
                         cx.hide();
                         false
                     });
