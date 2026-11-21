@@ -821,7 +821,12 @@ mod tests {
             { "type": "poll", "question": "Lunch?" },
         ]);
         let upsert = frame(1, "item.upsert", json!({ "item": reacted }));
-        assert!(upsert.event.is_ok(), "{:?}", upsert.event);
+        let Ok(Event::ItemUpsert(upsert)) = upsert.event else {
+            panic!("expected an item, got {:?}", upsert.event);
+        };
+        assert_eq!(upsert.item.reaction, None);
+        assert_eq!(upsert.item.parts, [], "the item reads as its text");
+        assert_eq!(upsert.item.text, "hi [Poll]");
 
         let turn = json!({
             "id": Uuid::nil(), "request_id": Uuid::nil(), "turn_no": 1, "provider_id": "codex",
@@ -836,7 +841,13 @@ mod tests {
             }],
         });
         let updated = frame(2, "turn.updated", json!({ "turn": turn }));
-        assert!(updated.event.is_ok(), "{:?}", updated.event);
+        let Ok(Event::TurnUpdated(updated)) = updated.event else {
+            panic!("expected a turn, got {:?}", updated.event);
+        };
+        assert_eq!(
+            updated.turn.outgoing_drafts[0].content,
+            else_wire::outgoing::DraftContent::Unknown
+        );
     }
 
     #[test]

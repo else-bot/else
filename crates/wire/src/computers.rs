@@ -162,6 +162,9 @@ pub enum ServerEvent {
         code: String,
         message: String,
     },
+    /// A status message a newer server added.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A bot's request that the owner take over its computer. Its turn waits

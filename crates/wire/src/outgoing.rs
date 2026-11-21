@@ -174,12 +174,16 @@ pub enum DraftContent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<DraftFile>,
     },
+    /// A channel a newer server added. Only a reader builds it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl DraftContent {
     pub fn attachments(&self) -> &[DraftFile] {
         match self {
             Self::Email { attachments, .. } | Self::Message { attachments, .. } => attachments,
+            Self::Unknown => &[],
         }
     }
 
@@ -210,19 +214,21 @@ impl DraftContent {
                 DraftPlatform::WhatsApp => "WhatsApp",
                 DraftPlatform::Other(text) => text,
             },
+            Self::Unknown => "Draft",
         }
     }
 
     pub fn body(&self) -> &str {
         match self {
             Self::Email { body, .. } | Self::Message { body, .. } => body,
+            Self::Unknown => "",
         }
     }
 
     pub fn subject(&self) -> Option<&str> {
         match self {
             Self::Email { subject, .. } => Some(subject),
-            Self::Message { .. } => None,
+            Self::Message { .. } | Self::Unknown => None,
         }
     }
 
@@ -234,6 +240,7 @@ impl DraftContent {
             Self::Email { .. } => "Email".into(),
             Self::Message { .. } if self.is_post() => "X post".into(),
             Self::Message { .. } => format!("{} message", self.label()),
+            Self::Unknown => "Draft".into(),
         }
     }
 
@@ -242,6 +249,7 @@ impl DraftContent {
         match self {
             Self::Email { to, .. } => Some(to.join(", ")),
             Self::Message { destination, .. } => destination.clone(),
+            Self::Unknown => None,
         }
     }
 
@@ -257,7 +265,7 @@ impl DraftContent {
                 ..
             } => account.clone(),
             Self::Message { .. } if self.is_post() => "Public post".into(),
-            Self::Message { .. } => String::new(),
+            Self::Message { .. } | Self::Unknown => String::new(),
         }
     }
 
@@ -301,6 +309,7 @@ impl DraftContent {
                 }
                 rows
             }
+            Self::Unknown => Vec::new(),
         }
     }
 
@@ -314,7 +323,7 @@ impl DraftContent {
             ..
         } = self
         else {
-            return "emails".into();
+            return if self.is_email() { "emails" } else { "drafts" }.into();
         };
         let mut label = format!(
             "{}{} {}",
@@ -397,15 +406,22 @@ pub struct DraftResponse {
 }
 
 impl OutgoingDraft {
-    /// Open on its card for the owner to edit, approve, or discard.
+    /// Open on its card for the owner to edit, approve, or discard. A draft
+    /// on a channel this build does not know stays closed: its card cannot
+    /// show what the owner would approve.
     pub fn is_open(&self) -> bool {
-        self.status == DraftStatus::Pending && !self.in_reply
+        self.status == DraftStatus::Pending
+            && !self.in_reply
+            && self.content != DraftContent::Unknown
     }
 
     /// The receipt line: who acted, then what became of the draft.
     pub fn label(&self) -> String {
         match self.status {
             DraftStatus::Pending if self.in_reply => "Continued in your reply".into(),
+            DraftStatus::Pending if self.content == DraftContent::Unknown => {
+                "Update else.bot to review this draft".into()
+            }
             DraftStatus::Discarded if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) => {
                 "Closed by your reply".into()
             }

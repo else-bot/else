@@ -228,6 +228,19 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_on_an_unknown_channel_stays_closed_and_asks_for_an_update() {
+        let draft: OutgoingDraft = serde_json::from_value(json!({
+            "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+            "content": {"channel":"fax", "number":"+1 555", "body":"Hi"},
+            "version":1, "status":"pending", "can_approve":true, "result_detail":null,
+            "updated_at":"2026-11-09T09:36:00Z", "settled_at":null
+        }))
+        .unwrap();
+        assert!(!draft.is_open());
+        assert_eq!(draft.label(), "Update else.bot to review this draft");
+    }
+
+    #[test]
     fn a_receipt_names_who_approved_or_discarded_it() {
         let card = |status: &str, source: Option<&str>, detail: Option<&str>| -> String {
             serde_json::from_value::<OutgoingDraft>(json!({

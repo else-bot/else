@@ -111,7 +111,7 @@ pub struct Turn {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::items::known_reaction")]
     pub reaction: Option<Reaction>,
     /// The running reply this message joined. Absent from older servers.
     #[serde(default)]

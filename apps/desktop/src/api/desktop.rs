@@ -468,6 +468,7 @@ impl Client {
                                         return Err(message);
                                     }
                                 },
+                                ServerEvent::Unknown => {},
                             }
                         },
                         Ok(Some(Ok(Message::Binary(bytes)))) => {
@@ -522,7 +523,7 @@ mod tests {
     #[test]
     fn a_newer_servers_status_message_decodes_instead_of_closing_the_stream() {
         let event = serde_json::from_str::<ServerEvent>(r#"{"type":"clipboard","text":"copied"}"#);
-        assert!(event.is_ok(), "{event:?}");
+        assert_eq!(event.unwrap(), ServerEvent::Unknown);
     }
 
     #[test]
