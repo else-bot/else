@@ -193,11 +193,6 @@ impl Store {
                             .collect::<String>();
                         body = format!("<ListBucketResult><IsTruncated>false</IsTruncated>{listing}</ListBucketResult>").into_bytes();
                     }
-                } else if method == "POST" && url.query_pairs().any(|(k, _)| k == "uploadId") {
-                    body = format!(
-                        "<Error><Code>InternalError</Code><Message>{SECRET}</Message></Error>"
-                    )
-                    .into_bytes();
                 } else if method == "PUT" {
                     arrived.send_modify(|n| *n += 1);
                     let _ = hold.subscribe().wait_for(|held| !*held).await;
@@ -761,8 +756,8 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
 }
 
 #[tokio::test]
-async fn multipart_error_documents_do_not_expose_remote_response_secrets() {
-    let store = Store::new(false).await;
+async fn remote_error_documents_do_not_reach_client_errors() {
+    let store = Store::new(true).await;
     let destination = else_api::backup::settings::Destination::resolve(
         serde_json::from_value(destination(&store.endpoint)).unwrap(),
         None,
@@ -770,13 +765,16 @@ async fn multipart_error_documents_do_not_expose_remote_response_secrets() {
     .unwrap();
     let client = else_api::backup::s3::S3::new(destination.s3_config()).unwrap();
     let error = client
-        .complete_multipart(
-            "workspace/test",
-            "fixture-upload",
-            &[(1, "fixture-etag".into())],
-        )
+        .put("workspace/test", b"fixture".to_vec(), false)
         .await
         .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            else_api::backup::s3::S3Error::Status { status: 403, .. }
+        ),
+        "{error:?}"
+    );
     assert!(!error.to_string().contains(SECRET));
     assert!(!format!("{error:?}").contains(SECRET));
 }

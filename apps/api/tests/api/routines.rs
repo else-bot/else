@@ -1274,7 +1274,7 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
             .fetch_all(&h.app.db.pool)
             .await
             .unwrap();
-    h.recorder.inner.forget_sessions(&sessions).await;
+    h.recorder.forget_sessions(&sessions);
     let sent = h.app.send(&main, Uuid::new_v4(), "Did it run?", None).await;
     h.app
         .wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])

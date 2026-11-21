@@ -3591,7 +3591,7 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
 async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
     let h = harness(TestApp::builder().max_active(3)).await;
     let app = &h.app;
-    let synthetic = &h.recorder.inner;
+    let recorder = &h.recorder;
     let work = leaf(app, "Work").await;
     let original = format!("{GATE_AFTER_OPENING} List the school forms.");
     let (task, first, token) = task_carried_to_a_follow_up(&h, &work, &original).await;
@@ -3617,7 +3617,7 @@ async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
-    synthetic.forget_sessions(&native).await;
+    recorder.forget_sessions(&native);
 
     let change = "Only the permission slip matters now.";
     let updated = tool(
@@ -3705,11 +3705,11 @@ async fn a_later_update_can_repeat_an_earlier_one() {
 async fn an_owner_aside_leaves_a_queued_update_to_run() {
     let h = harness(TestApp::builder().max_active(3)).await;
     let app = &h.app;
-    let synthetic = &h.recorder.inner;
+    let recorder = &h.recorder;
     let work = leaf(app, "Work").await;
     let (task, first, token) =
         task_carried_to_a_follow_up(&h, &work, "[synthetic:hang] long research").await;
-    synthetic.hold_hangs(true).await;
+    recorder.hold_hangs(true);
     let updated = tool(
         app,
         &token,
@@ -3728,7 +3728,7 @@ async fn an_owner_aside_leaves_a_queued_update_to_run() {
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     let aside_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    synthetic.hold_hangs(false).await;
+    recorder.hold_hangs(false);
     app.wait_turn(replacement, &["completed"]).await;
     let (_, result, _) = wait_task(app, task, "completed").await;
     assert!(

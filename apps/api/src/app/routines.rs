@@ -78,12 +78,6 @@ pub enum InvalidRoutine {
     ActiveHours,
 }
 
-impl InvalidRoutine {
-    pub fn is_size_limit(&self) -> bool {
-        matches!(self, Self::PromptTooLarge | Self::CheckTooLarge)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineName(String);
 

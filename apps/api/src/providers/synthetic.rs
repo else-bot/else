@@ -6,8 +6,7 @@
 //! behavior for tests, from the request or any owner message that joined it:
 //!
 //! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
-//!   200 ms to drain, like a provider confirming an interrupt. While a test
-//!   holds hangs, the drain waits for the release.
+//!   200 ms to drain, like a provider confirming an interrupt.
 //! - `[synthetic:fail]` acknowledges, then fails.
 //! - `[synthetic:ignore-cancel]` acknowledges and stops only when the stop escalates.
 //! - `[synthetic:stall-send]` marks delivery as started, then waits until
@@ -17,10 +16,10 @@
 //! - `[synthetic:messages]` follows the reply with a second message.
 //!
 //! Like a host adapter it keeps a native session per conversation (resumed
-//! while its fingerprint matches, unless the test forgot it), prepares the
-//! turn's packet through the same session code without saved memory, and
-//! records every packet so tests can check what a session received.
-//! Its checkpoint is deterministic text, or an error when a test asks.
+//! while its fingerprint matches), prepares the turn's packet through the
+//! same session code without saved memory, and records every packet so
+//! tests can check what a session received. Its checkpoint is deterministic
+//! text.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -44,16 +43,7 @@ pub struct Synthetic {
     id: &'static str,
     label: &'static str,
     chunk_delay: Duration,
-    projects: Option<std::path::PathBuf>,
-    state: Actor<State>,
-}
-
-#[derive(Default)]
-struct State {
-    packets: VecDeque<String>,
-    checkpoint_error: Option<String>,
-    forgotten: Vec<String>,
-    hangs_held: tokio::sync::watch::Sender<bool>,
+    packets: Actor<VecDeque<String>>,
 }
 
 impl Synthetic {
@@ -67,48 +57,16 @@ impl Synthetic {
             id,
             label,
             chunk_delay,
-            projects: None,
-            state: Actor::default(),
+            packets: Actor::default(),
         }
     }
 
-    /// Give each bot a project folder under `root`, as real providers do.
-    pub fn with_projects(mut self, root: std::path::PathBuf) -> Self {
-        self.projects = Some(root);
-        self
-    }
-
-    /// The last 256 packets this provider was sent, oldest first.
+    /// The last 256 packets this provider was sent, oldest first (fixture
+    /// API).
     pub async fn packets(&self) -> Vec<String> {
-        self.state
-            .call(|state| state.packets.iter().cloned().collect())
+        self.packets
+            .call(|packets| packets.iter().cloned().collect())
             .await
-    }
-
-    /// Hold or release the drain of every cancelled `[synthetic:hang]` turn,
-    /// so a test can queue messages behind one at any speed.
-    pub async fn hold_hangs(&self, held: bool) {
-        self.state
-            .call(move |state| {
-                state.hangs_held.send_replace(held);
-            })
-            .await;
-    }
-
-    /// Make checkpoints fail with `reason` (or succeed again with `None`).
-    pub async fn fail_checkpoints(&self, reason: Option<&str>) {
-        let reason = reason.map(str::to_owned);
-        self.state
-            .call(move |state| state.checkpoint_error = reason)
-            .await;
-    }
-
-    /// Lose every native session so far, as if its files were removed.
-    pub async fn forget_sessions(&self, native_ids: &[String]) {
-        let native_ids = native_ids.to_owned();
-        self.state
-            .call(move |state| state.forgotten.extend(native_ids))
-            .await;
     }
 }
 
@@ -134,11 +92,6 @@ impl Provider for Synthetic {
         self.label
     }
 
-    fn project_dir(&self, bot_id: uuid::Uuid) -> Option<std::path::PathBuf> {
-        let root = self.projects.as_deref()?;
-        super::host::project_dir(root, bot_id).ok()
-    }
-
     fn availability(&self) -> Availability {
         Availability::Available
     }
@@ -156,13 +109,6 @@ impl Provider for Synthetic {
         request: CheckpointRequest,
         _: &CancellationToken,
     ) -> Result<String, String> {
-        if let Some(reason) = self
-            .state
-            .call(|state| state.checkpoint_error.clone())
-            .await
-        {
-            return Err(reason);
-        }
         let lines = request
             .prompt
             .lines()
@@ -195,15 +141,10 @@ impl Provider for Synthetic {
                 message: "The synthetic provider refused the message.".into(),
             };
         }
-        let session = input.session.clone();
-        let resumed = self
-            .state
-            .call(move |state| {
-                session.filter(|s| {
-                    s.fingerprint == FINGERPRINT && !state.forgotten.contains(&s.native_id)
-                })
-            })
-            .await;
+        let resumed = input
+            .session
+            .clone()
+            .filter(|s| s.fingerprint == FINGERPRINT);
         // Tests assert packets without saved memory.
         let input = TurnInput {
             memory: None,
@@ -218,12 +159,12 @@ impl Provider for Synthetic {
             return TurnOutcome::Interrupted;
         }
         let packet = turn.packet.clone();
-        self.state
-            .call(move |state| {
-                if state.packets.len() == 256 {
-                    state.packets.pop_front();
+        self.packets
+            .call(move |packets| {
+                if packets.len() == 256 {
+                    packets.pop_front();
                 }
-                state.packets.push_back(packet);
+                packets.push_back(packet);
             })
             .await;
         if directives.contains("[synthetic:stall-send]") {
@@ -254,9 +195,6 @@ impl Provider for Synthetic {
         }
         if directives.contains("[synthetic:hang]") {
             cancel.cancelled().await;
-            let mut held = self.state.call(|state| state.hangs_held.subscribe()).await;
-            // The actor's state owns the sender, so the channel stays open.
-            let _ = held.wait_for(|held| !held).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             return TurnOutcome::Interrupted;
         }

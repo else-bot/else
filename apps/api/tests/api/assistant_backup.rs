@@ -777,7 +777,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
         "{result:?}"
     );
     assert_eq!(
-        s.manager.runtime_state(&name).await.unwrap(),
+        s.fake.state(&name).await.unwrap(),
         Some(RuntimeState::Running)
     );
     s.fake.checkpoint_fails.store(false, SeqCst);

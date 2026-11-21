@@ -51,6 +51,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         ..ComputerConfig::default()
     };
     let msb = || Arc::new(Msb::detect(dir.path(), None).expect("msb installed"));
+    let runtime = msb();
     let manager = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
     manager.reconcile_startup().await.unwrap();
     let a: Uuid = app.create_bot("Alpha").await.parse().unwrap();
@@ -78,7 +79,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         .tick(&tokio_util::sync::CancellationToken::new())
         .await
         .unwrap();
-    let states = manager.runtime_list().await.unwrap();
+    let states = runtime.list().await.unwrap();
     for name in [&name_a, &name_b] {
         assert!(
             states.contains(&(name.clone(), RuntimeState::Stopped)),
@@ -88,7 +89,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
 
     let restarted = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
     restarted.reconcile_startup().await.unwrap();
-    let states = restarted.runtime_list().await.unwrap();
+    let states = runtime.list().await.unwrap();
     assert!(
         states.iter().all(|(_, s)| *s == RuntimeState::Stopped),
         "{states:?}"
@@ -107,7 +108,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         Acquire::OwnerStopped
     );
     assert_eq!(
-        restarted.runtime_state(&name_a).await.unwrap(),
+        runtime.state(&name_a).await.unwrap(),
         Some(RuntimeState::Stopped)
     );
 
@@ -134,7 +135,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         .await
         .unwrap();
     assert_eq!(
-        pausing.runtime_state(&name_b).await.unwrap(),
+        runtime.state(&name_b).await.unwrap(),
         Some(RuntimeState::Paused)
     );
     let (lease_b, _) = ready(&pausing, b, "test:b3").await;
@@ -206,11 +207,8 @@ async fn guest_tools_desktop_and_isolation() {
         state_dir: dir.path().to_owned(),
         ..ComputerConfig::default()
     };
-    let manager = ComputerManager::new(
-        app.db.pool.clone(),
-        Arc::new(Msb::detect(dir.path(), None).unwrap()),
-        config,
-    );
+    let runtime = Arc::new(Msb::detect(dir.path(), None).unwrap());
+    let manager = ComputerManager::new(app.db.pool.clone(), runtime.clone(), config);
     manager.reconcile_startup().await.unwrap();
     let bot: Uuid = app.create_bot("Desk").await.parse().unwrap();
     _cleanup
@@ -316,8 +314,8 @@ async fn guest_tools_desktop_and_isolation() {
     let never = tokio_util::sync::CancellationToken::new();
     manager.tick(&never).await.unwrap();
     assert_eq!(
-        manager
-            .runtime_state(&ComputerManager::runtime_name(bot))
+        runtime
+            .state(&ComputerManager::runtime_name(bot))
             .await
             .unwrap(),
         Some(RuntimeState::Running),
@@ -734,7 +732,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     assert_eq!(acquiring.await.unwrap(), Acquire::OwnerStopped);
     assert_eq!(held(a_id).await, 0, "the late start granted nothing");
     assert_eq!(
-        manager.runtime_state(&name_a).await.unwrap(),
+        gated.state(&name_a).await.unwrap(),
         Some(RuntimeState::Stopped),
         "and did not stay up"
     );
@@ -752,7 +750,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     gated.open.add_permits(1);
     assert_eq!(acquiring.await.unwrap(), Acquire::BotInactive);
     assert_eq!(held(b_id).await, 0);
-    let state = manager.runtime_state(&name_b).await.unwrap();
+    let state = gated.state(&name_b).await.unwrap();
     assert!(matches!(state, Some(RuntimeState::Stopped)), "{state:?}");
     manager
         .tick(&tokio_util::sync::CancellationToken::new())
@@ -823,9 +821,10 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         state_dir: state.to_owned(),
         ..ComputerConfig::default()
     };
+    let runtime = Arc::new(Msb::detect(&data, None).unwrap());
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
-        Arc::new(Msb::detect(&data, None).unwrap()),
+        runtime.clone(),
         config(&data),
     ));
     manager.reconcile_startup().await.unwrap();
@@ -936,12 +935,10 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let compactor = else_api::memory_worker::Compactor::deterministic(db.pool.clone());
-    for _ in 0..5000 {
-        if compactor.step().await.unwrap() == else_api::memory_worker::Step::Idle {
-            break;
-        }
-    }
+    else_api::memory_worker::Compactor::deterministic(db.pool.clone())
+        .drain()
+        .await
+        .unwrap();
     let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_node")
         .fetch_one(&db.pool)
         .await
@@ -999,8 +996,8 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     );
     assert_eq!(summary.manifest.artifacts.len(), 4);
     assert_eq!(
-        manager
-            .runtime_state(&ComputerManager::runtime_name(beta))
+        runtime
+            .state(&ComputerManager::runtime_name(beta))
             .await
             .unwrap(),
         Some(RuntimeState::Stopped)

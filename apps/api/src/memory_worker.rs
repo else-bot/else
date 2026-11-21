@@ -29,7 +29,6 @@ use crate::scheduler::Scheduler;
 const LEASE: Duration = Duration::from_secs(20 * 60);
 const BATCH_LIMIT: Duration = Duration::from_secs(12 * 60);
 const SUMMARY_ATTEMPTS: usize = 5;
-const SUMMARY_CONCURRENCY: usize = 1;
 const NO_SUMMARIZER_RETRY: Duration = Duration::from_secs(10 * 60);
 const CAPACITY_RETRY: Duration = Duration::from_secs(20);
 const IDLE: Duration = Duration::from_millis(500);
@@ -60,12 +59,18 @@ pub enum Step {
     Summarizing,
 }
 
-#[derive(Clone)]
+enum Summaries {
+    Off,
+    On {
+        summarizer: Arc<dyn Summarizer>,
+        scheduler: Arc<Scheduler>,
+    },
+}
+
 pub struct Compactor {
     pool: SqlitePool,
-    summarizer: Option<Arc<dyn Summarizer>>,
-    scheduler: Option<Arc<Scheduler>>,
-    cancel: CancellationToken,
+    summaries: Summaries,
+    /// The one summary task, so at most one summary runs at a time.
     summary: Actor<Option<JoinHandle<()>>>,
     gate: Option<Arc<crate::maintenance::Gate>>,
 }
@@ -81,9 +86,7 @@ impl Compactor {
     pub fn deterministic(pool: SqlitePool) -> Self {
         Self {
             pool,
-            summarizer: None,
-            scheduler: None,
-            cancel: CancellationToken::new(),
+            summaries: Summaries::Off,
             summary: Actor::default(),
             gate: None,
         }
@@ -96,8 +99,10 @@ impl Compactor {
         scheduler: Arc<Scheduler>,
     ) -> Self {
         Self {
-            summarizer: Some(summarizer),
-            scheduler: Some(scheduler),
+            summaries: Summaries::On {
+                summarizer,
+                scheduler,
+            },
             ..Self::deterministic(pool)
         }
     }
@@ -119,8 +124,9 @@ impl Compactor {
             .await;
     }
 
-    /// Claim and process one job.
-    pub async fn step(&self) -> Result<Step, sqlx::Error> {
+    /// Claim and process one job. A summary started here stops when `cancel`
+    /// fires; once it has fired, the job is deferred instead.
+    pub async fn step(&self, cancel: &CancellationToken) -> Result<Step, sqlx::Error> {
         let pool = &self.pool;
         let Some(job) = store::claim(pool, LEASE).await? else {
             if store::advance(pool).await? {
@@ -148,24 +154,30 @@ impl Compactor {
                 }
             }
             Build::NeedsSummary { input } => {
-                let Some(summarizer) = self.summarizer.as_ref().filter(|s| s.available()) else {
-                    let reason = format!(
-                        "{} bytes exceed the {}-byte node limit and no summary provider is available",
-                        input.len(),
-                        job.recipe.node_bytes
-                    );
-                    return Ok(deferred(
-                        store::defer(
-                            pool,
-                            &job,
-                            Wait::SummaryUnavailable,
-                            Some(&reason),
-                            NO_SUMMARIZER_RETRY,
-                        )
-                        .await?,
-                    ));
+                let (summarizer, scheduler) = match &self.summaries {
+                    Summaries::On {
+                        summarizer,
+                        scheduler,
+                    } if summarizer.available() => (summarizer, scheduler),
+                    _ => {
+                        let reason = format!(
+                            "{} bytes exceed the {}-byte node limit and no summary provider is available",
+                            input.len(),
+                            job.recipe.node_bytes
+                        );
+                        return Ok(deferred(
+                            store::defer(
+                                pool,
+                                &job,
+                                Wait::SummaryUnavailable,
+                                Some(&reason),
+                                NO_SUMMARIZER_RETRY,
+                            )
+                            .await?,
+                        ));
+                    }
                 };
-                if self.cancel.is_cancelled() {
+                if cancel.is_cancelled() {
                     return Ok(deferred(
                         store::defer(
                             pool,
@@ -180,8 +192,8 @@ impl Compactor {
                 let task = SummaryTask {
                     pool: pool.clone(),
                     summarizer: summarizer.clone(),
-                    scheduler: self.scheduler.clone().expect("set with a summarizer"),
-                    cancel: self.cancel.clone(),
+                    scheduler: scheduler.clone(),
+                    cancel: cancel.clone(),
                     job: job.clone(),
                     input,
                     input_hash: prepared.input_hash,
@@ -226,11 +238,12 @@ impl Compactor {
     }
 
     /// Process every job that is available now, waiting for summaries
-    /// (tests and catch-up).
+    /// (fixture API).
     pub async fn drain(&self) -> Result<usize, sqlx::Error> {
+        let never = CancellationToken::new();
         let mut done = 0;
         for _ in 0..1_000_000 {
-            match self.step().await? {
+            match self.step(&never).await? {
                 Step::Idle if self.summary_pending().await => self.settle().await,
                 Step::Idle => break,
                 _ => done += 1,
@@ -241,8 +254,7 @@ impl Compactor {
 
     /// Run until cancelled; a running summary is stopped and awaited.
     /// Errors are logged and retried after a pause.
-    pub async fn run(mut self, cancel: CancellationToken) {
-        self.cancel = cancel.clone();
+    pub async fn run(self, cancel: CancellationToken) {
         loop {
             let admission = match &self.gate {
                 Some(gate) => match gate.enter() {
@@ -257,7 +269,7 @@ impl Compactor {
                 },
                 None => None,
             };
-            let step = self.step().await;
+            let step = self.step(&cancel).await;
             drop(admission);
             let pause = match step {
                 Ok(Step::Idle) => IDLE,
@@ -362,7 +374,7 @@ impl SummaryTask {
             let permit = if waiting {
                 None
             } else {
-                self.scheduler.try_begin_summary(SUMMARY_CONCURRENCY)
+                self.scheduler.try_begin_summary()
             };
             let Some(permit) = permit else {
                 return self
@@ -452,13 +464,4 @@ fn deferred(release: Completion) -> Step {
 pub fn backoff(failures: i32) -> Duration {
     let minutes = 1u64 << (failures.clamp(1, 7) - 1);
     Duration::from_secs(60 * minutes.min(60))
-}
-
-/// Copies and joins only, until nothing is available (tests).
-pub async fn drain(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
-    Compactor::deterministic(pool.clone()).drain().await
-}
-
-pub async fn step(pool: &SqlitePool) -> Result<Step, sqlx::Error> {
-    Compactor::deterministic(pool.clone()).step().await
 }

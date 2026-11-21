@@ -226,15 +226,6 @@ async fn load(
     .ok_or(DraftError::NotFound)
 }
 
-/// One of an active bot's drafts.
-pub async fn load_for(
-    pool: &SqlitePool,
-    bot_id: Uuid,
-    draft_id: Uuid,
-) -> Result<OutgoingDraft, DraftError> {
-    load(&mut *pool.acquire().await?, bot_id, draft_id).await
-}
-
 async fn reload(conn: &mut SqliteConnection, draft_id: Uuid) -> Result<OutgoingDraft, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE d.id = ?1")))
         .bind(draft_id)

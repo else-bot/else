@@ -1329,9 +1329,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    else_api::memory_worker::drain(&h.app.db.pool)
-        .await
-        .unwrap();
+    common::compact(&h.app.db.pool).await.unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, inbox, &permissions())
         .await

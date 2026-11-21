@@ -561,7 +561,7 @@ impl Replicator {
             .collect())
     }
 
-    /// Completed remote set IDs, oldest first.
+    /// Completed remote set IDs, oldest first (fixture API).
     pub async fn completed_remote(&self) -> Result<Vec<String>, BackupError> {
         Ok(self
             .remote_sets()
