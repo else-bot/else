@@ -203,7 +203,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     assert!(!required.to_string().contains("code_verifier"));
     assert!(app.state.grants.is_parked(turn).await);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let question = required["question_id"].as_str().unwrap();
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
@@ -279,7 +279,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     assert!(shared.is_file());
     assert!(!root.join(format!("oauth-{bot}.json")).exists());
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let db = h.app.stop().await;
     let h = harness(TestApp::builder().db(db)).await;
     let app = &h.app;

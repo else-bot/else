@@ -60,13 +60,13 @@ async fn explicit_owner_request_runs_its_host_action_without_another_card() {
             .unwrap();
     assert_eq!(questions, 0, "the request never creates an approval card");
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (next, token) = h.running(&bot, GATE).await;
     let called = tool(app, &token, "ask_permission", requested_host_action()).await;
     assert_eq!(called.result["status"], "pending", "{}", called.body);
     h.release(next).await;
-    wait(app, next, "waiting").await;
+    app.wait_turn(next, &["waiting"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -86,7 +86,7 @@ async fn invented_or_malformed_host_authorization_does_not_approve_an_action() {
     assert_eq!(called.result["status"], "pending", "{}", called.body);
     assert!(permissions(app, &bot).await.is_empty());
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -116,14 +116,14 @@ async fn owner_quote_cannot_override_a_pending_or_denied_host_action() {
         Gate::Pending(_)
     ));
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(answer(app, &bot, question, "deny").await, StatusCode::OK);
     let token = h.continued(turn, &token).await;
     let called = tool(app, &token, "ask_permission", args).await;
     assert_eq!(called.result["status"], "denied", "{}", called.body);
     assert!(permissions(app, &bot).await.is_empty());
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -158,12 +158,7 @@ async fn owner_quote_cannot_approve_a_different_action_after_the_attempt_parks()
         "{result:?}"
     );
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
-}
-
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
+    app.wait_turn(turn, &["waiting"]).await;
 }
 
 async fn answer(app: &TestApp, bot: &str, question: Uuid, choice: &str) -> StatusCode {
@@ -214,7 +209,7 @@ async fn asks_in_new_request(h: &Harness, bot: &str, args: Value, choices: &[&st
 /// request of its own instead of joining this one.
 async fn end_request(h: &Harness, bot: &str, turn: Uuid) {
     h.release(turn).await;
-    wait(&h.app, turn, "waiting").await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     let asked: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM owner_questions WHERE turn_id = ?1 AND status = 'pending'",
     )
@@ -225,7 +220,7 @@ async fn end_request(h: &Harness, bot: &str, turn: Uuid) {
     for question in asked {
         assert_eq!(answer(&h.app, bot, question, "deny").await, StatusCode::OK);
     }
-    wait(&h.app, turn, "completed").await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 async fn permissions(app: &TestApp, bot: &str) -> Vec<Value> {
@@ -252,12 +247,12 @@ async fn always_allow(h: &Harness, bot: &str, args: Value) -> Uuid {
     let (question, choices) = pending(&h.app, &token, args).await;
     assert_eq!(choices, ALWAYS);
     h.release(turn).await;
-    wait(&h.app, turn, "waiting").await;
+    h.app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         answer(&h.app, bot, question, "approve_task").await,
         StatusCode::OK
     );
-    wait(&h.app, turn, "completed").await;
+    h.app.wait_turn(turn, &["completed"]).await;
     question
 }
 
@@ -350,9 +345,9 @@ async fn approving_once_or_denying_remembers_nothing_and_plain_host_cards_offer_
         let (question, choices) = pending(app, &token, tailscale("up")).await;
         assert_eq!(choices, ALWAYS);
         h.release(turn).await;
-        wait(app, turn, "waiting").await;
+        app.wait_turn(turn, &["waiting"]).await;
         assert_eq!(answer(app, &main, question, choice).await, StatusCode::OK);
-        wait(app, turn, "completed").await;
+        app.wait_turn(turn, &["completed"]).await;
         assert!(permissions(app, &main).await.is_empty(), "{choice}");
     }
 
@@ -365,7 +360,7 @@ async fn approving_once_or_denying_remembers_nothing_and_plain_host_cards_offer_
     .await;
     assert_eq!(choices, ONCE);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     for refused in ["approve_forever", "approve_task", "approve_tool"] {
         assert_eq!(
             answer(app, &main, question, refused).await,
@@ -377,7 +372,7 @@ async fn approving_once_or_denying_remembers_nothing_and_plain_host_cards_offer_
         answer(app, &main, question, "approve").await,
         StatusCode::OK
     );
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM bot_permissions")
         .fetch_one(&app.db.pool)
         .await
@@ -402,14 +397,14 @@ async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let (denied, _) = pending(app, &token, tailscale("down")).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(answer(app, &main, denied, "deny").await, StatusCode::OK);
     let token = h.continued(turn, &token).await;
 
     let (allowed, choices) = pending(app, &token, tailscale("up")).await;
     assert_eq!(choices, ALWAYS);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         answer(app, &main, allowed, "approve_task").await,
         StatusCode::OK
@@ -421,7 +416,7 @@ async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
     runs_by_task_grant(app, &token, tailscale("up")).await;
     runs_by_task_grant(app, &token, tailscale("status")).await;
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -504,7 +499,7 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
     .await;
     assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     h.release(worker_turn).await;
-    wait(app, worker_turn, "completed").await;
+    app.wait_turn(worker_turn, &["completed"]).await;
 
     let (turn, token) = h.running(&main, GATE).await;
     let quoted = "Always allow managing Docker over SSH on omarchy-m1.";
@@ -559,7 +554,7 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
         "a delegated task-scoped card offers always"
     );
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     assert_eq!(
         answer(app, &worker, card, "approve_task").await,
         StatusCode::OK
@@ -572,7 +567,7 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
     let (card, choices) = pending(app, &child_token, docker.clone()).await;
     assert_eq!(choices, ALWAYS);
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     const TYPED: &str = "Always allow docker cleanup on this host";
     let sent = app.send(&worker, Uuid::new_v4(), TYPED, None).await;
     assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
@@ -700,7 +695,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     .await;
     assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     h.release(setup).await;
-    wait(app, setup, "completed").await;
+    app.wait_turn(setup, &["completed"]).await;
 
     else_api::db::routines::admit_due(&app.db.pool, &app.state.registry, None, due, 8)
         .await
@@ -737,7 +732,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     let other = asks_for(app, &token, like(LIKES, "X @other post likes")).await;
     assert_eq!(choices_of(app, other).await, ALWAYS);
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     assert_eq!(
         answer(app, &main, other, "approve_task").await,
         StatusCode::OK
@@ -756,11 +751,11 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     .await;
     assert_eq!(choices, ["approve", "deny", "approve_routine"]);
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     assert_eq!(answer(app, &main, cleanup, "deny").await, StatusCode::OK);
     h.continued(run, &token).await;
     h.release(run).await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     let id = webhook.result["webhook"]["id"].as_str().unwrap();
     let secret = webhook.result["token"].as_str().unwrap();

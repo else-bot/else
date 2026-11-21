@@ -338,7 +338,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     assert_eq!(parked.status, StatusCode::CONFLICT, "the attempt must end");
 
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(card["id"], id.to_string());
     assert_eq!(card["revision"], 1);
@@ -546,7 +546,7 @@ async fn discarding_continues_the_turn_and_nothing_can_send_it() {
         "a pending draft cannot be sent: {early:?}"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let discarded = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
@@ -577,7 +577,7 @@ async fn discarding_continues_the_turn_and_nothing_can_send_it() {
         "a report cannot invent a send"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("The owner discarded it on its card"),
@@ -594,7 +594,7 @@ async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_c
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, lunch()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     let turns_before: i64 = sqlx::query_scalar("SELECT count(*) FROM turns")
         .fetch_one(&app.db.pool)
         .await
@@ -682,7 +682,7 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, lunch()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let (second, token) = joined(
         &h,
@@ -766,7 +766,7 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, lunch()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let (_, plain) = joined(&h, &main, first, &token, "Send it.", None).await;
     let unbound = tool(
@@ -861,12 +861,12 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, lunch()).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     let token = h.continued(turn, &token).await;
     tool(app, &token, "computer_run", send_args(id)).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "uncertain", "{receipt}");
     assert!(
@@ -881,10 +881,10 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
     other["to"] = json!(["carol@example.com"]);
     let id = draft(app, &token, other).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "failed", "{receipt}");
     assert!(
@@ -946,7 +946,7 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     );
     let id = draft(app, &token, ship_post()).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(
         card["content"],
@@ -1058,7 +1058,7 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
     );
     let id = draft(app, &token, family_message()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["content"]["channel"], "message");
     assert_eq!(card["content"]["platform"], "telegram");
@@ -1167,7 +1167,7 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
     assert!(to_email.is_err(), "a revision's channel is fixed");
 
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     let (_, token) = joined(
         &h,
         &main,
@@ -1233,7 +1233,7 @@ async fn a_chat_approval_binds_the_open_message_version_only() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, family_message()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let (_, token) = joined(
         &h,
@@ -1341,7 +1341,7 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
     args["reply_to"]["folder"] = json!(folder);
     let id = draft(app, &token, args).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(
         card["content"]["from"], "main@owner.example",
@@ -1448,7 +1448,7 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, connected_reply(account)).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     let token = h.continued(first, &token).await;
     let lost = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
@@ -1457,7 +1457,7 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     assert_eq!(again.result["status"], "uncertain");
     assert_eq!(mail.sends().len(), 1, "an uncertain send is never repeated");
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
     assert_eq!(journaled(app, &main, id).await["status"], "uncertain");
 
     mail.connection_lost
@@ -1497,7 +1497,7 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     );
     assert_eq!(mail.sends().len(), 1, "a revoked account sends nothing");
     h.release(second).await;
-    app.wait_turn(&second.to_string(), &["completed"]).await;
+    app.wait_turn(second, &["completed"]).await;
 
     permit(app, account, &main, true).await;
     let sent = send_with_draft(
@@ -1555,7 +1555,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
         args["body"] = json!(format!("Dispatched: {dispatched}"));
         let id = draft(app, &token, args).await;
         h.release(turn).await;
-        app.wait_turn(&turn.to_string(), &["waiting"]).await;
+        app.wait_turn(turn, &["waiting"]).await;
         owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
         h.continued(turn, &token).await;
         let Claim::Fresh(Claimed {
@@ -1586,7 +1586,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
             ));
         }
         h.release(turn).await;
-        app.wait_turn(&turn.to_string(), &["completed"]).await;
+        app.wait_turn(turn, &["completed"]).await;
         let ended = journaled(app, &main, id).await;
         outcomes.push((id, action_id, ended["status"].as_str().unwrap().to_owned()));
         assert!(ended["result_detail"].is_string(), "{ended}");
@@ -1632,7 +1632,7 @@ async fn delegated_task(h: &Harness) -> (String, Uuid, Uuid, Uuid) {
     let main = app.main_bot().await;
     let leaf = app.create_bot("Telegram").await;
     let warm = h.send(&leaf, "hello").await;
-    app.wait_turn(&warm.to_string(), &["completed"]).await;
+    app.wait_turn(warm, &["completed"]).await;
     let (root, parent) = h.running(&main, GATE).await;
     let delegated = tool(
         app,
@@ -1673,7 +1673,7 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
     let id = draft(app, &token, lunch()).await;
     if parked {
         h.release(child).await;
-        app.wait_turn(&child.to_string(), &["waiting"]).await;
+        app.wait_turn(child, &["waiting"]).await;
     }
 
     // Before it parks, the message waits for the task's attempt to end,
@@ -1705,8 +1705,8 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
     .await;
     assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["completed"]).await;
-    app.wait_turn(&reply.to_string(), &["completed"]).await;
+    app.wait_turn(child, &["completed"]).await;
+    app.wait_turn(reply, &["completed"]).await;
     let outcome: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1728,7 +1728,7 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, family_message()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let (reply, _) = joined(
         &h,
@@ -1751,8 +1751,8 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    app.wait_turn(&reply.to_string(), &["interrupted"]).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(reply, &["interrupted"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     let card = shown(app, &main, first).await[0].clone();
     assert_eq!(
         card["status"], "pending",
@@ -1768,7 +1768,7 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    app.wait_turn(&first.to_string(), &["interrupted"]).await;
+    app.wait_turn(first, &["interrupted"]).await;
     let card = journaled(app, &main, id).await;
     assert_eq!(
         card["status"], "discarded",
@@ -1785,7 +1785,7 @@ async fn a_reply_that_moves_on_keeps_its_card_for_the_owner() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, family_message()).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     let (done, _) = joined(
         &h,
         &main,
@@ -1796,7 +1796,7 @@ async fn a_reply_that_moves_on_keeps_its_card_for_the_owner() {
     )
     .await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     assert_eq!(status(app, done).await, "queued", "it ends with its reply");
     let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["status"], "pending", "{card}");
@@ -1805,8 +1805,8 @@ async fn a_reply_that_moves_on_keeps_its_card_for_the_owner() {
     let discarded = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
-    app.wait_turn(&done.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
+    app.wait_turn(done, &["completed"]).await;
 }
 
 async fn granted(app: &TestApp, bot: &str) -> Value {
@@ -1830,7 +1830,7 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     )
     .await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(shown(app, &main, turn).await[0]["kind"], Value::Null);
     let refused = owner_action(
         app,
@@ -1854,7 +1854,7 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     let post = |body: &str| json!({ "platform": "x", "account": "@Proliquid_xyz", "body": body });
     let first = draft(app, &token, post("A whale flipped long.")).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown(app, &main, turn).await[1].clone();
     assert_eq!(
         card["kind"],
@@ -1956,7 +1956,7 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         .parse()
         .unwrap();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let discarded = owner_action(app, &main, reply, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
 
@@ -1976,11 +1976,11 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     );
 
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let (next, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     draft(app, &token, post("Another whale.")).await;
     h.release(next).await;
-    app.wait_turn(&next.to_string(), &["waiting"]).await;
+    app.wait_turn(next, &["waiting"]).await;
     assert_eq!(
         shown(app, &main, next).await[0]["status"],
         "pending",
@@ -2036,7 +2036,7 @@ async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
 
     let id = draft(app, &token, ship_post()).await;
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
     let card = shown(app, &leaf, child).await[0].clone();
     assert_eq!(
         card["status"], "pending",
@@ -2050,7 +2050,7 @@ async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
     let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("send exactly this X post now"), "{packet}");
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["completed"]).await;
+    app.wait_turn(child, &["completed"]).await;
     let delegation: String =
         sqlx::query_scalar("SELECT status FROM delegations WHERE child_turn_id = ?1")
             .bind(child)
@@ -2075,7 +2075,7 @@ async fn delegated_draft_after_approving_always(scheduled: bool) -> Value {
     }
     let first = draft(app, &token, family_message()).await;
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
     let approved = owner_action(
         app,
         &leaf,
@@ -2126,7 +2126,7 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
     )
     .await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(shown(app, &main, turn).await[0]["kind"], Value::Null);
     let refused = owner_action(
         app,
@@ -2146,7 +2146,7 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
     let token = h.continued(turn, &token).await;
     let first = draft(app, &token, to(family, "Nouvel article sur le blog.")).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
                        "destination": family });
     assert_eq!(
@@ -2201,7 +2201,7 @@ async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
     };
     let first = draft(app, &token, to(school, "Rue aux enfants vendredi.")).await;
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
 
     let reply = child;
     let (_, token) = joined(
@@ -2287,7 +2287,7 @@ async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
         .parse()
         .unwrap();
     h.release(reply).await;
-    app.wait_turn(&reply.to_string(), &["waiting"]).await;
+    app.wait_turn(reply, &["waiting"]).await;
     let discarded = owner_action(app, &leaf, other, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
     let token = h.continued(reply, &token).await;
@@ -2378,7 +2378,7 @@ async fn a_delegated_draft_marks_its_bot_as_needing_approval_until_approved() {
     let (_, token) = h.started(child).await;
     let id = draft(app, &token, family_message()).await;
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
     assert_eq!(
         sidebar_status(app, &leaf).await,
         json!({ "kind": "needs_approval", "preview": "Telegram message to Family group" }),
@@ -2409,7 +2409,7 @@ async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
     .await;
     assert_eq!(asked.result["status"], "pending", "{}", asked.body);
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
     assert_eq!(
         sidebar_status(app, &leaf).await,
         json!({ "kind": "waiting_for_answer", "preview": "Which account?" }),
@@ -2447,7 +2447,7 @@ async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
     );
     let first = draft(app, &token, dm("@ada", "Initial  lead DMs")).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let kind = json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
                        "destination": null, "task": "initial lead dms" });
     assert_eq!(
@@ -2533,7 +2533,7 @@ async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
     args["attachments"] = json!([{ "path": "report.pdf" }]);
     let id = draft(app, &token, args).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let card = shown(app, &main, turn).await[0].clone();
     let files = files_of(&card);
     assert_eq!(files.len(), 1, "{card}");
@@ -2614,7 +2614,7 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
     post["attachments"] = json!([{ "path": "a.png" }, { "path": "~/work/b.png" }]);
     let id = draft(app, &token, post).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let files = files_of(&shown(app, &main, turn).await[0]);
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|f| f["media_type"] == "image/png"));
@@ -2715,7 +2715,7 @@ async fn a_changed_attachment_fails_the_send_and_nothing_leaves() {
     args["attachments"] = json!([{ "path": "report.pdf" }]);
     let id = draft(app, &token, args).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let file_id = files_of(&shown(app, &main, turn).await[0])[0]["id"]
         .as_str()
         .unwrap()
@@ -2760,7 +2760,7 @@ async fn a_chat_approval_of_a_draft_with_files_needs_the_files_the_owner_saw() {
     args["attachments"] = json!([{ "path": "report.pdf" }]);
     let id = draft(app, &token, args).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let file_id = files_of(&shown(app, &main, turn).await[0])[0]["id"].clone();
 
     let unseen = send_with_draft(app, &main, "Send it.", json!({ "id": id, "version": 1 })).await;
@@ -2820,7 +2820,7 @@ async fn approved_connected_reply(h: &Harness, bot: &str, account: Uuid) -> (Uui
     let (turn, token) = h.running(bot, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, connected_reply(account)).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     owner_action(app, bot, id, "approve", json!({ "version": 1 })).await;
     (id, turn, h.continued(turn, &token).await)
 }
@@ -2857,7 +2857,7 @@ async fn a_send_that_stops_before_the_message_is_written_fails_with_its_reason()
     assert_eq!(refused["sends"][0]["phase"], "envelope", "{refused}");
     assert_eq!(action_statuses(app, account).await, ["failed"]);
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     mail.fail_at(None);
     let (_, token) = approve_again(&h, &main, id).await;
@@ -2903,7 +2903,7 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
         "{lost}"
     );
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     mail.fail_at(None);
     mail.search_fails
@@ -2922,7 +2922,7 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
     );
     assert_eq!(mail.sends().len(), 1, "a failed search sends nothing");
     h.release(second).await;
-    app.wait_turn(&second.to_string(), &["completed"]).await;
+    app.wait_turn(second, &["completed"]).await;
 
     mail.search_fails
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2966,7 +2966,7 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
         .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     mail.fail_at(None);
     let (second, token) = approve_again(&h, &main, id).await;
@@ -3023,7 +3023,7 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
     assert_eq!(mail.sends().len(), 1);
     assert_eq!(mail.searches().len(), 1);
     h.release(second).await;
-    app.wait_turn(&second.to_string(), &["completed"]).await;
+    app.wait_turn(second, &["completed"]).await;
 
     let (_, token) = approve_again(&h, &main, id).await;
     let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
@@ -3068,11 +3068,11 @@ async fn an_unsent_retry_keeps_the_earlier_send_uncertain() {
         .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     let (second, _) = approve_again(&h, &main, id).await;
     h.release(second).await;
-    app.wait_turn(&second.to_string(), &["completed"]).await;
+    app.wait_turn(second, &["completed"]).await;
     let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "uncertain", "{receipt}");
     assert_eq!(
@@ -3113,7 +3113,7 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
         .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
     sqlx::query("UPDATE draft_mail_sends SET message_id = NULL")
         .execute(&app.db.pool)
         .await
@@ -3133,7 +3133,7 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
             "{blocked}"
         );
         h.release(turn).await;
-        app.wait_turn(&turn.to_string(), &["completed"]).await;
+        app.wait_turn(turn, &["completed"]).await;
     }
     assert!(mail.searches().is_empty());
     assert_eq!(mail.sends().len(), 1, "no approval sends it again");
@@ -3154,7 +3154,7 @@ async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
         .result;
     let earlier = lost["sends"][0]["action_id"].clone();
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     let (second, _) = approve_again(&h, &main, id).await;
     outgoing_drafts::claim_connected(&app.db.pool, second, id, MAIL)
@@ -3195,7 +3195,7 @@ async fn a_retry_after_the_earlier_send_succeeded_sends_nothing() {
         .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
 
     mail.fail_at(None);
     let (_, token) = approve_again(&h, &main, id).await;

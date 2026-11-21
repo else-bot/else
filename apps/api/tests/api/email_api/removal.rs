@@ -100,7 +100,7 @@ async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_g
     );
 
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &main, &question, "approve").await;
     let token = h.continued(turn, &token).await;
     let removed = tool(app, &token, "mail_disconnect", args.clone()).await;
@@ -173,14 +173,14 @@ async fn a_bot_cannot_remove_an_inbox_it_cannot_read_or_one_the_owner_kept() {
     .await;
     assert!(invalid.error, "{}", invalid.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let args = json!({"account_id": account});
     let pending = tool(app, &token, "mail_disconnect", args.clone()).await;
     let question = pending.result["question_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &main, &question, "deny").await;
     let token = h.continued(turn, &token).await;
     let denied = tool(app, &token, "mail_disconnect", args).await;

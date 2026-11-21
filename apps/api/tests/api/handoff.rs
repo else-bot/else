@@ -465,7 +465,7 @@ async fn a_switch_waits_for_the_other_providers_turn_and_carries_job_records() {
     let second = reply.body["turn"]["id"].as_str().unwrap();
     h.release(first).await;
     assert_eq!(
-        app.wait_turn(&first.to_string(), &["completed"]).await,
+        app.wait_turn(first, &["completed"]).await,
         "completed",
         "the switch waits for the other provider's reply instead of stopping it"
     );

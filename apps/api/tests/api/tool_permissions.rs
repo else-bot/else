@@ -61,10 +61,7 @@ async fn stop(h: &Harness, bot: &str, turn: uuid::Uuid) {
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
     h.app
-        .wait_turn(
-            &turn.to_string(),
-            &["completed", "failed", "interrupted", "uncertain"],
-        )
+        .wait_turn(turn, &["completed", "failed", "interrupted", "uncertain"])
         .await;
 }
 
@@ -131,7 +128,7 @@ async fn always_allow_survives_new_requests_and_is_revocable_without_regrant_on_
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     h.release(turn).await;
     h.app
-        .wait_turn(&turn.to_string(), &["waiting", "running", "completed"])
+        .wait_turn(turn, &["waiting", "running", "completed"])
         .await;
     stop(&h, &bot, turn).await;
     let authorization = "Always approve ticket creation.";
@@ -387,9 +384,7 @@ async fn delegated_work_uses_the_bots_saved_tool_permission_and_offers_another()
     .await;
     assert_eq!(confirmed.result["status"], "approved");
     h.release(worker_turn).await;
-    h.app
-        .wait_turn(&worker_turn.to_string(), &["completed"])
-        .await;
+    h.app.wait_turn(worker_turn, &["completed"]).await;
     let delegated = tool(
         &h.app,
         &token,

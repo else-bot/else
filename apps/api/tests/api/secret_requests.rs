@@ -78,7 +78,7 @@ async fn an_owner_follow_up_continues_the_reply_and_keeps_the_secret_request() {
     let (turn, token) = h.running(&main, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let correction = "Use the logged-in gh host CLI instead of a GH_TOKEN.";
     let sent = app
@@ -94,8 +94,8 @@ async fn an_owner_follow_up_continues_the_reply_and_keeps_the_secret_request() {
 
     let answered = fulfill(app, &main, request, values()).await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
-    wait(app, turn, "completed").await;
-    wait(app, next, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
     assert_eq!(attempts(app, turn).await, 3);
 }
 
@@ -128,7 +128,7 @@ async fn a_follow_up_while_the_asking_attempt_still_runs_keeps_the_request() {
 
     let declined = cancel(app, &main, request).await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
 }
@@ -141,7 +141,7 @@ async fn an_answer_to_a_request_declined_after_a_follow_up_stores_nothing() {
     let (turn, token) = h.running(&main, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let sent = app
         .send(
             &main,
@@ -164,7 +164,7 @@ async fn an_answer_to_a_request_declined_after_a_follow_up_stores_nothing() {
         .await
         .unwrap();
     assert_eq!(stored, 0);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
     assert_canary_absent_from_database(app).await;
@@ -176,11 +176,6 @@ async fn status(app: &TestApp, turn: Uuid) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap()
-}
-
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
 }
 
 async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
@@ -236,7 +231,7 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
 
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
         .await;
@@ -278,7 +273,7 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     assert_eq!(stored.body["request"]["status"], "stored");
     assert_eq!(stored.body["requeued"], true);
     assert!(!stored.body.to_string().contains(CANARY));
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(attempts(app, turn).await, 2, "the same turn continued");
     let listed = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
     assert_eq!(listed.body["bot"]["sidebar_status"], Value::Null);
@@ -344,7 +339,7 @@ async fn an_answer_before_the_attempt_ends_queues_the_continuation_directly() {
         "the attempt is still running"
     );
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(attempts(app, turn).await, 2);
     assert_eq!(
         request_status(app, request).await,
@@ -361,7 +356,7 @@ async fn a_declined_request_continues_the_turn_without_a_secret() {
     let (turn, token) = h.running(&main, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let declined = cancel(app, &main, request).await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
     assert_eq!(declined.body["request"]["status"], "cancelled");
@@ -370,7 +365,7 @@ async fn a_declined_request_continues_the_turn_without_a_secret() {
         StatusCode::OK,
         "retry"
     );
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(
         request_status(app, request).await,
         ("cancelled".into(), Some(2))
@@ -422,8 +417,7 @@ async fn stop_withdraws_the_request_before_the_provider_finishes_draining() {
     );
     let listed = app.owner("GET", "/v1/task-secrets", None).await;
     assert_eq!(listed.body["secrets"], json!([]));
-    app.wait_turn(&turn.to_string(), &["interrupted", "uncertain"])
-        .await;
+    app.wait_turn(turn, &["interrupted", "uncertain"]).await;
     assert_canary_absent_from_database(app).await;
 }
 
@@ -436,7 +430,7 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
     let (turn, token) = h.running(&main, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let stop = app
         .owner(
             "POST",
@@ -445,7 +439,7 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(app, turn, "interrupted").await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(request_status(app, request).await.0, "cancelled");
     assert_eq!(
         fulfill(app, &main, request, values()).await.status,
@@ -460,23 +454,20 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
         Some(json!({ "request_id": Uuid::new_v4() })),
     )
     .await;
-    wait(app, turn, "interrupted").await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(request_status(app, request).await.0, "cancelled");
 
     let (turn, token) = h.running(&main, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let h = harness(TestApp::builder().db(h.app.stop().await)).await;
     let app = &h.app;
-    assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
-        "waiting"
-    );
+    assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
     assert_eq!(request_status(app, request).await.0, "pending");
     let stored = fulfill(app, &main, request, values()).await;
     assert_eq!(stored.status, StatusCode::OK, "{}", stored.body);
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(
         resolved(app, "deploy").await.len(),
         2,
@@ -487,12 +478,12 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
     let (turn, token) = h.running(&other, GATE).await;
     let request = request_id(app, &token).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     let deleted = app
         .owner("DELETE", &format!("/v1/bots/{other}"), None)
         .await;
     assert!(deleted.status.is_success(), "{}", deleted.body);
-    wait(app, turn, "interrupted").await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(request_status(app, request).await.0, "cancelled");
     assert_eq!(
         fulfill(app, &other, request, values()).await.status,
@@ -692,7 +683,7 @@ async fn an_owner_reply_in_the_bot_chat_joins_a_task_waiting_on_its_connection_c
     .await;
     assert_eq!(opened.result["parked"], true, "{}", opened.body);
     h.release(child).await;
-    wait(app, child, "waiting").await;
+    app.wait_turn(child, &["waiting"]).await;
     let reply = app
         .send(
             &leaf,

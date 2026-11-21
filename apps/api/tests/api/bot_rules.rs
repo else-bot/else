@@ -118,7 +118,7 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
         2
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let (next, _) = h.running(&main, GATE).await;
     let input = &h.inputs(next).await[0];
@@ -228,7 +228,7 @@ async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
         assert!(!saved.error, "{}", saved.body);
     }
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let path = format!("/v1/bots/{main}/rules/restore");
     let restored = h
@@ -337,7 +337,7 @@ async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
         assert!(!saved.error, "{}", saved.body);
     }
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let path = format!("/v1/bots/{main}/rules/restore");
     let restore = |version: i64, expected: i64| {
         h.app.owner(
@@ -373,7 +373,7 @@ async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
     .await;
     assert_eq!(saved.result["version"], 5, "{}", saved.body);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let undo = restore(4, 5).await;
     assert_eq!(undo.status, StatusCode::OK, "{}", undo.body);
 
@@ -437,7 +437,7 @@ async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
     .await;
     assert!(!saved.error, "{}", saved.body);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let cleared = h
         .app
         .owner(
@@ -504,7 +504,7 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
     .await;
     let question = asked.result["question_id"].as_str().unwrap().to_owned();
     h.release(root).await;
-    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    h.app.wait_turn(root, &["waiting"]).await;
     let chosen = h
         .app
         .owner(
@@ -567,7 +567,7 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
         .unwrap_or_else(|| panic!("no rules card in Scout's chat: {}", chat.body));
     assert_eq!(card["rules_update"]["section"], "DM cap");
     h.release(child).await;
-    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+    h.app.wait_turn(child, &["completed"]).await;
 
     let saved = rules(&h.app, &scout).await;
     assert_eq!(saved["sections"][0]["title"], "DM cap");

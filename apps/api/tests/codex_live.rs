@@ -267,21 +267,17 @@ async fn send_codex(app: &TestApp, bot: &str, text: &str) -> String {
 
 async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
     let turn = send_codex(app, bot, text).await;
-    let status = app
-        .wait_turn_for(&turn, FINISHED, Duration::from_secs(150))
-        .await;
+    let status = app.wait_live_turn(&turn, FINISHED).await;
     reply_text(app, bot, turn, status).await
 }
 
 async fn ask_answering_the_owner(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
     let turn = send_codex(app, bot, text).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let mut answered = 0;
     let mut statuses = FINISHED.to_vec();
     statuses.push("waiting");
     let status = loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let status = app.wait_turn_for(&turn, &statuses, remaining).await;
+        let status = app.wait_live_turn(&turn, &statuses).await;
         if status != "waiting" {
             break status;
         }
@@ -517,11 +513,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     )
     .await;
     let status = app
-        .wait_turn_for(
-            &turn,
-            &["interrupted", "completed", "uncertain"],
-            Duration::from_secs(60),
-        )
+        .wait_live_turn(&turn, &["interrupted", "completed", "uncertain"])
         .await;
     eprintln!("interrupt -> {status}");
     assert_eq!(status, "interrupted");
@@ -1100,11 +1092,7 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
         .unwrap();
     eprintln!("first attempt status {status} {error:?}: {text}");
     let final_status = app
-        .wait_turn_for(
-            &turn,
-            &["completed", "failed", "interrupted", "uncertain"],
-            Duration::from_secs(400),
-        )
+        .wait_live_turn(&turn, &["completed", "failed", "interrupted", "uncertain"])
         .await;
     let delegations: Vec<(Uuid, String, Option<String>, Option<i32>)> = sqlx::query_as(
         "SELECT target_bot_id, status, result, delivered_attempt FROM delegations WHERE root_turn_id = ?1",

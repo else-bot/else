@@ -108,7 +108,7 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
     let task_id = pending["task_id"].as_str().unwrap().parse().unwrap();
     let child = child_of(app, task_id).await;
     h.release(parent).await;
-    app.wait_turn(&parent.to_string(), &["completed"]).await;
+    app.wait_turn(parent, &["completed"]).await;
     let child_inputs = h.inputs(child).await;
     let child = child_inputs.first().expect("the task ran");
     assert_eq!(child.files.len(), 1, "only the named file is sent");
@@ -196,7 +196,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
     h.release(parent).await;
     let initial = h.started(child).await;
     let (asking, ask_token) = if updated {
-        app.wait_turn(&parent.to_string(), &["waiting"]).await;
+        app.wait_turn(parent, &["waiting"]).await;
         let follow = app.send(&main, Uuid::new_v4(), "Any news?", None).await;
         assert_eq!(follow.body["turn"]["steered_into"], parent.to_string());
         let token = h.continued(parent, &token).await;
@@ -208,7 +208,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
         )
         .await;
         assert!(!reply.error, "{}", reply.body);
-        app.wait_turn(&child.to_string(), &["interrupted"]).await;
+        app.wait_turn(child, &["interrupted"]).await;
         let replacement = child_of(app, task).await;
         h.started(replacement).await
     } else {
@@ -224,7 +224,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
     .await;
     assert!(!asked.error, "{}", asked.body);
     h.release(asking).await;
-    app.wait_turn(&asking.to_string(), &["waiting"]).await;
+    app.wait_turn(asking, &["waiting"]).await;
 
     let text = "Post it with this caption instead.";
     let sent = app.send(&twitter, Uuid::new_v4(), text, None).await;

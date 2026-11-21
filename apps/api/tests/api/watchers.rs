@@ -1,6 +1,5 @@
 use crate::common;
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,17 +53,6 @@ async fn setup() -> Setup {
         manager,
         bot,
         token,
-    }
-}
-
-async fn until<T, F: Future<Output = Option<T>>>(what: &str, mut probe: impl FnMut() -> F) -> T {
-    let deadline = tokio::time::Instant::now() + common::SETTLE;
-    loop {
-        if let Some(value) = probe().await {
-            return value;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "never {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -151,13 +139,15 @@ async fn job_status(app: &TestApp, job: Uuid) -> String {
 
 /// The watcher's current check job, once it runs.
 async fn running_check(s: &Setup, id: Uuid) -> Uuid {
-    let job = until("admitted the check", || async {
-        row(&s.h.app, id).await.check_job_id
-    })
+    let job = common::until(
+        "admitted the check",
+        common::poll(|| async { row(&s.h.app, id).await.check_job_id }),
+    )
     .await;
-    until("launched the check", || async {
-        (job_status(&s.h.app, job).await == "running").then_some(())
-    })
+    common::until(
+        "launched the check",
+        common::poll(|| async { (job_status(&s.h.app, job).await == "running").then_some(()) }),
+    )
     .await;
     job
 }
@@ -184,10 +174,13 @@ async fn check_ends(s: &Setup, job: Uuid, probe: &str) {
 }
 
 async fn settled(s: &Setup, id: Uuid, status: &str) -> Row {
-    until("settled the watcher", || async {
-        let row = row(&s.h.app, id).await;
-        (row.status == status).then_some(row)
-    })
+    common::until(
+        "settled the watcher",
+        common::poll(|| async {
+            let row = row(&s.h.app, id).await;
+            (row.status == status).then_some(row)
+        }),
+    )
     .await
 }
 
@@ -234,7 +227,7 @@ async fn a_watcher_checks_until_found_then_wakes_its_bot_once() {
     let s = setup().await;
     let id = started(&s).await;
     s.h.release(s.turn).await;
-    s.h.app.wait_turn(&s.turn.to_string(), &["completed"]).await;
+    s.h.app.wait_turn(s.turn, &["completed"]).await;
     let first = running_check(&s, id).await;
     let command: String = sqlx::query_scalar("SELECT command FROM guest_jobs WHERE id = ?1")
         .bind(first)
@@ -623,21 +616,24 @@ async fn a_check_whose_vault_entry_was_deleted_fails_and_says_why() {
         .unwrap();
         s.h.app.scheduler.wake();
         let (status, outcome, last_status): (String, Option<String>, Option<String>) =
-            until("counted the failed check", || async {
-                let (status, outcome, last, counted): (
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    i64,
-                ) = sqlx::query_as(
-                    "SELECT status, outcome, last_status, failures FROM watchers WHERE id = ?1",
-                )
-                .bind(id)
-                .fetch_one(&s.h.app.db.pool)
-                .await
-                .unwrap();
-                (counted == failures).then_some((status, outcome, last))
-            })
+            common::until(
+                "counted the failed check",
+                common::poll(|| async {
+                    let (status, outcome, last, counted): (
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        i64,
+                    ) = sqlx::query_as(
+                        "SELECT status, outcome, last_status, failures FROM watchers WHERE id = ?1",
+                    )
+                    .bind(id)
+                    .fetch_one(&s.h.app.db.pool)
+                    .await
+                    .unwrap();
+                    (counted == failures).then_some((status, outcome, last))
+                }),
+            )
             .await;
         assert_eq!(
             last_status.as_deref(),
@@ -685,15 +681,18 @@ async fn a_check_whose_vault_entries_cannot_be_read_fails_and_says_why() {
     .await
     .unwrap();
     s.h.app.scheduler.wake();
-    let last_status: Option<String> = until("counted the failed check", || async {
-        let (failures, last, status): (i64, Option<String>, String) =
-            sqlx::query_as("SELECT failures, last_status, status FROM watchers WHERE id = ?1")
-                .bind(id)
-                .fetch_one(&s.h.app.db.pool)
-                .await
-                .unwrap();
-        (failures == 1 && status == "waiting").then_some(last)
-    })
+    let last_status: Option<String> = common::until(
+        "counted the failed check",
+        common::poll(|| async {
+            let (failures, last, status): (i64, Option<String>, String) =
+                sqlx::query_as("SELECT failures, last_status, status FROM watchers WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&s.h.app.db.pool)
+                    .await
+                    .unwrap();
+            (failures == 1 && status == "waiting").then_some(last)
+        }),
+    )
     .await;
     assert_eq!(
         last_status.as_deref(),

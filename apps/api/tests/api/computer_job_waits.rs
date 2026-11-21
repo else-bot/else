@@ -99,7 +99,7 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
     );
     assert_eq!(parked.result["status"], "waiting");
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let parked_at: i64 = sqlx::query_scalar("SELECT max(seq) FROM bot_events WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
@@ -128,7 +128,7 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
 
     guest.report("done 3\nTimeoutError: page.goto exceeded 30000 ms\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let queued: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bot_events WHERE kind = 'turn.updated'
            AND json_extract(data, '$.turn.id') = ?1
@@ -167,10 +167,10 @@ async fn a_cancelled_job_also_continues_the_request_and_an_ended_job_returns_at_
     let job = start_job(app, &token).await;
     wait_job(app, &token, job).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     manager.cancel_job(bot.parse().unwrap(), job).await.unwrap();
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await, ("settled".into(), Some(2)));
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
@@ -245,17 +245,17 @@ async fn a_second_wait_is_refused_and_a_follow_up_continues_the_waiting_reply() 
         Err(CreateError::AttemptParked)
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let next = joined(app, &bot, turn, "Also summarize the crawl when it ends.", 2).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(wait_row(app, turn).await, ("pending".into(), None));
     assert_eq!(turn_status(app, next).await, "queued");
 
     guest.report("done 0\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
-    app.wait_turn(&next.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await, ("settled".into(), Some(3)));
     assert_eq!(
         attempts(app, turn).await,
@@ -282,7 +282,7 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
     let loose = start_job(app, &token).await;
     wait_job(app, &token, job).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let stopped = app
         .owner(
@@ -306,10 +306,7 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
         ("running", "pending"),
         "Stop leaves the waited job to its wait"
     );
-    assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
-        "waiting"
-    );
+    assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
 
     let shown = shown_waits(app, &bot, turn).await;
     assert_eq!(shown[0]["command"], "./crawl.sh", "{shown}");
@@ -321,7 +318,7 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
     assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
     assert_eq!(cancel.body["kind"], "computer_job", "{}", cancel.body);
     assert_eq!(job_status(app, job).await, "cancelling");
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await, ("stopped".into(), Some(2)));
     let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("status=\"stopped\""), "{packet}");
@@ -385,7 +382,7 @@ async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks()
     let crawl = start_job(app, &token).await;
     wait_job(app, &token, crawl).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let next = joined(app, &bot, turn, "Index the archive too.", 2).await;
     let token = h.continued(turn, &token).await;
@@ -402,7 +399,7 @@ async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks()
         .parse()
         .unwrap();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     manager
         .cancel_job(bot.parse().unwrap(), crawl)
         .await
@@ -426,8 +423,8 @@ async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks()
     assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
     h.continued(turn, &token).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
-    app.wait_turn(&next.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
     assert_eq!(attempts(app, turn).await, 3);
     assert_eq!(waits(app, turn).await, vec![(1, "settled".into(), Some(3))]);
 }

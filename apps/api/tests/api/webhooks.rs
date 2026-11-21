@@ -79,7 +79,7 @@ async fn a_trigger_wakes_the_bot_with_its_prompt_and_later_events_wait_and_coale
     assert_eq!(retried.result["webhook"]["id"], id.as_str());
     assert!(retried.result["token"].is_null(), "a token is shown once");
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     let wrong = trigger(&h.app, &id, "whk_wrong").await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
@@ -91,7 +91,7 @@ async fn a_trigger_wakes_the_bot_with_its_prompt_and_later_events_wait_and_coale
     assert_eq!(first.status, StatusCode::ACCEPTED, "{}", first.body);
     assert_eq!(first.body["status"], "requested");
     let (turn, _) = wait_for_wakes(&h.app, &id, 1).await[0];
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let finished: DateTime<Utc> = sqlx::query_scalar("SELECT finished_at FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&h.app.db.pool)
@@ -153,7 +153,7 @@ async fn a_wake_cannot_manage_webhooks() {
     let id = created.result["webhook"]["id"].as_str().unwrap().to_owned();
     let secret = created.result["token"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
 
     trigger(&h.app, &id, &secret).await;
     let (turn, _) = wait_for_wakes(&h.app, &id, 1).await[0];
@@ -173,7 +173,7 @@ async fn a_wake_cannot_manage_webhooks() {
     .await;
     assert!(made.status == StatusCode::FORBIDDEN || made.error);
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks")
         .fetch_one(&h.app.db.pool)
         .await
@@ -208,7 +208,7 @@ async fn a_faster_pace_waits_for_the_owner_to_approve_its_cost() {
         "{context}"
     );
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
 
     let answered = h
         .app
@@ -406,7 +406,7 @@ async fn deleting_a_webhook_revokes_its_token_and_drops_a_waiting_wake() {
         StatusCode::UNAUTHORIZED
     );
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     assert!(wakes(&h.app, &id).await.is_empty());
 }
 
@@ -483,7 +483,7 @@ async fn the_owner_sees_pauses_and_deletes_webhooks_in_the_sidebar() {
     let id = created.result["webhook"]["id"].as_str().unwrap().to_owned();
     let secret = created.result["token"].as_str().unwrap().to_owned();
     h.release(setup).await;
-    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    h.app.wait_turn(setup, &["completed"]).await;
     let webhooks = || async {
         h.app
             .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)

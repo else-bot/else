@@ -224,11 +224,8 @@ async fn stop(app: &TestApp, bot: &str, turn: Uuid) {
         )
         .await;
     assert!(stop.status.is_success(), "{:?}", stop.body);
-    app.wait_turn(
-        &turn.to_string(),
-        &["interrupted", "completed", "failed", "uncertain"],
-    )
-    .await;
+    app.wait_turn(turn, &["interrupted", "completed", "failed", "uncertain"])
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

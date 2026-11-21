@@ -960,7 +960,7 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1055,7 +1055,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
         "the owner approves the chat the username named when drafted: {proposed}"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1079,7 +1079,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{stopped}");
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let woken = insert_turn(db, bot, "connector", "queued", GATE).await;
     app.scheduler.wake();
     h.started(woken).await;
@@ -1544,7 +1544,7 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         "a connected draft is never sent by the bot's own tools"
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",

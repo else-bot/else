@@ -689,7 +689,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         Some(json!({ "request_id": Uuid::new_v4() })),
     )
     .await;
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let after = tool(app, &token, "memory_bots", json!({})).await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
 }

@@ -59,7 +59,7 @@ async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["bot"]["name"], "Tech Manager");
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 
     let (turn, token) = h.running(&github, GATE).await;
     for (target, name) in [(&main, "Proliquid"), (&github, "Engineering")] {
@@ -74,7 +74,7 @@ async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
         assert_eq!(snapshot(&h.app, target).await["name"], name);
     }
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let app = h.app.restart().await;
     assert_eq!(snapshot(&app, &github).await["name"], "Engineering");
     assert_eq!(snapshot(&app, &main).await["name"], "Proliquid");
@@ -192,7 +192,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     .await;
     assert!(!saved.error, "{}", saved.body);
     h.release(owner).await;
-    h.app.wait_turn(&owner.to_string(), &["completed"]).await;
+    h.app.wait_turn(owner, &["completed"]).await;
     let due = saved.result["routine"]["next_run_at"]
         .as_str()
         .unwrap()
@@ -258,7 +258,7 @@ async fn completed_turn_cannot_rename_a_bot() {
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let denied = tool(
         &h.app,
         &token,

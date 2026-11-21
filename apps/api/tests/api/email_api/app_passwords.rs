@@ -56,8 +56,7 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
     let context = card["context"].as_str().unwrap();
     assert!(context.contains("app-specific password"), "{context}");
     h.release(turn).await;
-    app.wait_turn_for(&turn.to_string(), &["waiting"], common::SETTLE)
-        .await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         approve(path.clone()).await.body["error"]["code"],
         "inbox_not_connected"
@@ -173,8 +172,7 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         "{context}"
     );
     h.release(turn).await;
-    app.wait_turn_for(&turn.to_string(), &["waiting"], common::SETTLE)
-        .await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(
         approve(path.clone()).await.body["error"]["code"],
         "inbox_not_connected",

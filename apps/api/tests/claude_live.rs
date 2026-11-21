@@ -69,11 +69,7 @@ async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, Str
     assert!(reply.status.is_success(), "{:?}", reply.body);
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     let status = app
-        .wait_turn_for(
-            &turn.to_string(),
-            &["completed", "failed", "interrupted", "uncertain"],
-            Duration::from_secs(240),
-        )
+        .wait_live_turn(turn, &["completed", "failed", "interrupted", "uncertain"])
         .await;
     let (text, error): (String, Option<String>) = sqlx::query_as(
         "SELECT coalesce((SELECT group_concat(text, '') FROM items WHERE turn_id = t.id
@@ -279,11 +275,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         .await;
     assert!(stop.status.is_success());
     let status = app
-        .wait_turn_for(
-            &long,
-            &["interrupted", "completed", "failed", "uncertain"],
-            Duration::from_secs(60),
-        )
+        .wait_live_turn(&long, &["interrupted", "completed", "failed", "uncertain"])
         .await;
     assert_eq!(status, "interrupted");
     tokio::time::sleep(Duration::from_secs(1)).await;

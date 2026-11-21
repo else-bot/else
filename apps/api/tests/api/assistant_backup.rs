@@ -659,12 +659,8 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
     let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
     h.release(first).await;
     assert_eq!(
-        app.wait_turn_for(
-            &first.to_string(),
-            &["completed", "cancelling", "interrupted"],
-            Duration::from_secs(30)
-        )
-        .await,
+        app.wait_turn(first, &["completed", "cancelling", "interrupted"])
+            .await,
         "completed",
         "the running turn finishes instead of being cancelled"
     );

@@ -263,10 +263,7 @@ async fn one_active_turn_per_bot_while_newer_messages_steer() {
     let third = h.send(&bot, "m2").await;
     h.release(first).await;
     for turn in [first, second, third] {
-        assert_eq!(
-            app.wait_turn(&turn.to_string(), &["completed"]).await,
-            "completed"
-        );
+        assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
     }
     done.cancel();
     assert_eq!(

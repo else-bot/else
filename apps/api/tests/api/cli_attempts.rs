@@ -2,7 +2,6 @@ use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::TestApp;
 use common::recorder::{Harness, harness, tool};
@@ -133,16 +132,6 @@ async fn send_grok(app: &TestApp, bot: &str, text: &str) -> Uuid {
     sent.body["turn"]["id"].as_str().unwrap().parse().unwrap()
 }
 
-async fn until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
-    tokio::time::timeout(timeout, async {
-        while !done() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
-}
-
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks whether the process exists.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -162,11 +151,12 @@ async fn an_escalated_stop_reaps_a_stubborn_cli_and_its_detached_worker_before_t
     let fx = fixture().await;
     let bot = fx.h.app.main_bot().await;
     let turn = send_grok(&fx.h.app, &bot, "[stubborn] keep working").await;
-    fx.h.app.wait_turn(&turn.to_string(), &["running"]).await;
+    fx.h.app.wait_turn(turn, &["running"]).await;
     let pid_file = fx.fake.join("worker.pid");
-    until("the detached worker", Duration::from_secs(10), || {
-        pid_file.is_file()
-    })
+    common::until(
+        "the detached worker",
+        common::poll(|| std::future::ready(pid_file.is_file().then_some(()))),
+    )
     .await;
     let worker: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
     assert!(alive(worker));
@@ -181,11 +171,7 @@ async fn an_escalated_stop_reaps_a_stubborn_cli_and_its_detached_worker_before_t
     assert!(stop.status.is_success(), "{}", stop.body);
     let status =
         fx.h.app
-            .wait_turn_for(
-                &turn.to_string(),
-                &["uncertain", "interrupted", "failed", "completed"],
-                Duration::from_secs(10),
-            )
+            .wait_turn(turn, &["uncertain", "interrupted", "failed", "completed"])
             .await;
     assert_eq!(status, "uncertain", "the CLI never confirmed its stop");
     assert!(
@@ -201,12 +187,16 @@ async fn a_parked_parent_without_a_result_keeps_its_child_and_continues_in_a_new
     let fx = fixture().await;
     let school = fx.h.app.create_bot("School").await;
     let warm = fx.h.send(&school, "hello").await;
-    fx.h.app.wait_turn(&warm.to_string(), &["completed"]).await;
+    fx.h.app.wait_turn(warm, &["completed"]).await;
     let main = fx.h.app.main_bot().await;
     let root = send_grok(&fx.h.app, &main, "[park] ask School for the form").await;
-    fx.h.app.wait_turn(&root.to_string(), &["running"]).await;
+    fx.h.app.wait_turn(root, &["running"]).await;
     let grant = fx.fake.join("grant");
-    until("Grok's task grant", common::SETTLE, || grant.is_file()).await;
+    common::until(
+        "Grok's task grant",
+        common::poll(|| std::future::ready(grant.is_file().then_some(()))),
+    )
+    .await;
     let token = std::fs::read_to_string(grant).unwrap();
     let reply = tool(
         &fx.h.app,
@@ -221,11 +211,7 @@ async fn a_parked_parent_without_a_result_keeps_its_child_and_continues_in_a_new
 
     let status =
         fx.h.app
-            .wait_turn_for(
-                &root.to_string(),
-                &["completed", "failed", "uncertain"],
-                Duration::from_secs(120),
-            )
+            .wait_turn(root, &["completed", "failed", "uncertain"])
             .await;
     assert_eq!(status, "completed");
     let delegation: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
@@ -280,7 +266,7 @@ async fn a_grok_that_signs_out_mid_turn_is_unavailable_until_the_host_signs_in_a
         let turn = send_grok(&fx.h.app, &bot, &format!("{marker} hello")).await;
         let status =
             fx.h.app
-                .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
+                .wait_turn(turn, &["failed", "completed", "uncertain"])
                 .await;
         let (code, message): (Option<String>, Option<String>) =
             sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
@@ -317,7 +303,7 @@ async fn a_grok_that_signs_out_mid_turn_is_unavailable_until_the_host_signs_in_a
     let turn = send_grok(&fx.h.app, &bot, "hello again").await;
     let status =
         fx.h.app
-            .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
+            .wait_turn(turn, &["failed", "completed", "uncertain"])
             .await;
     let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
         .bind(turn)

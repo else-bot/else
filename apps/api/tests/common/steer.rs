@@ -53,8 +53,7 @@ where
     let sent = app.send(bot, Uuid::new_v4(), first, Some(provider)).await;
     assert!(sent.status.is_success(), "{}", sent.body);
     let one: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn_for(&one.to_string(), &["running"], Duration::from_secs(120))
-        .await;
+    app.wait_live_turn(one, &["running"]).await;
     ready(one).await;
     let sent = app.send(bot, Uuid::new_v4(), second, Some(provider)).await;
     assert!(sent.status.is_success(), "{}", sent.body);
@@ -84,9 +83,7 @@ where
         assert!(tokio::time::Instant::now() < deadline, "{status}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let message = app
-        .wait_turn_for(&two.to_string(), ENDED, Duration::from_secs(30))
-        .await;
+    let message = app.wait_live_turn(two, ENDED).await;
     let text: String = sqlx::query_scalar(
         "SELECT coalesce(group_concat(text, char(10)), '') FROM (
              SELECT i.text FROM items i JOIN turns t ON t.id = i.turn_id

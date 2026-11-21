@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::routine_grants::{
     YEARLY, answer, asks, create, delete_args, fire, next_run, run_of, runs_without_asking,
-    send_args, wait,
+    send_args,
 };
 use super::tool_permissions::{SERVER, create as ticket, executed};
 
@@ -70,7 +70,7 @@ async fn routine(
     )
     .await;
     h.release(setup).await;
-    wait(&h.app, setup, "completed").await;
+    h.app.wait_turn(setup, &["completed"]).await;
     created
 }
 
@@ -86,9 +86,9 @@ async fn an_external_routine_card_always_allows_that_routine_until_revoked() {
     let (card, choices) = asks(app, &token, send_args()).await;
     assert_eq!(choices, ["approve", "deny", "approve_routine"]);
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, card, "approve_routine").await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
     assert_eq!(routine_grant_kinds(app, report).await, ["external"]);
     let listed = permissions(app, &main).await;
     assert_eq!(listed["routine_grants"][0]["kind"], "external");
@@ -103,7 +103,7 @@ async fn an_external_routine_card_always_allows_that_routine_until_revoked() {
         "an external grant does not cover destructive actions"
     );
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
 
     let revoked = app
         .owner(
@@ -147,9 +147,9 @@ async fn an_mcp_tool_card_in_a_routine_run_saves_a_tool_grant_the_next_run_uses(
         .unwrap();
     assert!(choices.contains("approve_tool"), "{choices}");
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     answer(app, &main, card, "approve_tool").await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 
     let run = run_of(&fire(app, next_run(app, daily).await).await, daily);
     let (_, token) = h.started(run).await;
@@ -183,9 +183,9 @@ async fn an_external_computer_call_without_a_task_scope_offers_a_grant_for_that_
     let (card, choices) = asks(app, &token, send_args()).await;
     assert_eq!(choices, ["approve", "deny", "approve_tool"]);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &main, card, "approve_tool").await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
     let listed = permissions(app, &main).await;
     let target = json!({"scope":"computer_tool", "tool":"computer_run", "kind":"external"});
     assert_eq!(listed["permissions"][0]["target"], target);
@@ -210,9 +210,9 @@ async fn an_external_computer_call_without_a_task_scope_offers_a_grant_for_that_
         .await;
     assert_eq!(revoked.status, StatusCode::NO_CONTENT);
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &main, deletion, "deny").await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (turn, token) = h.running(&main, &format!("{GATE} and once more")).await;
     asks(app, &token, send_args()).await;
@@ -229,7 +229,7 @@ async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing
         .await;
     let (card, _) = asks(app, &token, send_args()).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     h.send(&main, "Always allow.").await;
     assert_eq!(
         question(app, card).await,
@@ -248,12 +248,12 @@ async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing
     .await;
     assert_eq!(again.code(), "CARD_ANSWERED", "{}", again.body);
     h.release(turn).await;
-    wait(app, turn, "completed").await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (turn, token) = h.running(&main, &format!("{GATE} prune branches")).await;
     let (card, _) = asks(app, &token, delete_args("feature-a")).await;
     h.release(turn).await;
-    wait(app, turn, "waiting").await;
+    app.wait_turn(turn, &["waiting"]).await;
     h.send(&main, "Always allow.").await;
     assert_eq!(
         question(app, card).await,
@@ -279,14 +279,14 @@ async fn typing_always_approve_answers_a_waiting_routine_card() {
     let (_, token) = h.started(run).await;
     let (card, _) = asks(app, &token, send_args()).await;
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     h.send(&main, "Always approve.").await;
     assert_eq!(
         question(app, card).await,
         ("answered".to_owned(), Some("approve_routine".to_owned()))
     );
     assert_eq!(routine_grant_kinds(app, report).await, ["external"]);
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -299,12 +299,12 @@ async fn a_typed_reply_after_another_owner_message_answers_no_older_card() {
     let (_, token) = h.started(run).await;
     let (card, _) = asks(app, &token, send_args()).await;
     h.release(run).await;
-    wait(app, run, "waiting").await;
+    app.wait_turn(run, &["waiting"]).await;
     let chat = h.send(&main, "What is on my calendar today?").await;
-    wait(app, chat, "completed").await;
+    app.wait_turn(chat, &["completed"]).await;
     h.send(&main, "Always approve.").await;
     assert_eq!(question(app, card).await, ("pending".to_owned(), None));
     assert!(routine_grant_kinds(app, report).await.is_empty());
     answer(app, &main, card, "deny").await;
-    wait(app, run, "completed").await;
+    app.wait_turn(run, &["completed"]).await;
 }

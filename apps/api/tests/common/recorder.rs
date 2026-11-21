@@ -264,7 +264,7 @@ impl Harness {
 
     pub async fn continued(&self, turn: Uuid, old: &str) -> String {
         let token = self.grant(turn, Some(old)).await;
-        self.app.wait_turn(&turn.to_string(), &["running"]).await;
+        self.app.wait_turn(turn, &["running"]).await;
         token
     }
 
@@ -288,7 +288,7 @@ impl Harness {
     }
 
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
-        self.app.wait_turn(&turn.to_string(), &["running"]).await;
+        self.app.wait_turn(turn, &["running"]).await;
         (turn, self.grant(turn, None).await)
     }
 

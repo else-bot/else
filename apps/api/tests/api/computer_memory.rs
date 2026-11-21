@@ -121,7 +121,7 @@ async fn an_approved_resize_restarts_the_computer_bigger_and_reruns_the_job_it_r
         .result;
     assert_eq!(pending["status"], "pending", "{pending}");
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
         .await
@@ -183,7 +183,7 @@ async fn an_approved_resize_restarts_the_computer_bigger_and_reruns_the_job_it_r
         .unwrap()
     };
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(wait().await, (rerun, "pending".to_owned()));
     setup.guest.report("done 0\nindexed 1.2M documents\n");
     setup
@@ -199,7 +199,7 @@ async fn an_approved_resize_restarts_the_computer_bigger_and_reruns_the_job_it_r
 
     h.continued(turn, &token).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let stopped = app
         .owner(
@@ -240,14 +240,14 @@ async fn a_denied_resize_keeps_the_size_and_the_continuation_reports_the_oom() {
     .await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     setup.guest.report("done 137 1\nKilled\n");
     setup
         .manager
         .job(bot.parse().unwrap(), job.as_str().unwrap().parse().unwrap())
         .await
         .unwrap();
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Out of memory: it likely ran out of your computer's 1 GiB."),
@@ -261,7 +261,7 @@ async fn a_denied_resize_keeps_the_size_and_the_continuation_reports_the_oom() {
         .await
         .result;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &bot, &pending["question_id"], "deny").await;
     let token = h.continued(turn, &token).await;
     let denied = tool(app, &token, "computer_resize", args).await;
@@ -275,7 +275,7 @@ async fn a_denied_resize_keeps_the_size_and_the_continuation_reports_the_oom() {
         denied.body
     );
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("status=\"answered\" answer=\"deny\""),
@@ -302,13 +302,13 @@ async fn always_allow_covers_smaller_sizes_without_a_card_but_reruns_nothing_uns
         .await
         .result;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &bot, &pending["question_id"], "approve_task").await;
     let token = h.continued(turn, &token).await;
     let resized = tool(app, &token, "computer_resize", args).await.result;
     assert_eq!(resized["memory_mib"], 4096, "{resized}");
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let lowered = app
         .owner(
             "POST",
@@ -367,7 +367,7 @@ async fn always_allow_on_the_card_still_reruns_the_job_the_card_showed() {
         .await
         .result;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     answer(app, &bot, &pending["question_id"], "approve_task").await;
     let token = h.continued(turn, &token).await;
     setup.guest.report("running\n");

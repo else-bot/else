@@ -228,7 +228,7 @@ async fn snapshot_then_subscribe_replays_everything_in_between() {
         .await;
     common::steer::wait_for_text(&h.app, turn, 0).await;
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     subscribe_bot(&mut socket, &bot, &model.cursor()).await;
     let latest = server.snapshot(&bot).await;
@@ -257,10 +257,7 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
     .await;
     drop(socket);
     h.release(turn).await;
-    server
-        .app
-        .wait_turn(&turn.to_string(), &["completed"])
-        .await;
+    server.app.wait_turn(turn, &["completed"]).await;
     let latest = server.snapshot(&bot).await;
     let target = latest_seq(&latest);
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();

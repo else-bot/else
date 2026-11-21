@@ -130,7 +130,7 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
     assert_eq!(pending["commit"], COMMIT);
     let card_id = pending["request_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     let card = shown_card(app, &main, turn).await;
     assert_eq!(card["status"], "pending");
@@ -205,7 +205,7 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
     assert_eq!(done.body["install"]["key_stored"], true);
     assert_eq!(done.body["requeued"], true);
     assert!(!done.body.to_string().contains(CANARY));
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let packet = h.packets().await.last().unwrap().clone();
     assert!(
@@ -320,7 +320,7 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         .unwrap()
         .to_owned();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let declined = app
         .owner(
             "POST",
@@ -330,7 +330,7 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         .await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
     assert_eq!(declined.body["install"]["status"], "declined");
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert!(
         h.packets()
             .await
@@ -362,7 +362,7 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         .unwrap()
         .to_owned();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let done = app
         .owner(
             "POST",
@@ -371,7 +371,7 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         )
         .await;
     assert_eq!(done.body["install"]["key_stored"], false, "{}", done.body);
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let skill = &app.owner("GET", "/v1/settings/skills", None).await.body["skills"][0];
     assert_eq!(skill["scope"], "all");
     assert_eq!(skill["bot_id"], Value::Null);
@@ -466,7 +466,7 @@ async fn a_long_file_reads_in_full_across_pages() {
     .result;
     let card_id = pending["request_id"].as_str().unwrap().to_owned();
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let done = app
         .owner(
             "POST",
@@ -475,7 +475,7 @@ async fn a_long_file_reads_in_full_across_pages() {
         )
         .await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let (_, token) = h.running(&main, GATE).await;
     let mut text = String::new();
     let mut offset = Some(0);

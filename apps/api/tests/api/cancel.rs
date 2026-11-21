@@ -97,8 +97,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
     assert_eq!(retry.body["state"], "done");
     h.release(after).await;
     assert_eq!(
-        app.wait_turn(&after.to_string(), &["completed", "interrupted"])
-            .await,
+        app.wait_turn(after, &["completed", "interrupted"]).await,
         "completed"
     );
     let other = app.create_bot("Other").await;
@@ -275,7 +274,7 @@ async fn late_output_after_deletion_is_fenced() {
     };
     let at_delete = count().await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     assert_eq!(
         count().await,
         at_delete,

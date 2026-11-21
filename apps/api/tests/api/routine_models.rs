@@ -121,7 +121,7 @@ async fn fire(app: &TestApp, routine: &Value) -> Option<Uuid> {
 
 async fn finish(h: &Harness, turn: Uuid) {
     h.release(turn).await;
-    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    h.app.wait_turn(turn, &["completed"]).await;
 }
 
 async fn count(app: &TestApp, sql: &str, bind: &str) -> i64 {
@@ -182,7 +182,7 @@ async fn a_named_model_runs_the_routine_without_touching_the_bot_or_its_chat_ses
     finish(&h, turn).await;
 
     let run = fire(&h.app, routine).await.expect("the run was queued");
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let (provider, profile, lane): (String, String, String) =
         sqlx::query_as("SELECT provider_id, profile, session_lane FROM turns WHERE id = ?1")
             .bind(run)
@@ -320,20 +320,20 @@ async fn two_models_on_one_provider_keep_separate_native_sessions() {
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
 
     let chat = h.send(&bot, "Hello on the chat model.").await;
-    h.app.wait_turn(&chat.to_string(), &["completed"]).await;
+    h.app.wait_turn(chat, &["completed"]).await;
     let session_for = |id| {
         sqlx::query_scalar::<_, Uuid>("SELECT provider_session_id FROM turns WHERE id=?1").bind(id)
     };
     let chat_session = session_for(chat).fetch_one(&h.app.db.pool).await.unwrap();
     let run = fire(&h.app, &routine).await.unwrap();
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let routine_session = session_for(run).fetch_one(&h.app.db.pool).await.unwrap();
     assert_ne!(
         chat_session, routine_session,
         "routine uses a separate native session even on the chat provider"
     );
     let next = h.send(&bot, "Continue on the chat model.").await;
-    h.app.wait_turn(&next.to_string(), &["completed"]).await;
+    h.app.wait_turn(next, &["completed"]).await;
     assert_eq!(
         session_for(next).fetch_one(&h.app.db.pool).await.unwrap(),
         chat_session,
@@ -373,11 +373,11 @@ async fn an_admitted_run_keeps_its_model_after_the_routine_is_edited() {
     .await["routine"]
         .clone();
     let run = fire(&h.app, &routine).await.unwrap();
-    h.app.wait_turn(&run.to_string(), &["queued"]).await;
+    h.app.wait_turn(run, &["queued"]).await;
     let reset = patch(&h.app, &bot, &routine, json!({ "model": null })).await;
     assert_eq!(reset.status, StatusCode::OK);
     finish(&h, turn).await;
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let (provider, profile): (String, String) =
         sqlx::query_as("SELECT provider_id, profile FROM turns WHERE id=?1")
             .bind(run)
@@ -442,7 +442,7 @@ async fn unknown_or_omitted_models_never_block_creation() {
         .await
         .unwrap();
     assert_eq!(runs, 1, "only the unknown-model routine was due");
-    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    h.app.wait_turn(run, &["completed"]).await;
     let (provider, lane): (String, String) =
         sqlx::query_as("SELECT provider_id, session_lane FROM turns WHERE id = ?1")
             .bind(run)
@@ -664,7 +664,7 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
     assert_eq!(profile.body["profile"]["model"], "gpt-6-luna");
 
     let first = h.send(&bot, "hello").await;
-    h.app.wait_turn(&first.to_string(), &["completed"]).await;
+    h.app.wait_turn(first, &["completed"]).await;
     let (provider, profile): (String, String) =
         sqlx::query_as("SELECT provider_id, profile FROM turns WHERE id = ?1")
             .bind(first)
@@ -806,7 +806,7 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     finish(&h, turn).await;
 
     let next = h.send(&dev, "hello").await;
-    h.app.wait_turn(&next.to_string(), &["completed"]).await;
+    h.app.wait_turn(next, &["completed"]).await;
     let (provider, used): (String, String) =
         sqlx::query_as("SELECT provider_id, profile FROM turns WHERE id = ?1")
             .bind(next)
@@ -839,7 +839,7 @@ async fn run_once(app: &TestApp, routine: Uuid) -> Uuid {
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     tokio::time::timeout(common::SETTLE, async {
         while !sqlx::query_scalar::<_, bool>("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
             .bind(turn)

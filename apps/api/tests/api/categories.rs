@@ -317,7 +317,7 @@ async fn categories_change_during_a_turn_and_survive_a_restart_without_interrupt
     let team = create(app, Uuid::new_v4(), "Team").await.body["category"]["id"].clone();
     assert_eq!(assign(app, &bot, team.clone()).await.status, StatusCode::OK);
     h.release(turn).await;
-    let status = app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let status = app.wait_turn(turn, &["completed"]).await;
     assert_eq!(status, "completed", "the turn was not interrupted");
     let app = h.app.restart().await;
     let after = listing(&app).await;

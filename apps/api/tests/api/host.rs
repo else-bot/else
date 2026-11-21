@@ -857,7 +857,7 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::UNAUTHORIZED
     );
 
-    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    app.wait_turn(turn, &["interrupted"]).await;
     let conversation = h.inputs(turn).await[0].conversation_id;
     let stale = app
         .state

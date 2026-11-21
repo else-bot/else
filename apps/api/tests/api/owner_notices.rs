@@ -284,7 +284,7 @@ async fn a_card_raised_after_the_notice_replaces_it() {
     .await;
     assert!(!asked.error, "{}", asked.body);
     h.release(task.child).await;
-    app.wait_turn(&task.child.to_string(), &["waiting"]).await;
+    app.wait_turn(task.child, &["waiting"]).await;
 
     let shown = notices(app, &task.target, task.child).await;
     assert_eq!(shown[0]["status"], "superseded", "{shown:?}");
@@ -366,7 +366,7 @@ async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
     assert_eq!(received["owner_line"], Value::Null);
 
     h.release(task.child).await;
-    app.wait_turn(&task.child.to_string(), &["completed"]).await;
+    app.wait_turn(task.child, &["completed"]).await;
     let reply = item_where(app, &task.main, "bot_reply").await;
     assert_eq!(reply["title"], "Triage checkout errors");
     assert_eq!(reply["owner_need"], "decision", "{reply}");
@@ -408,7 +408,7 @@ async fn a_task_that_declares_nothing_keeps_its_reply_quiet() {
     let quiet = quiet.result;
     assert_eq!(quiet["kind"], "nothing");
     h.release(task.child).await;
-    app.wait_turn(&task.child.to_string(), &["completed"]).await;
+    app.wait_turn(task.child, &["completed"]).await;
     let reply = item_where(app, &task.main, "bot_reply").await;
     assert_eq!(reply["owner_need"], "nothing", "{reply}");
     assert!(reply.get("asks").is_none(), "{reply}");

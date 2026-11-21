@@ -101,16 +101,13 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     );
     assert_eq!(parked.result["status"], "waiting");
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     assert_eq!(attempts(app, turn).await, 1);
 
     check_now(app).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(wait_row(app, turn).await.0, "pending", "the job still runs");
-    assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
-        "waiting"
-    );
+    assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
     let shown = shown_waits(app, &main, turn).await;
     assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
     assert_eq!(shown[0]["mcp_id"], "t3-code", "{shown}");
@@ -123,7 +120,7 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(app).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(shown_waits(app, &main, turn).await, json!([]));
     assert_eq!(attempts(app, turn).await, 2, "the same request continued");
     assert_eq!(app.waiting_on(&main).await, Value::Null, "the job ended");
@@ -173,7 +170,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     std::fs::write(&state, "unreadable").unwrap();
     check_now(app).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -189,7 +186,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
         check_now(app).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let (status, delivered, checks) = wait_row(app, turn).await;
     assert_eq!((status.as_str(), delivered, checks), ("failed", Some(2), 4));
     let packet = h.packets().await.last().unwrap().clone();
@@ -213,7 +210,7 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     // A restart lands while the owner's Stop unwinds a reply that carries
     // this wait: recovery parks the turn on it instead of cancelling it.
     sqlx::query("UPDATE turns SET status = 'cancelling', error_code = 'stopped' WHERE id = ?1")
@@ -226,10 +223,7 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     let db = h.app.stop().await;
     let h = harness(TestApp::builder().db(db)).await;
     let app = &h.app;
-    assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
-        "waiting"
-    );
+    assert_eq!(app.wait_turn(turn, &["waiting"]).await, "waiting");
     assert_eq!(wait_row(app, turn).await.0, "pending");
     let stopped = app
         .owner(
@@ -241,14 +235,14 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(
-        app.wait_turn(&turn.to_string(), &["waiting"]).await,
+        app.wait_turn(turn, &["waiting"]).await,
         "waiting",
         "Stop ends generation only; the turn keeps waiting"
     );
     assert_eq!(wait_row(app, turn).await.0, "pending");
     std::fs::write(&state, "result_available").unwrap();
     check_now(app).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await.0, "finished");
 }
 
@@ -267,10 +261,10 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     std::fs::write(&state, "result_available").unwrap();
     check_now(app).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let finished: Uuid = sqlx::query_scalar("SELECT id FROM mcp_waits WHERE turn_id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -282,7 +276,7 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     let shown = shown_waits(app, &main, turn).await;
     assert_eq!(
         shown[0]["purpose"], "Review the WEB-284 PR once T3 finishes.",
@@ -300,7 +294,7 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
         (&first.body["kind"], &first.body["created"]),
         (&json!("mcp"), &json!(true))
     );
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     let (status, delivered, _) = wait_row(app, turn).await;
     assert_eq!((status.as_str(), delivered), ("stopped", Some(2)));
     let packet = h.packets().await.last().unwrap().clone();
@@ -333,7 +327,7 @@ async fn stopping_a_continued_reply_keeps_its_waits() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let next = follow(app, &main, first).await;
     let token = h.continued(first, &token).await;
@@ -346,7 +340,7 @@ async fn stopping_a_continued_reply_keeps_its_waits() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
     assert_eq!(turn_status(app, next).await, "interrupted");
     assert_eq!(carried(app, first).await, vec![(1, "pending".into())]);
 
@@ -354,7 +348,7 @@ async fn stopping_a_continued_reply_keeps_its_waits() {
     check_now(app).await;
     h.continued(first, &token).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
     assert_eq!(attempts(app, first).await, 3);
     let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
@@ -413,7 +407,7 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    app.wait_turn(first, &["waiting"]).await;
 
     let second = follow(app, &main, first).await;
     let token = h.continued(first, &token).await;
@@ -470,9 +464,9 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
     check_now(app).await;
     h.continued(first, &token).await;
     h.release(first).await;
-    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(first, &["completed"]).await;
     for message in [second, latest] {
-        app.wait_turn(&message.to_string(), &["completed"]).await;
+        app.wait_turn(message, &["completed"]).await;
         assert_eq!(
             attempts(app, message).await,
             0,
@@ -542,19 +536,19 @@ async fn a_status_tool_not_declared_repeatable_is_refused_and_a_deadline_ends_a_
         .unwrap();
     assert_eq!(held, 0, "a refused tool neither waits nor asks the owner");
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
 
     let (next, token) = h.running(&main, GATE).await;
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(next).await;
-    app.wait_turn(&next.to_string(), &["waiting"]).await;
+    app.wait_turn(next, &["waiting"]).await;
     sqlx::query("UPDATE mcp_waits SET deadline_at = '2000-01-01T00:00:00.000+00:00', next_check_at = '2999-01-01T00:00:00.000+00:00' WHERE turn_id = ?1")
         .bind(next)
         .execute(&app.db.pool)
         .await
         .unwrap();
-    app.wait_turn(&next.to_string(), &["completed"]).await;
+    app.wait_turn(next, &["completed"]).await;
     let (status, delivered, checks) = wait_row(app, next).await;
     assert_eq!(
         (status.as_str(), delivered, checks),
@@ -578,7 +572,7 @@ async fn a_busy_package_with_many_due_waits_does_not_hide_another_package() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
     sqlx::query(
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 70)
          INSERT INTO mcp_waits (id, bot_id, turn_id, attempt, mcp_id, tool, arguments,
@@ -637,7 +631,7 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
         .unwrap();
     assert_eq!(waits, 0);
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    app.wait_turn(turn, &["waiting"]).await;
 
     follow(app, &main, turn).await;
     let token = h.continued(turn, &token).await;
@@ -651,7 +645,7 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
     check_now(app).await;
     h.continued(turn, &token).await;
     h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await.0, "failed");
     assert_eq!(
         calls(&state),
@@ -702,9 +696,9 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
         "{parked}"
     );
     h.release(child).await;
-    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    app.wait_turn(child, &["waiting"]).await;
     h.release(root).await;
-    app.wait_turn(&root.to_string(), &["waiting"]).await;
+    app.wait_turn(root, &["waiting"]).await;
     let pending: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(delegation)
         .fetch_one(&app.db.pool)
@@ -721,14 +715,10 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
         )
         .await;
     assert_eq!(owner.status, StatusCode::ACCEPTED, "{}", owner.body);
-    app.wait_turn_for(
-        owner.body["turn"]["id"].as_str().unwrap(),
-        &["completed"],
-        common::SETTLE,
-    )
-    .await;
+    app.wait_turn(owner.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
     assert_eq!(
-        app.wait_turn(&child.to_string(), &["waiting"]).await,
+        app.wait_turn(child, &["waiting"]).await,
         "waiting",
         "the owner's work ran while the task kept waiting"
     );
@@ -736,10 +726,10 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(app).await;
-    app.wait_turn(&child.to_string(), &["completed"]).await;
+    app.wait_turn(child, &["completed"]).await;
     assert_eq!(attempts(app, child).await, 2, "the same task continued");
     assert_eq!(wait_row(app, child).await.0, "finished");
-    app.wait_turn(&root.to_string(), &["completed"]).await;
+    app.wait_turn(root, &["completed"]).await;
     assert_eq!(attempts(app, root).await, 2, "the delegator resumed once");
     let (status, delivered): (String, Option<i32>) =
         sqlx::query_as("SELECT status, delivered_attempt FROM delegations WHERE id = ?1")
@@ -787,7 +777,7 @@ async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
     let accepted = tool(app, &token, "delegate", task).await;
     assert_eq!(accepted.result["status"], "pending", "{}", accepted.body);
     h.release(root).await;
-    app.wait_turn(&root.to_string(), &["waiting"]).await;
+    app.wait_turn(root, &["waiting"]).await;
 
     follow(app, &main, root).await;
     let token = h.continued(root, &token).await;
@@ -859,7 +849,7 @@ async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(latest).await;
-    app.wait_turn(&latest.to_string(), &["waiting"]).await;
+    app.wait_turn(latest, &["waiting"]).await;
     follow(app, &main, latest).await;
     let token = h.continued(latest, &token).await;
     assert_eq!(attempts(app, latest).await, 2);
