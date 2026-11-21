@@ -6,7 +6,16 @@ use super::*;
 /// Seed main -> Target, then Target's running task hands work to Third.
 /// Returns (main, root, child, first delegation, grandchild, second delegation, Third).
 async fn seed_chain(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
-    let (main, root, child, first) = seed(db).await;
+    seed_chain_from(db, ItemKind::User, "Find the form.").await
+}
+
+/// Seed the chain under main's reply to a `kind` message.
+async fn seed_chain_from(
+    db: &TestDb,
+    kind: ItemKind,
+    text: &str,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let (main, root, child, first) = seed_from(db, kind, text).await;
     common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
     sqlx::query("UPDATE turns SET attempt = 1 WHERE id = ?1")
         .bind(child)
@@ -350,17 +359,8 @@ async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_ru
 async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
     use else_api::app::providers::Origin;
     let db = TestDb::migrated().await;
-    let (main, root, child, _, grandchild, _, _) = seed_chain(&db).await;
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         SELECT t.owner_item_id, t.conversation_id, 1000, t.id, 'routine', 'Hourly triage'
-         FROM turns t WHERE t.id = ?1",
-    )
-    .bind(root)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    let _ = main;
+    let (_, root, child, _, grandchild, _, _) =
+        seed_chain_from(&db, ItemKind::Routine, "Hourly triage").await;
     let origins = |expected: Origin, why: &'static str| {
         let pool = db.pool.clone();
         async move {

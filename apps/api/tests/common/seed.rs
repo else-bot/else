@@ -174,6 +174,41 @@ impl Turn {
     }
 }
 
+/// Seed a `kind` item for seeded `turn` as the next item of the turn's
+/// conversation, as a provider records a message the turn wrote.
+pub async fn item<'c>(
+    db: impl Acquire<'c, Database = Sqlite>,
+    turn: Uuid,
+    kind: ItemKind,
+    text: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    let mut tx = db.begin().await.unwrap();
+    let conversation: Uuid = sqlx::query_scalar(
+        "UPDATE conversations SET last_item_seq = last_item_seq + 1
+         WHERE id = (SELECT conversation_id FROM turns WHERE id = ?1)
+         RETURNING id",
+    )
+    .bind(turn)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         SELECT ?1, id, last_item_seq, ?3, ?4, ?5 FROM conversations WHERE id = ?2",
+    )
+    .bind(id)
+    .bind(conversation)
+    .bind(turn)
+    .bind(kind)
+    .bind(text)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
 /// Move a turn to `status` by hand, skipping the scheduler and the
 /// lifecycle's source-state checks. The status triggers fire as they would
 /// on a real transition.

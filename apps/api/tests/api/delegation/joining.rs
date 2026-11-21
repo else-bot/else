@@ -3,33 +3,6 @@
 
 use super::*;
 
-/// Make seeded `turn` the reply to an owner message, so a newer owner
-/// message can join it.
-async fn owner_reply(db: &TestDb, turn: Uuid) {
-    let (conversation, item): (Uuid, Uuid) =
-        sqlx::query_as("SELECT conversation_id, owner_item_id FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, (SELECT last_item_seq + 1 FROM conversations WHERE id = ?2),
-                 ?3, 'user', 'Find the form.')",
-    )
-    .bind(item)
-    .bind(conversation)
-    .bind(turn)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1")
-        .bind(conversation)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-}
-
 async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
     follow_up_with(db, bot, "synthetic", else_api::db::turns::Admission::Open).await
 }
@@ -40,15 +13,6 @@ async fn follow_up_with(
     provider: &str,
     preemption: else_api::db::turns::Admission,
 ) -> Uuid {
-    sqlx::query(
-        "UPDATE conversations SET last_turn_no = coalesce((SELECT max(turn_no) FROM turns t
-             WHERE t.conversation_id = conversations.id), last_turn_no)
-         WHERE bot_id = ?1 AND kind = 'owner'",
-    )
-    .bind(bot)
-    .execute(&db.pool)
-    .await
-    .unwrap();
     let accepted = else_api::db::turns::accept(
         &db.pool,
         else_api::db::turns::SendRequest {
@@ -129,7 +93,6 @@ async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
 async fn joining_a_reply_leaves_another_replys_handoff_pending() {
     let db = TestDb::migrated().await;
     let (main, root, _child, _outbound) = seed(&db).await;
-    owner_reply(&db, root).await;
     common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let handoff = Uuid::new_v4();
     sqlx::query(
@@ -160,7 +123,6 @@ async fn joining_a_reply_leaves_another_replys_handoff_pending() {
 async fn a_follow_up_joins_the_reply_that_receives_its_tasks_outcome() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
-    owner_reply(&db, root).await;
     common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     common::seed::force_status(&db.pool, child, TurnStatus::Completed).await;
     let follow = follow_up(&db, main).await;
@@ -188,7 +150,6 @@ async fn a_follow_up_joins_the_reply_that_receives_its_tasks_outcome() {
 async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
     let db = TestDb::migrated().await;
     let (main, root, child, outbound) = seed(&db).await;
-    owner_reply(&db, root).await;
     common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     common::seed::force_status(&db.pool, child, TurnStatus::Waiting).await;
     let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
@@ -349,29 +310,7 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_message_does_not_join_a_routine_run() {
     let db = TestDb::migrated().await;
-    let (main, root, child, delegation) = seed(&db).await;
-    let (conversation, item): (Uuid, Uuid) =
-        sqlx::query_as("SELECT conversation_id, owner_item_id FROM turns WHERE id = ?1")
-            .bind(root)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, (SELECT last_item_seq + 1 FROM conversations WHERE id = ?2),
-                 ?3, 'routine', 'Weekly audit')",
-    )
-    .bind(item)
-    .bind(conversation)
-    .bind(root)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1")
-        .bind(conversation)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    let (main, root, child, delegation) = seed_from(&db, ItemKind::Routine, "Weekly audit").await;
     common::seed::force_status(&db.pool, child, TurnStatus::Running).await;
     common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
     let follow = follow_up(&db, main).await;
@@ -518,7 +457,6 @@ async fn a_task_hands_work_on_once_and_the_last_hop_routes_follow_ups_back() {
 async fn a_message_sent_during_a_pause_joins_only_once_it_ends() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
-    owner_reply(&db, root).await;
     let follow = follow_up_with(
         &db,
         main,

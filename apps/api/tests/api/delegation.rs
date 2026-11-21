@@ -57,6 +57,12 @@ async fn turn_events(pool: &sqlx::SqlitePool, bot: Uuid, turn: Uuid) -> Vec<(Str
 }
 
 async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
+    seed_from(db, ItemKind::User, "Find the form.").await
+}
+
+/// Seed main's running reply to a `kind` message, delegating to Target.
+/// Returns (main, root, child, delegation).
+async fn seed_from(db: &TestDb, kind: ItemKind, text: &str) -> (Uuid, Uuid, Uuid, Uuid) {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let main: Uuid = sqlx::query_scalar("SELECT default_bot_id FROM installation")
         .fetch_one(&db.pool)
@@ -66,6 +72,7 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
     let root = common::seed::turn(main)
         .status(TurnStatus::Running)
         .attempt(1)
+        .message(kind, text)
         .insert(&db.pool)
         .await;
     let accepted =

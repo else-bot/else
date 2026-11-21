@@ -219,32 +219,12 @@ async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_pro
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
     let progress = "Routine paused. Now the computer state.";
-    let (target, conversation, seq): (Uuid, Uuid, i64) = sqlx::query_as(
-        "SELECT t.bot_id, c.id, c.last_item_seq + 1 FROM turns t
-         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
-    )
-    .bind(child)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(conversation)
-    .bind(seq)
-    .bind(child)
-    .bind(progress)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
-        .bind(conversation)
-        .bind(seq)
-        .execute(&db.pool)
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
         .await
         .unwrap();
+    common::seed::item(&db.pool, child, ItemKind::Assistant, progress).await;
     let else_api::app::providers::TurnOutcome::Failed { code, message } =
         else_api::providers::cli::attempt::deadline_failure()
     else {
@@ -294,31 +274,7 @@ async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_pro
 async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty() {
     let db = TestDb::migrated().await;
     let (main, root, child, _) = seed(&db).await;
-    let (conversation, seq): (Uuid, i64) = sqlx::query_as(
-        "SELECT c.id, c.last_item_seq + 1 FROM turns t
-         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
-    )
-    .bind(child)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'assistant', 'Half of the form')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(conversation)
-    .bind(seq)
-    .bind(child)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
-        .bind(conversation)
-        .bind(seq)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    common::seed::item(&db.pool, child, ItemKind::Assistant, "Half of the form").await;
     else_api::db::turns::lifecycle::recover_after_restart(&db.pool)
         .await
         .unwrap();
