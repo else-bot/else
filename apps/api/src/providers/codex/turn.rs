@@ -7,11 +7,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming, RpcError};
-use super::policy::{Refusal, Reported, TurnEvents};
+use super::policy::{Allowed, Refusal, Reported, TurnEvents};
 use super::{Codex, RPC_TIMEOUT, Ready, codex_home, prompt, skills};
 use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use crate::providers::cli::attempt::{self, Channel, Ended, SendError};
 use crate::providers::cli::session::{Opened, PreparedTurn};
+use crate::providers::cli::turn::ToolSet;
 
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait before listing an MCP server that reported no tools
@@ -28,10 +29,10 @@ fn instructions(input: &TurnInput, cwd: &str) -> String {
 }
 
 /// The running native turn, read through the app-server.
-struct Running<'s> {
-    server: &'s mut AppServer,
-    thread_id: &'s str,
-    native_turn: &'s str,
+pub(super) struct Running<'s> {
+    pub server: &'s mut AppServer,
+    pub thread_id: &'s str,
+    pub native_turn: &'s str,
 }
 
 #[async_trait]
@@ -329,8 +330,7 @@ impl Codex {
             thread_id: &thread_id,
             native_turn: &native_turn,
             profile,
-            host_tools: input.delegation.host_tools(),
-            elsebot_tools: self.tool_url.is_some(),
+            allowed: Allowed::Tools(ToolSet::for_turn(input, self.tool_url.as_deref())),
             current_message: None,
             project: &project,
             steers: Default::default(),

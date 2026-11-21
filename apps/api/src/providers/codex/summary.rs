@@ -1,7 +1,8 @@
-use super::super::codex_rpc::{AppServer, Incoming};
-use super::policy::Reported;
+use super::super::codex_rpc::AppServer;
+use super::policy::{Allowed, Reported, TurnEvents};
+use super::turn::Running;
 use super::{Codex, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
-use crate::providers::cli::attempt::Violation;
+use crate::providers::cli::attempt::{self, Violation};
 use async_trait::async_trait;
 use serde_json::json;
 use std::ffi::OsString;
@@ -136,63 +137,26 @@ impl Codex {
             .await
             .map_err(|e| e.to_string())?;
         let native_turn = turn["turn"]["id"].as_str().unwrap_or_default().to_owned();
-        let mut text = String::new();
-        let mut violation: Option<Violation> = None;
-        loop {
-            let Some(message) = server.next().await else {
-                return Err("Codex exited before the summary finished".into());
-            };
-            let (method, params) = match message {
-                Incoming::Refused { method } => {
-                    violation.get_or_insert(Violation::policy(format!("Codex requested {method}")));
-                    continue;
-                }
-                Incoming::Notification { method, params } => (method, params),
-            };
-            match method.as_str() {
-                "thread/started" if params["thread"]["id"].as_str() != Some(&thread_id) => {
-                    violation.get_or_insert(Violation::policy("Codex started another thread"));
-                }
-                "item/started" | "item/completed" => {
-                    let item = &params["item"];
-                    let kind = item["type"].as_str().unwrap_or_default();
-                    if !matches!(kind, "userMessage" | "agentMessage" | "reasoning") {
-                        violation.get_or_insert(Violation::policy(format!(
-                            "Codex produced a {kind} item"
-                        )));
-                    } else if method == "item/completed"
-                        && kind == "agentMessage"
-                        && item["phase"].as_str() != Some("commentary")
-                    {
-                        text = item["text"].as_str().unwrap_or_default().to_owned();
-                    }
-                }
-                "model/rerouted" if params["toModel"].as_str() != Some(&profile.model) => {
-                    violation.get_or_insert(Violation::policy("Codex rerouted the model"));
-                }
-                "thread/settings/updated" => {
-                    if let Some(mismatch) =
-                        Reported::from_response(&params["threadSettings"]).mismatch(profile)
-                    {
-                        violation.get_or_insert(Violation::profile(mismatch));
-                    }
-                }
-                "turn/completed"
-                    if params["turn"]["id"]
-                        .as_str()
-                        .is_none_or(|t| t == native_turn) =>
-                {
-                    if let Some(violation) = violation {
-                        return Err(violation.to_string());
-                    }
-                    return match params["turn"]["status"].as_str() {
-                        Some("completed") if !text.trim().is_empty() => Ok(text.trim().to_owned()),
-                        Some("completed") => Err("Codex returned an empty summary".into()),
-                        other => Err(format!("the summary turn ended {}", other.unwrap_or("?"))),
-                    };
-                }
-                _ => {}
-            }
+        let project = std::path::PathBuf::from(&server.cwd);
+        let mut events = TurnEvents {
+            thread_id: &thread_id,
+            native_turn: &native_turn,
+            profile,
+            allowed: Allowed::Messages,
+            current_message: None,
+            project: &project,
+            steers: Default::default(),
+        };
+        let mut running = Running {
+            server,
+            thread_id: &thread_id,
+            native_turn: &native_turn,
+        };
+        let (text, completed) = attempt::collect(&mut running, &mut events, "Codex").await?;
+        match completed.status.as_deref() {
+            Some("completed") if !text.trim().is_empty() => Ok(text.trim().to_owned()),
+            Some("completed") => Err("Codex returned an empty summary".into()),
+            other => Err(format!("the summary turn ended {}", other.unwrap_or("?"))),
         }
     }
 }

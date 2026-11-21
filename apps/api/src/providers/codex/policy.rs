@@ -7,6 +7,7 @@ use super::{Codex, RPC_TIMEOUT};
 use crate::app::providers::{FailureCode, LimitWindow, Profile, Steer, TurnOutcome};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+use crate::providers::cli::turn::ToolSet;
 use crate::providers::prompt;
 
 const FORBIDDEN_ITEMS: &[&str] = &[
@@ -139,8 +140,18 @@ impl Codex {
 
 /// The terminal `turn/completed` of the turn.
 pub(super) struct Completed {
-    status: Option<String>,
+    pub status: Option<String>,
     error: Option<String>,
+}
+
+/// What a Codex attempt may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Allowed {
+    /// A turn: any item but the forbidden ones, with tools from this set.
+    Tools(ToolSet),
+    /// A summary or checkpoint: messages and reasoning only. Its text is
+    /// each final message, read whole.
+    Messages,
 }
 
 /// One running Codex turn's notifications, checked against its policy.
@@ -148,8 +159,7 @@ pub(super) struct TurnEvents<'a> {
     pub thread_id: &'a str,
     pub native_turn: &'a str,
     pub profile: &'a Profile,
-    pub host_tools: bool,
-    pub elsebot_tools: bool,
+    pub allowed: Allowed,
     pub current_message: Option<String>,
     /// Where a steered message's files are staged.
     pub project: &'a std::path::Path,
@@ -158,8 +168,8 @@ pub(super) struct TurnEvents<'a> {
 }
 
 impl TurnEvents<'_> {
-    fn allowed_tool(&self, item: &Value) -> bool {
-        self.elsebot_tools
+    fn allowed_tool(tools: ToolSet, item: &Value) -> bool {
+        tools.elsebot()
             && item["server"].as_str() == Some(SERVER_NAME)
             && item["tool"]
                 .as_str()
@@ -168,11 +178,19 @@ impl TurnEvents<'_> {
 
     fn check_item(&self, item: &Value) -> Result<(), Violation> {
         let kind = item["type"].as_str().unwrap_or_default();
-        if FORBIDDEN_ITEMS.contains(&kind) || (!self.host_tools && HOST_TOOL_ITEMS.contains(&kind))
-        {
+        let tools = match self.allowed {
+            Allowed::Tools(tools) => tools,
+            Allowed::Messages if matches!(kind, "userMessage" | "agentMessage" | "reasoning") => {
+                return Ok(());
+            }
+            Allowed::Messages => {
+                return Err(Violation::policy(format!("Codex produced a {kind} item")));
+            }
+        };
+        if FORBIDDEN_ITEMS.contains(&kind) || (!tools.host() && HOST_TOOL_ITEMS.contains(&kind)) {
             return Err(Violation::policy(format!("Codex attempted a {kind} item")));
         }
-        if kind == "mcpToolCall" && !self.allowed_tool(item) {
+        if kind == "mcpToolCall" && !Self::allowed_tool(tools, item) {
             return Err(Violation::policy(format!(
                 "Codex called an MCP tool outside else.bot's allowlist: {}/{}",
                 item["server"].as_str().unwrap_or("?"),
@@ -262,6 +280,15 @@ impl Protocol for TurnEvents<'_> {
                 }
             }
             "item/started" => self.check_item(&params["item"])?,
+            "item/completed" if self.allowed == Allowed::Messages => {
+                let item = &params["item"];
+                self.check_item(item)?;
+                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
+                    let text = item["text"].as_str().unwrap_or_default();
+                    events.extend([Event::EndMessage, Event::Text(text.to_owned())]);
+                }
+            }
+            "item/agentMessage/delta" if self.allowed == Allowed::Messages => {}
             "thread/compacted" => events.push(Event::Compacted),
             "item/completed" if params["item"]["type"] == "contextCompaction" => {
                 events.push(Event::Compacted);

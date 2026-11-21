@@ -49,7 +49,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::cli::attempt::{Channel, Ended, Event, Protocol};
+use super::cli::attempt::{self, Ended};
 use super::cli::session::PreparedTurn;
 use super::cli::stream::{Interrupt, Prompt, StreamAttempt};
 use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, Stream, ToolSet};
@@ -503,45 +503,26 @@ async fn checkpoint_once(
     .map_err(|e| e.to_string())?;
     let uuid = Uuid::new_v4().to_string();
     let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
-    let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
-    let result = async {
+    let exchange = async {
         let line = user_message(&uuid, Value::from(prompt_text));
-        tokio::select! {
-            _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-            written = attempt.write(&line) => {
-                written.map_err(|e| e.to_string())?;
-            }
+        attempt.write(&line).await.map_err(|e| e.to_string())?;
+        let (text, info) = attempt::collect(&mut attempt, &mut tracker, DEFINITION.label).await?;
+        if !tracker.init_seen {
+            Err("Claude did not report its tool set".into())
+        } else if !info.success {
+            Err(info.message)
+        } else if text.trim().is_empty() {
+            Ok(info.message)
+        } else {
+            Ok(text)
         }
-        loop {
-            let event = tokio::select! {
-                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err("the checkpoint exceeded its deadline".to_owned());
-                }
-                event = attempt.next() => event?,
-            };
-            let Some(event) = event else {
-                return Err("Claude exited before the checkpoint finished".to_owned());
-            };
-            let events = tracker
-                .on(&event)
-                .map_err(|v| format!("{}: {}", v.code, v.message))?;
-            for event in events {
-                if let Event::Finished(info) = event {
-                    return if !tracker.init_seen {
-                        Err("Claude did not report its tool set".into())
-                    } else if !info.success {
-                        Err(info.message)
-                    } else if tracker.text.trim().is_empty() {
-                        Ok(info.message)
-                    } else {
-                        Ok(tracker.text.clone())
-                    };
-                }
-            }
+    };
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err("cancelled".to_owned()),
+        result = tokio::time::timeout(super::CHECKPOINT_DEADLINE, exchange) => {
+            result.unwrap_or_else(|_| Err("the checkpoint exceeded its deadline".to_owned()))
         }
-    }
-    .await;
+    };
     let closed = attempt.close().await;
     let text = result?;
     closed.map(|()| text)

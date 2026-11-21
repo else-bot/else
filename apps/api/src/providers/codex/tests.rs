@@ -407,13 +407,13 @@ async fn detect_with(dir: &std::path::Path, script: &str, logged_in: bool) -> Co
 }
 
 async fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
-    fake_codex_with(dir, &json!([]), None).await
+    fake_codex_with(dir, &json!([]), &[]).await
 }
 
 async fn fake_codex_with(
     dir: &std::path::Path,
     servers: &Value,
-    item_kind: Option<&str>,
+    items: &[Value],
 ) -> (Codex, std::path::PathBuf) {
     let received = dir.join("received.jsonl");
     let inputs = dir.join("inputs.jsonl");
@@ -438,10 +438,7 @@ async fn fake_codex_with(
         })).collect::<Vec<_>>(),
     });
     let catalog = format!("{:?}", catalog.to_string());
-    let item = item_kind.map_or_else(
-        || "None".to_owned(),
-        |kind| format!("{:?}", json!({ "type": kind, "id": "item-1" }).to_string()),
-    );
+    let items = format!("{:?}", Value::from(items).to_string());
     let servers = format!("{:?}", servers.to_string());
     let script = format!(
         r#"python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> {launches:?}
@@ -456,7 +453,7 @@ cat "$CODEX_HOME/config.toml" > {launched:?}
 exec python3 -c '
 import json, os, sys
 def out(m): print(json.dumps(m), flush=True)
-item = {item}
+items = json.loads({items})
 models = [m["slug"] for m in json.loads({catalog})["models"]]
 if os.path.exists({one_model:?}): models = models[:1]
 for flag, value in zip(sys.argv, sys.argv[1:]):
@@ -496,9 +493,10 @@ for line in sys.stdin:
     else: r = {{}}
     out({{"id": m["id"], "result": r}})
     if method == "turn/start":
-        if item:
-            out({{"method": "item/started", "params": {{"threadId": p["threadId"],
-                 "turnId": "native-turn", "item": json.loads(item)}}}})
+        for item in items:
+            for event in ("item/started", "item/completed"):
+                out({{"method": event, "params": {{"threadId": p["threadId"],
+                     "turnId": "native-turn", "item": item}}}})
         out({{"method": "turn/completed", "params": {{"threadId": p["threadId"],
              "turn": {{"id": "native-turn", "status": "completed"}}}}}})
 ' "$@""#
@@ -551,7 +549,7 @@ async fn a_connector_event_launches_without_host_tools_but_keeps_elsebot_tools()
         (Origin::Other, true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
+        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), &[]).await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex.run(turn_from(origin), &sink, Stop::default()).await;
@@ -645,7 +643,7 @@ async fn a_connector_event_fails_before_its_turn_without_the_no_native_catalog()
         ("ignore-catalog", true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), &[]).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join(marker), "").unwrap();
         if one {
@@ -710,10 +708,49 @@ async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
 }
 
 #[tokio::test]
+async fn a_summary_is_its_final_message_and_refuses_any_other_item() {
+    let profile = turn_from(crate::app::providers::Origin::Other)
+        .profile
+        .unwrap();
+    let summarize = |items: Vec<Value>| {
+        let profile = profile.clone();
+        async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (codex, _) = fake_codex_with(dir.path(), &json!([]), &items).await;
+            codex
+                .summarize_once(
+                    Uuid::new_v4(),
+                    &profile,
+                    "summarize",
+                    &CancellationToken::new(),
+                )
+                .await
+        }
+    };
+    let result = summarize(vec![
+        json!({ "type": "agentMessage", "id": "c", "phase": "commentary", "text": "Reading." }),
+        json!({ "type": "reasoning", "id": "r" }),
+        json!({ "type": "agentMessage", "id": "f", "phase": "final_answer", "text": " Summary. " }),
+    ])
+    .await;
+    assert_eq!(result, Ok("Summary.".into()));
+    // A kind a turn would allow, such as a new one, is refused here too.
+    for kind in ["commandExecution", "mcpToolCall", "plan"] {
+        let result = summarize(vec![json!({ "type": kind, "id": "item-1" })]).await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.contains(&format!("Codex produced a {kind} item"))),
+            "{kind}: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
     for (failures, delivered) in [(1, true), (2, false)] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), &[]).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join("account-failures"), failures.to_string()).unwrap();
         let sink = super::super::recording::Recorded::default();
@@ -746,7 +783,7 @@ async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
 async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
     for (failures, delivered) in [(1, true), (2, false)] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), &[]).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join("mcp-failures"), failures.to_string()).unwrap();
         let sink = super::super::recording::Recorded::default();
@@ -782,7 +819,7 @@ async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
 async fn an_unexpected_tool_inventory_is_a_policy_violation() {
     let dir = tempfile::tempdir().unwrap();
     let servers = json!([{ "name": crate::app::tools::SERVER_NAME, "tools": { "shell": {} } }]);
-    let (codex, received) = fake_codex_with(dir.path(), &servers, None).await;
+    let (codex, received) = fake_codex_with(dir.path(), &servers, &[]).await;
     let codex = codex.with_tools(TOOL_URL.into());
     let sink = super::super::recording::Recorded::default();
     let outcome = codex
@@ -841,7 +878,12 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
     use crate::app::providers::Origin;
     for kind in ["commandExecution", "fileChange", "webSearch"] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind)).await;
+        let (codex, _) = fake_codex_with(
+            dir.path(),
+            &elsebot_server(),
+            &[json!({ "type": kind, "id": "item-1" })],
+        )
+        .await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex
@@ -857,7 +899,12 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
     }
     for kind in ["commandExecution", "fileChange"] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind)).await;
+        let (codex, _) = fake_codex_with(
+            dir.path(),
+            &elsebot_server(),
+            &[json!({ "type": kind, "id": "item-1" })],
+        )
+        .await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex
@@ -1185,8 +1232,7 @@ fn account_rate_limit_updates_report_both_windows() {
         thread_id: "th",
         native_turn: "tu",
         profile: &profile,
-        host_tools: true,
-        elsebot_tools: true,
+        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1231,8 +1277,7 @@ fn token_usage_of_this_turn_is_reported_per_model_request() {
         thread_id: "th",
         native_turn: "tu",
         profile: &profile,
-        host_tools: true,
-        elsebot_tools: true,
+        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1268,8 +1313,7 @@ fn context_compaction_is_reported_once_per_signal() {
         thread_id: "th",
         native_turn: "tu",
         profile: &profile,
-        host_tools: true,
-        elsebot_tools: true,
+        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),
@@ -1341,8 +1385,7 @@ fn a_steered_message_names_the_turn_and_its_echo_is_taken_once() {
         thread_id: "th",
         native_turn: "tu",
         profile: &profile,
-        host_tools: true,
-        elsebot_tools: true,
+        allowed: super::policy::Allowed::Tools(ToolSet::HostAndElsebot),
         current_message: None,
         project: std::path::Path::new("/p"),
         steers: Default::default(),

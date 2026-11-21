@@ -534,6 +534,35 @@ where
     }
 }
 
+/// Read a tool-less one-shot attempt, such as a checkpoint or a memory
+/// summary, to its terminal result: its text, with messages separated by a
+/// blank line, and the terminal. A violation or an early exit is an error.
+/// The caller bounds it in time and cancels it.
+pub async fn collect<C, P>(
+    channel: &mut C,
+    protocol: &mut P,
+    label: &str,
+) -> Result<(String, P::Terminal), String>
+where
+    C: Channel,
+    P: Protocol<Message = C::Message>,
+{
+    let mut text = String::new();
+    loop {
+        let Some(message) = channel.next().await? else {
+            return Err(format!("{label} exited before its terminal result."));
+        };
+        for event in protocol.on(&message).map_err(|v| v.to_string())? {
+            match event {
+                Event::Text(delta) => text.push_str(&delta),
+                Event::EndMessage if !text.is_empty() => text.push_str("\n\n"),
+                Event::Finished(terminal) => return Ok((text, terminal)),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// How an attempt ended, which decides its cleanup and its native session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {

@@ -40,7 +40,6 @@ pub struct Tracker {
     calls: HashMap<String, Call>,
     wrote_text: bool,
     separate: bool,
-    pub(super) text: String,
     activity: bool,
     /// Steered turns whose message was written to the CLI and not echoed
     /// yet. Each message's UUID is its turn's ID.
@@ -62,7 +61,6 @@ impl Tracker {
             calls: HashMap::new(),
             wrote_text: false,
             separate: false,
-            text: String::new(),
             activity: false,
             steers: HashSet::new(),
             notices: HashSet::new(),
@@ -212,10 +210,8 @@ impl Tracker {
                 if self.separate {
                     self.separate = false;
                     events.push(Event::EndMessage);
-                    self.text.push_str("\n\n");
                 }
                 self.wrote_text = true;
-                self.text.push_str(delta);
                 events.push(Event::Text(delta.to_owned()));
             }
             _ => {}

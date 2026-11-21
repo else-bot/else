@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::providers::{Availability, Provider, TurnInput, TurnOutcome};
 use crate::app::providers::{FailureCode, MemoryContext, SessionState};
-use crate::providers::cli::attempt::StopCause;
+use crate::providers::cli::attempt::{Event, Protocol, StopCause};
 use crate::providers::models::Models;
 use protocol::ResultInfo;
 
@@ -719,6 +719,56 @@ out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok",
     .await;
     assert!(matches!(claude.availability(), Availability::Available));
     (claude, received)
+}
+
+#[tokio::test]
+async fn a_checkpoint_is_its_text_blocks_joined_by_a_blank_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("claude");
+    std::fs::write(
+        &program,
+        r#"#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
+if a[:1] == ["auth"]: print('{"loggedIn":true}'); sys.exit()
+out = lambda e: print(json.dumps(e), flush=True)
+model = a[a.index("--model") + 1]
+out({"type": "system", "subtype": "init", "model": model, "tools": [], "mcp_servers": []})
+msg = json.loads(sys.stdin.readline())
+out({"type": "user", "uuid": msg["uuid"], "isReplay": True})
+out({"type": "stream_event", "event": {"type": "message_start", "message": {"model": model}}})
+for text in ["First.", "Second."]:
+    out({"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "text"}}})
+    out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}})
+out({"type": "result", "subtype": "success", "is_error": False, "result": "Second.", "num_turns": 1})
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claude = Claude::detect(
+        Some(Host::new(dir.path(), &dir.path().join("bots"))),
+        Some(program),
+        Some(claude_home::HostConfig {
+            dir: dir.path().join("config"),
+            explicit: true,
+        }),
+        String::new(),
+    )
+    .await;
+    let request = CheckpointRequest {
+        bot_id: Uuid::new_v4(),
+        profile: Some(Profile {
+            model: "claude-opus-5-5".into(),
+            reasoning_effort: "high".into(),
+            service_tier: "default".into(),
+        }),
+        prompt: "Checkpoint the conversation.".into(),
+        max_bytes: 1024,
+    };
+    let text = claude.checkpoint(request, &CancellationToken::new()).await;
+    assert_eq!(text, Ok("First.\n\nSecond.".into()));
 }
 
 fn specialist_turn(session: Option<SessionState>) -> TurnInput {
