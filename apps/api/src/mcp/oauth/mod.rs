@@ -50,7 +50,14 @@ pub(super) struct Session {
     store: Store,
     client: Option<Arc<RegisteredClient>>,
     state: State,
-    connection: Option<transport::Connection>,
+    connection: Option<Open>,
+}
+
+/// A live connection and the filled config it was opened with, so a task
+/// secret the owner replaced reconnects instead of reusing the old values.
+struct Open {
+    connection: transport::Connection,
+    config: Transport,
 }
 
 impl Session {
@@ -131,6 +138,7 @@ impl Session {
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
+        self.close_unless_opened_with(config).await;
         if !transport::METHODS.contains(&method.as_str()) || !params.is_object() {
             return Err(Error::Invalid(
                 "Use a supported MCP method with object params.",
@@ -151,6 +159,7 @@ impl Session {
                     self.connection
                         .as_mut()
                         .expect("connected MCP")
+                        .connection
                         .request(method.clone(), params.clone())
                         .await
                 }
@@ -243,11 +252,24 @@ impl Session {
         ))
     }
 
+    /// Close a connection opened with other values as soon as the new ones
+    /// are known, even if the operation then fails, so it cannot keep
+    /// streaming with a replaced secret.
+    async fn close_unless_opened_with(&mut self, config: &Transport) {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|open| open.config != *config)
+        {
+            self.close().await;
+        }
+    }
+
     async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
         if self.connection.is_none() {
-            let mut config = config.clone();
+            let mut sent = config.clone();
             if let State::Authorized(credential) = &self.state
-                && let Transport::Http { headers, .. } = &mut config
+                && let Transport::Http { headers, .. } = &mut sent
             {
                 headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
                 headers.insert(
@@ -255,18 +277,20 @@ impl Session {
                     format!("Bearer {}", credential.token.access_token().secret()),
                 );
             }
-            self.connection = Some(
-                transport::connect(
-                    &config,
-                    self.store.path(),
-                    self.store
-                        .path()
-                        .parent()
-                        .and_then(Path::parent)
-                        .expect("MCP data directory"),
-                )
-                .await?,
-            );
+            let connection = transport::connect(
+                &sent,
+                self.store.path(),
+                self.store
+                    .path()
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("MCP data directory"),
+            )
+            .await?;
+            self.connection = Some(Open {
+                connection,
+                config: config.clone(),
+            });
         }
         Ok(())
     }
@@ -276,6 +300,7 @@ impl Session {
         config: &Transport,
         redirect_uri: String,
     ) -> Result<McpAuthorization, Error> {
+        self.close_unless_opened_with(config).await;
         self.store.require_key()?;
         let redirect = reqwest::Url::parse(&redirect_uri).ok().filter(|url| {
             url.scheme() == "http"
@@ -468,8 +493,8 @@ impl Session {
     }
 
     pub(super) async fn close(&mut self) {
-        if let Some(mut connection) = self.connection.take() {
-            connection.shutdown().await;
+        if let Some(mut open) = self.connection.take() {
+            open.connection.shutdown().await;
         }
     }
 }

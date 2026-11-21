@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use else_wire::mcp::{InstalledMcp, McpAuthorization, McpConnectionStatus};
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -527,50 +528,35 @@ pub struct Replaced {
     pub reconnect: bool,
 }
 
-struct Slot {
+/// A package's actor state. Every bot's operations on one package, upstream
+/// calls included, run one at a time in its mailbox, because they share one
+/// connection and one sign-in. A slow server delays only its own package.
+enum Slot {
+    Live(Box<Live>),
+    /// Removed. An operation that looked up this slot before the removal
+    /// finds this and reports the package missing, even after the id is
+    /// installed again under a new slot.
+    Retired,
+}
+
+struct Live {
     path: PathBuf,
     /// One connection and one saved sign-in, shared by every bot.
     session: Option<oauth::Session>,
-    oauth_key: Option<Arc<crate::credentials::SecretKey>>,
-    oauth_client: Option<Arc<oauth::RegisteredClient>>,
-    task_secrets: Option<TaskSecrets>,
-    /// The filled config the live connection, if any, was opened with.
-    connected_with: Option<Transport>,
-    retired: bool,
-    gate: Arc<crate::maintenance::Gate>,
 }
 
-impl Slot {
+impl Live {
     async fn package(&self) -> Result<Package, Error> {
-        if self.retired {
-            return Err(Error::NotFound);
-        }
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || read_package(&path))
             .await
             .map_err(|_| Error::Connection)?
     }
 
-    /// The package's connection config with its task secrets filled in.
-    /// A live connection made with other values, such as a secret the
-    /// owner since replaced, is closed so the next one sends these.
-    async fn config(&mut self) -> Result<(Transport, Vec<task_secrets::Redact>), Error> {
-        let package = self.package().await?;
-        let (config, redact) =
-            TaskSecrets::fill(self.task_secrets.as_ref(), &package.config).await?;
-        if self.connected_with.as_ref() != Some(&config) {
-            if let Some(session) = self.session.as_mut() {
-                session.close().await;
-            }
-            self.connected_with = Some(config.clone());
-        }
-        Ok((config, redact))
-    }
-
-    async fn session(&mut self) -> Result<&mut oauth::Session, Error> {
+    async fn session(&mut self, shared: &Shared) -> Result<&mut oauth::Session, Error> {
         if self.session.is_none() {
-            let store = oauth::Store::new(self.path.clone(), self.oauth_key.clone());
-            self.session = Some(oauth::Session::open(store, self.oauth_client.clone()).await?);
+            let store = oauth::Store::new(self.path.clone(), shared.oauth_key.clone());
+            self.session = Some(oauth::Session::open(store, shared.oauth_client.clone()).await?);
         }
         Ok(self.session.as_mut().expect("opened MCP session"))
     }
@@ -582,62 +568,198 @@ impl Slot {
     }
 }
 
+/// The maintenance admission an operation holds while it runs.
+#[derive(Clone, Copy)]
+enum Admit {
+    /// Reads files only, so it runs during a backup.
+    Never,
+    /// Writes: refused once a backup or update waits.
+    Write,
+    /// Called for running turns: allowed until a backup captures.
+    Turn,
+    /// Writes only when it opens the session, which may adopt older sign-in
+    /// files.
+    IfOpening,
+}
+
+impl Admit {
+    fn enter(
+        self,
+        gate: &Arc<crate::maintenance::Gate>,
+        live: &Live,
+    ) -> Result<Option<crate::maintenance::TurnAdmission>, Error> {
+        let write = || {
+            gate.enter()
+                .map(crate::maintenance::TurnAdmission::Open)
+                .ok_or(Error::Paused)
+        };
+        Ok(match self {
+            Self::Never => None,
+            Self::IfOpening if live.session.is_some() => None,
+            Self::Write | Self::IfOpening => Some(write()?),
+            Self::Turn => Some(gate.enter_turn().ok_or(Error::Paused)?),
+        })
+    }
+}
+
+trait Needs: Send + 'static {
+    type Ready: Send + 'static;
+    fn prepare(
+        live: &Live,
+        shared: &Shared,
+    ) -> impl Future<Output = Result<Self::Ready, Error>> + Send;
+}
+
+struct Installed;
+
+impl Needs for Installed {
+    type Ready = ();
+    async fn prepare(live: &Live, _: &Shared) -> Result<(), Error> {
+        live.package().await.map(drop)
+    }
+}
+
+/// The connection config with its task secrets filled in now, so a secret
+/// the owner replaced applies to the next connection, and the values to
+/// redact from what the server returns.
+struct Filled;
+
+impl Needs for Filled {
+    type Ready = (Transport, Vec<task_secrets::Redact>);
+    async fn prepare(live: &Live, shared: &Shared) -> Result<Self::Ready, Error> {
+        let package = live.package().await?;
+        TaskSecrets::fill(shared.task_secrets.as_ref(), &package.config).await
+    }
+}
+
 #[derive(Clone)]
 struct Entry {
     epoch: Uuid,
     actor: Actor<Slot>,
 }
 
+impl Entry {
+    async fn live<R: Send + 'static>(
+        &self,
+        shared: Arc<Shared>,
+        admit: Admit,
+        f: impl for<'a> FnOnce(&'a mut Live, &'a Shared) -> BoxFuture<'a, Result<R, Error>>
+        + Send
+        + 'static,
+    ) -> Result<R, Error> {
+        self.actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let Slot::Live(live) = slot else {
+                        return Err(Error::NotFound);
+                    };
+                    let _admission = admit.enter(&shared.gate, live)?;
+                    f(live, &shared).await
+                })
+            })
+            .await
+    }
+
+    /// Delete the package's files and retire the slot, then drop it from
+    /// `index` unless the id was installed again meanwhile.
+    async fn retire(
+        &self,
+        shared: Arc<Shared>,
+        index: Actor<HashMap<String, Entry>>,
+        id: String,
+    ) -> Result<(), Error> {
+        let epoch = self.epoch;
+        self.actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let Slot::Live(live) = slot else {
+                        return Err(Error::NotFound);
+                    };
+                    let _admission = Admit::Write.enter(&shared.gate, live)?;
+                    live.close().await;
+                    let path = live.path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let parent = path.parent().expect("package parent");
+                        require_dir(parent)?;
+                        require_dir(&path)?;
+                        let retired = parent.join(format!(".removed-{}", Uuid::new_v4()));
+                        std::fs::rename(&path, &retired)?;
+                        std::fs::File::open(parent)?.sync_all()?;
+                        std::fs::remove_dir_all(retired)?;
+                        std::fs::File::open(parent)?.sync_all()?;
+                        Ok::<_, Error>(())
+                    })
+                    .await
+                    .map_err(|_| Error::Connection)??;
+                    *slot = Slot::Retired;
+                    index
+                        .call(move |slots| {
+                            if slots.get(&id).is_some_and(|entry| entry.epoch == epoch) {
+                                slots.remove(&id);
+                            }
+                        })
+                        .await;
+                    Ok(())
+                })
+            })
+            .await
+    }
+}
+
+/// Configuration every package actor reads and none changes.
 #[derive(Clone)]
-pub struct Library {
+struct Shared {
     root: PathBuf,
     gate: Arc<crate::maintenance::Gate>,
-    slots: Actor<HashMap<String, Entry>>,
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     oauth_client: Option<Arc<oauth::RegisteredClient>>,
     task_secrets: Option<TaskSecrets>,
 }
 
+#[derive(Clone)]
+pub struct Library {
+    shared: Arc<Shared>,
+    slots: Actor<HashMap<String, Entry>>,
+}
+
 impl Library {
     pub fn new(root: PathBuf, gate: Arc<crate::maintenance::Gate>) -> Self {
         Self {
-            root,
-            gate,
+            shared: Arc::new(Shared {
+                root,
+                gate,
+                oauth_key: None,
+                oauth_client: None,
+                task_secrets: None,
+            }),
             slots: Actor::default(),
-            oauth_key: None,
-            oauth_client: None,
-            task_secrets: None,
         }
     }
 
     pub fn with_task_secrets(mut self, secrets: TaskSecrets) -> Self {
-        self.task_secrets = Some(secrets);
+        Arc::make_mut(&mut self.shared).task_secrets = Some(secrets);
         self
     }
 
     pub async fn check_secrets(&self, config: &Transport) -> Result<(), Error> {
-        TaskSecrets::fill(self.task_secrets.as_ref(), config)
+        TaskSecrets::fill(self.shared.task_secrets.as_ref(), config)
             .await
             .map(drop)
     }
 
     pub fn with_oauth_key(mut self, key: Option<Arc<crate::credentials::SecretKey>>) -> Self {
-        self.oauth_key = key;
+        Arc::make_mut(&mut self.shared).oauth_key = key;
         self
     }
 
     pub fn with_oauth_client(mut self, client: Option<Arc<oauth::RegisteredClient>>) -> Self {
-        self.oauth_client = client;
+        Arc::make_mut(&mut self.shared).oauth_client = client;
         self
     }
 
     async fn slot(&self, id: &PackageId) -> Result<Entry, Error> {
         let id = id.0.clone();
-        let path = self.root.join(&id);
-        let gate = self.gate.clone();
-        let oauth_key = self.oauth_key.clone();
-        let oauth_client = self.oauth_client.clone();
-        let task_secrets = self.task_secrets.clone();
+        let path = self.shared.root.join(&id);
         self.slots
             .call(move |slots| {
                 if !slots.contains_key(&id) && slots.len() >= 1024 {
@@ -649,16 +771,10 @@ impl Library {
                     .entry(id)
                     .or_insert_with(|| Entry {
                         epoch: Uuid::new_v4(),
-                        actor: Actor::new(Slot {
+                        actor: Actor::new(Slot::Live(Box::new(Live {
                             path,
                             session: None,
-                            oauth_key,
-                            oauth_client,
-                            task_secrets,
-                            connected_with: None,
-                            retired: false,
-                            gate,
-                        }),
+                        }))),
                     })
                     .clone())
             })
@@ -666,7 +782,7 @@ impl Library {
     }
 
     async fn installed_slot(&self, id: &PackageId) -> Result<Entry, Error> {
-        let metadata = tokio::fs::symlink_metadata(self.root.join(&id.0))
+        let metadata = tokio::fs::symlink_metadata(self.shared.root.join(&id.0))
             .await
             .map_err(Error::from)
             .map_err(missing)?;
@@ -676,13 +792,34 @@ impl Library {
         self.slot(id).await
     }
 
+    async fn with_session<N: Needs, R: Send + 'static>(
+        &self,
+        id: &PackageId,
+        admit: Admit,
+        _needs: N,
+        f: impl for<'a> FnOnce(&'a mut oauth::Session, N::Ready) -> BoxFuture<'a, Result<R, Error>>
+        + Send
+        + 'static,
+    ) -> Result<R, Error> {
+        self.installed_slot(id)
+            .await?
+            .live(self.shared.clone(), admit, move |live, shared| {
+                Box::pin(async move {
+                    let ready = N::prepare(live, shared).await?;
+                    f(live.session(shared).await?, ready).await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
     pub async fn list(&self) -> Result<Vec<Summary>, Error> {
-        installed(self.root.clone()).await
+        installed(self.shared.root.clone()).await
     }
 
     pub async fn listings(&self) -> Result<Vec<InstalledMcp>, Error> {
         let manifests = self.list().await?;
-        let root = self.root.clone();
+        let root = self.shared.root.clone();
         tokio::task::spawn_blocking(move || {
             manifests
                 .into_iter()
@@ -705,17 +842,8 @@ impl Library {
     pub async fn read(&self, id: &PackageId) -> Result<Package, Error> {
         self.installed_slot(id)
             .await?
-            .actor
-            .call_async(|slot| {
-                Box::pin(async move {
-                    if slot.retired {
-                        return Err(Error::NotFound);
-                    }
-                    let path = slot.path.clone();
-                    tokio::task::spawn_blocking(move || read_package(&path))
-                        .await
-                        .map_err(|_| Error::Connection)?
-                })
+            .live(self.shared.clone(), Admit::Never, |live, _| {
+                Box::pin(live.package())
             })
             .await
             .map_err(missing)
@@ -751,15 +879,11 @@ impl Library {
         replace: bool,
     ) -> Result<Replaced, Error> {
         input.validate()?;
-        let slot = self.slot(&input.id).await?;
-        slot.actor
-            .call_async(move |slot| {
+        self.slot(&input.id)
+            .await?
+            .live(self.shared.clone(), Admit::Write, move |live, _| {
                 Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    if slot.retired {
-                        return Err(Error::NotFound);
-                    }
-                    let path = slot.path.clone();
+                    let path = live.path.clone();
                     let published = tokio::task::spawn_blocking(move || {
                         install(&path, &input, installed_by, replace)
                     })
@@ -769,7 +893,7 @@ impl Library {
                     // A failed replacement may still have published the new config,
                     // so no session that holds the old sign-in survives it.
                     if published.as_ref().map_or(replace, |p| p.reconnect) {
-                        slot.close().await;
+                        live.close().await;
                     }
                     published
                 })
@@ -778,44 +902,9 @@ impl Library {
     }
 
     pub async fn remove(&self, id: &PackageId) -> Result<(), Error> {
-        let entry = self.installed_slot(id).await?;
-        let epoch = entry.epoch;
-        let index = self.slots.clone();
-        let id = id.0.clone();
-        entry
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    if slot.retired {
-                        return Err(Error::NotFound);
-                    }
-                    slot.close().await;
-                    let path = slot.path.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let parent = path.parent().expect("package parent");
-                        require_dir(parent)?;
-                        require_dir(&path)?;
-                        let retired = parent.join(format!(".removed-{}", Uuid::new_v4()));
-                        std::fs::rename(&path, &retired)?;
-                        std::fs::File::open(parent)?.sync_all()?;
-                        std::fs::remove_dir_all(retired)?;
-                        std::fs::File::open(parent)?.sync_all()?;
-                        Ok::<_, Error>(())
-                    })
-                    .await
-                    .map_err(|_| Error::Connection)??;
-                    slot.retired = true;
-                    index
-                        .call(move |slots| {
-                            if slots.get(&id).is_some_and(|entry| entry.epoch == epoch) {
-                                slots.remove(&id);
-                            }
-                        })
-                        .await;
-                    Ok(())
-                })
-            })
+        self.installed_slot(id)
+            .await?
+            .retire(self.shared.clone(), self.slots.clone(), id.0.clone())
             .await
             .map_err(missing)
     }
@@ -826,63 +915,31 @@ impl Library {
         method: String,
         params: Value,
     ) -> Result<Value, Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    // Called for running turns: allowed until a backup captures.
-                    let _admission = slot.gate.enter_turn().ok_or(Error::Paused)?;
-                    let (config, secrets) = slot.config().await?;
-                    let result = slot
-                        .session()
-                        .await?
-                        .request(&config, method, params)
-                        .await?;
-                    Ok(if secrets.is_empty() {
-                        result
-                    } else {
-                        task_secrets::redact_json(result, &secrets)
-                    })
+        self.with_session(id, Admit::Turn, Filled, |session, (config, secrets)| {
+            Box::pin(async move {
+                let result = session.request(&config, method, params).await?;
+                Ok(if secrets.is_empty() {
+                    result
+                } else {
+                    task_secrets::redact_json(result, &secrets)
                 })
             })
-            .await
-            .map_err(missing)
+        })
+        .await
     }
 
     pub async fn git_token(&self, id: &PackageId) -> Result<zeroize::Zeroizing<String>, Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter_turn().ok_or(Error::Paused)?;
-                    let (config, _) = slot.config().await?;
-                    slot.session().await?.git_token(&config).await
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::Turn, Filled, |session, (config, _)| {
+            Box::pin(async move { session.git_token(&config).await })
+        })
+        .await
     }
 
     pub async fn connection_status(&self, id: &PackageId) -> Result<McpConnectionStatus, Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    // Opening the session may adopt older sign-in files, a write
-                    // that must wait for a backup or update.
-                    let _admission = match slot.session {
-                        Some(_) => None,
-                        None => Some(slot.gate.enter().ok_or(Error::Paused)?),
-                    };
-                    slot.package().await?;
-                    Ok(slot.session().await?.status())
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::IfOpening, Installed, |session, ()| {
+            Box::pin(async move { Ok(session.status()) })
+        })
+        .await
     }
 
     pub async fn authorize(
@@ -890,18 +947,10 @@ impl Library {
         id: &PackageId,
         redirect_uri: String,
     ) -> Result<McpAuthorization, Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    let (config, _) = slot.config().await?;
-                    slot.session().await?.authorize(&config, redirect_uri).await
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::Write, Filled, |session, (config, _)| {
+            Box::pin(async move { session.authorize(&config, redirect_uri).await })
+        })
+        .await
     }
 
     pub async fn complete_authorization(
@@ -909,18 +958,10 @@ impl Library {
         id: &PackageId,
         callback: oauth::Complete,
     ) -> Result<(), Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    slot.package().await?;
-                    slot.session().await?.complete(callback).await
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::Write, Installed, |session, ()| {
+            Box::pin(session.complete(callback))
+        })
+        .await
     }
 
     pub async fn cancel_authorization(
@@ -928,52 +969,30 @@ impl Library {
         id: &PackageId,
         request_id: Uuid,
     ) -> Result<(), Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    slot.package().await?;
-                    slot.session().await?.cancel(request_id);
-                    Ok(())
-                })
+        self.with_session(id, Admit::Write, Installed, move |session, ()| {
+            Box::pin(async move {
+                session.cancel(request_id);
+                Ok(())
             })
-            .await
-            .map_err(missing)
+        })
+        .await
     }
 
     pub async fn cancel_pending_authorization(
         &self,
         id: &PackageId,
     ) -> Result<McpConnectionStatus, Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    slot.package().await?;
-                    Ok(slot.session().await?.cancel_pending())
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::Write, Installed, |session, ()| {
+            Box::pin(async move { Ok(session.cancel_pending()) })
+        })
+        .await
     }
 
     pub async fn disconnect(&self, id: &PackageId) -> Result<(), Error> {
-        self.installed_slot(id)
-            .await?
-            .actor
-            .call_async(move |slot| {
-                Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    slot.package().await?;
-                    slot.session().await?.disconnect().await
-                })
-            })
-            .await
-            .map_err(missing)
+        self.with_session(id, Admit::Write, Installed, |session, ()| {
+            Box::pin(session.disconnect())
+        })
+        .await
     }
 }
 
