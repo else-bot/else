@@ -533,6 +533,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     let app = TestApp::installed().await;
 
     let old = manager(&app, dir.path(), "else-guest:1").await;
+    let runtime = Msb::detect(dir.path(), None).unwrap();
     let bot: Uuid = app.create_bot("Veteran").await.parse().unwrap();
     let before = run(
         &old,
@@ -615,11 +616,11 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         (report.to_runtime_name.as_str(), "else-guest:2")
     );
     assert_eq!(
-        manager.runtime_state(&old_name).await.unwrap(),
+        runtime.state(&old_name).await.unwrap(),
         Some(RuntimeState::Stopped)
     );
     assert_eq!(
-        manager.runtime_state(&new_name).await.unwrap(),
+        runtime.state(&new_name).await.unwrap(),
         Some(RuntimeState::Stopped)
     );
     let state: (String, String) =
@@ -686,7 +687,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         "nothing to roll back"
     );
     assert_eq!(
-        manager.runtime_state(&new_name).await.unwrap(),
+        runtime.state(&new_name).await.unwrap(),
         Some(RuntimeState::Stopped),
         "kept"
     );

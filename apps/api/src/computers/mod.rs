@@ -534,16 +534,6 @@ impl ComputerManager {
         &self.config
     }
 
-    /// The runtime's view of a computer (inspection only).
-    pub async fn runtime_state(&self, name: &str) -> Result<Option<RuntimeState>, RuntimeError> {
-        self.runtime.state(name).await
-    }
-
-    /// Every computer the runtime reports (inspection only).
-    pub async fn runtime_list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        self.runtime.list().await
-    }
-
     /// The runtime name of a bot's computer.
     pub fn runtime_name(bot_id: Uuid) -> String {
         format!("elsebot-{bot_id}")

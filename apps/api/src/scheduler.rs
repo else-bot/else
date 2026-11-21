@@ -195,12 +195,6 @@ impl Scheduler {
             .await
     }
 
-    pub async fn is_running(&self, turn_id: Uuid) -> bool {
-        self.running
-            .call(move |running| running.contains_key(&turn_id))
-            .await
-    }
-
     /// Run until `shutdown` fires, then interrupt running turns and wait up
     /// to `grace` for them to record outcomes. Claiming and the feature
     /// pumps run in separate loops, so a slow pump never delays a claim.

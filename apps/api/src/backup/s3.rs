@@ -122,12 +122,6 @@ struct ErrorResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct InitiateMultipartUploadResult {
-    upload_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
 struct ListMultipartUploadsResult {
     #[serde(default)]
     upload: Vec<Upload>,
@@ -375,7 +369,7 @@ impl S3 {
         })
     }
 
-    /// Create the bucket (test and setup use; the worker never creates one).
+    /// Create the bucket (fixture API; the worker never creates one).
     pub async fn create_bucket(&self) -> Result<(), S3Error> {
         let builder = self.request(reqwest::Method::PUT, "", &[], &[], EMPTY_SHA256);
         match self.send(builder).await {
@@ -470,91 +464,6 @@ impl S3 {
         Ok(out)
     }
 
-    pub async fn create_multipart(&self, key: &str) -> Result<String, S3Error> {
-        let builder = self.request(
-            reqwest::Method::POST,
-            key,
-            &[("uploads", "")],
-            &[],
-            EMPTY_SHA256,
-        );
-        let body = self
-            .send(builder)
-            .await?
-            .text()
-            .await
-            .map_err(|e| S3Error::Transport(e.to_string()))?;
-        parse::<InitiateMultipartUploadResult>(&body)?
-            .upload_id
-            .ok_or_else(|| S3Error::Protocol("no UploadId".into()))
-    }
-
-    pub async fn upload_part(
-        &self,
-        key: &str,
-        upload_id: &str,
-        number: u32,
-        body: Vec<u8>,
-    ) -> Result<String, S3Error> {
-        let digest = hex::encode(Sha256::digest(&body));
-        let number = number.to_string();
-        let builder = self
-            .request(
-                reqwest::Method::PUT,
-                key,
-                &[("partNumber", &number), ("uploadId", upload_id)],
-                &[],
-                &digest,
-            )
-            .body(body);
-        let response = self.send(builder).await?;
-        response
-            .headers()
-            .get("etag")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-            .ok_or_else(|| S3Error::Protocol("no ETag for the part".into()))
-    }
-
-    pub async fn complete_multipart(
-        &self,
-        key: &str,
-        upload_id: &str,
-        parts: &[(u32, String)],
-    ) -> Result<(), S3Error> {
-        let mut xml = String::from("<CompleteMultipartUpload>");
-        for (number, etag) in parts {
-            xml.push_str(&format!(
-                "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
-                etag.replace('&', "&amp;").replace('<', "&lt;")
-            ));
-        }
-        xml.push_str("</CompleteMultipartUpload>");
-        let digest = hex::encode(Sha256::digest(xml.as_bytes()));
-        let builder = self
-            .request(
-                reqwest::Method::POST,
-                key,
-                &[("uploadId", upload_id)],
-                &[],
-                &digest,
-            )
-            .body(xml);
-        let body = self
-            .send(builder)
-            .await?
-            .text()
-            .await
-            .map_err(|e| S3Error::Transport(e.to_string()))?;
-        // A 200 response can still carry an error document.
-        if body.contains("<Error>") {
-            return Err(S3Error::Protocol(
-                "multipart completion was rejected by remote storage".into(),
-            ));
-        }
-        Ok(())
-    }
-
     pub async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<(), S3Error> {
         let builder = self.request(
             reqwest::Method::DELETE,
@@ -624,7 +533,7 @@ impl S3 {
         }
     }
 
-    /// Replace the bucket's lifecycle rules (test use; the worker never
+    /// Replace the bucket's lifecycle rules (fixture API; the worker never
     /// changes them).
     pub async fn put_lifecycle(&self, xml: &str) -> Result<(), S3Error> {
         let digest = Sha256::digest(xml.as_bytes());
