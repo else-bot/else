@@ -90,9 +90,7 @@ impl ConversationView {
     /// A warm view's stream broke; the next resume loads its page again
     /// unless a load is already running.
     pub(in crate::app) fn break_stream(&mut self) {
-        if matches!(self.load, Load::Settled) {
-            self.load = Load::Failed { _retry: None };
-        }
+        self.load.break_stream();
     }
 
     /// Shows why the stream is down, or clears it once it is back.
@@ -130,6 +128,14 @@ impl ConversationView {
         conversation.insert_turn(sent.turn);
         cx.notify();
         true
+    }
+}
+
+impl Load {
+    fn break_stream(&mut self) {
+        if matches!(self, Load::Settled) {
+            *self = Load::Failed { _retry: None };
+        }
     }
 }
 
@@ -188,6 +194,23 @@ mod tests {
             resume(&Load::Settled, Some(&saved)),
             Resume::Load,
             "a saved page is replaced"
+        );
+    }
+
+    #[test]
+    fn a_broken_stream_reloads_a_settled_view_but_not_one_still_loading() {
+        let live = Conversation::from_snapshot(page(42)).unwrap();
+        let mut settled = Load::Settled;
+        settled.break_stream();
+        assert_eq!(resume(&settled, Some(&live)), Resume::Load);
+        let mut running = Load::Running {
+            _task: Task::ready(()),
+        };
+        running.break_stream();
+        assert_eq!(
+            resume(&running, Some(&live)),
+            Resume::Wait,
+            "the running load subscribes when it lands"
         );
     }
 }
