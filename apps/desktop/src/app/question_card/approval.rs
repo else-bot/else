@@ -387,7 +387,7 @@ impl ElseApp {
             submit
                 .filter(|s| s.answer.contains(choice))
                 .and_then(|s| match s.state {
-                    Request::Sending { .. } => Some("Sending…"),
+                    Request::Sending { .. } | Request::Resending { .. } => Some("Sending…"),
                     Request::Accepted(()) => Some("Recorded"),
                     _ => None,
                 })

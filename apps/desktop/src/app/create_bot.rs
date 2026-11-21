@@ -72,16 +72,52 @@ pub(super) struct CreateFormHolder {
 
 impl ElseApp {
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Research"));
+        let resumed = self.pending_create();
+        let name = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder("e.g. Research");
+            match &resumed {
+                Some(op) => input.default_value(op.name.clone()),
+                None => input,
+            }
+        });
         let profile = self.caps.clone().map(|caps| {
-            let picker = self
-                .profile_picker(&caps, caps.defaults.as_ref(), cx)
-                .tabs();
-            cx.new(|_| picker)
+            let initial = match &resumed {
+                Some(op) => op.profile.as_ref(),
+                None => caps.defaults.as_ref(),
+            };
+            let mut picker = self.profile_picker(&caps, initial, cx).tabs();
+            let locked = resumed.is_some();
+            cx.new(|cx| {
+                picker.set_disabled(locked, cx);
+                picker
+            })
         });
         let choices = category_choices(&self.categories);
-        let category =
-            cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));
+        let selected = resumed
+            .as_ref()
+            .and_then(|op| {
+                choices
+                    .iter()
+                    .position(|choice| choice.id == op.category_id)
+            })
+            .unwrap_or(0);
+        let category = cx.new(|cx| {
+            SelectState::new(choices.clone(), Some(IndexPath::new(selected)), window, cx)
+        });
+        let avatar = resumed
+            .as_ref()
+            .and_then(|op| op.avatar)
+            .unwrap_or_else(|| Avatar {
+                shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
+                color: AvatarColor::ALL[rand::random_range(0..AvatarColor::ALL.len())],
+            });
+        let request = match resumed {
+            Some(op) => Request::Unconfirmed {
+                op,
+                error: "The last Create bot request may have reached the server.".into(),
+            },
+            None => Request::Idle,
+        };
         let enter =
             cx.subscribe_in(
                 &name,
@@ -94,12 +130,9 @@ impl ElseApp {
             );
         let holder = cx.new(|_| CreateFormHolder {
             form: CreateForm {
-                request: Request::Idle,
+                request,
                 name: name.clone(),
-                avatar: Avatar {
-                    shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
-                    color: AvatarColor::ALL[rand::random_range(0..AvatarColor::ALL.len())],
-                },
+                avatar,
                 profile,
                 category,
                 category_choices: choices,
@@ -231,6 +264,8 @@ impl ElseApp {
             let app_ok = app.clone();
             let app_close = app.clone();
             let mine = holder.clone();
+            let app_cancel = app.clone();
+            let mine_cancel = holder.clone();
             crate::appearance::modal_surface(dialog, cx)
                 .title(
                     div()
@@ -264,7 +299,14 @@ impl ElseApp {
                             Button::new("create-cancel")
                                 .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                                .on_click(move |_, window, cx| {
+                                    let _ = app_cancel.update(cx, |app, _| {
+                                        if app.create.as_ref() == Some(&mine_cancel) {
+                                            app.create = None;
+                                        }
+                                    });
+                                    window.close_dialog(cx);
+                                }),
                         )
                         .child(
                             Button::new("create-submit")
@@ -298,12 +340,25 @@ impl ElseApp {
                 .is_some_and(|caps| caps.bot_avatar_on_create)
                 .then_some(form.avatar),
         };
+        let payload = form.request.unconfirmed_op().cloned().unwrap_or(fresh);
+        if let Err(err) = self.save_pending_create(payload.clone()) {
+            let error = format!("Couldn't save the request before sending it. {err}");
+            holder.update(cx, |h, cx| {
+                h.form.request = match h.form.request.unconfirmed_op().cloned() {
+                    Some(op) => Request::Unconfirmed { op, error },
+                    None => Request::Failed(error),
+                };
+                cx.notify();
+            });
+            window.refresh();
+            return;
+        }
         let sent = holder.update(cx, |h, cx| {
             let sent = h.form.request.retry().or_else(|| {
                 h.form
                     .request
-                    .begin(fresh.clone())
-                    .map(|attempt| (attempt, fresh))
+                    .begin(payload.clone())
+                    .map(|attempt| (attempt, payload))
             });
             if let Some(profile) = &h.form.profile {
                 profile.update(cx, |picker, cx| picker.set_disabled(true, cx));
@@ -314,11 +369,19 @@ impl ElseApp {
         let Some((attempt, payload)) = sent else {
             return;
         };
+        let request_id = payload.request_id;
+        self.create_attempt = Some(attempt);
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.create_bot(payload).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
+                let rejected = settled
+                    && app.create_attempt == Some(attempt)
+                    && !holder.read(cx).form.request.unconfirmed();
+                if result.is_ok() || rejected {
+                    app.clear_pending_create(request_id);
+                }
                 if let Err(err) = &result {
                     app.unauthorized(err, window, cx);
                 }
@@ -327,33 +390,109 @@ impl ElseApp {
                 }
                 match result {
                     Ok(bot) => {
-                        if app.create.as_ref() == Some(&holder) {
+                        let closing = app.create.as_ref().is_some_and(|current| {
+                            let request = &current.read(cx).form.request;
+                            current == &holder
+                                || request
+                                    .pending()
+                                    .or(request.unconfirmed_op())
+                                    .is_some_and(|op| op.request_id == request_id)
+                        });
+                        if closing {
                             app.create = None;
                             window.close_dialog(cx);
                         }
-                        if app.bots.iter().any(|b| b.id == bot.id) {
-                            return;
+                        let listed = app.bots.iter().any(|b| b.id == bot.id);
+                        if !listed {
+                            app.bots.push(bot.clone());
+                            app.refresh_now(window, cx);
                         }
-                        app.bots.push(bot.clone());
-                        app.select(Some(bot.id), window, cx);
-                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                        app.refresh_now(window, cx);
+                        if closing || !listed {
+                            app.select(Some(bot.id), window, cx);
+                            app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                        }
                     }
                     Err(_) => {
-                        holder.update(cx, |h, cx| {
-                            if let Some(profile) = &h.form.profile {
-                                let unconfirmed = h.form.request.unconfirmed();
-                                profile
-                                    .update(cx, |picker, cx| picker.set_disabled(unconfirmed, cx));
-                            }
-                            cx.notify();
+                        let mut forms = vec![holder.clone()];
+                        let reopened = app.create.clone().filter(|current| {
+                            rejected
+                                && current != &holder
+                                && current
+                                    .read(cx)
+                                    .form
+                                    .request
+                                    .unconfirmed_op()
+                                    .is_some_and(|op| op.request_id == request_id)
                         });
+                        if let Some(current) = reopened {
+                            let error = holder.read(cx).form.request.error().unwrap_or_default();
+                            let error = error.to_owned();
+                            current.update(cx, |h, _| h.form.request = Request::Failed(error));
+                            forms.push(current);
+                        }
+                        for form in forms {
+                            form.update(cx, |h, cx| {
+                                if let Some(profile) = &h.form.profile {
+                                    let unconfirmed = h.form.request.unconfirmed();
+                                    profile.update(cx, |picker, cx| {
+                                        picker.set_disabled(unconfirmed, cx)
+                                    });
+                                }
+                                cx.notify();
+                            });
+                        }
                         window.refresh();
                     }
                 }
             });
         })
         .detach();
+    }
+}
+
+impl ElseApp {
+    /// The create sent to this server whose outcome is not yet known.
+    fn pending_create(&self) -> Option<CreateBotRequest> {
+        self.preferences
+            .pending_creates
+            .get(self.client.origin().as_str())
+            .cloned()
+    }
+
+    /// Saved before sending, rather than debounced: a changed owner key
+    /// replaces this session, and the next one reads the request back from
+    /// disk. On failure nothing is kept, and nothing may be sent.
+    fn save_pending_create(&mut self, request: CreateBotRequest) -> Result<(), String> {
+        let origin = self.client.origin().as_str().to_owned();
+        let previous = self
+            .preferences
+            .pending_creates
+            .insert(origin.clone(), request);
+        self.preferences.save().inspect_err(|_| match previous {
+            Some(previous) => {
+                self.preferences.pending_creates.insert(origin, previous);
+            }
+            None => {
+                self.preferences.pending_creates.remove(&origin);
+            }
+        })
+    }
+
+    /// Drops the pending create once its outcome is known. A later
+    /// create's record is left alone.
+    fn clear_pending_create(&mut self, request_id: Uuid) {
+        let origin = self.client.origin().as_str();
+        if self
+            .preferences
+            .pending_creates
+            .get(origin)
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            self.preferences.pending_creates.remove(origin);
+            if let Err(err) = self.preferences.save() {
+                eprintln!("{err}");
+            }
+        }
     }
 }
 

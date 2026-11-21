@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use else_wire::settings::Capabilities;
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,20 @@ pub struct Preferences {
     pub models_seen: HashMap<String, HashSet<String>>,
     /// The bot the owner last opened on this server, reopened at launch.
     pub last_bot: Option<Uuid>,
+    /// The Create bot request sent and not yet known to have applied or
+    /// failed, per origin, so a saved server pointed elsewhere neither
+    /// replays nor replaces it. It outlives the dialog, a changed owner key
+    /// and a restart, so the next Create resends it under the same request
+    /// ID. Unreadable reads as none, keeping the layout.
+    #[serde(deserialize_with = "lenient")]
+    pub pending_creates: HashMap<String, crate::api::CreateBotRequest>,
+}
+
+fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(
+    deserializer: D,
+) -> Result<T, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl Default for Preferences {
@@ -35,6 +50,7 @@ impl Default for Preferences {
             rules_seen: HashMap::new(),
             models_seen: HashMap::new(),
             last_bot: None,
+            pending_creates: HashMap::new(),
         }
     }
 }
@@ -123,6 +139,44 @@ mod tests {
         b.save().unwrap();
         assert_eq!(Preferences::load(first).sidebar_width, 310.);
         assert_eq!(Preferences::load(second).sidebar_width, 390.);
+    }
+
+    #[test]
+    fn a_pending_create_survives_a_reload_under_its_request_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ProfileStore::at(dir.path().join("desktop.json"));
+        let server = Uuid::new_v4();
+        let request_id = Uuid::from_u128(706);
+        let mut prefs = Preferences::load_for_server(&store, server, false);
+        prefs.pending_creates.insert(
+            "http://127.0.0.1:7879".into(),
+            crate::api::CreateBotRequest {
+                request_id,
+                name: "Research".into(),
+                profile: None,
+                category_id: None,
+                avatar: None,
+            },
+        );
+        prefs.save().unwrap();
+        let reloaded = Preferences::load_for_server(&store, server, false);
+        let pending = &reloaded.pending_creates["http://127.0.0.1:7879"];
+        assert_eq!(pending.request_id, request_id);
+        assert_eq!(pending.name, "Research");
+    }
+
+    #[test]
+    fn an_unreadable_create_keeps_the_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        std::fs::write(
+            &path,
+            r#"{"sidebar_width":310,"pending_creates":{"http://a":{"name":7}}}"#,
+        )
+        .unwrap();
+        let prefs = Preferences::load(path);
+        assert_eq!(prefs.sidebar_width, 310.);
+        assert!(prefs.pending_creates.is_empty());
     }
 
     #[test]
