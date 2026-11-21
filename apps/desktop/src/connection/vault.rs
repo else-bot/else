@@ -7,14 +7,19 @@ use crate::api::{
 };
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, Form};
-use gpui_kit::component::button::Button;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{StyledExt as _, h_flex};
+use gpui_kit::component::{
+    Disableable as _, FocusableExt as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex,
+};
 use std::collections::BTreeMap;
 
 pub(super) struct View {
     client: Arc<Client>,
     entries: Option<Vec<VaultEntry>>,
+    search: Entity<InputState>,
+    _search: Subscription,
     phase: Phase,
     error: Option<String>,
     notice: Option<String>,
@@ -48,9 +53,19 @@ struct Editor {
 
 impl View {
     pub(super) fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search by title, slug, website or field")
+        });
+        let subscription = cx.subscribe_in(&search, window, |_, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let mut this = Self {
             client,
             entries: None,
+            search,
+            _search: subscription,
             phase: Phase::Browsing,
             error: None,
             notice: None,
@@ -348,12 +363,38 @@ impl Render for View {
             self.phase,
             Phase::Saving(_) | Phase::Revealing(_) | Phase::Deleting(_)
         );
-        let mut body = v_flex().gap_5().child(settings::section_heading(
+        let blocked = busy || matches!(self.phase, Phase::Unconfirmed(_));
+        let editing = matches!(self.phase, Phase::Editing(_) | Phase::Saving(_));
+        let actions = vec![
+            Button::new("vault-refresh")
+                .control(Tier::Secondary, Scale::Standard, busy || editing, cx)
+                .icon(IconName::RefreshCw)
+                .label("Refresh")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if !matches!(this.phase, Phase::Unconfirmed(_)) {
+                        this.clear(window, cx);
+                    }
+                    this.refresh(window, cx);
+                }))
+                .into_any_element(),
+            Button::new("vault-add")
+                .control(
+                    Tier::Primary,
+                    Scale::Standard,
+                    blocked || editing || self.entries.is_none(),
+                    cx,
+                )
+                .icon(IconName::Plus)
+                .label("Add entry")
+                .on_click(cx.listener(|this, _, window, cx| this.edit(None, window, cx)))
+                .into_any_element(),
+        ];
+        let mut body = v_flex().gap_5().child(crate::panel_kit::page_heading(
             "Vault",
             "Save once. Every bot on this server can use these credentials.",
+            actions,
             cx,
         ));
-        let blocked = busy || matches!(self.phase, Phase::Unconfirmed(_));
         if let Phase::Unconfirmed(message) = &self.phase {
             body = body.child(div().text_sm().child(message.clone()));
         }
@@ -425,32 +466,6 @@ impl Render for View {
             );
             return body.into_any_element();
         }
-        body = body.child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("vault-add")
-                        .control(
-                            Tier::Primary,
-                            Scale::Standard,
-                            blocked || self.entries.is_none(),
-                            cx,
-                        )
-                        .label("Add entry")
-                        .on_click(cx.listener(|this, _, window, cx| this.edit(None, window, cx))),
-                )
-                .child(
-                    Button::new("vault-refresh")
-                        .control(Tier::Secondary, Scale::Standard, busy, cx)
-                        .label("Refresh")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if !matches!(this.phase, Phase::Unconfirmed(_)) {
-                                this.clear(window, cx);
-                            }
-                            this.refresh(window, cx);
-                        })),
-                ),
-        );
         let Some(entries) = &self.entries else {
             return body
                 .child(if self.error.is_some() {
@@ -461,116 +476,198 @@ impl Render for View {
                 .into_any_element();
         };
         if entries.is_empty() {
-            body = body.child("No saved entries. Add a login or save one when a bot asks.");
+            return body
+                .child("No saved entries. Add a login or save one when a bot asks.")
+                .into_any_element();
         }
-        for entry in entries {
-            let edit = entry.clone();
-            let reveal = entry.name.clone();
-            let delete = entry.name.clone();
-            let mut row =
-                v_flex()
-                    .gap_2()
-                    .py_4()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .font_semibold()
-                            .child(if entry.description.is_empty() {
-                                entry.name.clone()
-                            } else {
-                                entry.description.clone()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{}{}",
-                                entry.name,
-                                entry
-                                    .website
-                                    .as_ref()
-                                    .map(|site| format!(" · {site}"))
-                                    .unwrap_or_default()
-                            )),
-                    )
-                    .child(div().text_xs().child(entry.env.join(", ")))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        vault_last_used(entry.last_used.as_ref(), chrono::Utc::now()),
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "Updated {}{}",
-                                entry.updated_at.format("%b %-d, %Y"),
-                                entry
-                                    .last_used
-                                    .as_ref()
-                                    .map(|last| format!(" · Used in {}", last.r#use.label()))
-                                    .unwrap_or_default()
-                            )),
-                    );
-            let revealed =
-                matches!(&self.phase, Phase::Revealed { name, .. } if name == &entry.name);
-            if let Phase::Revealed { name, env } = &self.phase
-                && name == &entry.name
-            {
-                for (var, value) in env {
-                    row = row.child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_xs().child(var.clone()))
-                            .child(div().text_sm().whitespace_normal().child(value.clone())),
-                    );
-                }
-            }
-            row = row.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new(SharedString::from(format!("vault-edit-{}", entry.name)))
-                            .control(Tier::Secondary, Scale::Compact, blocked, cx)
-                            .label("Edit")
-                            .accessibility_label(format!("Edit {}", entry.name))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.edit(Some(edit.clone()), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("vault-reveal-{}", entry.name)))
-                            .control(Tier::Secondary, Scale::Compact, blocked, cx)
-                            .label(if revealed { "Hide" } else { "Reveal" })
-                            .accessibility_label(format!(
-                                "{} {}",
-                                if revealed { "Hide" } else { "Reveal" },
-                                entry.name
-                            ))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if revealed {
-                                    this.clear(window, cx);
-                                } else {
-                                    this.confirm(reveal.clone(), true, window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("vault-delete-{}", entry.name)))
-                            .control(Tier::Danger, Scale::Compact, blocked, cx)
-                            .label("Delete")
-                            .accessibility_label(format!("Delete {}", entry.name))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm(delete.clone(), false, window, cx)
-                            })),
-                    ),
+        body = body.child(
+            div().max_w(px(340.)).child(
+                text_field(Input::new(&self.search), cx)
+                    .aria_label("Search the Vault")
+                    .small()
+                    .prefix(Icon::new(IconName::Search).size_3()),
+            ),
+        );
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let filtered: Vec<_> = entries.iter().filter(|e| matches(e, &query)).collect();
+        let mut list = v_flex().child(
+            div()
+                .pb_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(format!("Saved · {}", filtered.len())),
+        );
+        if filtered.is_empty() {
+            list = list.child(
+                div()
+                    .py_8()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("No matching entries. Try a title, slug, website or field name."),
             );
-            body = body.child(row);
         }
-        body.into_any_element()
+        for entry in filtered {
+            list = list.child(self.row(entry, blocked, &theme, cx));
+        }
+        body.child(list).into_any_element()
     }
+}
+
+impl View {
+    /// One entry on one line. Its actions appear on hover and stay shown
+    /// while its values are revealed.
+    fn row(&self, entry: &VaultEntry, blocked: bool, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let revealed = match &self.phase {
+            Phase::Revealed { name, env } if name == &entry.name => Some(env),
+            _ => None,
+        };
+        let edit = entry.clone();
+        let reveal = entry.name.clone();
+        let delete = entry.name.clone();
+        let action = |id: &str, icon: IconName, label: String| {
+            Button::new(SharedString::from(format!("vault-{id}-{}", entry.name)))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .accessibility_label(label)
+                .disabled(blocked)
+        };
+        let actions = h_flex()
+            .flex_none()
+            .gap_1()
+            .when(revealed.is_none(), |row| {
+                row.opacity(0.)
+                    .group_hover("vault-row", |style| style.opacity(1.))
+                    .focus(|style| style.opacity(1.))
+            })
+            .child(
+                action("edit", IconName::PencilLine, format!("Edit {}", entry.name)).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        this.edit(Some(edit.clone()), window, cx)
+                    }),
+                ),
+            )
+            .child(
+                action(
+                    "reveal",
+                    if revealed.is_some() {
+                        IconName::EyeOff
+                    } else {
+                        IconName::Eye
+                    },
+                    format!(
+                        "{} {}",
+                        if revealed.is_some() { "Hide" } else { "Reveal" },
+                        entry.name
+                    ),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if matches!(&this.phase, Phase::Revealed { name, .. } if name == &reveal) {
+                        this.clear(window, cx);
+                    } else {
+                        this.confirm(reveal.clone(), true, window, cx);
+                    }
+                })),
+            )
+            .child(div().w_px().h_4().mx_1().bg(theme.border))
+            .child(
+                action("delete", IconName::Trash, format!("Delete {}", entry.name))
+                    .text_color(theme.danger)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm(delete.clone(), false, window, cx)
+                    })),
+            );
+        let title = if entry.description.is_empty() {
+            &entry.name
+        } else {
+            &entry.description
+        };
+        let detail = std::iter::once(entry.name.as_str())
+            .chain(entry.website.as_deref())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let fields = entry.env.join(", ");
+        let mut row = v_flex().border_b_1().border_color(theme.border).child(
+            h_flex()
+                .group("vault-row")
+                .gap_3()
+                .py_1p5()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(260.))
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(if fields.is_empty() {
+                            detail
+                        } else {
+                            format!("{fields} · {detail}")
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(vault_last_used(
+                            entry.last_used.as_ref(),
+                            chrono::Utc::now(),
+                        )),
+                )
+                .child(actions),
+        );
+        if let Some(env) = revealed {
+            row = row.child(
+                div()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "Updated {}{}",
+                        entry.updated_at.format("%b %-d, %Y"),
+                        entry
+                            .last_used
+                            .as_ref()
+                            .map(|last| format!(" · Used in {}", last.r#use.label()))
+                            .unwrap_or_default()
+                    )),
+            );
+            for (var, value) in env {
+                row = row.child(
+                    v_flex()
+                        .gap_1()
+                        .pb_2()
+                        .child(div().text_xs().child(var.clone()))
+                        .child(div().text_sm().whitespace_normal().child(value.clone())),
+                );
+            }
+        }
+        row
+    }
+}
+
+/// Whether an entry's title, slug, website or a field name contains `query`,
+/// which the caller has trimmed and lowercased.
+fn matches(entry: &VaultEntry, query: &str) -> bool {
+    [&entry.description, &entry.name]
+        .into_iter()
+        .chain(entry.website.as_ref())
+        .chain(&entry.env)
+        .any(|text| text.to_lowercase().contains(query))
 }
 
 /// Values shorter than this are not redacted from output (the server's
@@ -610,7 +707,9 @@ fn settle<T>(result: Result<T, ClientError>) -> Settled<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BTreeMap, ClientError, Settled, removed, settle, short_fields};
+    use super::{
+        BTreeMap, ClientError, Settled, VaultEntry, matches, removed, settle, short_fields,
+    };
 
     fn api(status: u16, code: &str) -> ClientError {
         ClientError::Api {
@@ -661,5 +760,21 @@ mod tests {
             ("PASSWORD".to_owned(), "long-enough".to_owned()),
         ]);
         assert_eq!(short_fields(&env), ["PIN"]);
+    }
+
+    #[test]
+    fn search_matches_title_slug_website_and_field_names() {
+        let entry = VaultEntry {
+            name: "x_login".into(),
+            description: "X, @owner".into(),
+            website: Some("x.com".into()),
+            env: vec!["PASSWORD".into(), "TOTP_SECRET".into()],
+            updated_at: chrono::Utc::now(),
+            last_used: None,
+        };
+        for query in ["", "@owner", "x_log", "x.com", "totp"] {
+            assert!(matches(&entry, query), "{query}");
+        }
+        assert!(!matches(&entry, "github"));
     }
 }
