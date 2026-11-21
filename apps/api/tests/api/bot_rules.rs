@@ -491,6 +491,49 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
 }
 
 #[tokio::test]
+async fn a_turn_filed_under_another_bots_chat_cannot_edit_rules() {
+    let h = harness(common::TestApp::builder().max_active(2)).await;
+    let main = h.app.main_bot().await;
+    let other = h.app.create_bot("Other").await;
+    let (turn, _) = h.running(&main, GATE).await;
+    let own: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE turns SET conversation_id =
+             (SELECT id FROM conversations WHERE bot_id = ?2 AND kind = 'owner')
+         WHERE id = ?1",
+    )
+    .bind(turn)
+    .bind(other.parse::<Uuid>().unwrap())
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    let forged = h.grant_with(turn, vec![Tool::Rules]).await;
+
+    let refused = tool(
+        &h.app,
+        &forged,
+        "rules_update",
+        update("Tone", "Short.", "Be short."),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    assert_eq!(rules(&h.app, &main).await["version"], 0);
+    assert_eq!(rules(&h.app, &other).await["version"], 0);
+
+    sqlx::query("UPDATE turns SET conversation_id = ?2 WHERE id = ?1")
+        .bind(turn)
+        .bind(own)
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+    h.release(turn).await;
+}
+
+#[tokio::test]
 async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_words() {
     let h = harness(common::TestApp::builder().max_active(2)).await;
     let manager = h.app.main_bot().await;

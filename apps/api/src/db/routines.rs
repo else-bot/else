@@ -431,6 +431,11 @@ pub(crate) async fn authorized_owner_conversation(
     let Some(turn) = super::turns::caller(conn, caller.turn_id).await? else {
         return Err(RoutineError::NotRunning);
     };
+    let Some((owner_conversation, _)) =
+        super::conversation::owner_conversation(conn, turn.bot_id).await?
+    else {
+        return Err(RoutineError::NotRunning);
+    };
     if turn.bot_id != caller.bot_id || turn.conversation_id != caller.conversation_id {
         return Err(RoutineError::NotAllowed);
     }
@@ -442,10 +447,7 @@ pub(crate) async fn authorized_owner_conversation(
     if !turn.running {
         return Err(RoutineError::NotRunning);
     }
-    super::conversation::owner_conversation(conn, turn.bot_id)
-        .await?
-        .map(|(id, _)| id)
-        .ok_or(RoutineError::NotRunning)
+    Ok(owner_conversation)
 }
 
 pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {

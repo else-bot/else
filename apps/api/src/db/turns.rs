@@ -832,7 +832,7 @@ pub async fn caller(
              EXISTS (SELECT 1 FROM installation WHERE default_bot_id = t.bot_id) AS main_bot,
              t.status IN ('sending', 'running') AND b.status = 'active' AND NOT b.cancel_pending
                  AS running
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
          JOIN bots b ON b.id = t.bot_id
          WHERE t.id = ?1",
     )

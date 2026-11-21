@@ -472,7 +472,9 @@ pub async fn authorize(
     write: bool,
     send: bool,
 ) -> Result<Access, Error> {
-    if !crate::db::turns::asking_caller(conn, turn)
+    // One snapshot, so a Stop cannot land between the turn and chat checks.
+    let mut tx = sqlx::Acquire::begin(&mut *conn).await?;
+    if !crate::db::turns::asking_caller(&mut tx, turn)
         .await?
         .is_some_and(|caller| caller.bot_id == bot)
     {
@@ -486,7 +488,7 @@ pub async fn authorize(
     .bind(c.id)
     .bind(c.generation)
     .bind(turn)
-    .fetch_optional(&mut *conn)
+    .fetch_optional(&mut *tx)
     .await?;
     let access = match kind.ok_or(Error::Forbidden)? {
         crate::db::turns::ItemKind::Connector => {
@@ -497,7 +499,7 @@ pub async fn authorize(
             .bind(turn)
             .bind(c.id)
             .bind(bot)
-            .fetch_all(&mut *conn)
+            .fetch_all(&mut *tx)
             .await?;
             if chats.is_empty() {
                 return Err(Error::Forbidden);
@@ -509,6 +511,7 @@ pub async fn authorize(
     if (write || send) && !access.mutates() || destination.is_some_and(|d| !access.allows(d)) {
         return Err(Error::Forbidden);
     }
+    tx.commit().await?;
     Ok(access)
 }
 /// The social action table's own column.
