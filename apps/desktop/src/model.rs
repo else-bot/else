@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::api::MailTrigger;
 use crate::api::socials::Trigger;
-use crate::api::{Activity, Bot};
+use else_wire::bots::Activity;
+use else_wire::bots::Bot;
 
 mod outgoing;
 pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
@@ -463,7 +464,7 @@ impl MailFile {
 pub struct BotDeletion {
     pub name: String,
     #[serde(default)]
-    pub avatar: crate::avatar::Avatar,
+    pub avatar: else_wire::bots::Avatar,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

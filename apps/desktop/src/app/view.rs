@@ -6,7 +6,6 @@ use super::{
     ToggleSettings,
 };
 use crate::ambient::looping;
-use crate::api::{Bot, SidebarStatus};
 use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
 use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
@@ -15,7 +14,9 @@ use crate::controls::{
     stop_button,
 };
 use crate::sidebar::status::{Kind, Subtitle};
+use else_wire::bots::Bot;
 use else_wire::bots::Phase;
+use else_wire::bots::SidebarStatus;
 use else_wire::turns::TurnStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
@@ -1133,7 +1134,9 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
-    if activity.phase == Phase::Working && bot.sidebar_status == Some(SidebarStatus::HasComputer) {
+    if activity.phase == Phase::Working
+        && matches!(bot.sidebar_status, Some(SidebarStatus::HasComputer { .. }))
+    {
         return "You have the computer".to_owned();
     }
     // An owner request outranks the bots it waits on, as in the sidebar.

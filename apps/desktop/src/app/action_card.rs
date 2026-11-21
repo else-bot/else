@@ -412,7 +412,7 @@ pub(super) fn event_face_size(count: usize) -> Pixels {
 impl super::ElseApp {
     /// The icon column for the bots taking part in an activity row.
     pub(super) fn event_faces(&self, key: &str, ids: impl IntoIterator<Item = uuid::Uuid>) -> Div {
-        let mut shown: Vec<&crate::api::Bot> = Vec::new();
+        let mut shown: Vec<&else_wire::bots::Bot> = Vec::new();
         for id in ids {
             if shown.len() < 2
                 && !shown.iter().any(|bot| bot.id == id)

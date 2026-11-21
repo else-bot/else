@@ -66,10 +66,14 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{
-    Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
-};
+use crate::api::{Capabilities, Client, ClientError, Live, LiveCommand, LiveEvent, Sent};
+
+use else_wire::bots::Bot;
+
+use else_wire::bots::BotList;
+
 use crate::model::Reaction;
+use else_wire::bots::Category;
 
 actions!(
     else_desktop,

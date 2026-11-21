@@ -1,5 +1,9 @@
-use super::{Avatar, AvatarColor, AvatarShape, bot_avatar};
+use super::AvatarLook;
+use super::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
+use else_wire::bots::Avatar;
+use else_wire::bots::AvatarColor;
+use else_wire::bots::AvatarShape;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -92,7 +96,7 @@ impl RenderOnce for AvatarPicker {
             let pick = self.on_change.clone();
             // A swatch close to the dialog's own tone (white on a light
             // theme) needs a firmer edge than the hairline to stay visible.
-            let fill = color.fill();
+            let fill = super::color_fill(color);
             let edge = if (fill.l - theme.popover.l).abs() < 0.12 {
                 theme.foreground.opacity(0.25)
             } else {

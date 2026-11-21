@@ -26,23 +26,13 @@ pub struct ReplyPosition {
     pub text_bytes: i64,
 }
 
-/// The newest reply of a turn in the owner conversation that ended or
-/// waits on the owner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LatestReply {
-    pub turn_id: Uuid,
-    pub item_id: Uuid,
-    pub position: ReplyPosition,
-    pub preview: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ReadState {
-    pub latest: Option<LatestReply>,
-    pub read_through: ReplyPosition,
-    pub marked_unread: bool,
-    pub unread: bool,
-    pub unread_replies: i64,
+impl From<ReplyPosition> for else_wire::bots::ReplyPosition {
+    fn from(position: ReplyPosition) -> Self {
+        Self {
+            item_seq: position.item_seq,
+            text_bytes: position.text_bytes,
+        }
+    }
 }
 
 /// The read columns of a bot's row, as selected with it.
@@ -62,7 +52,7 @@ pub struct ReadRow {
 const PREVIEW_CHARS: usize = 160;
 
 impl ReadRow {
-    pub fn state(&self) -> ReadState {
+    pub fn state(&self) -> else_wire::bots::ReadState {
         let read_through = ReplyPosition {
             item_seq: self.read_item_seq,
             text_bytes: self.read_text_bytes,
@@ -73,25 +63,32 @@ impl ReadRow {
             self.head_seq,
             self.head_bytes,
         ) {
-            (Some(item_id), Some(turn_id), Some(item_seq), Some(text_bytes)) => Some(LatestReply {
+            (Some(item_id), Some(turn_id), Some(item_seq), Some(text_bytes)) => Some((
                 turn_id,
                 item_id,
-                position: ReplyPosition {
+                ReplyPosition {
                     item_seq,
                     text_bytes,
                 },
-                preview: preview(self.head_preview.as_deref().unwrap_or_default()),
-            }),
+            )),
             _ => None,
         };
         let unread =
-            self.marked_unread || latest.as_ref().is_some_and(|l| l.position > read_through);
-        ReadState {
-            latest,
-            read_through,
+            self.marked_unread || latest.is_some_and(|(_, _, position)| position > read_through);
+        let unread_replies = if unread { self.unread_count.max(1) } else { 0 };
+        else_wire::bots::ReadState {
+            latest: latest.map(
+                |(turn_id, item_id, position)| else_wire::bots::LatestReply {
+                    turn_id,
+                    item_id,
+                    position: position.into(),
+                    preview: preview(self.head_preview.as_deref().unwrap_or_default()),
+                },
+            ),
+            read_through: read_through.into(),
             marked_unread: self.marked_unread,
             unread,
-            unread_replies: if unread { self.unread_count.max(1) } else { 0 },
+            unread_replies: Some(u32::try_from(unread_replies).unwrap_or(u32::MAX)),
         }
     }
 }

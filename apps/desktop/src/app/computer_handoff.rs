@@ -14,8 +14,9 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::{APP_CONTEXT, ElseApp, TakeOverComputer};
-use crate::api::{Bot, HandoffAction};
+use crate::api::HandoffAction;
 use crate::model::{ComputerHandoff, HandoffStatus};
+use else_wire::bots::Bot;
 
 impl ElseApp {
     fn open_handoff(&self) -> Option<(Uuid, ComputerHandoff)> {

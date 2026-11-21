@@ -110,7 +110,7 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ),
                 this.send_json::<serde_json::Value>(this.request(Method::GET, "/readyz")),
                 this.send_json::<Report>(this.request(Method::GET, "/v1/maintenance/update")),
-                this.send_json::<crate::api::BotList>(this.request(Method::GET, "/v1/bots")),
+                this.send_json::<else_wire::bots::BotList>(this.request(Method::GET, "/v1/bots")),
             );
             let (_, caps) = caps.map_err(|err| match err {
                 ClientError::Unauthorized => (

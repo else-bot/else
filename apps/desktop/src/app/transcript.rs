@@ -3,12 +3,12 @@ use super::pending_send::PendingSend;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource};
 use super::task_reply::state::{TaskReply, place_cards, task_replies};
-use crate::api::ReplyPosition;
 use crate::model::{
     Conversation, DelegationStatus, DraftStatus, GapSize, HandoffStatus, OwnerNotice,
     SkillInstallStatus,
 };
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use else_wire::bots::ReplyPosition;
 use else_wire::items::ItemKind;
 use else_wire::questions::QuestionStatus;
 use else_wire::secrets::SecretRequestStatus;
@@ -874,10 +874,10 @@ pub(super) fn build<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ReplyPosition;
     use crate::app::conversation::ConversationView;
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
+    use else_wire::bots::ReplyPosition;
 
     use crate::model::{Conversation, Snapshot};
     use serde_json::{Value, json};

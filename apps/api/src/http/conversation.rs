@@ -13,7 +13,7 @@ use super::turns::bot_deleted;
 use super::{AppState, Routes};
 use crate::db::bots::BotStatus;
 use crate::db::conversation::{self, WindowQuery};
-use crate::views::{activity_json, item_json, routine_json, turn_json};
+use crate::views::{item_json, routine_json, turn_json};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -81,7 +81,7 @@ async fn snapshot(
         "event_cursor": encode_cursor(state.server_instance_id, bot.id, snapshot.last_event_seq),
         "items": snapshot.items.iter().map(item_json).collect::<Vec<_>>(),
         "turns": snapshot.turns.iter().map(turn_json).collect::<Vec<_>>(),
-        "activity": activity_json(bot),
+        "activity": else_wire::bots::Activity::from(bot),
         "older_before_seq": snapshot.older_before_seq,
         "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
         "social_triggers": snapshot.social_triggers,

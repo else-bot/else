@@ -14,7 +14,7 @@ use super::{AppState, Routes};
 use crate::app::bots::{Avatar, BotName};
 use crate::db::bots::{self, BotError, BotStatus, Created};
 use crate::db::reads::{self, ReadCommand, ReadError};
-use crate::views::*;
+use else_wire::bots::{BotEnvelope, BotList};
 
 pub fn routes() -> Routes {
     Routes {
@@ -51,9 +51,9 @@ async fn mark_read(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(command): ApiJson<ReadCommand>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     let bot = reads::apply(&state.db, bot_id, command).await?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 impl From<BotError> for ApiError {
@@ -97,16 +97,12 @@ struct ListQuery {
 async fn list(
     State(state): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotList>, ApiError> {
     let Query(query) = query.map_err(|_| {
         ApiError::bad_request("invalid_query", "include_deleting must be true or false.")
     })?;
     let listing = bots::list(&state.db, query.include_deleting).await?;
-    Ok(Json(json!({
-        "default_bot_id": listing.default_bot_id,
-        "categories": listing.categories,
-        "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
-    })))
+    Ok(Json(BotList::from(&listing)))
 }
 
 #[derive(Deserialize)]
@@ -158,24 +154,22 @@ async fn create(
             (
                 StatusCode::CREATED,
                 [(header::LOCATION, location)],
-                Json(json!({ "bot": bot_json(&bot) })),
+                Json(BotEnvelope::from(&bot)),
             )
                 .into_response()
         }
-        Created::Existing(bot) => {
-            (StatusCode::OK, Json(json!({ "bot": bot_json(&bot) }))).into_response()
-        }
+        Created::Existing(bot) => (StatusCode::OK, Json(BotEnvelope::from(&bot))).into_response(),
     })
 }
 
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     let bot = bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 #[derive(Deserialize)]
@@ -193,7 +187,7 @@ async fn update(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<UpdateBot>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<BotEnvelope>, ApiError> {
     if body.name.is_none() && body.avatar.is_none() && body.muted.is_none() {
         return Err(ApiError::bad_request(
             "invalid_input",
@@ -212,7 +206,7 @@ async fn update(
         muted: body.muted,
     };
     let bot = bots::update(&state.db, bot_id, patch).await?;
-    Ok(Json(json!({ "bot": bot_json(&bot) })))
+    Ok(Json(BotEnvelope::from(&bot)))
 }
 
 async fn delete(
@@ -224,7 +218,7 @@ async fn delete(
         BotStatus::Deleted => StatusCode::OK,
         _ => StatusCode::ACCEPTED,
     };
-    Ok((status, Json(json!({ "bot": bot_json(&bot) }))).into_response())
+    Ok((status, Json(BotEnvelope::from(&bot))).into_response())
 }
 
 pub(super) async fn delete_bot(

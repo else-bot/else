@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::api::{Category, Client, ClientError};
+use crate::api::{Client, ClientError};
+
+use else_wire::bots::Category;
 
 #[derive(Debug, Clone)]
 enum Stage {

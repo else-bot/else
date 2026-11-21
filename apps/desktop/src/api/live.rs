@@ -1,5 +1,6 @@
-use super::{BotList, Client, ServerPause};
+use super::{Client, ServerPause};
 use crate::model::Frame;
+use else_wire::bots::BotList;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
 use reqwest::header::AUTHORIZATION;

@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
 serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

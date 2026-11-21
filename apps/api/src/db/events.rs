@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::db::turns::{ConversationKind, ItemKind};
 use crate::db::{bots, routines, turns};
-use crate::views::{bot_json, item_json, routine_json, turn_json};
+use crate::views::{item_json, routine_json, turn_json};
 
 async fn append(
     conn: &mut SqliteConnection,
@@ -73,7 +73,7 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
             conn,
             bot_id,
             "bot.updated",
-            json!({ "bot_id": bot_id, "bot": bot_json(&bot), "routines": routines,
+            json!({ "bot_id": bot_id, "bot": else_wire::bots::Bot::from(&bot), "routines": routines,
                     "social_triggers": social_triggers, "mail_triggers": mail_triggers,
                     "webhooks": webhooks, "watchers": watchers, "draft_grants": draft_grants,
                     "rules_version": rules_version }),

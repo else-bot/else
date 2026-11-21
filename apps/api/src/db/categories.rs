@@ -36,6 +36,33 @@ pub struct Category {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl From<Category> for else_wire::bots::Category {
+    fn from(category: Category) -> Self {
+        Self {
+            id: category.id,
+            name: category.name,
+            position: category.position,
+            created_at: category.created_at,
+            updated_at: category.updated_at,
+        }
+    }
+}
+
+impl From<Category> for else_wire::bots::CategoryEnvelope {
+    fn from(category: Category) -> Self {
+        Self {
+            category: category.into(),
+        }
+    }
+}
+
+/// `{"categories": [...]}`.
+pub fn list_body(categories: Vec<Category>) -> else_wire::bots::CategoryList {
+    else_wire::bots::CategoryList {
+        categories: categories.into_iter().map(Into::into).collect(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CategoryError {
     #[error(transparent)]

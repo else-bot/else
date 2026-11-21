@@ -1,8 +1,9 @@
-use crate::api::Bot;
 use crate::app::ElseApp;
 use crate::app::panel::{hairline, note};
-use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
+use crate::avatar::{AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, text_field};
+use else_wire::bots::Avatar;
+use else_wire::bots::Bot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
@@ -444,7 +445,9 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{Metadata, MetadataChange, MetadataSync, parse_name};
-    use crate::avatar::{Avatar, AvatarColor, AvatarShape};
+    use else_wire::bots::Avatar;
+    use else_wire::bots::AvatarColor;
+    use else_wire::bots::AvatarShape;
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
         Metadata {

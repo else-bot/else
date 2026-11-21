@@ -9,10 +9,10 @@ use super::computer::{ComputerView, DetailsTab, LayoutChanged};
 use super::panel::{hairline, list_rows, muted, section};
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
-use crate::api::Bot;
 use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
 use crate::model::Conversation;
+use else_wire::bots::Bot;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, IconName, Sizable as _, h_flex, v_flex,

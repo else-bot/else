@@ -12,14 +12,14 @@
 //! after only a name that starts with the whole query, and prefers a recently
 //! used server. Recently opened items rank higher.
 
+use else_wire::bots::Avatar;
+
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::sidebar::fold;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::avatar::Avatar;
-use crate::sidebar::fold;
 
 /// How many recently opened items the switcher remembers.
 pub const RECENTS: usize = 8;
@@ -51,7 +51,7 @@ pub struct Bot {
 impl Bot {
     /// The switcher's entries for a server's bot list, without bots being
     /// deleted.
-    pub fn listed(bots: &[crate::api::Bot]) -> Vec<Self> {
+    pub fn listed(bots: &[else_wire::bots::Bot]) -> Vec<Self> {
         bots.iter()
             .filter(|bot| bot.is_active())
             .map(|bot| Self {

@@ -715,7 +715,7 @@ impl ElseApp {
         {
             let owner = cx.entity().downgrade();
             let bot = view.bot_id;
-            let position = crate::api::ReplyPosition {
+            let position = else_wire::bots::ReplyPosition {
                 item_seq: latest.seq,
                 text_bytes: latest.text.len() as i64,
             };

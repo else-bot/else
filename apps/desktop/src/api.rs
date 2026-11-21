@@ -6,10 +6,11 @@
 //! HTTPS and WSS share one TLS configuration that verifies certificates
 //! with the platform's trust store.
 
+use else_wire::bots::Avatar;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -35,17 +36,18 @@ mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
 pub mod socials;
+use crate::config::{Origin, OwnerToken};
+use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
 pub use desktop::{
     ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode,
     MAX_CLIPBOARD_BYTES,
 };
+use else_wire::bots::{
+    Bot, BotEnvelope, BotList, Category, CategoryEnvelope, CategoryList, ReplyPosition,
+};
 use serde_json::json;
-
-use crate::avatar::Avatar;
-use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
 
 pub struct SendRequest {
     pub request_id: Uuid,
@@ -276,189 +278,6 @@ struct Onboarded {
     main_bot_id: Uuid,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Activity {
-    pub phase: else_wire::bots::Phase,
-    pub active_turn_id: Option<Uuid>,
-    pub queued_count: u32,
-    /// Set while the active turn is parked on tasks it handed to other
-    /// bots or on its own jobs; absent from older servers.
-    #[serde(default)]
-    pub waiting_on: Option<WaitingOn>,
-}
-
-/// What a parked turn waits on: the bots doing its tasks, oldest task
-/// first, and its own pending jobs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WaitingOn {
-    /// When its oldest unfinished task or job wait began.
-    pub since: DateTime<Utc>,
-    pub bots: Vec<WaitingBot>,
-    /// Its pending MCP and computer job waits; absent from older servers,
-    /// which report only tasks.
-    #[serde(default)]
-    pub jobs: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct WaitingBot {
-    pub id: Uuid,
-    pub name: String,
-    pub tasks: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Cleanup {
-    pub state: String,
-    pub error: Option<serde_json::Value>,
-}
-
-/// `since` is when the open request was made; absent from older servers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SidebarStatus {
-    WaitingForAnswer {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsApproval {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsTakeover {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    NeedsYou {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-        /// Absent from servers before #508.
-        #[serde(default)]
-        notice_id: Option<Uuid>,
-    },
-    NeedsCredentials {
-        preview: String,
-        #[serde(default)]
-        since: Option<DateTime<Utc>>,
-    },
-    /// The owner took over the bot's computer and has not handed it back.
-    HasComputer,
-    Failed,
-    Stopped,
-    Uncertain,
-    #[serde(other)]
-    Unknown,
-}
-
-/// A request the bot waits on the owner to settle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Waiting {
-    pub since: Option<DateTime<Utc>>,
-}
-
-impl SidebarStatus {
-    pub fn waiting(&self) -> Option<Waiting> {
-        match self {
-            Self::WaitingForAnswer { since, .. }
-            | Self::NeedsApproval { since, .. }
-            | Self::NeedsTakeover { since, .. }
-            | Self::NeedsCredentials { since, .. }
-            | Self::NeedsYou { since, .. } => Some(Waiting { since: *since }),
-            Self::HasComputer | Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => {
-                None
-            }
-        }
-    }
-}
-
-/// An active bot, or a deletion receipt (`cleanup` set).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Bot {
-    pub id: Uuid,
-    pub name: String,
-    #[serde(default)]
-    pub metadata_revision: Option<i64>,
-    /// Absent from older servers, which draw every bot the same.
-    #[serde(default)]
-    pub avatar: Avatar,
-    #[serde(default)]
-    pub conversation_id: Option<Uuid>,
-    #[serde(default)]
-    pub selected_provider_id: Option<String>,
-    #[serde(default)]
-    pub activity: Option<Activity>,
-    #[serde(default)]
-    pub cleanup: Option<Cleanup>,
-    /// Its sidebar category; absent (older servers, receipts) or null means
-    /// unassigned.
-    #[serde(default)]
-    pub category_id: Option<Uuid>,
-    /// The owner silenced it: unread and announced only while it waits on
-    /// the owner. Absent from receipts and older servers.
-    #[serde(default)]
-    pub muted: bool,
-    /// Absent from receipts and older servers.
-    #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
-    /// The newest owner or bot message; `None` before the first one and
-    /// from older servers.
-    #[serde(default)]
-    pub last_message_at: Option<DateTime<Utc>>,
-    /// Absent from older servers and on receipts.
-    #[serde(default)]
-    pub read_state: Option<ReadState>,
-    #[serde(default)]
-    pub sidebar_status: Option<SidebarStatus>,
-    #[serde(default)]
-    pub watching: usize,
-}
-
-/// A point in a bot's replies: the assistant item, then the UTF-8 bytes of
-/// its text. Field order makes the derived ordering lexicographic.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize,
-)]
-pub struct ReplyPosition {
-    pub item_seq: i64,
-    pub text_bytes: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct LatestReply {
-    pub turn_id: Uuid,
-    pub item_id: Uuid,
-    pub position: ReplyPosition,
-    #[serde(default)]
-    pub preview: String,
-}
-
-impl LatestReply {
-    /// The preview as one line, for surfaces that cannot render markdown.
-    /// The server already strips the markdown, so parsing again would turn
-    /// literal `*stars*` into emphasis.
-    pub fn plain_preview(&self) -> String {
-        self.preview
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-/// The owner's saved read state for a bot's owner conversation.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ReadState {
-    pub latest: Option<LatestReply>,
-    pub read_through: ReplyPosition,
-    pub marked_unread: bool,
-    /// Replies past `read_through`; absent from older servers.
-    #[serde(default)]
-    pub unread_replies: Option<u32>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ReadCommand {
@@ -467,60 +286,9 @@ pub enum ReadCommand {
     MarkUnread,
 }
 
-/// A sidebar category.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Category {
-    pub id: Uuid,
-    pub name: String,
-    /// The owner's sidebar place; absent from older servers, null when
-    /// never placed.
-    #[serde(default)]
-    pub position: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CategoryList {
-    categories: Vec<Category>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CategoryEnvelope {
-    category: Category,
-}
-
-impl Bot {
-    pub fn is_active(&self) -> bool {
-        self.cleanup.is_none()
-    }
-
-    /// The open request this bot waits on the owner to settle, if any.
-    pub fn waiting(&self) -> Option<Waiting> {
-        self.sidebar_status.as_ref()?.waiting()
-    }
-
-    /// Muted and not waiting on the owner: never unread and never announced.
-    pub fn silenced(&self) -> bool {
-        self.muted && self.waiting().is_none()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BotList {
-    pub default_bot_id: Option<Uuid>,
-    /// Absent from servers without categories.
-    #[serde(default)]
-    pub categories: Vec<Category>,
-    pub bots: Vec<Bot>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct RoutineEnvelope {
     routine: Routine,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct BotEnvelope {
-    bot: Bot,
 }
 
 /// A bot's newest conversation page and the response it was read from.

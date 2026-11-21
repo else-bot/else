@@ -907,7 +907,7 @@ impl ElseApp {
 /// where it is now, and a button that opens the emails still there.
 pub(super) fn mail_banner(
     turn: &crate::model::Turn,
-    bots: &[crate::api::Bot],
+    bots: &[else_wire::bots::Bot],
     cx: &mut Context<ElseApp>,
 ) -> Option<Div> {
     let first = turn.mail.first()?;

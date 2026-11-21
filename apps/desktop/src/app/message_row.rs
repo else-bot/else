@@ -66,7 +66,7 @@ impl ElseApp {
             && conversation.is_feedback_acknowledgement(item)
         {
             let bot = view.bot_id;
-            let position = crate::api::ReplyPosition {
+            let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: item.text.len() as i64,
             };
@@ -423,7 +423,7 @@ impl ElseApp {
                 {
                     let owner = cx.entity().downgrade();
                     let bot = view.bot_id;
-                    let position = crate::api::ReplyPosition {
+                    let position = else_wire::bots::ReplyPosition {
                         item_seq: item.seq,
                         text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
                     };

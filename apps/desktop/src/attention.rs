@@ -2,7 +2,9 @@
 //! replies from bots that are not muted, and the requests waiting on the
 //! owner, muted bots included.
 
-use crate::api::{Bot, SidebarStatus};
+use else_wire::bots::Bot;
+
+use else_wire::bots::SidebarStatus;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Attention {
@@ -35,7 +37,7 @@ impl Ask {
             SidebarStatus::NeedsTakeover { .. } => Self::Takeover,
             SidebarStatus::NeedsCredentials { .. } => Self::Credentials,
             SidebarStatus::NeedsYou { .. } => Self::Owner,
-            SidebarStatus::HasComputer
+            SidebarStatus::HasComputer { .. }
             | SidebarStatus::Failed
             | SidebarStatus::Stopped
             | SidebarStatus::Uncertain
@@ -116,7 +118,8 @@ impl Attention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{ReadState, ReplyPosition};
+    use else_wire::bots::ReadState;
+    use else_wire::bots::ReplyPosition;
     use uuid::Uuid;
 
     fn bot(name: &str, replies: Option<u32>, status: Option<SidebarStatus>) -> Bot {
@@ -129,6 +132,7 @@ mod tests {
             latest: None,
             read_through: ReplyPosition::default(),
             marked_unread: replies.is_some(),
+            unread: replies.is_some(),
             unread_replies: replies,
         });
         bot.sidebar_status = status;

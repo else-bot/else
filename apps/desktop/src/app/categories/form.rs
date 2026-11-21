@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use super::creation::Creation;
 use super::{Connection, ElseApp};
-use crate::api::Category;
 use crate::app::request::Request;
+use else_wire::bots::Category;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};

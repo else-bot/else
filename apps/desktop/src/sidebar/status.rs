@@ -1,7 +1,11 @@
 use chrono::{DateTime, Utc};
 use else_wire::bots::Phase;
 
-use crate::api::{Bot, SidebarStatus, WaitingOn};
+use else_wire::bots::Bot;
+
+use else_wire::bots::SidebarStatus;
+
+use else_wire::bots::WaitingOn;
 
 /// How long a request has waited, in its largest whole unit: `now`, `5m`,
 /// `2h`, `3d`.
@@ -111,7 +115,7 @@ impl Subtitle {
             Some(SidebarStatus::NeedsCredentials { preview, .. }) => {
                 return label(Kind::Credentials, &format!("Needs credentials · {preview}"));
             }
-            Some(SidebarStatus::HasComputer) => {
+            Some(SidebarStatus::HasComputer { .. }) => {
                 return label(Kind::HasComputer, "You have the computer");
             }
             _ => {}
@@ -188,7 +192,7 @@ mod tests {
     fn idle_uses_the_bot_reply_and_distinguishes_empty_from_missing_data() {
         let mut bot = bot(json!({}));
         assert_eq!(Subtitle::new(&bot, true, false).text, "No replies yet");
-        bot.read_state.as_mut().unwrap().latest = Some(crate::api::LatestReply {
+        bot.read_state.as_mut().unwrap().latest = Some(else_wire::bots::LatestReply {
             turn_id: uuid::Uuid::nil(),
             item_id: uuid::Uuid::nil(),
             position: Default::default(),

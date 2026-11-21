@@ -11,7 +11,13 @@ use else_wire::bots::Phase;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, ReadCommand, ReplyPosition, SidebarStatus};
+use crate::api::ReadCommand;
+
+use else_wire::bots::Bot;
+
+use else_wire::bots::ReplyPosition;
+
+use else_wire::bots::SidebarStatus;
 
 /// The owner's explicit choice from the bot menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,7 +496,8 @@ pub fn parse_tag(tag: &str) -> Option<(Uuid, Uuid)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{LatestReply, ReadState};
+    use else_wire::bots::LatestReply;
+    use else_wire::bots::ReadState;
 
     fn at(item_seq: i64, text_bytes: i64) -> ReplyPosition {
         ReplyPosition {
@@ -518,6 +525,7 @@ mod tests {
                 }),
                 read_through: read,
                 marked_unread: false,
+                unread: false,
                 unread_replies: None,
             });
             bot
@@ -549,11 +557,13 @@ mod tests {
     }
 
     fn busy(mut bot: Bot, phase: Phase) -> Bot {
-        bot.activity = Some(crate::api::Activity {
+        bot.activity = Some(else_wire::bots::Activity {
             phase,
             active_turn_id: (phase == Phase::Working).then(|| turn(1)),
             queued_count: u32::from(phase == Phase::Queued),
             waiting_on: None,
+            running_job_count: 0,
+            error: None,
         });
         bot
     }
@@ -606,7 +616,7 @@ mod tests {
         let mut inbox = Inbox::default();
         inbox.observe(&[busy(bot(1, None, at(0, 0)), Phase::Working)]);
         let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), Phase::Working);
-        asking.sidebar_status = Some(crate::api::SidebarStatus::WaitingForAnswer {
+        asking.sidebar_status = Some(else_wire::bots::SidebarStatus::WaitingForAnswer {
             preview: "Which one?".into(),
             since: None,
         });

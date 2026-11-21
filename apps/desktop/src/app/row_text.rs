@@ -1188,11 +1188,11 @@ mod tests {
         CellRun, RowFormat, RowSource, file_links, file_map, linked_file, list_blocks,
         plain_content, shows_its_destination, table_columns,
     };
-    use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
     use crate::app::reply::{Author, Draft, MessageReference, Quote};
     use crate::attachments::{Attachment, MessagePart, file_id};
+    use else_wire::bots::Bot;
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
 

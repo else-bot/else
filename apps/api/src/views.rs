@@ -2,6 +2,7 @@
 //! so snapshots and streamed events carry identical shapes. Internal
 //! checkpoints, native session IDs, profiles, and credentials never appear.
 
+use else_wire as wire;
 use serde_json::{Value, json};
 
 use crate::app::routines::ModelSetting;
@@ -9,56 +10,95 @@ use crate::db::bots::{BotRecord, BotStatus};
 use crate::db::routines::{Routine, RunState};
 use crate::db::turns::{ItemRecord, TurnRecord, TurnStatus};
 
-/// Public projection of an active bot or a deletion receipt.
-pub fn bot_json(bot: &BotRecord) -> Value {
-    if bot.status != BotStatus::Active {
-        return json!({
-            "id": bot.id,
-            "name": bot.name,
-            "avatar": bot.avatar(),
-            "deleted_at": bot.deleted_at,
-            "cleanup": {
-                "state": if bot.status == BotStatus::Deleted { "done" } else { "pending" },
-                "error": null,
-            },
-        });
+impl From<&BotRecord> for wire::bots::Bot {
+    /// An active bot, or a deletion receipt with only its identity and
+    /// cleanup.
+    fn from(bot: &BotRecord) -> Self {
+        let receipt = Self {
+            id: bot.id,
+            name: bot.name.clone(),
+            avatar: bot.avatar().into(),
+            conversation_id: None,
+            created_at: None,
+            last_message_at: None,
+            metadata_revision: None,
+            deleted_at: bot.deleted_at,
+            selected_provider_id: None,
+            category_id: None,
+            muted: false,
+            activity: None,
+            sidebar_status: None,
+            read_state: None,
+            watching: 0,
+            cleanup: None,
+        };
+        if bot.status != BotStatus::Active {
+            return Self {
+                cleanup: Some(wire::bots::Cleanup {
+                    state: if bot.status == BotStatus::Deleted {
+                        wire::bots::CleanupState::Done
+                    } else {
+                        wire::bots::CleanupState::Pending
+                    },
+                    error: None,
+                }),
+                ..receipt
+            };
+        }
+        Self {
+            conversation_id: Some(bot.conversation_id),
+            created_at: Some(bot.created_at),
+            last_message_at: bot.last_message_at,
+            metadata_revision: Some(bot.metadata_revision),
+            deleted_at: None,
+            selected_provider_id: bot.selected_provider_id.clone(),
+            category_id: bot.category_id,
+            muted: bot.muted,
+            activity: Some(bot.into()),
+            sidebar_status: bot
+                .sidebar
+                .status(bot.active_turn_id.is_some() || bot.queued_count > 0),
+            read_state: Some(bot.read.state()),
+            watching: usize::try_from(bot.watching).unwrap_or(0),
+            ..receipt
+        }
     }
-    json!({
-        "id": bot.id,
-        "name": bot.name,
-        "avatar": bot.avatar(),
-        "conversation_id": bot.conversation_id,
-        "created_at": bot.created_at,
-        "last_message_at": bot.last_message_at,
-        "metadata_revision": bot.metadata_revision,
-        "deleted_at": null,
-        "selected_provider_id": bot.selected_provider_id,
-        "category_id": bot.category_id,
-        "muted": bot.muted,
-        "activity": activity_json(bot),
-        "sidebar_status": bot.sidebar.status(bot.active_turn_id.is_some() || bot.queued_count > 0),
-        "read_state": bot.read.state(),
-        "watching": bot.watching,
-        "cleanup": null,
-    })
 }
 
-/// Project turn records into the sidebar activity. No separate state.
-pub fn activity_json(bot: &BotRecord) -> Value {
-    let phase = match (bot.cancel_pending, bot.active_turn_status) {
-        (true, _) | (_, Some(TurnStatus::Cancelling)) => "cancelling",
-        (_, Some(_)) => "working",
-        (_, None) if bot.queued_count > 0 => "queued",
-        _ => "idle",
-    };
-    json!({
-        "phase": phase,
-        "active_turn_id": bot.active_turn_id,
-        "queued_count": bot.queued_count,
-        "waiting_on": bot.waiting_on.as_ref().map(|waiting| &waiting.0),
-        "running_job_count": 0,
-        "error": null,
-    })
+impl From<&BotRecord> for wire::bots::BotEnvelope {
+    fn from(bot: &BotRecord) -> Self {
+        Self { bot: bot.into() }
+    }
+}
+
+impl From<&crate::db::bots::Listing> for wire::bots::BotList {
+    fn from(listing: &crate::db::bots::Listing) -> Self {
+        Self {
+            default_bot_id: listing.default_bot_id,
+            categories: listing.categories.iter().cloned().map(Into::into).collect(),
+            bots: listing.bots.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&BotRecord> for wire::bots::Activity {
+    /// Projected from turn records. No separate state.
+    fn from(bot: &BotRecord) -> Self {
+        let phase = match (bot.cancel_pending, bot.active_turn_status) {
+            (true, _) | (_, Some(TurnStatus::Cancelling)) => wire::bots::Phase::Cancelling,
+            (_, Some(_)) => wire::bots::Phase::Working,
+            (_, None) if bot.queued_count > 0 => wire::bots::Phase::Queued,
+            _ => wire::bots::Phase::Idle,
+        };
+        Self {
+            phase,
+            active_turn_id: bot.active_turn_id,
+            queued_count: u32::try_from(bot.queued_count).unwrap_or(u32::MAX),
+            waiting_on: bot.waiting_on.as_ref().map(|waiting| waiting.0.clone()),
+            running_job_count: 0,
+            error: None,
+        }
+    }
 }
 
 pub fn turn_json(turn: &TurnRecord) -> Value {

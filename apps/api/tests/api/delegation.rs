@@ -1135,7 +1135,8 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
             .await
             .unwrap()
             .unwrap();
-        else_api::views::bot_json(&bot)["activity"]["waiting_on"].clone()
+        serde_json::to_value(else_wire::bots::Bot::from(&bot)).unwrap()["activity"]["waiting_on"]
+            .clone()
     };
     assert_eq!(waiting_on().await, Value::Null, "a running turn is working");
 

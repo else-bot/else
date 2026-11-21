@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use sqlx::types::Json;
 
 use crate::app::outgoing::Content;
 
 use crate::db::turns::TurnStatus;
 use crate::socials::types::Provider;
+use else_wire::bots::SidebarStatus;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SidebarRow {
@@ -34,41 +34,6 @@ pub struct SidebarRow {
     latest_turn_read: bool,
 }
 
-/// `since` is when the open request it shows was made.
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SidebarStatus {
-    WaitingForAnswer {
-        preview: String,
-        since: DateTime<Utc>,
-    },
-    NeedsApproval {
-        preview: String,
-        since: DateTime<Utc>,
-    },
-    NeedsTakeover {
-        preview: String,
-        since: DateTime<Utc>,
-    },
-    NeedsCredentials {
-        preview: String,
-        since: DateTime<Utc>,
-    },
-    /// A task delegated to the bot ended needing the owner.
-    NeedsYou {
-        preview: String,
-        since: DateTime<Utc>,
-        /// The ask shown, so a desktop announces each ask once.
-        notice_id: uuid::Uuid,
-    },
-    HasComputer {
-        since: DateTime<Utc>,
-    },
-    Failed,
-    Stopped,
-    Uncertain,
-}
-
 impl SidebarRow {
     pub fn status(&self, busy: bool) -> Option<SidebarStatus> {
         let preview = |text: &str| super::super::reads::preview(text);
@@ -76,40 +41,46 @@ impl SidebarRow {
             let preview = preview(title);
             return Some(
                 if self.question_kind == Some(crate::app::questions::Kind::Choice) {
-                    SidebarStatus::WaitingForAnswer { preview, since }
+                    SidebarStatus::WaitingForAnswer {
+                        preview,
+                        since: Some(since),
+                    }
                 } else {
-                    SidebarStatus::NeedsApproval { preview, since }
+                    SidebarStatus::NeedsApproval {
+                        preview,
+                        since: Some(since),
+                    }
                 },
             );
         }
         if let (Some(reason), Some(since)) = (&self.handoff_reason, self.handoff_at) {
             return Some(SidebarStatus::NeedsTakeover {
                 preview: preview(reason),
-                since,
+                since: Some(since),
             });
         }
         if let (Some(title), Some(since)) = (&self.skill_install_title, self.skill_install_at) {
             return Some(SidebarStatus::NeedsApproval {
                 preview: preview(title),
-                since,
+                since: Some(since),
             });
         }
         if let (Some(Json(content)), Some(since)) = (&self.draft_content, self.draft_at) {
             return Some(SidebarStatus::NeedsApproval {
                 preview: preview(&format!("{} to {}", content.noun(), content.audience())),
-                since,
+                since: Some(since),
             });
         }
         if let (Some(reason), Some(since)) = (&self.credential_reason, self.credential_at) {
             return Some(SidebarStatus::NeedsCredentials {
                 preview: preview(reason),
-                since,
+                since: Some(since),
             });
         }
         if let (Some(provider), Some(since)) = (self.setup_provider, self.setup_at) {
             return Some(SidebarStatus::NeedsCredentials {
                 preview: format!("Connect {}", provider.label()),
-                since,
+                since: Some(since),
             });
         }
         if let (Some(notice_id), Some(summary), Some(since)) =
@@ -117,12 +88,12 @@ impl SidebarRow {
         {
             return Some(SidebarStatus::NeedsYou {
                 preview: preview(summary),
-                since,
-                notice_id,
+                since: Some(since),
+                notice_id: Some(notice_id),
             });
         }
         if let Some(since) = self.computer_taken_at {
-            return Some(SidebarStatus::HasComputer { since });
+            return Some(SidebarStatus::HasComputer { since: Some(since) });
         }
         if busy || self.latest_turn_read {
             return None;

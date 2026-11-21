@@ -61,7 +61,7 @@ pub(super) struct ComputerView {
     client: Arc<Client>,
     bot: Uuid,
     name: String,
-    avatar: crate::avatar::Avatar,
+    avatar: else_wire::bots::Avatar,
     screen: Screen,
     computer: Option<ComputerState>,
     upgrade_refused: Option<String>,
@@ -97,7 +97,7 @@ impl EventEmitter<LayoutChanged> for ComputerView {}
 impl ComputerView {
     pub fn new(
         client: Arc<Client>,
-        bot: &crate::api::Bot,
+        bot: &else_wire::bots::Bot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -755,8 +755,8 @@ impl ComputerView {
             };
             // Without a screen to show, the bot keeps its shape in neutral
             // grey: absent, not dimmed.
-            let resting = crate::avatar::Avatar {
-                color: crate::avatar::AvatarColor::Gray,
+            let resting = else_wire::bots::Avatar {
+                color: else_wire::bots::AvatarColor::Gray,
                 ..self.avatar
             };
             // The state centres in the space it has, a little above the

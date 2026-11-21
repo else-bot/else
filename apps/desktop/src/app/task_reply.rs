@@ -474,7 +474,7 @@ impl ElseApp {
             .is_some_and(|reply| reply.id == id)
         {
             let owner = cx.entity().downgrade();
-            let position = crate::api::ReplyPosition {
+            let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
             };
