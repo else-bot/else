@@ -256,8 +256,9 @@ pub(crate) fn on_commands<E: InteractiveElement>(element: E, app: &Entity<ElseAp
     let element = on::<LoadOlder, _>(element, app, |app, window, cx| {
         app.update_view(cx, |view, cx| view.load_older(window, cx));
     });
-    let element =
-        on::<FindInConversation, _>(element, app, |app, window, cx| app.open_find(window, cx));
+    let element = on::<FindInConversation, _>(element, app, |app, window, cx| {
+        app.update_view(cx, |view, cx| view.open_find(window, cx));
+    });
     let element = on::<NewCategory, _>(element, app, |app, window, cx| {
         if app.connection == Connection::Connected {
             app.open_category_dialog(None, window, cx);
@@ -347,7 +348,7 @@ pub struct ElseApp {
     client: Arc<Client>,
     connection: Connection,
     caps: Option<Arc<Capabilities>>,
-    bots: Vec<Bot>,
+    bots: Arc<[Bot]>,
     /// When a bot list last arrived, if one has since the last connection
     /// event. The live stream reports a connection before its first list, so
     /// `bots` can be stale.
@@ -362,6 +363,9 @@ pub struct ElseApp {
     view: Option<Entity<ConversationView>>,
     /// Bots' views kept after switching away.
     warm: warm::Warm<Entity<ConversationView>>,
+    /// What the owner has read of the shown view.
+    reading: reading::Reading,
+    trays: HashMap<Uuid, waiting_tray::Tray>,
     /// Starts preloading a bot's view once the pointer rests on it.
     _preload: Option<(Uuid, Task<()>)>,
     saved: Option<crate::saved_conversations::SavedConversations>,
@@ -469,7 +473,7 @@ impl ElseApp {
             client,
             connection: Connection::Connecting,
             caps: None,
-            bots: Vec::new(),
+            bots: Arc::default(),
             listed_at: None,
             requested: None,
             mention_bots: Default::default(),
@@ -478,6 +482,8 @@ impl ElseApp {
             selected: None,
             view: None,
             warm: Default::default(),
+            reading: Default::default(),
+            trays: HashMap::new(),
             _preload: None,
             saved,
             composer,
@@ -596,15 +602,12 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                for view in self.warm.iter() {
-                    view.update(cx, |view, _| view.stream_problem = None);
+                for view in self.warm.iter().chain(&self.view) {
+                    view.update(cx, |view, cx| view.set_stream_problem(None, cx));
                 }
-                let cold = self.view.as_ref().is_some_and(|view| {
-                    view.update(cx, |view, _| {
-                        view.stream_problem = None;
-                        view.conversation.is_none()
-                    })
-                });
+                let cold = self
+                    .shown(cx)
+                    .is_some_and(|view| view.conversation.is_none());
                 if cold {
                     self.load_conversation(window, cx);
                 }
@@ -613,11 +616,8 @@ impl ElseApp {
             }
             LiveEvent::Disconnected(reason) => {
                 self.connection = Connection::Disconnected(reason.clone());
-                if let Some(view) = &self.view {
-                    view.update(cx, |view, _| {
-                        view.stream_problem = Some(format!("Reconnecting… {reason}"));
-                    });
-                }
+                let problem = Some(format!("Reconnecting… {reason}"));
+                self.update_view(cx, |view, cx| view.set_stream_problem(problem, cx));
             }
             LiveEvent::Unauthorized => {
                 self.unauthorized(&ClientError::Unauthorized, cx);
@@ -676,7 +676,7 @@ impl ElseApp {
 
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
-        self.bots = list.bots;
+        self.bots = list.bots.into();
         self.listed_at = Some(std::time::Instant::now());
         let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
         if *self.mention_bots != mention_bots {
@@ -685,6 +685,8 @@ impl ElseApp {
         self.categories = list.categories;
         let bots = &self.bots;
         self.warm.retain(|id| bots.iter().any(|bot| bot.id == id));
+        self.trays
+            .retain(|id, _| bots.iter().any(|bot| bot.id == *id));
         self.carry_category_order(cx);
         self.stopping.retain(|id| {
             self.bots
@@ -804,15 +806,9 @@ impl ElseApp {
                 .find(|bot| bot.id == id && self.inbox.is_unread(bot))
                 .map(|bot| self.inbox.seen_through(bot))
         });
-        if id == self.selected
-            && let Some(view) = self.view.clone()
-        {
-            if view.read(cx).unread.is_none()
-                && let Some(since) = unread_since
-            {
-                view.update(cx, |view, _| {
-                    view.unread = Some(conversation::Unread::since(since));
-                });
+        if id == self.selected && self.view.is_some() {
+            if self.reading.unread_since().is_none() && unread_since.is_some() {
+                self.reading = reading::Reading::new(unread_since);
                 self.sync_rows(window, cx);
             }
             return;
@@ -846,11 +842,7 @@ impl ElseApp {
         });
         self.notice = None;
         self.swap_view(id, window, cx);
-        if let Some(view) = &self.view {
-            view.update(cx, |view, _| {
-                view.unread = unread_since.map(conversation::Unread::since);
-            });
-        }
+        self.reading = reading::Reading::new(unread_since);
         self.ensure_settings(window, cx);
         if id.is_some() {
             self.sync_rows(window, cx);
@@ -1018,21 +1010,14 @@ impl ElseApp {
     }
 
     fn accept_sent(&mut self, bot: Uuid, sent: Sent, window: &mut Window, cx: &mut Context<Self>) {
-        let Sent { item, turn } = sent;
-        let inserted = self.view_of(bot, cx).is_some_and(|view| {
-            view.update(cx, |view, _| {
-                let Some(conversation) = view.conversation.as_mut() else {
-                    return false;
-                };
-                conversation.insert_item(item.clone());
-                conversation.insert_turn(turn);
-                true
-            })
-        });
+        let request_id = sent.item.request_id;
+        let inserted = self
+            .view_of(bot, cx)
+            .is_some_and(|view| view.update(cx, |view, cx| view.insert_sent(sent, cx)));
         if inserted {
             self.prune_pending(bot, cx);
         } else if let Some(list) = self.pending.get_mut(&bot) {
-            list.retain(|p| Some(p.request_id) != item.request_id);
+            list.retain(|p| Some(p.request_id) != request_id);
         }
         self.sync_rows(window, cx);
     }

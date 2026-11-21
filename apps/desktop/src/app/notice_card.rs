@@ -1,3 +1,4 @@
+use super::conversation::on_app;
 use crate::api::ClientError;
 use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
@@ -138,8 +139,9 @@ impl ConversationView {
             )
             .child({
                 let summary = notice.summary.clone();
-                button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
-                    self.on_app(move |app, _, window, cx| {
+                button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(on_app(
+                    &self.app,
+                    move |app, _, window, cx| {
                         // The asking bot answers in its own chat. The reply
                         // quotes the ask, and settles only it where the
                         // server can.
@@ -149,8 +151,8 @@ impl ConversationView {
                         let settles = app.caps.as_ref().is_some_and(|caps| caps.answers_notice);
                         let quote = super::reply::Quote::ask(id, summary.clone(), settles);
                         app.add_quote(bot, quote, window, cx);
-                    }),
-                )
+                    },
+                ))
             });
         super::action_card::card(IconName::TriangleAlert, title, subtitle)
             .meta(since)

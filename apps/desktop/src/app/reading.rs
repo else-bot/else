@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use super::conversation::ReplyLayout;
 use super::{Connection, ElseApp};
 use crate::api::{ClientError, ReadCommand};
 use crate::inbox::{Mark, Outcome};
@@ -20,18 +19,61 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 const READ_SPACING: Duration = Duration::from_millis(400);
 const UNREAD_DIVIDER_DELAY: Duration = Duration::from_secs(5);
 
+/// Where the latest reply was painted.
+#[derive(Clone, Copy)]
+pub(super) struct ReplyLayout {
+    pub position: ReplyPosition,
+    pub bounds: Bounds<Pixels>,
+}
+
+/// Where the unread divider sits, and the timer that hides it once the
+/// owner has seen the replies below it.
+struct Unread {
+    since: ReplyPosition,
+    dismissal: Option<Task<()>>,
+}
+
+/// What the owner has read of the shown transcript. It starts over each
+/// time another bot is shown.
+#[derive(Default)]
+pub(super) struct Reading {
+    unread: Option<Unread>,
+    latest_seen: bool,
+    reply_layout: Option<ReplyLayout>,
+}
+
+impl Reading {
+    /// Starts reading a bot whose replies after `since` are unread.
+    pub(super) fn new(since: Option<ReplyPosition>) -> Self {
+        Self {
+            unread: since.map(|since| Unread {
+                since,
+                dismissal: None,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Where the unread divider sits.
+    pub(super) fn unread_since(&self) -> Option<ReplyPosition> {
+        self.unread.as_ref().map(|unread| unread.since)
+    }
+
+    pub(super) fn clear_unread(&mut self) {
+        self.unread = None;
+    }
+}
+
 impl ElseApp {
     pub(super) fn check_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = &self.view else {
+        if self.view.is_none() {
             return;
-        };
-        view.update(cx, |view, _| {
-            if let Some(unread) = &mut view.unread {
-                unread.dismissal = None;
-            }
-            view.reply_layout = None;
-            view.latest_seen = false;
-        });
+        }
+        if let Some(unread) = &mut self.reading.unread {
+            unread.dismissal = None;
+        }
+        self.reading.reply_layout = None;
+        self.reading.latest_seen = false;
         // Lays the cached transcript out again, so the latest reply reports
         // where it is.
         window.refresh();
@@ -41,9 +83,6 @@ impl ElseApp {
     fn dismiss_unread_after_viewing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let attending = self.viewing_transcript(window, cx);
         let latest = self.latest_loaded(cx);
-        let Some(view) = self.view.clone() else {
-            return;
-        };
         let dismissal = |cx: &mut Context<Self>| {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(UNREAD_DIVIDER_DELAY).await;
@@ -51,46 +90,23 @@ impl ElseApp {
                     if !app.viewing_transcript(window, cx) {
                         return;
                     }
-                    let Some(view) = app.view.clone() else {
-                        return;
-                    };
-                    if view.read(cx).latest_seen {
-                        view.update(cx, |view, _| view.unread = None);
+                    if app.reading.latest_seen {
+                        app.reading.unread = None;
                         app.sync_rows(window, cx);
                     }
                 });
             })
         };
-        let (latest_seen, waiting) = {
-            let view = view.read(cx);
-            (
-                view.latest_seen,
-                view.unread
-                    .as_ref()
-                    .map(|unread| (unread.since, unread.dismissal.is_some())),
-            )
-        };
+        let latest_seen = self.reading.latest_seen;
         // A kept view can show its old tail before the unread reply arrives.
-        let Some((since, dismissing)) = waiting else {
+        let Some(unread) = &mut self.reading.unread else {
             return;
         };
-        if !attending || !latest_seen || latest <= Some(since) {
-            view.update(cx, |view, _| {
-                if let Some(unread) = &mut view.unread {
-                    unread.dismissal = None;
-                }
-            });
-            return;
+        if !attending || !latest_seen || latest <= Some(unread.since) {
+            unread.dismissal = None;
+        } else if unread.dismissal.is_none() {
+            unread.dismissal = Some(dismissal(cx));
         }
-        if dismissing {
-            return;
-        }
-        let task = dismissal(cx);
-        view.update(cx, |view, _| {
-            if let Some(unread) = &mut view.unread {
-                unread.dismissal = Some(task);
-            }
-        });
     }
 
     fn latest_loaded(&self, cx: &App) -> Option<ReplyPosition> {
@@ -114,10 +130,10 @@ impl ElseApp {
         {
             return;
         }
-        let Some(view) = self.view_of(bot, cx).filter(|_| self.shows(bot, cx)) else {
+        if !self.shows(bot, cx) {
             return;
-        };
-        view.update(cx, |view, _| view.reply_layout = Some(layout));
+        }
+        self.reading.reply_layout = Some(layout);
         self.acknowledge_visible(window, cx);
     }
 
@@ -141,20 +157,21 @@ impl ElseApp {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let Some((layout, viewport, bot_id)) = view.read_with(cx, |view, _| {
-            let layout = view
-                .reply_layout
-                .filter(|layout| layout.position.item_seq == position.item_seq)?;
-            Some((layout, view.list.viewport_bounds(), view.bot_id))
-        }) else {
+        let Some(layout) = self
+            .reading
+            .reply_layout
+            .filter(|layout| layout.position.item_seq == position.item_seq)
+        else {
             return;
         };
+        let (viewport, bot_id) =
+            view.read_with(cx, |view, _| (view.list.viewport_bounds(), view.bot_id));
         let seen = viewport.size.height > px(0.)
             && layout.bounds.bottom() > viewport.top()
             && layout.bounds.bottom() <= viewport.bottom() + px(1.);
         let latest_seen = seen && layout.position == position;
-        if view.read(cx).latest_seen != latest_seen {
-            view.update(cx, |view, _| view.latest_seen = latest_seen);
+        if self.reading.latest_seen != latest_seen {
+            self.reading.latest_seen = latest_seen;
             cx.notify();
         }
         if seen
@@ -177,7 +194,7 @@ impl ElseApp {
         let (Some(view), Some(position)) = (self.shown(cx), self.latest_loaded(cx)) else {
             return false;
         };
-        !view.latest_seen
+        !self.reading.latest_seen
             && !view.list.is_following_tail()
             && self
                 .bots
@@ -276,7 +293,7 @@ impl ElseApp {
             .then_some(
                 self.shown(cx)
                     .filter(|v| {
-                        v.latest_seen
+                        self.reading.latest_seen
                             || (v.list.is_following_tail()
                                 && v.list.viewport_bounds().size.height > px(0.))
                     })
@@ -304,8 +321,9 @@ impl ElseApp {
 
     /// `None` until this connection has listed the bots.
     pub(crate) fn attention(&self) -> Option<crate::attention::Attention> {
-        (self.listed_at.is_some() && self.connected())
-            .then(|| crate::attention::Attention::of(&self.bots, |bot| self.inbox.is_unread(bot)))
+        (self.listed_at.is_some() && self.connected()).then(|| {
+            crate::attention::Attention::of(self.bots.iter(), |bot| self.inbox.is_unread(bot))
+        })
     }
 
     pub(crate) fn notification_scope(&self) -> Uuid {

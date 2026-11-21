@@ -1,4 +1,3 @@
-use super::conversation::ConversationView;
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
 use super::{
@@ -626,7 +625,9 @@ impl ElseApp {
                     &FindInConversation,
                     Some(APP_CONTEXT),
                 )
-                .on_click(cx.listener(|app, _, window, cx| app.open_find(window, cx))),
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.update_view(cx, |view, cx| view.open_find(window, cx));
+                })),
         );
         if !self.details.open() {
             actions = actions.child(
@@ -795,7 +796,7 @@ impl ElseApp {
                     .child("Updating…"),
             );
         }
-        if let Some(problem) = view.and_then(|v| v.stream_problem.clone()) {
+        if let Some(problem) = view.and_then(|v| v.stream_problem()).map(str::to_owned) {
             notices = notices.child(div().text_xs().text_color(theme.warning).child(problem));
         }
         if let Some(notice) = &self.notice {
@@ -1130,11 +1131,6 @@ pub(super) const HEADER_HEIGHT: Pixels = px(56.);
 /// The transcript list's padding, so a resting transcript starts and ends
 /// with room under the header and above the composer.
 pub(super) const TRANSCRIPT_FADE: Pixels = px(24.);
-/// The fade over a scrolled transcript edge: an opaque band taller than a
-/// 22 px body line, so a line sliced at the edge is hidden whole, then a
-/// gradient.
-const TRANSCRIPT_EDGE: Pixels = px(48.);
-const TRANSCRIPT_EDGE_OPAQUE: Pixels = px(24.);
 pub(super) const READING_WIDTH: Pixels = px(760.);
 
 pub(super) fn reading_column() -> Div {
@@ -1145,77 +1141,6 @@ pub(super) fn reading_column() -> Div {
         .max_w(READING_WIDTH)
         .mx_auto()
         .px_5()
-}
-
-impl Render for ConversationView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(debug_assertions)]
-        count_transcript_render();
-        self.sightings.clear();
-        let page = cx.theme().background;
-        // Rows dissolve under the header and above the composer only where
-        // rows have actually scrolled past that edge; a resting transcript
-        // shows every row at full strength. The band next to each edge is
-        // opaque and taller than a line, so a sliced line never shows as
-        // half-legible text. Plain divs take no pointer input.
-        // The list draws rows into its top padding but clips them at its
-        // bottom padding, so the bottom fade starts its opaque band at that
-        // clip line.
-        let fade = |angle: f32, inset: Pixels| {
-            let height = inset + TRANSCRIPT_EDGE;
-            let opaque = f32::from(inset + TRANSCRIPT_EDGE_OPAQUE) / f32::from(height);
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .h(height)
-                .bg(linear_gradient(
-                    angle,
-                    linear_color_stop(page, opaque),
-                    linear_color_stop(page.opacity(0.), 1.),
-                ))
-        };
-        let past_top = self.list.scroll_px_offset_for_scrollbar().y < px(0.);
-        let past_bottom = self.list.is_scrolled_to_end() == Some(false);
-        div()
-            .relative()
-            .size_full()
-            .child(
-                list(
-                    self.list.clone(),
-                    cx.processor(|view, ix, window, cx| {
-                        let row = h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .justify_center()
-                            .child(view.render_row(ix, window, cx));
-                        view.center_row(ix, row, cx).into_any_element()
-                    }),
-                )
-                .size_full()
-                .py(TRANSCRIPT_FADE),
-            )
-            .when(past_top, |transcript| {
-                transcript.child(fade(180., px(0.)).top_0())
-            })
-            .when(past_bottom, |transcript| {
-                transcript.child(fade(0., TRANSCRIPT_FADE).bottom_0())
-            })
-    }
-}
-
-/// Counts transcript draws in a debug build and, with `ELSE_COUNT_RENDERS`
-/// set, logs each one, to check what redraws the transcript.
-#[cfg(debug_assertions)]
-fn count_transcript_render() {
-    use std::sync::LazyLock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static RENDERS: AtomicUsize = AtomicUsize::new(0);
-    static LOG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ELSE_COUNT_RENDERS").is_some());
-    let count = RENDERS.fetch_add(1, Ordering::Relaxed) + 1;
-    if *LOG {
-        eprintln!("transcript render {count}");
-    }
 }
 
 impl Render for ElseApp {

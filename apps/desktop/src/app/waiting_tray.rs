@@ -12,7 +12,28 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashSet;
 use uuid::Uuid;
+
+/// How one bot's waiting tray is open, kept while the bot is listed.
+pub(super) struct Tray {
+    /// It lists its waits instead of only its header.
+    expanded: bool,
+    /// Waits whose details are open.
+    open: HashSet<Uuid>,
+    /// Waits the owner asked to stop that the server has not settled yet.
+    stopping: HashSet<Uuid>,
+}
+
+impl Default for Tray {
+    fn default() -> Self {
+        Self {
+            expanded: true,
+            open: HashSet::new(),
+            stopping: HashSet::new(),
+        }
+    }
+}
 
 /// About three rows; more scroll inside the tray so the composer stays put.
 const MAX_ROWS_HEIGHT: f32 = 240.;
@@ -103,30 +124,27 @@ fn elapsed_since(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String
 }
 
 impl ElseApp {
-    pub(super) fn toggle_waiting_tray(&mut self, cx: &mut Context<Self>) {
-        if let Some(view) = &self.view {
-            view.update(cx, |view, _| view.tray_expanded.toggle());
-        }
+    fn tray(&self, bot: Uuid) -> Option<&Tray> {
+        self.trays.get(&bot)
+    }
+
+    pub(super) fn toggle_waiting_tray(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+        let tray = self.trays.entry(bot).or_default();
+        tray.expanded = !tray.expanded;
         cx.notify();
     }
 
-    fn toggle_wait(&mut self, wait: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = &self.view {
-            view.update(cx, |view, _| {
-                if !view.expanded_waits.remove(&wait) {
-                    view.expanded_waits.insert(wait);
-                }
-            });
+    fn toggle_wait(&mut self, bot: Uuid, wait: Uuid, cx: &mut Context<Self>) {
+        let open = &mut self.trays.entry(bot).or_default().open;
+        if !open.remove(&wait) {
+            open.insert(wait);
         }
         cx.notify();
     }
 
     /// Stop one wait. The turn update that settles it arrives on the stream.
     fn stop_wait(&mut self, bot: Uuid, wait: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view_of(bot, cx).filter(|_| self.shows(bot, cx)) else {
-            return;
-        };
-        if !view.update(cx, |view, _| view.stopping_waits.insert(wait)) {
+        if !self.shows(bot, cx) || !self.trays.entry(bot).or_default().stopping.insert(wait) {
             return;
         }
         cx.notify();
@@ -134,8 +152,8 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.cancel_wait(bot, wait).await;
             let _ = this.update(cx, |app, cx| {
-                if let Some(view) = app.view_of(bot, cx) {
-                    view.update(cx, |view, _| view.stopping_waits.remove(&wait));
+                if let Some(tray) = app.trays.get_mut(&bot) {
+                    tray.stopping.remove(&wait);
                 }
                 match result {
                     Ok(()) => {}
@@ -165,7 +183,8 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let sender = self.bots.iter().find(|bot| bot.id == view.bot_id);
         let sender_name = sender.map_or_else(|| "This bot".to_owned(), |b| b.name.clone());
-        let collapsed = !view.tray_expanded;
+        let bot = view.bot_id;
+        let collapsed = self.tray(bot).is_some_and(|tray| !tray.expanded);
         let summary = format!("{sender_name} is waiting on {}", waiting_summary(&waits));
         let tasks = waits.iter().filter_map(|wait| match wait {
             Wait::Task(task) => Some(task.target_bot_id),
@@ -211,7 +230,9 @@ impl ElseApp {
                     } else {
                         "Hide what this bot is waiting on"
                     })
-                    .on_click(on_app(&this, |app, _, _, cx| app.toggle_waiting_tray(cx))),
+                    .on_click(on_app(&this, move |app, _, _, cx| {
+                        app.toggle_waiting_tray(bot, cx)
+                    })),
             );
 
         let rows = (!collapsed).then(|| {
@@ -221,7 +242,7 @@ impl ElseApp {
                 .map(|(ix, wait)| {
                     let row = match wait {
                         Wait::Task(task) => self.render_task_row(task, &sender_name, &this, cx),
-                        _ => self.render_job_row(wait, &this, cx),
+                        _ => self.render_job_row(bot, wait, &this, cx),
                     };
                     div()
                         .w_full()
@@ -271,7 +292,9 @@ impl ElseApp {
             return None;
         }
         let (bot, id) = (view.bot_id, wait.id());
-        let stopping = view.stopping_waits.contains(&id);
+        let stopping = self
+            .tray(bot)
+            .is_some_and(|tray| tray.stopping.contains(&id));
         Some(
             Button::new(SharedString::from(format!("tray-stop-{id}")))
                 .control(Tier::Ghost, Scale::Compact, stopping, cx)
@@ -284,12 +307,16 @@ impl ElseApp {
         )
     }
 
-    fn render_job_row(&self, wait: &Wait<'_>, this: &WeakEntity<Self>, cx: &App) -> AnyElement {
+    fn render_job_row(
+        &self,
+        bot: Uuid,
+        wait: &Wait<'_>,
+        this: &WeakEntity<Self>,
+        cx: &App,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let id = wait.id();
-        let expanded = self
-            .shown(cx)
-            .is_some_and(|view| view.expanded_waits.contains(&id));
+        let expanded = self.tray(bot).is_some_and(|tray| tray.open.contains(&id));
         let title = wait_title(wait);
         let source = match wait {
             Wait::Mcp(wait) if wait.tool.is_empty() => wait.mcp_id.clone(),
@@ -326,7 +353,9 @@ impl ElseApp {
             .rounded(theme.radius)
             .cursor_pointer()
             .hover(|row| row.bg(theme.foreground.opacity(0.03)))
-            .on_click(on_app(this, move |app, _, _, cx| app.toggle_wait(id, cx)))
+            .on_click(on_app(this, move |app, _, _, cx| {
+                app.toggle_wait(bot, id, cx)
+            }))
             .child(
                 h_flex()
                     .w_full()

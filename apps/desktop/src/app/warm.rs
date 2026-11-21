@@ -1,16 +1,20 @@
-//! Conversations kept after switching away, so switching back to a bot
-//! draws it at once and catches up from where it left off.
+//! Loading each bot's conversation, shown or warm, and the conversations
+//! kept after switching away, so switching back to a bot draws it at once
+//! and catches up from where it left off.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
+use else_wire::bots::Phase;
+use else_wire::conversation::Snapshot;
 use gpui_kit::*;
 use uuid::Uuid;
 
 use super::ElseApp;
-use super::conversation::{ConversationView, Load};
-use crate::api::LiveCommand;
-use crate::model::Conversation;
+use super::conversation::{ConversationView, Resume};
+use crate::api::{ClientError, LiveCommand, StreamMessage};
+use crate::model::{Applied, Conversation};
 
 /// How many conversations a server keeps besides the shown one.
 const WARM_VIEWS: usize = 8;
@@ -62,33 +66,6 @@ impl<V> Warm<V> {
 
     pub(super) fn retain(&mut self, keep: impl Fn(Uuid) -> bool) {
         self.views.retain(|(id, _)| keep(*id));
-    }
-}
-
-/// What a view needs to catch up once shown.
-#[derive(Debug, PartialEq)]
-pub(super) enum Resume {
-    /// Follow the live stream from this cursor.
-    Follow(String),
-    /// Its load is still running and subscribes when it lands.
-    Wait,
-    /// Load its newest page.
-    Load,
-}
-
-impl ConversationView {
-    pub(super) fn resume(&self) -> Resume {
-        resume(&self.load, self.conversation.as_ref())
-    }
-}
-
-fn resume(load: &Load, conversation: Option<&Conversation>) -> Resume {
-    match (load, conversation) {
-        (Load::Running { .. }, _) => Resume::Wait,
-        (Load::Settled, Some(conversation)) if !conversation.is_saved() => {
-            Resume::Follow(conversation.cursor())
-        }
-        _ => Resume::Load,
     }
 }
 
@@ -151,6 +128,10 @@ impl ElseApp {
             self.live_command(LiveCommand::Unsubscribe { bot });
             self.warm.keep(bot, old);
         }
+        // A tray opens as it did by default once its view is dropped.
+        let warm = &self.warm;
+        self.trays
+            .retain(|id, _| Some(*id) == bot || warm.contains(*id));
     }
 
     fn new_view(&self, bot: Uuid, cx: &mut Context<Self>) -> Entity<ConversationView> {
@@ -170,7 +151,7 @@ impl ElseApp {
             Resume::Load => self.load_conversation(window, cx),
         }
         self.ensure_rules(bot, window, cx);
-        self.resume_find(window, cx);
+        self.update_view(cx, |view, cx| view.resume_find(window, cx));
     }
 
     /// Preloads `bot`'s conversation once the pointer or the quick
@@ -204,11 +185,207 @@ impl ElseApp {
     }
 }
 
+impl ElseApp {
+    pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bot) = self.shown_bot(cx) {
+            self.load_into(bot, window, cx);
+        }
+    }
+
+    /// Loads `bot`'s newest page into its view, shown or warm. A view with
+    /// nothing to draw shows the saved page while the server's loads.
+    pub(super) fn load_into(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let (client, saved) = (self.client.clone(), self.saved.clone());
+        let Some(view) = self.view_of(bot, cx) else {
+            return;
+        };
+        let cold = view.read(cx).conversation.is_none();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let fetch = cx.background_executor().spawn(client.latest(bot));
+            if cold
+                && let Some(saved) = saved.clone()
+                && let Some(page) = cx
+                    .background_executor()
+                    .spawn(async move { saved.load(bot) })
+                    .await
+            {
+                let _ =
+                    this.update_in(cx, |app, window, cx| app.apply_saved(bot, page, window, cx));
+            }
+            let snapshot = fetch.await.map(|crate::api::Latest { snapshot, raw }| {
+                if let Some(saved) = saved {
+                    let ticket = saved.ticket();
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(err) = saved.save(bot, &raw, ticket) {
+                                eprintln!("{err}");
+                            }
+                        })
+                        .detach();
+                }
+                snapshot
+            });
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
+                    app.live_command(LiveCommand::Subscribe { bot, cursor });
+                }
+            });
+        });
+        view.update(cx, |view, _| view.begin_load(task));
+    }
+
+    /// Shows the saved page of a view still waiting for its first one.
+    fn apply_saved(
+        &mut self,
+        bot: Uuid,
+        page: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shows(bot, cx);
+        let (Some(view), Ok(conversation)) =
+            (self.view_of(bot, cx), Conversation::from_saved(page))
+        else {
+            return;
+        };
+        if view.update(cx, |view, cx| view.show_saved(conversation, cx)) && shown {
+            self.sync_rows(window, cx);
+        }
+    }
+
+    /// Applies `bot`'s newest page to its view, and returns the cursor to
+    /// follow if the view is shown.
+    fn apply_snapshot(
+        &mut self,
+        bot: Uuid,
+        snapshot: Result<Snapshot, ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let shown = self.shows(bot, cx);
+        let view = self.view_of(bot, cx)?;
+        let failed = |problem: String, retry: Option<Task<()>>, cx: &mut Context<Self>| {
+            view.update(cx, |view, cx| view.fail(problem, retry, cx));
+            cx.notify();
+        };
+        match snapshot.map(Conversation::from_snapshot) {
+            Ok(Ok(conversation)) => {
+                let cursor = conversation.cursor();
+                view.update(cx, |view, cx| view.settle(conversation, cx));
+                if !shown {
+                    return None;
+                }
+                self.sync_rows(window, cx);
+                self.ensure_rules(bot, window, cx);
+                Some(cursor)
+            }
+            Ok(Err(_)) => {
+                failed("The server sent an invalid snapshot.".into(), None, cx);
+                None
+            }
+            Err(ClientError::Api { status: 410, .. }) => {
+                view.update(cx, |view, _| view.expire());
+                self.refresh_now(window, cx);
+                None
+            }
+            Err(err) => {
+                let retry = shown.then(|| {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
+                        let _ = this.update_in(cx, |app, window, cx| {
+                            if app.shows(bot, cx) {
+                                app.load_conversation(window, cx);
+                            }
+                        });
+                    })
+                });
+                failed(format!("Could not load history: {err}"), retry, cx);
+                None
+            }
+        }
+    }
+
+    pub(super) fn apply_stream(
+        &mut self,
+        bot: Uuid,
+        message: StreamMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A warm view keeps applying what arrives until its unsubscribe
+        // lands, so the cursor it resumes from is the one it applied.
+        let shown = self.shows(bot, cx);
+        let Some(view) = self.view_of(bot, cx) else {
+            return;
+        };
+        let failed = match message {
+            StreamMessage::Frame(frame) => {
+                let Some(applied) = view.update(cx, |view, cx| view.apply_frame(&frame, cx)) else {
+                    return;
+                };
+                match applied {
+                    Ok((Applied::Duplicate, _)) => false,
+                    // The bot list stays authoritative for a warm bot's
+                    // activity: its last frames can trail the list.
+                    Ok((Applied::Changed, _)) if !shown => {
+                        self.prune_pending(bot, cx);
+                        false
+                    }
+                    Ok((Applied::Changed, activity)) => {
+                        if activity.as_ref().is_some_and(|a| a.phase == Phase::Idle) {
+                            self.stopping.remove(&bot);
+                        }
+                        // Most frames leave the activity as it was; only a
+                        // change copies the shared bot list.
+                        if activity.is_some()
+                            && let Some(ix) = (self.bots.iter())
+                                .position(|b| b.id == bot && b.activity != activity)
+                        {
+                            Arc::make_mut(&mut self.bots)[ix].activity = activity;
+                        }
+                        self.sync_rows(window, cx);
+                        self.ensure_rules(bot, window, cx);
+                        false
+                    }
+                    Err(_) => true,
+                }
+            }
+            StreamMessage::Reset => true,
+            StreamMessage::Deleted => {
+                self.refresh_now(window, cx);
+                false
+            }
+        };
+        if !failed {
+            return;
+        }
+        // Dropped so the reloaded page's cursor subscribes anew, even when
+        // it equals the one asked for before.
+        self.live_command(LiveCommand::Unsubscribe { bot });
+        if shown {
+            self.load_conversation(window, cx);
+        } else {
+            view.update(cx, |view, _| view.break_stream());
+        }
+    }
+
+    /// Drops `bot`'s pending sends its conversation now holds.
+    pub(super) fn prune_pending(&mut self, bot: Uuid, cx: &App) {
+        let Some(view) = self.view_of(bot, cx) else {
+            return;
+        };
+        if let (Some(conversation), Some(pending)) = (
+            view.read(cx).conversation.as_ref(),
+            self.pending.get_mut(&bot),
+        ) {
+            pending.retain(|p| !conversation.has_request(p.request_id));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Load, Resume, Warm, resume};
-    use crate::model::Conversation;
-    use gpui_kit::Task;
+    use super::Warm;
     use uuid::Uuid;
 
     fn ids(warm: &Warm<u8>) -> Vec<u128> {
@@ -227,47 +404,5 @@ mod tests {
         assert_eq!(warm.take(Uuid::from_u128(2)), None, "2 was evicted");
         assert_eq!(warm.take(Uuid::from_u128(8)), Some(8));
         assert!(!warm.contains(Uuid::from_u128(8)));
-    }
-
-    fn page(applied: i64) -> else_wire::conversation::Snapshot {
-        serde_json::from_value(serde_json::json!({
-            "event_cursor": format!("server:bot:{applied}"),
-            "items": [], "turns": [],
-            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn a_view_shown_again_follows_from_its_cursor_unless_it_needs_a_load() {
-        assert_eq!(
-            resume(&Load::Settled, None),
-            Resume::Load,
-            "nothing loaded yet"
-        );
-        let running = Load::Running {
-            _task: Task::ready(()),
-        };
-        assert_eq!(
-            resume(&running, None),
-            Resume::Wait,
-            "its load subscribes on landing"
-        );
-        let live = Conversation::from_snapshot(page(42)).unwrap();
-        assert_eq!(
-            resume(&Load::Settled, Some(&live)),
-            Resume::Follow("server:bot:42".into())
-        );
-        assert_eq!(
-            resume(&Load::Failed { _retry: None }, Some(&live)),
-            Resume::Load,
-            "a failed load or a reset reloads"
-        );
-        let saved = Conversation::from_saved(page(42)).unwrap();
-        assert_eq!(
-            resume(&Load::Settled, Some(&saved)),
-            Resume::Load,
-            "a saved page is replaced"
-        );
     }
 }

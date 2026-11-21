@@ -7,6 +7,7 @@
 mod skills;
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use else_wire::bots::Activity;
@@ -135,7 +136,7 @@ pub struct Conversation {
     gaps: BTreeMap<i64, GapSize>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
-    extras: BotExtras,
+    extras: Arc<BotExtras>,
     /// Read from the page saved on disk, so possibly behind the server.
     saved: bool,
 }
@@ -158,7 +159,7 @@ impl Conversation {
             gaps: BTreeMap::new(),
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
-            extras: snapshot.extras,
+            extras: Arc::new(snapshot.extras),
             saved: false,
         };
         for item in snapshot.items {
@@ -242,7 +243,7 @@ impl Conversation {
                 if bot.selected_provider_id.is_some() {
                     self.selected_provider_id = bot.selected_provider_id;
                 }
-                self.extras.update(extras);
+                Arc::make_mut(&mut self.extras).update(extras);
             }
         }
         self.applied = seq;
@@ -623,7 +624,8 @@ impl Conversation {
             .map(|item| item.id)
     }
 
-    pub fn extras(&self) -> &BotExtras {
+    /// Shared so a reader can keep them without copying.
+    pub fn extras(&self) -> &Arc<BotExtras> {
         &self.extras
     }
 
@@ -638,8 +640,7 @@ impl Conversation {
     /// A routine from a change response. Only a newer version replaces the
     /// one the stream delivered, so a late response never undoes an event.
     pub fn apply_routine(&mut self, routine: Routine) {
-        if let Some(current) = self
-            .extras
+        if let Some(current) = Arc::make_mut(&mut self.extras)
             .routines
             .iter_mut()
             .flatten()
@@ -1816,7 +1817,7 @@ mod tests {
     fn older_servers_without_social_triggers_use_an_empty_list() {
         let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
         assert!(conversation.extras().social_triggers.is_empty());
-        conversation.extras.social_triggers =
+        Arc::make_mut(&mut conversation.extras).social_triggers =
             vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
         conversation.apply(&bot_updated(2, None)).unwrap();
         assert!(conversation.extras().social_triggers.is_empty());

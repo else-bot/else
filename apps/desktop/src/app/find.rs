@@ -387,10 +387,6 @@ impl ConversationView {
 }
 
 impl ElseApp {
-    pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.update_view(cx, |view, cx| view.open_find(window, cx));
-    }
-
     /// Closes the find bar, clears its highlights, and returns to the
     /// latest messages. Loaded windows stay.
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -400,14 +396,6 @@ impl ElseApp {
         self.jump_to_latest(window, cx);
         self.composer
             .update(cx, |composer, cx| composer.focus(window, cx));
-    }
-
-    fn step_find(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.update_view(cx, |view, cx| view.step_find(older, window, cx));
-    }
-
-    pub(super) fn resume_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.update_view(cx, |view, cx| view.resume_find(window, cx));
     }
 
     pub(super) fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -428,7 +416,9 @@ impl ElseApp {
                 .ghost()
                 .disabled(!can_step)
                 .accessibility_label(name)
-                .on_click(cx.listener(move |app, _, window, cx| app.step_find(older, window, cx)))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.update_view(cx, |view, cx| view.step_find(older, window, cx));
+                }))
         };
         Some(
             h_flex()

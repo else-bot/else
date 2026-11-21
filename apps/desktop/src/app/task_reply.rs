@@ -1,7 +1,6 @@
 pub(super) mod state;
 
 use self::state::{Earlier, ReplyState, TaskReply};
-use super::conversation::ReplyLayout;
 use super::message_row::CardPlacement;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
@@ -11,7 +10,6 @@ use crate::avatar::bot_avatar;
 use chrono::{DateTime, Utc};
 use else_wire::notices::OwnerNoticeStatus;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -316,8 +314,15 @@ impl ConversationView {
         // Earlier replies always read before the current one. A completed,
         // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
-            let remedy = self.model_remedy(turn, cx);
-            let retry = self.routine_retry(turn, cx);
+            let remedy = super::message_row::model_remedy(turn, self.bot_id, &self.app, cx);
+            let retry = super::message_row::routine_retry(
+                turn,
+                self.bot_id,
+                self.routines(),
+                self.inputs.connected,
+                &self.app,
+                cx,
+            );
             card.children(earlier)
                 .children(reply)
                 .children(explanation)
@@ -471,19 +476,11 @@ impl ConversationView {
             .latest_reply()
             .is_some_and(|reply| reply.id == id)
         {
-            let owner = self.app.clone();
             let position = else_wire::bots::ReplyPosition {
                 item_seq: item.seq,
                 text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
             };
-            body = body.on_prepaint(move |bounds, window, cx| {
-                let owner = owner.clone();
-                window.defer(cx, move |window, cx| {
-                    let _ = owner.update(cx, |app, cx| {
-                        app.reply_laid_out(bot, ReplyLayout { position, bounds }, window, cx)
-                    });
-                });
-            });
+            body = self.report_reply_layout(body, position);
         }
         body = body.child(
             div()

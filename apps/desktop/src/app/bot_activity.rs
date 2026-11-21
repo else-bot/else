@@ -6,6 +6,7 @@
 
 use super::RowKey;
 use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
+use super::conversation::on_app;
 use super::conversation::{Reveal, Spot};
 use super::transcript::TranscriptRow;
 use crate::app::conversation::ConversationView;
@@ -1035,7 +1036,9 @@ impl ConversationView {
                 cx,
             )
             .accessibility_label(format!("Open chat with {name}"))
-            .on_click(self.on_app(move |app, _, window, cx| app.open_bot(id, window, cx)))
+            .on_click(on_app(&self.app, move |app, _, window, cx| {
+                app.open_bot(id, window, cx)
+            }))
         });
         let row = super::action_card::event_row(&theme)
             .child(self.event_faces(&format!("created-{item}"), child.map(|bot| bot.id)))

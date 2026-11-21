@@ -215,7 +215,10 @@ impl ElseApp {
                 app.deleting.remove(&id);
                 match result {
                     Ok(receipt) => {
-                        if let Some(bot) = app.bots.iter_mut().find(|b| b.id == id) {
+                        if let Some(bot) = std::sync::Arc::make_mut(&mut app.bots)
+                            .iter_mut()
+                            .find(|b| b.id == id)
+                        {
                             *bot = receipt;
                         }
                         app.reconcile_selection(window, cx);
