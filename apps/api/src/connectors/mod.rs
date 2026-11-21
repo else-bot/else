@@ -553,8 +553,9 @@ impl ConnectorManager {
         }
     }
 
-    /// Starts a worker for each active account that has none. Startup awaits
-    /// the first pass, so it never races an account created afterwards.
+    /// Starts a worker for each active account that has none, skipping any it
+    /// cannot read or start. Startup awaits the first pass, so that pass never
+    /// races an account created after the runtime is up.
     pub(crate) async fn start_workers(self: &Arc<Self>) {
         if let Ok(accounts) = store::accounts(&self.db).await {
             for account in accounts {

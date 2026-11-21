@@ -28,9 +28,9 @@ enum Message {
     Release(Uuid),
 }
 
-/// The tool grant an attempt was given, and whether the attempt waits for
-/// the test: held by a gate until [`Harness::release`], or by a synthetic
-/// hang until it is stopped.
+/// The tool grant an attempt was given, and whether its input asks to hold
+/// it: a gate until [`Harness::release`], or a synthetic hang until it is
+/// stopped. Other directives in the same input can still end it early.
 #[derive(Clone)]
 struct Granted {
     token: String,
