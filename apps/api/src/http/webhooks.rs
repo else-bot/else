@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
-use else_wire::routines::Webhook;
+use else_wire::routines::{Webhook, WebhookEnvelope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -55,7 +55,7 @@ async fn owner_update(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, webhook_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<OwnerPatch>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<WebhookEnvelope>, ApiError> {
     let patch = Patch {
         enabled: Some(body.enabled),
         ..Patch::default()
@@ -63,7 +63,9 @@ async fn owner_update(
     let (webhook, _) = webhooks::update(&state.db, By::Owner { bot_id }, webhook_id, patch)
         .await
         .map_err(owner_error)?;
-    Ok(Json(json!({ "webhook": Webhook::from(&webhook) })))
+    Ok(Json(WebhookEnvelope {
+        webhook: Webhook::from(&webhook),
+    }))
 }
 
 async fn owner_delete(

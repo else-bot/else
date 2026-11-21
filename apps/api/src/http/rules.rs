@@ -167,19 +167,19 @@ async fn routines_next(state: &AppState, bot_id: Uuid) -> Option<String> {
 async fn show(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RulesFile>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
     let mut conn = state.db.acquire().await?;
     let versions = rules::history(&mut conn, bot_id).await?;
     let (version, markdown) = versions
         .first()
         .map_or((0, ""), |v| (v.version, v.markdown.as_str()));
-    Ok(Json(json!(RulesFile {
+    Ok(Json(RulesFile {
         version,
         markdown: markdown.to_owned(),
         sections: Rules::parse(markdown).sections,
         history: versions.iter().map(RulesVersion::from).collect(),
-    })))
+    }))
 }
 
 #[derive(Deserialize)]

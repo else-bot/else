@@ -7,8 +7,8 @@ use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use else_wire::items::{Item, ItemEnvelope, Items};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
@@ -73,7 +73,7 @@ async fn history(
     State(state): State<Arc<AppState>>,
     Extension(grant): Extension<Grant>,
     query: Result<Query<HistoryQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Items>, ApiError> {
     let Query(query) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use before_seq and limit only."))?;
     check(&state, &grant, Tool::ReadHistory).await?;
@@ -88,16 +88,16 @@ async fn history(
     .bind(limit)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(
-        json!({ "items": items.iter().rev().map(else_wire::items::Item::from).collect::<Vec<_>>() }),
-    ))
+    Ok(Json(Items {
+        items: items.iter().rev().map(Item::from).collect(),
+    }))
 }
 
 async fn item(
     State(state): State<Arc<AppState>>,
     Extension(grant): Extension<Grant>,
     ApiPath(item_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ItemEnvelope>, ApiError> {
     check(&state, &grant, Tool::ReadHistory).await?;
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
@@ -108,5 +108,7 @@ async fn item(
     .fetch_optional(&state.db)
     .await?;
     let item = item.ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!({ "item": else_wire::items::Item::from(&item) })))
+    Ok(Json(ItemEnvelope {
+        item: Item::from(&item),
+    }))
 }

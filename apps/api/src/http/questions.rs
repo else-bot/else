@@ -11,7 +11,6 @@ use axum::{Json, Router};
 use else_wire::notices::NoticeResponse;
 use else_wire::questions::{Permissions, QuestionSettlement};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
@@ -106,7 +105,7 @@ async fn answer(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, question_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<AnswerBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<QuestionSettlement>, ApiError> {
     let answer = match body {
         AnswerBody::Single { choice } => Answer::Single(choice),
         AnswerBody::Multiple { choices } => Answer::Multiple(choices),
@@ -117,25 +116,25 @@ async fn answer(
     if settled.requeued {
         state.scheduler.wake();
     }
-    Ok(Json(json!(QuestionSettlement {
+    Ok(Json(QuestionSettlement {
         question: (&settled.question).into(),
-        requeued: settled.requeued
-    })))
+        requeued: settled.requeued,
+    }))
 }
 
 async fn permissions(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Permissions>, ApiError> {
     active_bot(&state, bot_id).await?;
     let (permissions, routine_grants) = tokio::join!(
         owner_questions::permissions(&state.db, bot_id),
         owner_questions::routine_grants(&state.db, bot_id),
     );
-    Ok(Json(json!(Permissions {
+    Ok(Json(Permissions {
         permissions: permissions?.iter().map(Into::into).collect(),
-        routine_grants: routine_grants?.iter().map(Into::into).collect()
-    })))
+        routine_grants: routine_grants?.iter().map(Into::into).collect(),
+    }))
 }
 
 async fn revoke_routine(

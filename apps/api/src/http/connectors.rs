@@ -109,7 +109,7 @@ impl From<MailError> for ApiError {
     }
 }
 
-async fn definitions() -> Json<Value> {
+async fn definitions() -> Json<email::Definitions> {
     use email::Authentication::{AppPassword, OAuth2};
 
     let providers = [
@@ -135,7 +135,7 @@ async fn definitions() -> Json<Value> {
         oauth_wizard: matches!(provider, Provider::Gmail | Provider::Microsoft),
     })
     .collect();
-    Json(json!(email::Definitions {
+    Json(email::Definitions {
         connectors: vec![email::Definition {
             id: "email".into(),
             version: 1,
@@ -144,14 +144,14 @@ async fn definitions() -> Json<Value> {
             notifications: "imap_idle".into(),
             permissions: ["read", "write", "send", "wake"].map(String::from).into(),
         }],
-    }))
+    })
 }
 
-async fn accounts(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn accounts(State(state): State<Arc<AppState>>) -> Result<Json<email::Accounts>, ApiError> {
     let accounts = store::accounts(&state.db).await.map_err(unavailable)?;
-    Ok(Json(json!(email::Accounts {
+    Ok(Json(email::Accounts {
         accounts: accounts.iter().map(Into::into).collect(),
-    })))
+    }))
 }
 /// One message for the owner's reader. It goes to the mail server with the
 /// saved credential, never through a bot, and leaves the message unread.
@@ -159,7 +159,7 @@ async fn view_message(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     query: Result<axum::extract::Query<MessageRef>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::EmailMessage>, ApiError> {
     let axum::extract::Query(message) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use folder, uid_validity and uid."))?;
     let manager = &state.connectors;
@@ -171,12 +171,12 @@ async fn view_message(
                 Some((status, message)) => ApiError::new(status, error.code.as_str(), message),
                 None => ApiError::from(error),
             })?;
-    Ok(Json(json!(view)))
+    Ok(Json(view))
 }
 async fn account(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::AccountDetail>, ApiError> {
     let account = store::account(&state.db, id)
         .await
         .map_err(unavailable)?
@@ -190,10 +190,10 @@ async fn account(
             permissions: (&permissions).into(),
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!(email::AccountDetail {
+    Ok(Json(email::AccountDetail {
         account: (&account).into(),
         grants,
-    })))
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,7 +204,7 @@ struct Connect {
 async fn connect(
     State(state): State<Arc<AppState>>,
     ApiJson(request): ApiJson<Connect>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::Connected>, ApiError> {
     request.config.validate()?;
     request.credential.validate(request.config.provider)?;
     let manager = &state.connectors;
@@ -218,9 +218,9 @@ async fn connect(
     .await
     .map_err(unavailable)?;
     manager.changed(account.id).await;
-    Ok(Json(json!(email::Connected {
+    Ok(Json(email::Connected {
         account: (&account).into(),
-    })))
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -267,16 +267,16 @@ async fn activate(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(request): ApiJson<Active>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::Connected>, ApiError> {
     let manager = &state.connectors;
     let account = store::set_active(&state.db, id, request.active)
         .await
         .map_err(unavailable)?
         .ok_or_else(ApiError::not_found)?;
     manager.changed(id).await;
-    Ok(Json(json!(email::Connected {
+    Ok(Json(email::Connected {
         account: (&account).into(),
-    })))
+    }))
 }
 async fn disconnect(
     State(state): State<Arc<AppState>>,
@@ -308,15 +308,15 @@ async fn configure_folders(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(config): ApiJson<MailConfig>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::Connected>, ApiError> {
     let manager = &state.connectors;
     let account = store::configure_folders(&state.db, id, &config)
         .await
         .map_err(unavailable)?;
     manager.changed(id).await;
-    Ok(Json(json!(email::Connected {
+    Ok(Json(email::Connected {
         account: (&account).into(),
-    })))
+    }))
 }
 
 async fn credentials(
@@ -339,7 +339,7 @@ async fn permissions(
     State(state): State<Arc<AppState>>,
     ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
     ApiJson(request): ApiJson<Permissions>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::PermissionsEnvelope>, ApiError> {
     if (request.wake || request.write || request.send) && !request.read
         || request.send && !request.write
     {
@@ -351,9 +351,9 @@ async fn permissions(
     store::set_permissions(&state.db, id, bot, &request)
         .await
         .map_err(unavailable)?;
-    Ok(Json(
-        json!({"permissions":email::Permissions::from(&request)}),
-    ))
+    Ok(Json(email::PermissionsEnvelope {
+        permissions: email::Permissions::from(&request),
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -418,7 +418,7 @@ async fn oauth_start(
 async fn oauth_complete(
     State(state): State<Arc<AppState>>,
     ApiJson(request): ApiJson<oauth::Complete>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<email::Connected>, ApiError> {
     let manager = &state.connectors;
     let (provider, address, credential) = manager.oauth.complete(request).await?;
     let config = provider.config(address)?;
@@ -452,9 +452,9 @@ async fn oauth_complete(
         .await
         .map_err(unavailable)?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(json!(email::Connected {
+    Ok(Json(email::Connected {
         account: (&account).into(),
-    })))
+    }))
 }
 
 async fn oauth_cancel(

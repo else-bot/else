@@ -258,6 +258,11 @@ pub struct Grant {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsEnvelope {
+    pub permissions: Permissions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Permissions {
     pub read: bool,
     pub write: bool,

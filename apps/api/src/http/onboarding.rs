@@ -6,7 +6,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use else_wire::settings::Onboarded;
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 use super::error::{ApiError, ApiJson};
 use super::settings::{ProfileRequest, validate_choice};
@@ -39,7 +38,7 @@ pub async fn required(state: &AppState) -> Result<bool, sqlx::Error> {
 async fn complete(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<Onboarding>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Onboarded>, ApiError> {
     let name = BotName::parse(&body.name)
         .map_err(|err| ApiError::bad_request("invalid_input", err.to_string()))?;
     let provider_id = validate_choice(&state, &body.profile)?;
@@ -79,9 +78,9 @@ async fn complete(
         crate::db::events::bot_updated(&mut tx, main).await?;
     }
     tx.commit().await?;
-    Ok(Json(json!(Onboarded {
+    Ok(Json(Onboarded {
         main_bot_id: main,
         name: Some(name.as_str().to_owned()),
         profile: Some(profile.choice(provider_id)),
-    })))
+    }))
 }
