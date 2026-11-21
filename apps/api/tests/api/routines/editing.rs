@@ -10,9 +10,9 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
     let routine = create(&h.app, &token, digest("Summarize my unread mail.")).await;
     let patch = json!({ "routine_id": routine["id"], "name": "Daily digest", "cron": "0 8 * * *" });
     let edited = tool(&h.app, &token, "routine_update", patch.clone()).await;
-    assert!(!edited.error, "{}", edited.body);
+    edited.ok();
     let retry = tool(&h.app, &token, "routine_update", patch).await;
-    assert!(!retry.error);
+    retry.ok();
     let rejected = tool(
         &h.app,
         &token,
@@ -61,7 +61,7 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
         json!({ "routine_id": routine["id"], "name": "Weekly digest" }),
     )
     .await;
-    assert!(!renamed.error);
+    renamed.ok();
     let before = notice["seq"].as_i64().unwrap() + 1;
     let page = h
         .app
@@ -120,7 +120,7 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
         json!({ "name": "Inbox", "prompt": "Triage my inbox.", "cron": "*/30 * * * *" }),
     )
     .await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     assert!(
         called.result["next"]
             .as_str()
@@ -153,7 +153,7 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
         json!({ "name": "Inbox", "prompt": "Triage my inbox.", "cron": "*/30 * * * *" }),
     )
     .await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(
         retry.result["created"], false,
         "a retry survives a new desktop zone"
@@ -213,7 +213,7 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
         json!({ "routine_id": id, "active_hours": "always" }),
     )
     .await;
-    assert!(!always.error, "{}", always.body);
+    always.ok();
     assert_eq!(always.result["routine"]["active_hours"], "always");
     let again = tool(
         &h.app,
@@ -222,7 +222,7 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
         json!({ "routine_id": id, "active_hours": "always" }),
     )
     .await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     assert_eq!(
         again.result["routine"]["active_hours"], "always",
         "a repeat reads back the hours it kept"
@@ -246,7 +246,7 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
                 { "days": ["sat", "sun"], "start": "10:00", "end": "12:00" } }),
     )
     .await;
-    assert!(!weekend.error, "{}", weekend.body);
+    weekend.ok();
     let local = at(&weekend.result["routine"]["next_run_at"]).with_timezone(&zone);
     assert!(local.weekday().num_days_from_monday() >= 5, "{local}");
     assert!((10..12).contains(&local.hour()), "{local}");

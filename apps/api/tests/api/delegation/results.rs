@@ -236,7 +236,7 @@ async fn an_updated_task_keeps_its_earlier_attempts_ask() {
         json!({ "task_id": task, "message": format!("{GATE} Recheck every EU checkout error from this morning.") }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     let next = child_of(app, task).await;
     assert_ne!(next, first);
     let (_, next_token) = h.started(next).await;

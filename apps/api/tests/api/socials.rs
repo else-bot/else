@@ -123,10 +123,21 @@ async fn trigger_row(
     id
 }
 
+struct Abandon<'a>(Option<&'a Notify>);
+impl Drop for Abandon<'_> {
+    fn drop(&mut self) {
+        if let Some(abandoned) = self.0 {
+            abandoned.notify_one();
+        }
+    }
+}
+
 #[derive(Default)]
 struct Fake {
     started: Notify,
     release: Notify,
+    /// Notified when a send future is dropped before it finishes.
+    abandoned: Notify,
     blocked: AtomicBool,
     sends: AtomicUsize,
     sent_to: std::sync::Mutex<Vec<String>>,
@@ -178,9 +189,11 @@ impl Transport for Fake {
         files: &[SendFile],
     ) -> Result<Value, Error> {
         self.started.notify_one();
+        let mut abandon = Abandon(Some(&self.abandoned));
         if self.blocked.load(Ordering::SeqCst) {
             self.release.notified().await;
         }
+        abandon.0 = None;
         self.sends.fetch_add(1, Ordering::SeqCst);
         self.sent_to.lock().unwrap().push(destination.to_owned());
         self.sent_files.lock().unwrap().extend(
@@ -233,7 +246,7 @@ pub(crate) async fn http(
 }
 fn social_result(called: Called) -> Value {
     assert_eq!(called.status, axum::http::StatusCode::OK, "{}", called.body);
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     called.result
 }
 

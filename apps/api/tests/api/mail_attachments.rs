@@ -267,7 +267,7 @@ async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() 
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     let token = h.continued(turn, &token).await;
     let opened = tool(&h.app, &token, "mail_action", open(account, &[2, 1, 0])).await;
-    assert!(!opened.error, "{}", opened.body);
+    opened.ok();
     let statuses: Vec<_> = opened.result["files"]
         .as_array()
         .unwrap()
@@ -301,7 +301,7 @@ async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() 
         search(account, 0, "DIVIDEND"),
     )
     .await;
-    assert!(!found.error, "{}", found.body);
+    found.ok();
     assert_eq!(found.result["total"], 1);
     assert_eq!(found.result["matches"][0]["page"], 1);
     assert_eq!(found.result["matches"][0]["line"], 2);
@@ -381,7 +381,7 @@ async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_c
         .await;
     let token = h.continued(turn, &token).await;
     let declined = tool(&h.app, &token, "mail_action", open(account, &[2])).await;
-    assert!(!declined.error, "{}", declined.body);
+    declined.ok();
     assert_eq!(declined.result["files"][0]["status"], "declined");
     assert!(declined.result["files"][0]["attachment_id"].is_null());
     let unsupported = tool(&h.app, &token, "mail_action", open(account, &[1, 9])).await;
@@ -440,7 +440,7 @@ async fn pdfs_are_read_in_a_worker_that_a_hostile_file_cannot_take_down() {
         .await;
     let token = h.continued(turn, &token).await;
     let opened = tool(&h.app, &token, "mail_action", open(account, &[3, 4])).await;
-    assert!(!opened.error, "{}", opened.body);
+    opened.ok();
     assert_eq!(
         opened.result["files"][0]["status"], "opened",
         "{}",

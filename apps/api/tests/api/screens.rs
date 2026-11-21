@@ -164,7 +164,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let (_, token) = h.running(&bot, GATE).await;
     let result = tool(app, &token, "computer_screenshot", json!({ "save": true })).await;
     assert_eq!(result.status, StatusCode::OK, "{}", result.body);
-    assert!(!result.error, "{}", result.body);
+    result.ok();
     let content = result.body["result"]["content"].as_array().unwrap();
     assert_eq!(content.len(), 2);
     let meta = result.result;
@@ -292,7 +292,7 @@ async fn computers_without_a_desktop_say_so() {
 
 fn handed_off(reply: Called) -> Value {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert!(!reply.error, "{}", reply.body);
+    reply.ok();
     let result = &reply.body["result"];
     let content = result["content"].as_array().unwrap();
     assert_eq!(content.len(), 1, "the bot already saw its screen: {result}");
@@ -307,7 +307,7 @@ async fn a_handoff_shares_the_screen_it_asks_the_owner_to_look_at() {
     let (_, token) = h.running(&bot, GATE).await;
     let looked = tool(app, &token, "computer_screenshot", json!({})).await;
     assert_eq!(looked.status, StatusCode::OK, "{}", looked.body);
-    assert!(!looked.error, "{}", looked.body);
+    looked.ok();
 
     let reason = json!({ "reason": "X Chat is blank at x.com/messages." });
     let asked = handed_off(tool(app, &token, "computer_handoff", reason).await);
@@ -403,7 +403,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });
     let done = tool(app, &token, "computer_input", batch.clone()).await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
-    assert!(!done.error, "{}", done.body);
+    done.ok();
     let result = done.result;
     assert_eq!(
         (result["done"].clone(), result["of"].clone()),

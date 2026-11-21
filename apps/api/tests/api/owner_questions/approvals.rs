@@ -171,7 +171,7 @@ async fn approved_mcp_call(h: &Harness, bot: &str, call: Value) -> (Uuid, Uuid, 
         crate::shared_mcp::installation(),
     )
     .await;
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let pending = tool(app, &token, "mcp_request", call.clone()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     h.release(turn).await;
@@ -201,7 +201,7 @@ async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
     let app = &h.app;
     let main = app.main_bot().await;
     let (turn, question, ran) = approved_mcp_call(&h, &main, echo_call("echo")).await;
-    assert!(!ran.error, "the approved call ran: {}", ran.body);
+    ran.ok();
     let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["used"]["outcome"], "completed", "{card}");
     let ran_at = card["used"]["at"]

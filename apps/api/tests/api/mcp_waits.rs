@@ -99,7 +99,7 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
 
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert!(
@@ -157,7 +157,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
 
     let mut misspelled = wait_args();
     misspelled["status_pointer"] = json!("/work_state");
@@ -214,7 +214,7 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
@@ -272,7 +272,7 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
@@ -338,7 +338,7 @@ async fn stopping_a_continued_reply_keeps_its_waits() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(first).await;
@@ -418,7 +418,7 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(first).await;
@@ -529,7 +529,7 @@ async fn a_status_tool_not_declared_repeatable_is_refused_and_a_deadline_ends_a_
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let mut poke = wait_args();
     poke["tool"] = json!("task_poke");
     let refused = tool(app, &token, "mcp_wait", poke).await;
@@ -583,7 +583,7 @@ async fn a_busy_package_with_many_due_waits_does_not_hide_another_package() {
     let (turn, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(turn).await;
@@ -634,7 +634,7 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let mut external = wait_args();
     external["effect"] = json!("external");
     let asked = tool(app, &token, "mcp_wait", external).await.result;
@@ -686,7 +686,7 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
     let (root, token) = h.running(&main, GATE).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let task = format!("{GATE} Run WEB-284 in T3, review its PR, and report back.");
     let accepted = tool(
         app,
@@ -787,7 +787,7 @@ async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
     let (root, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let task = json!({ "target_bot_id": dev, "task": "[synthetic:hang] Audit the billing code." });
     let accepted = tool(app, &token, "delegate", task).await;
     assert_eq!(accepted.result["status"], "pending", "{}", accepted.body);
@@ -860,7 +860,7 @@ async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
     let (latest, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(latest).await;
@@ -1053,7 +1053,7 @@ async fn a_follow_up_that_waits_again_on_the_same_job_keeps_the_one_wait() {
     let main = app.main_bot().await;
     let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", install(&state)).await;
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let parked = tool(app, &token, "mcp_wait", wait_args()).await;
     assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
     h.release(first).await;

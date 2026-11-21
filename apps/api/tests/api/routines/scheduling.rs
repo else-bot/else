@@ -405,7 +405,7 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
                        "in_minutes": 360 });
     let before = Utc::now();
     let called = tool(&h.app, &token, "reminder_create", args.clone()).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     let reminder = called.result["reminder"].clone();
     let id = reminder["id"].as_str().unwrap().to_owned();
     let run_at = at(&reminder["run_at"]);
@@ -438,7 +438,7 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
                 "timezone": "Europe/Paris" }),
     )
     .await;
-    assert!(!dated.error, "{}", dated.body);
+    dated.ok();
     let dated_at = at(&dated.result["reminder"]["run_at"]).with_timezone(&paris);
     assert_eq!(dated_at.format("%Y-%m-%dT%H:%M").to_string(), nine);
 

@@ -37,11 +37,11 @@ async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
     let (turn, token) = h.running(&main, GATE).await;
     let args = json!({ "target_bot_id": github, "name": "  Tech Manager  " });
     let renamed = tool(&h.app, &token, "rename_bot", args.clone()).await;
-    assert!(!renamed.error, "{}", renamed.body);
+    renamed.ok();
     assert_eq!(renamed.result["bot_id"], github);
     assert_eq!(renamed.result["name"], "Tech Manager");
     let retry = tool(&h.app, &token, "rename_bot", args).await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(retry.result, renamed.result);
     let saved = snapshot(&h.app, &github).await;
     assert_eq!(saved["name"], "Tech Manager");
@@ -70,7 +70,7 @@ async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
             json!({ "target_bot_id": target, "name": name }),
         )
         .await;
-        assert!(!called.error, "{}", called.body);
+        called.ok();
         assert_eq!(snapshot(&h.app, target).await["name"], name);
     }
     h.release(turn).await;
@@ -139,7 +139,7 @@ async fn delegated_owner_request_can_rename_a_bot() {
         json!({ "target_bot_id": worker, "task": format!("{GATE} Rename {main} to Proliquid.") }),
     )
     .await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -154,7 +154,7 @@ async fn delegated_owner_request_can_rename_a_bot() {
         json!({ "target_bot_id": main, "name": "Proliquid" }),
     )
     .await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     assert_eq!(snapshot(&h.app, &main).await["name"], "Proliquid");
     let parked = tool(
         &h.app,
@@ -190,7 +190,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
         json!({ "name": "Check", "prompt": GATE, "cron": "0 9 1 1 *" }),
     )
     .await;
-    assert!(!saved.error, "{}", saved.body);
+    saved.ok();
     h.release(owner).await;
     h.app.wait_turn(owner, &["completed"]).await;
     let due = saved.result["routine"]["next_run_at"]

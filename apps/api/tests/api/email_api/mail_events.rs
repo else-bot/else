@@ -55,7 +55,7 @@ async fn mail_event_origin_removes_computer_authority() {
                        "command": { "operation": "send", "draft": {
                            "to": ["owner@example.com"], "subject": "New mail", "body": "Summary" } } });
     let sent = tool(&h.app, &token, "mail_action", send).await;
-    assert!(!sent.error, "{}", sent.body);
+    sent.ok();
     assert_eq!(sent.result["status"], "succeeded", "{}", sent.body);
     assert_eq!(
         transport.sends.load(Ordering::SeqCst),
@@ -312,7 +312,7 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
                         "to": ["customer@example.com"], "subject": "Re: Support",
                         "body": "Thanks, we are looking into it." });
     let drafted = tool(&h.app, &token, "draft_email", reply).await;
-    assert!(!drafted.error, "{}", drafted.body);
+    drafted.ok();
     assert_eq!(drafted.result["status"], "pending", "{}", drafted.body);
     let id = drafted.result["draft"]["draft_id"]
         .as_str()

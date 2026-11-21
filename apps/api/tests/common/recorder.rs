@@ -408,6 +408,21 @@ pub struct Called {
 }
 
 impl Called {
+    /// The tool's result, after asserting the call succeeded. `!error` alone
+    /// also passes a grant refusal or a JSON-RPC error, which carry no tool
+    /// result.
+    #[track_caller]
+    pub fn ok(&self) -> &Value {
+        assert!(
+            self.status == StatusCode::OK
+                && self.body["result"]["content"].is_array()
+                && !self.error,
+            "tool call failed: {}",
+            self.body
+        );
+        &self.result
+    }
+
     pub fn code(&self) -> &str {
         self.result
             .as_str()

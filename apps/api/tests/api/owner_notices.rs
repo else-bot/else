@@ -26,7 +26,7 @@ async fn delegated(h: &Harness, task: &str) -> Delegated {
         json!({ "target_bot_id": target, "task": format!("{GATE} {task}"), "title": "Triage checkout errors" }),
     )
     .await;
-    assert!(!delegated.error, "{}", delegated.result);
+    delegated.ok();
     h.release(root).await;
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
@@ -96,7 +96,7 @@ async fn a_delegated_task_shows_the_owner_what_it_needs_until_it_is_handled() {
         blocked_notice("Dev can't start the fix."),
     )
     .await;
-    assert!(!first.error, "{}", first.body);
+    first.ok();
     let first = first.result;
     assert_eq!(first["status"], "pending");
     let again = tool(
@@ -108,7 +108,7 @@ async fn a_delegated_task_shows_the_owner_what_it_needs_until_it_is_handled() {
         ),
     )
     .await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     let again = again.result;
     assert_eq!(
         again["notice_id"], first["notice_id"],
@@ -161,7 +161,7 @@ async fn an_owner_message_answers_the_notice_and_it_can_no_longer_be_dismissed()
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!flagged.error, "{}", flagged.body);
+    flagged.ok();
     let flagged = flagged.result;
 
     let sent = app
@@ -244,7 +244,7 @@ async fn repeating_a_handled_notice_keeps_it_handled() {
         blocked_notice(summary),
     )
     .await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     let again = again.result;
     assert_eq!(
         again["notice_id"], flagged["notice_id"],
@@ -273,7 +273,7 @@ async fn a_card_raised_after_the_notice_replaces_it() {
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!flagged.error, "{}", flagged.body);
+    flagged.ok();
     let flagged = flagged.result;
     let asked = tool(
         app,
@@ -282,7 +282,7 @@ async fn a_card_raised_after_the_notice_replaces_it() {
         json!({ "question": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!asked.error, "{}", asked.body);
+    asked.ok();
     h.release(task.child).await;
     app.wait_turn(task.child, &["waiting"]).await;
 
@@ -329,7 +329,7 @@ async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
         json!({ "kind": "fyi", "summary": "Declined MIRAY myself." }),
     )
     .await;
-    assert!(!fyi.error, "{}", fyi.body);
+    fyi.ok();
     let fyi = fyi.result;
     assert_eq!(fyi["status"], "recorded");
     let received = item_where(app, &task.target, "bot_task").await;
@@ -344,7 +344,7 @@ async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
         json!({ "kind": "decision", "summary": "Approve the Romow DM before I send it." }),
     )
     .await;
-    assert!(!asked.error, "{}", asked.body);
+    asked.ok();
     let asked = asked.result;
     assert_eq!(asked["status"], "pending");
 
@@ -404,7 +404,7 @@ async fn a_task_that_declares_nothing_keeps_its_reply_quiet() {
         json!({ "kind": "nothing" }),
     )
     .await;
-    assert!(!quiet.error, "{}", quiet.body);
+    quiet.ok();
     let quiet = quiet.result;
     assert_eq!(quiet["kind"], "nothing");
     h.release(task.child).await;
@@ -486,7 +486,7 @@ async fn a_reply_settles_only_the_ask_it_answers() {
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!flagged.error, "{}", flagged.body);
+    flagged.ok();
     let flagged = flagged.result;
     let first: Uuid = flagged["notice_id"].as_str().unwrap().parse().unwrap();
     let other = second_ask(app, &task).await;

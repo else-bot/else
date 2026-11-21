@@ -18,7 +18,7 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         json!({ "task_id": task, "message": change }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     let updated = updated.result;
     assert_eq!(updated["task_id"], task.to_string());
     assert!(
@@ -88,7 +88,7 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         json!({ "task_id": task, "message": change }),
     )
     .await;
-    assert!(!repeated.error, "{}", repeated.body);
+    repeated.ok();
     let repeated = repeated.result;
     assert_eq!(repeated["status"], "completed");
     assert_eq!(repeated["next"], "This update was already applied.");
@@ -135,7 +135,7 @@ async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
         json!({ "task_id": task, "message": change }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     wait_task(app, task, "completed").await;
     let packet = h
         .packets()
@@ -165,7 +165,7 @@ async fn a_later_update_can_repeat_an_earlier_one() {
         json!({ "task_id": task, "message": include }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     let included = child_of(app, task).await;
     let updated = tool(
         app,
@@ -174,7 +174,7 @@ async fn a_later_update_can_repeat_an_earlier_one() {
         json!({ "task_id": task, "message": exclude }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     let again = tool(
         app,
         &token,
@@ -182,7 +182,7 @@ async fn a_later_update_can_repeat_an_earlier_one() {
         json!({ "task_id": task, "message": include }),
     )
     .await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     let latest = child_of(app, task).await;
     assert_ne!(
         latest, included,
@@ -204,7 +204,7 @@ async fn a_later_update_can_repeat_an_earlier_one() {
         json!({ "task_id": task, "message": include }),
     )
     .await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(retry.result["next"], "This update was already applied.");
     assert_eq!(child_of(app, task).await, latest);
 }
@@ -225,7 +225,7 @@ async fn an_owner_aside_leaves_a_queued_update_to_run() {
         json!({ "task_id": task, "message": "Narrow it to the permission slip." }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     app.wait_turn(first, &["cancelling"]).await;
     let replacement = child_of(app, task).await;
     app.wait_turn(replacement, &["queued"]).await;
@@ -257,7 +257,7 @@ async fn a_delegating_bot_cancels_a_running_task() {
         task_carried_to_a_follow_up(&h, &work, "[synthetic:hang] long research").await;
 
     let stopping = tool(app, &token, "delegation_cancel", json!({ "task_id": task })).await;
-    assert!(!stopping.error, "{}", stopping.body);
+    stopping.ok();
     let stopping = stopping.result;
     assert_eq!(stopping["status"], "stopping", "{stopping}");
     app.wait_turn(child, &["interrupted"]).await;
@@ -270,7 +270,7 @@ async fn a_delegating_bot_cancels_a_running_task() {
     );
 
     let again = tool(app, &token, "delegation_cancel", json!({ "task_id": task })).await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     let again = again.result;
     assert_eq!(again["status"], "cancelled");
     assert!(

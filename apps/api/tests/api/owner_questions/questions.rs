@@ -273,7 +273,7 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
     let h = harness(TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = h.running(&main, GATE).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     for bad in [
         json!({ "question": "q", "choices": ["only one"] }),
         json!({ "question": "q", "choices": ["a", "b"], "extra": 1 }),
@@ -293,24 +293,28 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
     assert_eq!(first["status"], "pending", "{first}");
     let parked = tool(app, &token, "ask_owner", choice_args()).await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "{}", parked.body);
-    use else_api::app::questions::{Spec, Status};
-    use else_api::db::owner_questions::{RequestError, create};
+    let question = first["question_id"].clone();
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+    let question_id: Uuid = question.as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        answer(app, &main, question_id, "b").await.status,
+        StatusCode::OK
+    );
+    let token = h.continued(turn, &token).await;
 
-    let again = create(&app.db.pool, turn, &Spec::choice(&choice_args()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(again.id.to_string(), first["question_id"]);
-    assert_eq!(again.status, Status::Pending);
+    let again = tool(app, &token, "ask_owner", choice_args()).await;
+    assert_eq!(again.result["status"], "answered", "{}", again.body);
+    assert_eq!(again.result["question_id"], question);
+    assert_eq!(again.result["answer"]["id"], "b");
     let mut multiple = choice_args();
     multiple["multiple"] = json!(true);
     let mut other = choice_args();
     other["choices"] = json!(["Plain text", "Both"]);
     for changed in [multiple, other] {
-        let spec = Spec::choice(&changed).unwrap();
-        assert_eq!(
-            create(&app.db.pool, turn, &spec).await.unwrap_err(),
-            RequestError::Conflict
-        );
+        let refused = tool(app, &token, "ask_owner", changed).await;
+        assert!(refused.error, "{}", refused.body);
+        assert_eq!(refused.code(), "CONFLICT", "{}", refused.body);
     }
     let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions")
         .fetch_one(&app.db.pool)

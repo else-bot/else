@@ -510,7 +510,7 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
         json!({ "target_bot_id": worker, "task": format!("{GATE_EVERY_ATTEMPT} {quoted}") }),
     )
     .await;
-    assert!(!delegated.error, "{}", delegated.body);
+    delegated.ok();
     let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()
@@ -671,7 +671,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
                 "cron": "0 9 1 1 *" }),
     )
     .await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     let due: DateTime<Utc> =
         DateTime::parse_from_rfc3339(created.result["routine"]["next_run_at"].as_str().unwrap())
             .unwrap()
@@ -683,7 +683,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
         json!({ "name": "Lead alert", "prompt": format!("{GATE} Scout X leads.") }),
     )
     .await;
-    assert!(!webhook.error, "{}", webhook.body);
+    webhook.ok();
     let confirmed = tool(
         app,
         &token,

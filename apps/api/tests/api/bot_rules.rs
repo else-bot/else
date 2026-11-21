@@ -56,7 +56,7 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
         ),
     )
     .await;
-    assert!(!added.error, "{}", added.body);
+    added.ok();
     assert_eq!(added.result["version"], 1);
     assert_eq!(added.result["change"], "added");
 
@@ -77,7 +77,7 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
         update("New Linear issue", NEW_RULE, words),
     )
     .await;
-    assert!(!changed.error, "{}", changed.body);
+    changed.ok();
     assert_eq!(changed.result["version"], 2);
     assert_eq!(changed.result["change"], "changed");
 
@@ -161,7 +161,7 @@ async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
             json!({ "name": name, "prompt": "Post detailed sections.", "cron": "0 9 * * *" }),
         )
         .await;
-        assert!(!created.error, "{}", created.body);
+        created.ok();
         ids.push(created.result["routine"]["id"].as_str().unwrap().to_owned());
     }
     let paused = tool(
@@ -171,7 +171,7 @@ async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
         json!({ "routine_id": ids[1], "enabled": false }),
     )
     .await;
-    assert!(!paused.error, "{}", paused.body);
+    paused.ok();
 
     let saved = tool(
         &h.app,
@@ -184,7 +184,7 @@ async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
         ),
     )
     .await;
-    assert!(!saved.error, "{}", saved.body);
+    saved.ok();
     let next = saved.result["next"].as_str().unwrap();
     assert!(
         next.contains(&format!("\"Growth digest\" ({})", ids[0])),
@@ -225,7 +225,7 @@ async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
             update("New Linear issue", content, words),
         )
         .await;
-        assert!(!saved.error, "{}", saved.body);
+        saved.ok();
     }
     h.release(turn).await;
     h.app.wait_turn(turn, &["completed"]).await;
@@ -334,7 +334,7 @@ async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
             update(section, content, "remember this"),
         )
         .await;
-        assert!(!saved.error, "{}", saved.body);
+        saved.ok();
     }
     h.release(turn).await;
     h.app.wait_turn(turn, &["completed"]).await;
@@ -436,7 +436,7 @@ async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
         update("New Linear issue", NEW_RULE, "send it"),
     )
     .await;
-    assert!(!saved.error, "{}", saved.body);
+    saved.ok();
     h.release(turn).await;
     h.app.wait_turn(turn, &["completed"]).await;
     let cleared = h
@@ -470,7 +470,7 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
         json!({ "target_bot_id": worker, "task": format!("{GATE} Save a rule.") }),
     )
     .await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -527,7 +527,7 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
         }),
     )
     .await;
-    assert!(!pending.error, "{}", pending.body);
+    pending.ok();
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -553,7 +553,7 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
         ),
     )
     .await;
-    assert!(!saved.error, "{}", saved.body);
+    saved.ok();
     assert_eq!(saved.result["version"], 1, "{}", saved.body);
     assert_eq!(cards(&h.app, child).await.len(), 1);
     let chat = h

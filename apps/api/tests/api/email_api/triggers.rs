@@ -61,7 +61,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     let token = h.continued(turn, &token).await;
     let set = tool(&h.app, &token, "mail_trigger_set", args).await;
-    assert!(!set.error, "{}", set.body);
+    set.ok();
     assert_eq!(set.result["trigger"]["wake"], true, "{}", set.body);
     let listed = triggers().await;
     assert_eq!(listed[0]["account_id"], json!(account.id));

@@ -134,7 +134,7 @@ async fn a_bot_manages_its_own_routines_over_mcp() {
         json!({ "routine_id": id, "name": "Digest", "cron": "0 8 * * *", "timezone": "Asia/Tokyo" }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     assert_eq!(updated.result["routine"]["name"], "Digest");
     let next = at(&updated.result["routine"]["next_run_at"]);
     assert_eq!(next.format("%H:%M").to_string(), "23:00", "08:00 in Tokyo");
@@ -254,7 +254,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
         )
         .await;
     let created = tool(&h.app, &token, "create_bot", json!({ "name": "Mail" })).await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     let mail = created.result["bot_id"].as_str().unwrap().to_owned();
     let handoff = "[gate] Save this as your own routine named Morning digest: summarize the \
                    owner's unread mail, at 07:30 on weekdays, Europe/Paris time.";
@@ -292,7 +292,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
         json!({ "routine_id": saved["id"], "prompt": "Summarize unread mail and highlight urgent messages." }),
     )
     .await;
-    assert!(!edited.error, "{}", edited.body);
+    edited.ok();
     let history = h
         .app
         .owner("GET", &format!("/v1/bots/{mail}/conversation"), None)
@@ -384,7 +384,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
         json!({ "routine_id": old["id"], "enabled": false }),
     )
     .await;
-    assert!(!retired.error, "{}", retired.body);
+    retired.ok();
     assert_eq!(retired.result["routine"]["enabled"], false);
     h.release(root).await;
     h.app.wait_turn(root, &["completed"]).await;
@@ -472,7 +472,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     assert_eq!(called.code(), "NOT_ALLOWED", "{}", called.body);
     let memory = tool(&h.app, &run_token, "memory_bots", json!({})).await;
     assert_eq!(memory.status, StatusCode::OK);
-    assert!(!memory.error);
+    memory.ok();
 
     let pending = tool(
         &h.app,
@@ -627,7 +627,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
         json!({ "routine_id": leads["id"], "prompt": "Find leads; DM at most 20 per day." }),
     )
     .await;
-    assert!(!edited.error, "{}", edited.body);
+    edited.ok();
     let mut conn = h.app.db.pool.acquire().await.unwrap();
     assert_eq!(
         else_api::db::delegations::origin(&mut conn, child)
@@ -680,12 +680,12 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     assert!(next_run_at.is_string(), "{}", enabled.body);
 
     let ran = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
-    assert!(!ran.error, "{}", ran.body);
+    ran.ok();
     assert_eq!(ran.result["queued"], true);
     assert_eq!(ran.result["routine"]["last_run"]["status"], "queued");
     assert_eq!(ran.result["routine"]["next_run_at"], next_run_at);
     let retry = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
-    assert!(!retry.error, "{}", retry.body);
+    retry.ok();
     assert_eq!(
         retry.result["queued"], false,
         "a retry returns the same run"
@@ -743,7 +743,7 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     );
     let (again, token) = h.running(&main, GATE).await;
     let ran = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
-    assert!(!ran.error, "{}", ran.body);
+    ran.ok();
     assert_eq!(ran.result["queued"], true, "a new request runs it again");
     assert_eq!(ran.result["routine"]["enabled"], false);
     assert!(ran.result["routine"]["next_run_at"].is_null());

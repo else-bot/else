@@ -185,7 +185,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let initial = tool(
         app,
         &token,
@@ -316,7 +316,7 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let denied = app
         .call(
             "POST",
@@ -408,7 +408,7 @@ async fn expired_access_refreshes_once_and_revoked_consent_requires_owner_auth()
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     fixture.control(json!({"next_ttl":1})).await;
     connect(app, &fixture, &bot).await;
     fixture.control(json!({"next_ttl":3600})).await;
@@ -471,7 +471,7 @@ async fn cancelled_consent_never_connects_or_exchanges_a_code() {
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let abandoned = authorize(app, &bot).await;
     let abandoned_callback = fixture.browser_callback(&abandoned, false).await;
     let cleared = app
@@ -506,7 +506,7 @@ async fn an_unauthorized_mutation_is_not_replayed_after_token_refresh() {
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     connect(app, &fixture, &bot).await;
     let arguments = json!({
         "id":"oauth-fixture", "method":"tools/call",
@@ -552,7 +552,7 @@ async fn a_provider_advertising_hundreds_of_scopes_still_shows_the_sign_in_card(
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let required = list_tools(app, &token).await;
     assert_eq!(required["status"], "auth_required", "{required}");
     assert_eq!(required["parked"], true, "{required}");

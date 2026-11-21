@@ -36,7 +36,7 @@ pub(super) async fn create(
         json!({ "name": name, "prompt": prompt, "cron": cron, "active_hours": "always" }),
     )
     .await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     let routine = &called.result["routine"];
     (
         routine["id"].as_str().unwrap().parse().unwrap(),

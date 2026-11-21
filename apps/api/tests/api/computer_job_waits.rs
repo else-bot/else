@@ -368,7 +368,7 @@ async fn wait_job(app: &TestApp, token: &str, job: Uuid) {
     )
     .await;
     assert_eq!(waited.status, StatusCode::OK, "{}", waited.body);
-    assert!(!waited.error, "{}", waited.body);
+    waited.ok();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -457,7 +457,7 @@ async fn a_joined_reply_that_waits_again_on_its_job_keeps_the_one_wait() {
         json!({ "job_id": crawl, "wait": true }),
     )
     .await;
-    assert!(!again.error, "{}", again.body);
+    again.ok();
     assert_eq!(again.result["wait_id"], first["wait_id"], "{}", again.body);
     assert_eq!(again.result["status"], "already_waiting", "{}", again.body);
     assert_eq!(again.result["parked"], false, "{}", again.body);
@@ -468,11 +468,7 @@ async fn a_joined_reply_that_waits_again_on_its_job_keeps_the_one_wait() {
         json!({ "question": "Keep crawling?", "choices": ["Yes", "No"] }),
     )
     .await;
-    assert!(
-        !asked.error,
-        "the attempt holds nothing yet: {}",
-        asked.body
-    );
+    asked.ok();
     let question = asked.result["question_id"].as_str().unwrap().to_owned();
     use else_api::db::computer_job_waits::{CreateError, create};
     assert_eq!(

@@ -60,7 +60,7 @@ async fn start_run(h: &Harness, bot: &str, quiet: bool, task: &str) -> (Value, U
                 "cron": "0 9 1 1 *", "quiet": quiet }),
     )
     .await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     let saved = created.result["routine"].clone();
     assert_eq!(saved["quiet"], quiet);
     h.release(setup).await;
@@ -108,7 +108,7 @@ async fn a_quiet_run_with_no_news_alerts_no_one() {
     );
 
     let first = no_news(&h.app, &token).await;
-    assert!(!first.error, "{}", first.body);
+    first.ok();
     assert_eq!(first.result["report"], "no_news");
     let again = no_news(&h.app, &token).await;
     assert_eq!(
@@ -139,7 +139,7 @@ async fn a_quiet_run_that_asks_the_owner_still_reports() {
     let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (_, run, token) = start_run(&h, &main, true, UPTIME).await;
-    assert!(!no_news(&h.app, &token).await.error);
+    no_news(&h.app, &token).await.ok();
     let asked = tool(
         &h.app,
         &token,
@@ -206,7 +206,7 @@ async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
         .await;
     assert_eq!(marked.status, StatusCode::OK, "{}", marked.body);
     assert_eq!(marked.body["routine"]["quiet"], true);
-    assert!(!no_news(&h.app, &token).await.error);
+    no_news(&h.app, &token).await.ok();
     h.release(run).await;
     h.app.wait_turn(run, &["completed"]).await;
     assert_eq!(
@@ -233,7 +233,7 @@ async fn a_quiet_run_that_fails_still_reports() {
     let main = h.app.main_bot().await;
     let task = format!("{GATE} [synthetic:fail] Check that example.com answers.");
     let (_, run, token) = start_run(&h, &main, true, &task).await;
-    assert!(!no_news(&h.app, &token).await.error);
+    no_news(&h.app, &token).await.ok();
     h.release(run).await;
     h.app.wait_turn(run, &["failed"]).await;
 

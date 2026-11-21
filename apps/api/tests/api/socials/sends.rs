@@ -181,19 +181,14 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
         .await
         .unwrap();
     manager.changed(c.id).await;
-    assert!(
-        common::until("the cancelled send", task)
-            .await
-            .unwrap()
-            .is_err()
-    );
-    fake.release.notify_one();
-    common::never_polled(
-        "the cancelled send to reach the transport",
-        Duration::from_millis(20),
-        || std::future::ready((fake.sends.load(Ordering::SeqCst) != 0).then_some(())),
+    let sent = common::until("the cancelled send", task).await.unwrap();
+    assert!(matches!(sent, Err(Error::Inactive)), "{sent:?}");
+    common::until(
+        "the cancelled send to be dropped",
+        fake.abandoned.notified(),
     )
     .await;
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
     let status: String = sqlx::query_scalar("SELECT status FROM social_actions WHERE action_id=?1")
         .bind(id)
         .fetch_one(&db.pool)
@@ -247,8 +242,12 @@ async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
         .await
         .unwrap()
         .unwrap();
-    assert!(sent.is_err(), "{sent:?}");
-    fake.release.notify_one();
+    assert!(matches!(sent, Err(Error::Inactive)), "{sent:?}");
+    common::until(
+        "the cancelled send to be dropped",
+        fake.abandoned.notified(),
+    )
+    .await;
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
     assert_eq!(
         store::ACTIONS
@@ -307,7 +306,11 @@ async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
     })
     .await
     .expect("the abandoned send is recorded uncertain");
-    fake.release.notify_one();
+    common::until(
+        "the cancelled send to be dropped",
+        fake.abandoned.notified(),
+    )
+    .await;
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
 }
 

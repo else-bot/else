@@ -24,7 +24,7 @@ fn digest(prompt: &str) -> Value {
 
 async fn create(app: &TestApp, token: &str, args: Value) -> Value {
     let called = tool(app, token, "routine_create", args).await;
-    assert!(!called.error, "{}", called.body);
+    called.ok();
     called.result["routine"].clone()
 }
 

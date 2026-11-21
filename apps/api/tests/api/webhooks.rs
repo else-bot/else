@@ -61,7 +61,7 @@ async fn a_trigger_wakes_the_bot_with_its_prompt_and_later_events_wait_and_coale
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     let webhook = created.result["webhook"].clone();
     let id = webhook["id"].as_str().unwrap().to_owned();
     let secret = created.result["token"].as_str().unwrap().to_owned();
@@ -217,13 +217,13 @@ async fn a_faster_pace_waits_for_the_owner_to_approve_its_cost() {
         )
         .await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
-    let (_, token) = h.started(turn).await;
+    let token = h.continued(turn, &token).await;
     let created = tool(&h.app, &token, "webhook_create", fast.clone()).await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     assert_eq!(created.result["webhook"]["min_interval_minutes"], 1);
     assert_eq!(created.result["webhook"]["daily_limit"], 100);
     let retried = tool(&h.app, &token, "webhook_create", fast.clone()).await;
-    assert!(!retried.error, "{}", retried.body);
+    retried.ok();
     assert_eq!(
         retried.result["webhook"]["id"],
         created.result["webhook"]["id"]
@@ -242,11 +242,7 @@ async fn a_faster_pace_waits_for_the_owner_to_approve_its_cost() {
         json!({ "webhook_id": id, "min_interval_minutes": 30 }),
     )
     .await;
-    assert!(
-        !slower.error,
-        "slowing down needs no approval: {}",
-        slower.body
-    );
+    slower.ok();
     assert_eq!(slower.result["webhook"]["min_interval_minutes"], 30);
     h.release(turn).await;
 }

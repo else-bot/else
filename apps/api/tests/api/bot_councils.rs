@@ -29,7 +29,8 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
         tool(&h.app, &token, "create_bot", args.clone()),
         tool(&h.app, &token, "create_bot", args.clone())
     );
-    assert!(!a.error && !b.error, "{} {}", a.body, b.body);
+    a.ok();
+    b.ok();
     assert_eq!(a.result["bot_id"], b.result["bot_id"]);
     assert_ne!(a.result["created"], b.result["created"]);
     let created = a.result["bot_id"].as_str().unwrap();
@@ -104,7 +105,7 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
         json!({"query": "deployment blockers"}),
     )
     .await;
-    assert!(!found.error, "{}", found.body);
+    found.ok();
     assert!(found.result.to_string().contains(created), "{}", found.body);
     let (new_turn, new_token) = h.running(created, GATE).await;
     let memory = tool(
@@ -115,7 +116,7 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
     )
     .await;
     assert!(
-        !memory.error && memory.result.to_string().contains("tool_activity"),
+        memory.ok().to_string().contains("tool_activity"),
         "{}",
         memory.body
     );
@@ -161,7 +162,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
         .await;
     let (root, token) = h.running(&main, GATE).await;
     let all = tool(&h.app, &token, "list_bots", json!({})).await;
-    assert!(!all.error, "{}", all.body);
+    all.ok();
     assert_eq!(all.result["main_bot_id"], main);
     assert!(
         all.result["categories"]
@@ -184,7 +185,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
         json!({"category_id": category}),
     )
     .await;
-    assert!(!listed.error, "{}", listed.body);
+    listed.ok();
     let members: Vec<_> = listed.result["bots"]
         .as_array()
         .unwrap()
@@ -211,11 +212,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
         json!({"target_bot_ids": members, "task": task}),
     )
     .await;
-    assert!(
-        !accepted.error && accepted.result["parked"] == true,
-        "{}",
-        accepted.body
-    );
+    assert!(accepted.ok()["parked"] == true, "{}", accepted.body);
     assert_eq!(accepted.result["tasks"].as_array().unwrap().len(), 3);
     let ids: Vec<Uuid> = targets.iter().map(|id| id.parse().unwrap()).collect();
     let replay = else_api::db::delegations::council(&h.app.db.pool, root, &ids, task, None)
@@ -277,7 +274,7 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
         json!({"target_bot_ids": [peer], "task": "[synthetic:hang] review"}),
     )
     .await;
-    assert!(!accepted.error, "{}", accepted.body);
+    accepted.ok();
     let extra = h.app.create_bot("Late").await;
     assert!(
         else_api::db::delegations::council(
@@ -348,7 +345,7 @@ async fn a_cancelled_member_is_included_with_the_other_council_reports() {
         }),
     )
     .await;
-    assert!(!accepted.error, "{}", accepted.body);
+    accepted.ok();
     h.release(root).await;
     let children: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT child_turn_id, target_bot_id FROM delegations WHERE root_turn_id = ?1 ORDER BY target_bot_id"

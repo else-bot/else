@@ -155,7 +155,7 @@ async fn installation_and_execution_require_their_grants_and_external_calls_park
     }
     let installed = tool(app, &token, "mcp_install", installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let missing_effect = tool(
         app,
         &token,
@@ -180,7 +180,7 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
     let (turn, token) = h.running(&maple, GATE_EVERY_ATTEMPT).await;
     let installed = tool(app, &token, "mcp_install", installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let mut moved = installation();
     moved["config"]["env"]["MCP_TEST_SECRET"] = json!("new-secret-stays-out-of-cards");
     let conflict = tool(app, &token, "mcp_install", moved.clone()).await;
@@ -384,7 +384,7 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
     assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
     let installed = tool(app, &token, "mcp_install", install(json!(["bento"]))).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let config =
         std::fs::read_to_string(app.config.data_dir.join("mcp/bento/config.json")).unwrap();
     assert!(config.contains("${BENTO_SECRET_KEY}"), "{config}");
@@ -455,7 +455,7 @@ async fn a_cut_result_is_saved_whole_in_the_bots_project() {
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let long = "row ".repeat(8_000);
     let called = tool(app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await.result;
     assert!(called.to_string().len() < 12_000, "the preview stays small");
@@ -494,7 +494,7 @@ async fn without_a_project_a_result_keeps_the_larger_budget() {
     let (_, token) = h.running(&bot, GATE).await;
     let installed = tool(app, &token, "mcp_install", installation()).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let long = "row ".repeat(3_500);
     let called = tool(app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await.result;
     assert!(called.get("whole_result").is_none());
@@ -517,7 +517,7 @@ async fn else_side_mcp_request_failures_use_the_json_error_envelope() {
     broken["config"]["args"] = json!(["-c", "import sys; sys.exit(1)"]);
     let installed = tool(app, &token, "mcp_install", broken).await;
     assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
-    assert!(!installed.error, "{}", installed.body);
+    installed.ok();
     let failed = tool(
         app,
         &token,

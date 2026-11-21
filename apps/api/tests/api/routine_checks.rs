@@ -50,7 +50,7 @@ async fn setup(check: &str) -> Setup {
                 "timezone": "UTC", "active_hours": "always" }),
     )
     .await;
-    assert!(!created.error, "{}", created.body);
+    created.ok();
     assert_eq!(created.result["routine"]["check"], check);
     let routine = created.result["routine"]["id"]
         .as_str()
@@ -294,7 +294,7 @@ async fn without_computers_a_check_is_skipped_as_unavailable_and_update_can_remo
         json!({ "routine_id": s.routine, "check": null }),
     )
     .await;
-    assert!(!updated.error, "{}", updated.body);
+    updated.ok();
     assert_eq!(updated.result["routine"]["check"], Value::Null);
     assert_eq!(
         updated.result["routine"]["prompt_revision"], 2,
