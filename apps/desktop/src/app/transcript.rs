@@ -14,15 +14,7 @@ pub(super) enum RowKey {
     Item(Uuid),
     Task(Uuid),
     Pending(Uuid),
-    SecretRequest(Uuid),
-    SkillInstall(Uuid),
-    Question(Uuid),
-    Draft(Uuid),
-    SocialSetup(Uuid),
-    /// The first task of a provider attempt's delegations.
-    Handoff(Uuid),
-    ComputerHandoff(Uuid),
-    OwnerNotice(Uuid),
+    Card(CardKey),
     /// Unloaded messages just below the loaded item with this seq.
     Gap(i64),
     /// A routine run that completed with no news, folded to its header.
@@ -33,25 +25,81 @@ pub(super) enum RowKey {
 
 impl RowKey {
     pub(super) fn task_sender(self, c: &Conversation) -> Option<&str> {
-        if !matches!(
-            self,
-            Self::Question(_)
-                | Self::SecretRequest(_)
-                | Self::Draft(_)
-                | Self::Handoff(_)
-                | Self::ComputerHandoff(_)
-        ) {
+        let Self::Card(card) = self else {
+            return None;
+        };
+        if !card.names_sender() {
             return None;
         }
-        let turn = c.turns_in_order().into_iter().find(|turn| match self {
-            Self::Question(id) => turn.questions.iter().any(|q| q.id == id),
-            Self::SecretRequest(id) => turn.secret_requests.iter().any(|r| r.id == id),
-            Self::Draft(id) => turn.outgoing_drafts.iter().any(|d| d.id == id),
-            Self::Handoff(id) => turn.delegations.iter().any(|d| d.id == id),
-            Self::ComputerHandoff(id) => turn.computer_handoffs.iter().any(|h| h.id == id),
-            _ => false,
-        })?;
-        Some(&c.task_receipt(turn.id)?.bot_task.as_ref()?.sender_name)
+        Some(
+            &c.task_receipt(card.turn(c)?.id)?
+                .bot_task
+                .as_ref()?
+                .sender_name,
+        )
+    }
+}
+
+/// A card the bot raised in a turn for the owner to see or act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum CardKey {
+    SecretRequest(Uuid),
+    SkillInstall(Uuid),
+    Question(Uuid),
+    Draft(Uuid),
+    SocialSetup(Uuid),
+    /// The first task of a provider attempt's delegations.
+    Handoff(Uuid),
+    ComputerHandoff(Uuid),
+    OwnerNotice(Uuid),
+}
+
+impl CardKey {
+    /// Whether it draws as a bordered card, rather than a status line.
+    pub(super) fn is_boxed(self) -> bool {
+        !matches!(self, Self::Handoff(_) | Self::ComputerHandoff(_))
+    }
+
+    /// Whether it waits on the owner's answer.
+    pub(super) fn needs_owner(self) -> bool {
+        matches!(
+            self,
+            Self::Question(_) | Self::SecretRequest(_) | Self::Draft(_) | Self::OwnerNotice(_)
+        )
+    }
+
+    /// Whether it names the bot whose task raised it.
+    fn names_sender(self) -> bool {
+        !matches!(
+            self,
+            Self::SkillInstall(_) | Self::SocialSetup(_) | Self::OwnerNotice(_)
+        )
+    }
+
+    /// The turn that raised it.
+    pub(super) fn turn(self, c: &Conversation) -> Option<&crate::model::Turn> {
+        c.turns_in_order()
+            .into_iter()
+            .find(|turn| Self::raised_by(turn).any(|card| card == self))
+    }
+
+    /// Every card `turn` raised.
+    fn raised_by(turn: &crate::model::Turn) -> impl Iterator<Item = Self> + '_ {
+        (turn
+            .secret_requests
+            .iter()
+            .map(|r| Self::SecretRequest(r.id)))
+        .chain(turn.skill_installs.iter().map(|i| Self::SkillInstall(i.id)))
+        .chain(turn.questions.iter().map(|q| Self::Question(q.id)))
+        .chain(turn.outgoing_drafts.iter().map(|d| Self::Draft(d.id)))
+        .chain(turn.social_setups.iter().map(|s| Self::SocialSetup(s.id)))
+        .chain(turn.delegations.iter().map(|d| Self::Handoff(d.id)))
+        .chain(
+            turn.computer_handoffs
+                .iter()
+                .map(|h| Self::ComputerHandoff(h.id)),
+        )
+        .chain(turn.owner_notices.iter().map(|n| Self::OwnerNotice(n.id)))
     }
 }
 
@@ -88,7 +136,7 @@ impl TranscriptRow {
             || self
                 .task
                 .as_ref()
-                .is_some_and(|task| task.cards.iter().any(|card| card.key == key))
+                .is_some_and(|task| task.cards.iter().any(|card| RowKey::Card(card.key) == key))
     }
 }
 
@@ -198,35 +246,12 @@ pub(super) struct RoutineRow {
 
 /// The routine run each row belongs to, a task row's included.
 fn routine_turns(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<Uuid>> {
-    let mut turns = HashMap::new();
-    for turn in conversation.into_iter().flat_map(|c| c.turns_in_order()) {
-        if turn.routine.is_some() {
-            for question in &turn.questions {
-                turns.insert(RowKey::Question(question.id), turn.id);
-            }
-            for install in &turn.skill_installs {
-                turns.insert(RowKey::SkillInstall(install.id), turn.id);
-            }
-            for request in &turn.secret_requests {
-                turns.insert(RowKey::SecretRequest(request.id), turn.id);
-            }
-            for draft in &turn.outgoing_drafts {
-                turns.insert(RowKey::Draft(draft.id), turn.id);
-            }
-            for setup in &turn.social_setups {
-                turns.insert(RowKey::SocialSetup(setup.id), turn.id);
-            }
-            for delegation in &turn.delegations {
-                turns.insert(RowKey::Handoff(delegation.id), turn.id);
-            }
-            for notice in &turn.owner_notices {
-                turns.insert(RowKey::OwnerNotice(notice.id), turn.id);
-            }
-            for handoff in &turn.computer_handoffs {
-                turns.insert(RowKey::ComputerHandoff(handoff.id), turn.id);
-            }
-        }
-    }
+    let cards: HashMap<CardKey, Uuid> = conversation
+        .into_iter()
+        .flat_map(|c| c.turns_in_order())
+        .filter(|turn| turn.routine.is_some())
+        .flat_map(|turn| CardKey::raised_by(turn).map(|card| (card, turn.id)))
+        .collect();
     rows.iter()
         .map(|key| match *key {
             RowKey::Item(id) => conversation
@@ -237,14 +262,7 @@ fn routine_turns(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Op
                 .and_then(|c| c.turn(turn))
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
-            RowKey::Question(_)
-            | RowKey::SkillInstall(_)
-            | RowKey::SecretRequest(_)
-            | RowKey::Draft(_)
-            | RowKey::SocialSetup(_)
-            | RowKey::Handoff(_)
-            | RowKey::ComputerHandoff(_)
-            | RowKey::OwnerNotice(_) => turns.get(key).copied(),
+            RowKey::Card(card) => cards.get(&card).copied(),
             RowKey::Pending(_) | RowKey::Gap(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => {
                 None
             }
@@ -395,12 +413,12 @@ pub(super) fn opened_mail(c: &Conversation, opens: Option<Uuid>) -> Option<&crat
 pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
     turn_card_rows(c)
         .into_iter()
-        .map(|(_, key, anchor)| (key, anchor))
+        .map(|(_, key, anchor)| (RowKey::Card(key), anchor))
         .collect()
 }
 
 /// Each card row with its turn and the item it follows.
-pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid>)> {
+pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uuid>)> {
     c.turns_in_order()
         .into_iter()
         .flat_map(|turn| {
@@ -408,19 +426,19 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
                 .iter()
                 .map(move |request| {
                     (
-                        RowKey::SecretRequest(request.id),
+                        CardKey::SecretRequest(request.id),
                         c.question_anchor(turn.id, None),
                     )
                 })
                 .chain(turn.skill_installs.iter().filter_map(move |install| {
                     let anchor = c.question_anchor(turn.id, install.settled_at);
                     (install.settled_at.is_none() || anchor.is_some())
-                        .then_some((RowKey::SkillInstall(install.id), anchor))
+                        .then_some((CardKey::SkillInstall(install.id), anchor))
                 }))
                 .chain(turn.questions.iter().filter_map(move |question| {
                     let anchor = c.question_anchor(turn.id, question.settled_at);
                     (question.is_pending() || anchor.is_some())
-                        .then_some((RowKey::Question(question.id), anchor))
+                        .then_some((CardKey::Question(question.id), anchor))
                 }))
                 .chain(
                     turn.delegations
@@ -445,14 +463,14 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
                             } else {
                                 anchor.is_some()
                             };
-                            shown.then_some((RowKey::Handoff(d.id), anchor))
+                            shown.then_some((CardKey::Handoff(d.id), anchor))
                         }),
                 )
                 // A pending handoff of a turn outside the loaded page shows
                 // only in the composer bar.
                 .chain(turn.computer_handoffs.iter().filter_map(move |handoff| {
                     let anchor = c.question_anchor(turn.id, None)?;
-                    Some((RowKey::ComputerHandoff(handoff.id), Some(anchor)))
+                    Some((CardKey::ComputerHandoff(handoff.id), Some(anchor)))
                 }))
                 .chain(
                     turn.owner_notices
@@ -466,12 +484,12 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
                             let anchor = c.question_anchor(turn.id, None);
                             (notice.status == crate::model::OwnerNoticeStatus::Pending
                                 || anchor.is_some())
-                            .then_some((RowKey::OwnerNotice(notice.id), anchor))
+                            .then_some((CardKey::OwnerNotice(notice.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
                     (
-                        RowKey::SocialSetup(setup.id),
+                        CardKey::SocialSetup(setup.id),
                         c.question_anchor(turn.id, None),
                     )
                 }))
@@ -482,7 +500,7 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
                         .filter_map(move |draft| {
                             let anchor = c.question_anchor(turn.id, draft.settled_at);
                             (draft.settled_at.is_none() || anchor.is_some())
-                                .then_some((RowKey::Draft(draft.id), anchor))
+                                .then_some((CardKey::Draft(draft.id), anchor))
                         }),
                 )
                 .map(move |(key, anchor)| (turn.id, key, anchor))
@@ -492,19 +510,27 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
 
 fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
     match key {
-        RowKey::Question(id) => c.question(id).map(|q| format!("{:?}", q.status)),
-        RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
+        RowKey::Card(CardKey::Question(id)) => c.question(id).map(|q| format!("{:?}", q.status)),
+        RowKey::Card(CardKey::Draft(id)) => c.outgoing_draft(id).map(|d| {
             format!(
                 "{}:{}:{:?}:{}:{}",
                 d.version, d.updated_at, d.status, d.can_approve, d.in_reply
             )
         }),
-        RowKey::SkillInstall(id) => c.skill_install(id).map(|r| format!("{:?}", r.status)),
-        RowKey::SecretRequest(id) => c.secret_request(id).map(|r| format!("{:?}", r.status)),
-        RowKey::SocialSetup(id) => c.social_setup(id).map(|s| format!("{:?}", s.status)),
-        RowKey::OwnerNotice(id) => c.owner_notice(id).map(|n| format!("{n:?}")),
-        RowKey::ComputerHandoff(id) => c.computer_handoff(id).map(|h| format!("{:?}", h.status)),
-        RowKey::Handoff(id) => c
+        RowKey::Card(CardKey::SkillInstall(id)) => {
+            c.skill_install(id).map(|r| format!("{:?}", r.status))
+        }
+        RowKey::Card(CardKey::SecretRequest(id)) => {
+            c.secret_request(id).map(|r| format!("{:?}", r.status))
+        }
+        RowKey::Card(CardKey::SocialSetup(id)) => {
+            c.social_setup(id).map(|s| format!("{:?}", s.status))
+        }
+        RowKey::Card(CardKey::OwnerNotice(id)) => c.owner_notice(id).map(|n| format!("{n:?}")),
+        RowKey::Card(CardKey::ComputerHandoff(id)) => {
+            c.computer_handoff(id).map(|h| format!("{:?}", h.status))
+        }
+        RowKey::Card(CardKey::Handoff(id)) => c
             .handoff(id)
             .map(|(_, group)| format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())),
         RowKey::Item(id) => c
@@ -706,15 +732,7 @@ pub(super) fn build<Tz: TimeZone>(
                             (!p.is_rejected() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SkillInstall(_)
-                | RowKey::SecretRequest(_)
-                | RowKey::Question(_)
-                | RowKey::Draft(_)
-                | RowKey::SocialSetup(_)
-                | RowKey::Handoff(_)
-                | RowKey::ComputerHandoff(_)
-                | RowKey::OwnerNotice(_)
-                | RowKey::Gap(_) => (None, None),
+                RowKey::Card(_) | RowKey::Gap(_) => (None, None),
                 // A folded run dates the day it ran, under no sender.
                 RowKey::QuietRun(turn) | RowKey::QuietRuns(turn) => (
                     None,
@@ -755,7 +773,7 @@ pub(super) fn build<Tz: TimeZone>(
                         .get(&id)
                         .into_iter()
                         .flat_map(|task| &task.cards)
-                        .filter_map(|card| card_state(c, card.key))
+                        .filter_map(|card| card_state(c, RowKey::Card(card.key)))
                         .fold(format!("{:?}", t.status), |state, card| state + ":" + &card)
                 }),
                 _ => card_state(c, key),
@@ -941,7 +959,10 @@ mod tests {
             let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
             assert_eq!(
                 request_rows(&c),
-                [(RowKey::OwnerNotice(Uuid::from_u128(400)), Some(receipt))]
+                [(
+                    RowKey::Card(CardKey::OwnerNotice(Uuid::from_u128(400))),
+                    Some(receipt)
+                )]
             );
             assert_eq!(
                 c.owner_notice(Uuid::from_u128(400)).unwrap().summary,
@@ -1006,14 +1027,17 @@ mod tests {
         }]);
         let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
         assert_eq!(
-            RowKey::Draft(Uuid::from_u128(310)).task_sender(&c),
+            RowKey::Card(CardKey::Draft(Uuid::from_u128(310))).task_sender(&c),
             Some("Sentry")
         );
         assert_eq!(
-            RowKey::Question(Uuid::from_u128(210)).task_sender(&c),
+            RowKey::Card(CardKey::Question(Uuid::from_u128(210))).task_sender(&c),
             Some("Sentry")
         );
-        assert_eq!(RowKey::Question(Uuid::nil()).task_sender(&c), None);
+        assert_eq!(
+            RowKey::Card(CardKey::Question(Uuid::nil())).task_sender(&c),
+            None
+        );
         assert_eq!(RowKey::Item(Uuid::from_u128(1)).task_sender(&c), None);
     }
 
@@ -1024,7 +1048,7 @@ mod tests {
         assert_eq!(
             card_rows(card_page("sent", earlier, None)),
             [(
-                RowKey::Draft(Uuid::from_u128(310)),
+                RowKey::Card(CardKey::Draft(Uuid::from_u128(310))),
                 Some(Uuid::from_u128(1))
             )]
         );
@@ -1041,7 +1065,7 @@ mod tests {
         assert_eq!(
             card_rows(card_page("sent", items, None)),
             [(
-                RowKey::Draft(Uuid::from_u128(310)),
+                RowKey::Card(CardKey::Draft(Uuid::from_u128(310))),
                 Some(Uuid::from_u128(1))
             )]
         );
@@ -1075,7 +1099,7 @@ mod tests {
         assert_eq!(
             request_rows(&c),
             [(
-                RowKey::Draft(Uuid::from_u128(310)),
+                RowKey::Card(CardKey::Draft(Uuid::from_u128(310))),
                 Some(Uuid::from_u128(1))
             )]
         );
@@ -1084,7 +1108,7 @@ mod tests {
         assert_eq!(
             request_rows(&pending),
             [(
-                RowKey::Draft(Uuid::from_u128(310)),
+                RowKey::Card(CardKey::Draft(Uuid::from_u128(310))),
                 Some(Uuid::from_u128(2))
             )]
         );
@@ -1096,7 +1120,7 @@ mod tests {
         assert_eq!(
             request_rows(&c),
             [(
-                RowKey::Draft(Uuid::from_u128(310)),
+                RowKey::Card(CardKey::Draft(Uuid::from_u128(310))),
                 Some(Uuid::from_u128(1))
             )]
         );
@@ -1116,7 +1140,7 @@ mod tests {
             assert_eq!(
                 request_rows(&c),
                 [(
-                    RowKey::Question(Uuid::from_u128(210)),
+                    RowKey::Card(CardKey::Question(Uuid::from_u128(210))),
                     Some(Uuid::from_u128(1))
                 )]
             );
@@ -1153,11 +1177,11 @@ mod tests {
             request_rows(&c),
             [
                 (
-                    RowKey::Handoff(Uuid::from_u128(20)),
+                    RowKey::Card(CardKey::Handoff(Uuid::from_u128(20))),
                     Some(Uuid::from_u128(1))
                 ),
                 (
-                    RowKey::Handoff(Uuid::from_u128(22)),
+                    RowKey::Card(CardKey::Handoff(Uuid::from_u128(22))),
                     Some(Uuid::from_u128(2))
                 ),
             ]
@@ -1262,7 +1286,7 @@ mod tests {
         assert_eq!(c.handoff(Uuid::from_u128(21)).unwrap().1.len(), 1);
         assert_eq!(
             request_rows(&c),
-            [(RowKey::Handoff(Uuid::from_u128(22)), None)]
+            [(RowKey::Card(CardKey::Handoff(Uuid::from_u128(22))), None)]
         );
     }
 
@@ -1273,7 +1297,7 @@ mod tests {
         let c = Conversation::from_snapshot(page).unwrap();
         assert_eq!(
             request_rows(&c),
-            [(RowKey::Question(Uuid::from_u128(210)), None)]
+            [(RowKey::Card(CardKey::Question(Uuid::from_u128(210))), None)]
         );
     }
 
@@ -1456,7 +1480,7 @@ mod tests {
     #[test]
     fn bot_activity_groups_adjacent_exchanges_without_hiding_owner_or_action_rows() {
         let c = activity_conversation();
-        let question = RowKey::Question(Uuid::from_u128(40));
+        let question = RowKey::Card(CardKey::Question(Uuid::from_u128(40)));
         let task = RowKey::Task(Uuid::from_u128(41));
         let keys = [
             item(1),
@@ -1806,8 +1830,8 @@ mod tests {
         let rows = [
             item(1),
             item(2),
-            RowKey::Question(Uuid::from_u128(210)),
-            RowKey::SecretRequest(Uuid::from_u128(310)),
+            RowKey::Card(CardKey::Question(Uuid::from_u128(210))),
+            RowKey::Card(CardKey::SecretRequest(Uuid::from_u128(310))),
         ];
         let groups = routine_rows(&rows, Some(&c));
         assert_eq!(
@@ -1841,9 +1865,9 @@ mod tests {
     fn task_bubbles_separate_the_surrounding_routine_request_cards() {
         let c = routine_conversation();
         let rows = [
-            RowKey::Question(Uuid::from_u128(210)),
+            RowKey::Card(CardKey::Question(Uuid::from_u128(210))),
             RowKey::Task(Uuid::from_u128(10)),
-            RowKey::SecretRequest(Uuid::from_u128(310)),
+            RowKey::Card(CardKey::SecretRequest(Uuid::from_u128(310))),
         ];
         assert_eq!(
             routine_rows(&rows, Some(&c)),
@@ -2122,7 +2146,10 @@ mod tests {
     fn the_first_row_of_each_viewer_day_names_that_day() {
         let keys = [1, 2, 3, 4].map(|n| RowKey::Item(Uuid::from_u128(n)));
         let mut rows: Vec<_> = keys.iter().map(|&key| transcript_row(key)).collect();
-        rows.insert(2, transcript_row(RowKey::Question(Uuid::from_u128(9))));
+        rows.insert(
+            2,
+            transcript_row(RowKey::Card(CardKey::Question(Uuid::from_u128(9)))),
+        );
         let times: std::collections::HashMap<_, _> = [
             (keys[0], at("21:00:00")),
             (keys[1], at("21:30:00")),

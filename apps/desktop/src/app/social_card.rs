@@ -1,3 +1,4 @@
+use crate::app::transcript::CardKey;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -81,7 +82,7 @@ impl ElseApp {
                     }
                 });
                 let layout = cx.observe_in(&form, window, move |app, _, _, cx| {
-                    app.remeasure_row(RowKey::SocialSetup(id), cx);
+                    app.remeasure_row(RowKey::Card(CardKey::SocialSetup(id)), cx);
                 });
                 view.social_forms.insert(
                     id,

@@ -3,6 +3,7 @@ use super::pending_send::Delivery;
 use super::reply::Author;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
+use crate::app::transcript::CardKey;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{ItemKind, ReactionKind, TurnStatus};
@@ -190,13 +191,7 @@ impl ElseApp {
             .and_then(|ix| view.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
         let follows_name = self.follows_name(ix);
-        let actionable = matches!(
-            row.key,
-            RowKey::Question(_)
-                | RowKey::SecretRequest(_)
-                | RowKey::Draft(_)
-                | RowKey::OwnerNotice(_)
-        );
+        let actionable = matches!(row.key, RowKey::Card(card) if card.needs_owner());
         // A routine's rows sit on the page like any other reply; its banner names the run.
         let frame = gpui_kit::component::v_flex()
             .w_full()
@@ -507,14 +502,7 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SkillInstall(_)
-            | RowKey::SecretRequest(_)
-            | RowKey::Question(_)
-            | RowKey::Draft(_)
-            | RowKey::SocialSetup(_)
-            | RowKey::Handoff(_)
-            | RowKey::ComputerHandoff(_)
-            | RowKey::OwnerNotice(_) => self.render_card(key, CardPlacement::Row, window, cx)?,
+            RowKey::Card(card) => self.render_card(card, CardPlacement::Row, window, cx)?,
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -644,29 +632,25 @@ pub(super) enum CardPlacement {
 impl ElseApp {
     pub(super) fn render_card(
         &self,
-        key: RowKey,
+        key: CardKey,
         placement: CardPlacement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let side = |card: AnyElement| div().w_full().min_w_0().child(card).into_any_element();
-        Some(match key {
-            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)),
-            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)),
-            RowKey::Question(id) => side(self.render_question_card(id, placement, window, cx)),
-            RowKey::Draft(id) => side(self.render_draft_card(id, placement, cx)),
-            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)),
-            RowKey::Handoff(id) => self.render_handoff(id, cx),
-            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
-            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?),
-            RowKey::Item(_)
-            | RowKey::Task(_)
-            | RowKey::Pending(_)
-            | RowKey::Gap(_)
-            | RowKey::QuietRun(_)
-            | RowKey::QuietRuns(_) => {
-                return None;
-            }
+        let card = match key {
+            CardKey::SkillInstall(id) => self.render_skill_card(id, cx),
+            CardKey::SecretRequest(id) => self.render_secret_card(id, cx),
+            CardKey::Question(id) => self.render_question_card(id, placement, window, cx),
+            CardKey::Draft(id) => self.render_draft_card(id, placement, cx),
+            CardKey::SocialSetup(id) => self.render_social_card(id, cx),
+            CardKey::Handoff(id) => self.render_handoff(id, cx),
+            CardKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
+            CardKey::OwnerNotice(id) => self.render_notice_card(id, cx)?,
+        };
+        Some(if key.is_boxed() {
+            div().w_full().min_w_0().child(card).into_any_element()
+        } else {
+            card
         })
     }
 }
@@ -858,7 +842,7 @@ impl ElseApp {
                 .exchange_is_line(activity)
                 .then_some(EventKind::Exchange);
         }
-        if matches!(row.key, RowKey::Handoff(_)) {
+        if matches!(row.key, RowKey::Card(CardKey::Handoff(_))) {
             return Some(EventKind::Exchange);
         }
         if matches!(row.key, RowKey::QuietRun(_) | RowKey::QuietRuns(_)) {
@@ -910,17 +894,7 @@ impl ElseApp {
         self.view
             .as_ref()
             .and_then(|view| view.rows.get(ix))
-            .is_some_and(|row| {
-                matches!(
-                    row.key,
-                    RowKey::Question(_)
-                        | RowKey::SecretRequest(_)
-                        | RowKey::Draft(_)
-                        | RowKey::OwnerNotice(_)
-                        | RowKey::SkillInstall(_)
-                        | RowKey::SocialSetup(_)
-                )
-            })
+            .is_some_and(|row| matches!(row.key, RowKey::Card(card) if card.is_boxed()))
     }
 }
 

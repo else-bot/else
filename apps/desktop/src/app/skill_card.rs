@@ -1,3 +1,4 @@
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::collections::HashSet;
 
@@ -105,7 +106,7 @@ impl ElseApp {
         };
         card.files.selected = Some(path);
         if card.files.contents.is_some() || card.files.loading {
-            self.remeasure_row(RowKey::SkillInstall(id), cx);
+            self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
             return;
         }
         card.files.loading = true;
@@ -122,11 +123,11 @@ impl ElseApp {
                     Ok(detail) => card.files.contents = Some(detail.contents),
                     Err(err) => card.files.error = Some(err.to_string()),
                 }
-                app.remeasure_row(RowKey::SkillInstall(id), cx);
+                app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
             });
         })
         .detach();
-        self.remeasure_row(RowKey::SkillInstall(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
     }
 
     fn answer_skill(
@@ -168,7 +169,7 @@ impl ElseApp {
                 Ok(env) => env.flatten(),
                 Err(error) => {
                     card.error = Some(error);
-                    self.remeasure_row(RowKey::SkillInstall(id), cx);
+                    self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
                     return;
                 }
             }
@@ -195,7 +196,7 @@ impl ElseApp {
             });
         })
         .detach();
-        self.remeasure_row(RowKey::SkillInstall(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
     }
 
     fn skill_answered(
@@ -237,7 +238,7 @@ impl ElseApp {
                 }
             }
         }
-        self.remeasure_row(RowKey::SkillInstall(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
     }
 
     pub(super) fn render_skill_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
@@ -367,7 +368,7 @@ impl ElseApp {
                     if let Some(card) = app.view.as_mut().and_then(|v| v.skill_cards.get_mut(&id)) {
                         card.scope = scope;
                     }
-                    app.remeasure_row(RowKey::SkillInstall(id), cx);
+                    app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
                 })),
             );
         }

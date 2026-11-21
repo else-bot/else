@@ -4,6 +4,7 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, FieldsChanged, Form};
 use gpui_kit::assets::IconName;
@@ -44,7 +45,7 @@ impl SecretForm {
         let fields = cx.new(|cx| CredentialFields::new(&request.env, Form::Requested, window, cx));
         let id = request.id;
         let subscription = cx.subscribe(&fields, move |app, _, _: &FieldsChanged, cx| {
-            app.remeasure_row(RowKey::SecretRequest(id), cx);
+            app.remeasure_row(RowKey::Card(CardKey::SecretRequest(id)), cx);
         });
         Self {
             fields,
@@ -154,7 +155,7 @@ impl ElseApp {
                 Ok(env) => Some(env),
                 Err(message) => {
                     form.error = Some(message);
-                    self.remeasure_row(RowKey::SecretRequest(request), cx);
+                    self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
                     return;
                 }
             }
@@ -174,7 +175,7 @@ impl ElseApp {
             });
         });
         task.detach();
-        self.remeasure_row(RowKey::SecretRequest(request), cx);
+        self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
     }
 
     fn secret_answered(
@@ -213,7 +214,7 @@ impl ElseApp {
                 }
             }
         }
-        self.remeasure_row(RowKey::SecretRequest(request), cx);
+        self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
     }
 
     pub(super) fn render_secret_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
@@ -325,7 +326,7 @@ impl ElseApp {
                         {
                             view.expanded_events.insert(id);
                         }
-                        app.remeasure_row(super::RowKey::SecretRequest(id), cx);
+                        app.remeasure_row(super::RowKey::Card(CardKey::SecretRequest(id)), cx);
                     })),
             )
             .child(
@@ -352,7 +353,7 @@ impl ElseApp {
         if form.locks() {
             card
         } else {
-            self.sighted(RowKey::SecretRequest(id), card, cx)
+            self.sighted(RowKey::Card(CardKey::SecretRequest(id)), card, cx)
         }
     }
 }

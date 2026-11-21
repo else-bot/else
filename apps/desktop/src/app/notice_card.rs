@@ -1,5 +1,6 @@
 use super::{Connection, ElseApp};
 use crate::api::ClientError;
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
@@ -65,7 +66,7 @@ impl ElseApp {
             .map(|task| &task.sender_name);
         // A received task's ask is its own row. Right under its exchange,
         // the exchange's header names the task; further down, the card does.
-        let here = view.row_index(super::RowKey::OwnerNotice(id));
+        let here = view.row_index(super::RowKey::Card(CardKey::OwnerNotice(id)));
         let exchange =
             receipt.and_then(|r| Some((r.id, view.row_index(super::RowKey::Item(r.id))?)));
         let below = exchange.is_some_and(|(_, ix)| here == Some(ix + 1));

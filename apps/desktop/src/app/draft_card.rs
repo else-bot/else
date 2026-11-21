@@ -1,3 +1,4 @@
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
@@ -74,14 +75,14 @@ impl DraftForm {
         let subject_change = subject.as_ref().map(|subject| {
             cx.subscribe_in(subject, window, move |app, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    app.remeasure_row(RowKey::Draft(id), cx);
+                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }
             })
         });
         let body_change =
             cx.subscribe_in(&body, window, move |app, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    app.remeasure_row(RowKey::Draft(id), cx);
+                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }
             });
         Self {
@@ -162,7 +163,7 @@ impl ElseApp {
             } else if !parts.is_empty() {
                 let (gallery, _observe) = Self::message_images(
                     self.client.clone(),
-                    RowKey::Draft(draft.id),
+                    RowKey::Card(CardKey::Draft(draft.id)),
                     view.bot_id,
                     &parts,
                     window,
@@ -246,7 +247,7 @@ impl ElseApp {
             });
         })
         .detach();
-        self.remeasure_row(RowKey::Draft(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
     }
 
     fn draft_acted(
@@ -280,7 +281,7 @@ impl ElseApp {
                 } else {
                     self.notice = Some(err.to_string());
                 }
-                self.remeasure_row(RowKey::Draft(id), cx);
+                self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
             }
         }
     }
@@ -313,7 +314,7 @@ impl ElseApp {
                 .insert(id, DraftForm::new(&draft, window, cx));
             self.sync_draft_forms(window, cx);
         }
-        self.remeasure_row(RowKey::Draft(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
     }
 
     fn render_draft_files(
@@ -367,7 +368,7 @@ impl ElseApp {
                                     if let Some(images) = view.draft_images.get(&id) {
                                         images.sync(&form.files, cx);
                                     }
-                                    app.remeasure_row(RowKey::Draft(id), cx);
+                                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                                 })),
                         )
                     })
@@ -521,7 +522,7 @@ impl ElseApp {
                     {
                         view.expanded_drafts.insert(id);
                     }
-                    app.remeasure_row(RowKey::Draft(id), cx);
+                    app.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
                 }));
             card = card.child(header);
             if !draft.content.attachments().is_empty() {

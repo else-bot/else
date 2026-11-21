@@ -5,6 +5,7 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
@@ -138,7 +139,7 @@ impl ElseApp {
         {
             view.expanded_questions.insert(id);
         }
-        self.remeasure_row(RowKey::Question(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
     pub(super) fn sync_question_submits(&mut self) {
@@ -194,7 +195,7 @@ impl ElseApp {
                 continue;
             }
             let state = cx.new(|cx| TextViewState::markdown(&source, cx));
-            let row = RowKey::Question(key.0);
+            let row = RowKey::Card(CardKey::Question(key.0));
             let _parsed = cx.observe(&state, move |app, _, cx| app.remeasure_row(row, cx));
             view.card_contexts
                 .insert(key, FormattedContext { state, _parsed });
@@ -258,7 +259,7 @@ impl ElseApp {
             });
         });
         task.detach();
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn question_answered(
@@ -287,7 +288,7 @@ impl ElseApp {
             ),
             Err(err) => SubmitState::Failed(err.to_string()),
         };
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     pub(super) fn render_question_card(
@@ -319,7 +320,7 @@ impl ElseApp {
             self.render_approval_card(question, submit, &bot_name, cx)
         };
         if waiting {
-            self.sighted(RowKey::Question(id), card, cx)
+            self.sighted(RowKey::Card(CardKey::Question(id)), card, cx)
         } else {
             card
         }
@@ -340,14 +341,14 @@ impl ElseApp {
             .iter()
             .enumerate()
             .filter(|(_, row)| match row.key {
-                RowKey::Question(id) => {
+                RowKey::Card(CardKey::Question(id)) => {
                     conversation.question(id).is_some_and(Question::is_pending)
                         && !view
                             .question_submits
                             .get(&id)
                             .is_some_and(QuestionForm::locks)
                 }
-                RowKey::SecretRequest(id) => {
+                RowKey::Card(CardKey::SecretRequest(id)) => {
                     conversation
                         .secret_request(id)
                         .is_some_and(|request| request.is_pending())
@@ -400,10 +401,12 @@ impl ElseApp {
         }
         let waiting = rows.len();
         let first = *rows.first()?;
-        let secret = self
-            .view
-            .as_ref()
-            .is_some_and(|view| matches!(view.rows[first].key, RowKey::SecretRequest(_)));
+        let secret = self.view.as_ref().is_some_and(|view| {
+            matches!(
+                view.rows[first].key,
+                RowKey::Card(CardKey::SecretRequest(_))
+            )
+        });
         let theme = cx.theme();
         Some(
             h_flex()

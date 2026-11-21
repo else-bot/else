@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::EmailProvider;
+use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier, text_field};
 use crate::model::QuestionStatus;
 use flow::{Consent, Flow, Resolution};
@@ -47,7 +48,7 @@ impl ElseApp {
             .rows
             .iter()
             .filter_map(|row| {
-                let RowKey::Question(id) = row.key else {
+                let RowKey::Card(CardKey::Question(id)) = row.key else {
                     return None;
                 };
                 let question = conversation?.question(id)?;
@@ -119,7 +120,7 @@ impl ElseApp {
             Ok(Resolution::Cancelled) => Phase::Cancelled,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
-        self.remeasure_row(RowKey::Question(flow.question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(flow.question)), cx);
     }
 
     fn check_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
@@ -136,7 +137,7 @@ impl ElseApp {
             let result = flow.recover().await;
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn activate_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,7 +159,7 @@ impl ElseApp {
                     let result = flow.confirm().await;
                     let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
                 }));
-                self.remeasure_row(RowKey::Question(question), cx);
+                self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
             }
             _ => {}
         }
@@ -224,7 +225,7 @@ impl ElseApp {
                             if let Some(form) = view.connections.get_mut(&question) {
                                 form.phase = Phase::Exchanging;
                             }
-                            app.remeasure_row(RowKey::Question(question), cx);
+                            app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
                             true
                         })
                         .unwrap_or(false)
@@ -243,7 +244,7 @@ impl ElseApp {
                         {
                             form.phase = Phase::Confirming;
                         }
-                        app.remeasure_row(RowKey::Question(question), cx);
+                        app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
                     });
                     (flow.confirm().await, None)
                 }
@@ -251,7 +252,7 @@ impl ElseApp {
             };
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
         }));
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn save_password(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -268,7 +269,7 @@ impl ElseApp {
         let password = input.read(cx).value().trim().to_owned();
         if password.is_empty() {
             form.phase = Phase::Ready(Some("Paste the app-specific password first.".into()));
-            self.remeasure_row(RowKey::Question(question), cx);
+            self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
             return;
         }
         form.phase = Phase::Exchanging;
@@ -286,7 +287,7 @@ impl ElseApp {
                         {
                             form.phase = Phase::Confirming;
                         }
-                        app.remeasure_row(RowKey::Question(question), cx);
+                        app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
                     });
                     (flow.confirm().await, None)
                 }
@@ -294,7 +295,7 @@ impl ElseApp {
             };
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
         }));
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn reopen_signin(&mut self, question: Uuid, cx: &mut Context<Self>) {
@@ -332,7 +333,7 @@ impl ElseApp {
             });
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     pub(super) fn render_connection_card(

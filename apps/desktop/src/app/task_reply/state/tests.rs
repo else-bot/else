@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::transcript::CardKey;
 use crate::model::ItemKind;
 use crate::model::{Frame, Snapshot};
 use serde_json::{Value, json};
@@ -983,8 +984,8 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
                 task.earlier(&c, &task.history, false),
                 [
                     Earlier::Reply(id(3)),
-                    Earlier::Card(RowKey::Question(id(210))),
-                    Earlier::Card(RowKey::Draft(id(310))),
+                    Earlier::Card(CardKey::Question(id(210))),
+                    Earlier::Card(CardKey::Draft(id(310))),
                 ],
                 "a working attempt's progress reply is folded itself, so it supersedes nothing"
             );
@@ -995,8 +996,8 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
             [
                 Earlier::Reply(id(2)),
                 Earlier::Reply(id(3)),
-                Earlier::Card(RowKey::Question(id(210))),
-                Earlier::Card(RowKey::Draft(id(310))),
+                Earlier::Card(CardKey::Question(id(210))),
+                Earlier::Card(CardKey::Draft(id(310))),
             ],
             "{status}: expanded progress keeps the cards after the reply they followed"
         );
@@ -1047,9 +1048,9 @@ fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
         task.earlier(&c, &task.history, true),
         [
             Earlier::Reply(id(2)),
-            Earlier::Card(RowKey::Question(id(210))),
+            Earlier::Card(CardKey::Question(id(210))),
             Earlier::Reply(id(3)),
-            Earlier::Card(RowKey::Draft(id(310))),
+            Earlier::Card(CardKey::Draft(id(310))),
         ],
         "each card follows the reply that asked for it"
     );
@@ -1124,7 +1125,7 @@ fn the_latest_attempts_reply_folds_what_came_before_it() {
         task.earlier(&working, &task.history, false),
         [
             Earlier::Reply(id(2)),
-            Earlier::Card(RowKey::Handoff(id(41)))
+            Earlier::Card(CardKey::Handoff(id(41)))
         ]
     );
 }
@@ -1160,8 +1161,8 @@ fn a_pending_card_keeps_its_row_below_the_reply_asking_for_it() {
     assert_eq!(
         rows,
         [
-            (RowKey::Question(id(210)), Some(id(3))),
-            (RowKey::Draft(id(310)), Some(id(3))),
+            (RowKey::Card(CardKey::Question(id(210))), Some(id(3))),
+            (RowKey::Card(CardKey::Draft(id(310))), Some(id(3))),
         ]
     );
 }
@@ -1184,7 +1185,7 @@ fn a_card_settled_after_a_single_attempts_last_reply_keeps_its_row() {
     let task = &tasks[&id(10)];
     assert!(task.cards.is_empty());
     assert!(task.earlier(&c, &task.history, true).is_empty());
-    assert_eq!(rows, [(RowKey::Draft(id(310)), Some(id(3)))]);
+    assert_eq!(rows, [(RowKey::Card(CardKey::Draft(id(310))), Some(id(3)))]);
 }
 
 #[test]
@@ -1496,8 +1497,12 @@ fn a_card_after_a_folded_update_reads_after_the_reply_it_folds_under() {
     let (items, turns) = parked_then_joined("waiting", 2, &[]);
     let c = conversation(items, turns);
     let mut tasks = task_replies(&c);
-    let card = RowKey::Question(id(300));
-    let left = place_cards(&c, &mut tasks, vec![(id(20), card, Some(id(3)))]);
+    let card = RowKey::Card(CardKey::Question(id(300)));
+    let left = place_cards(
+        &c,
+        &mut tasks,
+        vec![(id(20), CardKey::Question(id(300)), Some(id(3)))],
+    );
     assert_eq!(left, [(card, Some(id(5)))]);
     assert!(tasks[&id(20)].cards.is_empty());
     assert_eq!(

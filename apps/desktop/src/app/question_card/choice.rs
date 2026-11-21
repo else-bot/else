@@ -1,4 +1,5 @@
 use crate::app::clip;
+use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -61,7 +62,9 @@ impl ElseApp {
                     window,
                     move |app, _, event: &InputEvent, window, cx| match event {
                         InputEvent::PressEnter { .. } => app.send_write_in(id, window, cx),
-                        InputEvent::Change => app.remeasure_row(RowKey::Question(id), cx),
+                        InputEvent::Change => {
+                            app.remeasure_row(RowKey::Card(CardKey::Question(id)), cx)
+                        }
                         _ => {}
                     },
                 );
@@ -136,7 +139,7 @@ impl ElseApp {
             selected.push(choice.to_owned());
         }
         form.state = SubmitState::Choosing;
-        self.remeasure_row(RowKey::Question(id), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
     pub(super) fn render_choice_card(

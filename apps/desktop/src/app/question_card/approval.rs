@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::app::clip;
+use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
 use crate::model::QuestionKind;
@@ -108,7 +109,7 @@ impl ElseApp {
             return;
         }
         view.approval_scopes.insert(question, choice);
-        self.remeasure_row(RowKey::Question(question), cx);
+        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     pub(super) fn render_approval_card(
