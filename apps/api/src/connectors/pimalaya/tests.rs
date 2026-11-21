@@ -1378,3 +1378,25 @@ async fn locate_finds_the_exact_message_id_after_archive_and_trash() {
     );
     fixture.task.abort();
 }
+
+#[tokio::test]
+async fn imap_and_smtp_name_the_same_cause_for_a_refused_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: listener.local_addr().unwrap().port(),
+        start_tls: true,
+    };
+    drop(listener);
+    let (_, connector) = tls();
+    let imap = Imap::connect(&endpoint, &auth(), &connector).await.err();
+    let smtp = Smtp::connect(&endpoint, &auth(), &connector).await.err();
+    for error in [imap, smtp] {
+        let error = error.expect("a closed port refuses the connection");
+        assert_eq!(error.code, MailErrorCode::MailTransportFailed);
+        assert_eq!(
+            error.cause.as_deref(),
+            Some("the mail server refused the connection")
+        );
+    }
+}
