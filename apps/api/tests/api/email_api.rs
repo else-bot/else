@@ -1125,15 +1125,18 @@ async fn mail_event(
         arrivals: vec![],
         more: false,
     };
-    store::record_scan(
-        &h.app.db.pool,
-        account.id,
-        account.generation,
-        None,
-        &initial,
-    )
-    .await
-    .unwrap();
+    assert!(
+        store::record_scan(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            None,
+            &initial,
+        )
+        .await
+        .unwrap(),
+        "no watch recorded a scan first"
+    );
     // Before the arrival: the scheduler may admit it on its next scan.
     sqlx::query("UPDATE connector_grants SET wake_instructions = ?1")
         .bind(instructions)
@@ -1159,15 +1162,17 @@ async fn mail_event(
         }],
         more: false,
     };
-    store::record_scan(
-        &h.app.db.pool,
-        account.id,
-        account.generation,
-        Some(&initial.cursor),
-        &arrival,
-    )
-    .await
-    .unwrap();
+    assert!(
+        store::record_scan(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            Some(&initial.cursor),
+            &arrival,
+        )
+        .await
+        .unwrap()
+    );
     else_api::connectors::delivery::admit_pending(&h.app.db.pool, &h.app.state.registry, 32)
         .await
         .unwrap();
@@ -1333,7 +1338,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     let turn = mail_event(
         &h,
         &account,
-        &format!("INBOX {GATE}"),
+        &format!("INBOX {GATE_EVERY_ATTEMPT}"),
         "Pass X Ads emails to the Marketing Manager bot.",
     )
     .await;
@@ -1734,7 +1739,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     let (turn, token) = h
         .running(
             &bot,
-            &format!("{GATE} Handle my Gmail inbox owner@gmail.com"),
+            &format!("{GATE_EVERY_ATTEMPT} Handle my Gmail inbox owner@gmail.com"),
         )
         .await;
     let unsupported = tool(

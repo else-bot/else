@@ -21,23 +21,32 @@ pub const GATE_AFTER_OPENING: &str = "[gate:after-opening]";
 pub const GATE_EVERY_ATTEMPT: &str = "[gate:every-attempt]";
 
 enum Message {
-    Record(Box<TurnInput>),
-    Grant(Uuid, oneshot::Sender<watch::Receiver<Option<String>>>),
+    Record { input: Box<TurnInput>, held: bool },
+    Grant(Uuid, oneshot::Sender<watch::Receiver<Option<Granted>>>),
     Inputs(Uuid, oneshot::Sender<Vec<TurnInput>>),
     Hold(Uuid, oneshot::Sender<()>),
     Release(Uuid),
 }
 
+/// The tool grant an attempt was given, and whether its input asks to hold
+/// it: a gate until [`Harness::release`], or a synthetic hang until it is
+/// stopped. Other directives in the same input can still end it early.
+#[derive(Clone)]
+struct Granted {
+    token: String,
+    held: bool,
+}
+
 #[derive(Default)]
 struct State {
-    grants: HashMap<Uuid, watch::Sender<Option<String>>>,
+    grants: HashMap<Uuid, watch::Sender<Option<Granted>>>,
     inputs: Vec<TurnInput>,
     held: HashMap<Uuid, oneshot::Sender<()>>,
     released: HashSet<Uuid>,
 }
 
 impl State {
-    fn grant_updates(&mut self, turn: Uuid) -> &watch::Sender<Option<String>> {
+    fn grant_updates(&mut self, turn: Uuid) -> &watch::Sender<Option<Granted>> {
         self.grants
             .entry(turn)
             .or_insert_with(|| watch::channel(None).0)
@@ -45,9 +54,10 @@ impl State {
 
     fn handle(&mut self, message: Message) {
         match message {
-            Message::Record(input) => {
+            Message::Record { input, held } => {
                 if let Some(token) = input.tool_grant.clone() {
-                    self.grant_updates(input.turn_id).send_replace(Some(token));
+                    self.grant_updates(input.turn_id)
+                        .send_replace(Some(Granted { token, held }));
                 }
                 self.inputs.push(*input);
             }
@@ -195,14 +205,22 @@ impl Provider for Recorder {
         sink: &dyn TurnSink,
         stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
-        self.mailbox
-            .send(Message::Record(Box::new(input.clone())))
-            .await
-            .unwrap();
         let opening = input.attempt == 1 && input.text.contains(GATE_AFTER_OPENING);
         let gated = input.text.contains(GATE_EVERY_ATTEMPT)
             || opening
             || (input.attempt == 1 && input.text.contains(GATE));
+        let hangs = std::iter::once(&input.text)
+            .chain(input.steered.iter().map(|s| &s.message.text))
+            .any(|text| {
+                text.contains("[synthetic:hang]") || text.contains("[synthetic:ignore-cancel]")
+            });
+        self.mailbox
+            .send(Message::Record {
+                input: Box::new(input.clone()),
+                held: gated || hangs,
+            })
+            .await
+            .unwrap();
         let sink = Gated {
             inner: sink,
             gate: gated.then_some((self, input.turn_id)),
@@ -250,21 +268,30 @@ pub async fn harness(mut builder: Builder) -> Harness {
 }
 
 impl Harness {
-    async fn grant(&self, turn: Uuid, old: Option<&str>) -> String {
+    async fn grant(&self, turn: Uuid, old: Option<&str>) -> Granted {
         let mut updates = self.recorder.ask(|r| Message::Grant(turn, r)).await;
-        let token = until(
+        let granted = until(
             &format!("turn {turn} to supply a new grant"),
-            updates.wait_for(|token| token.as_deref().is_some_and(|token| Some(token) != old)),
+            updates.wait_for(|granted| {
+                granted
+                    .as_ref()
+                    .is_some_and(|granted| Some(granted.token.as_str()) != old)
+            }),
         )
         .await
         .unwrap();
-        token.as_ref().unwrap().clone()
+        granted.clone().unwrap()
     }
 
     pub async fn continued(&self, turn: Uuid, old: &str) -> String {
-        let token = self.grant(turn, Some(old)).await;
+        let granted = self.grant(turn, Some(old)).await;
+        assert!(
+            granted.held,
+            "turn {turn} resumed without a gate, so it can finish before the test acts; \
+             start it with GATE_EVERY_ATTEMPT"
+        );
         self.app.wait_turn(turn, &["running"]).await;
-        token
+        granted.token
     }
 
     pub async fn release(&self, turn: Uuid) {
@@ -288,7 +315,7 @@ impl Harness {
 
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
         self.app.wait_turn(turn, &["running"]).await;
-        (turn, self.grant(turn, None).await)
+        (turn, self.grant(turn, None).await.token)
     }
 
     /// A grant for `turn` with exactly `tools`, for a test that checks a

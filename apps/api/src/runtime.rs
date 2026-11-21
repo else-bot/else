@@ -305,6 +305,7 @@ pub async fn start(
         scheduler.clone(),
         mail,
     ));
+    connectors.start_workers().await;
     background.spawn("connectors", connectors.clone().run(shutdown.clone()));
     let socials = Arc::new(
         crate::socials::Manager::with_transport(pool.clone(), secret_key.clone(), social)
