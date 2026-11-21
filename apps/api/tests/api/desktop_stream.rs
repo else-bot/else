@@ -1106,3 +1106,56 @@ async fn a_failed_control_lease_hands_control_back_and_keeps_watching() {
     assert_eq!(s.leases("desktop-control:%").await, 1);
     drop(socket);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waking_stream_waits_for_a_backup_but_an_attaching_one_does_not() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let bot_id: Uuid = s.bot.parse().unwrap();
+    s.manager.owner_stop(bot_id).await.unwrap();
+    s.manager.owner_resume(bot_id).await.unwrap();
+    let held = s.app.owner("POST", "/v1/maintenance/update", None).await;
+    assert_eq!(held.body["ready"], true, "{}", held.body);
+
+    let calls = s.runtime.events().len();
+    let mut socket = s.open("mode=watch&wake=true").await;
+    ends_with(&mut socket, "maintenance").await;
+    let mut socket = s.open("mode=watch").await;
+    ends_with(&mut socket, "computer_not_running").await;
+    assert_eq!(s.runtime.events().len(), calls, "nothing woke");
+    assert_eq!(s.leases("desktop-stream:%").await, 0);
+
+    let reopened = s.app.owner("DELETE", "/v1/maintenance/update", None).await;
+    assert_eq!(reopened.body["reopened"], true);
+    let mut socket = s.open("mode=watch&wake=true").await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"size","width":64,"height":48})
+    );
+    let held = s.app.owner("POST", "/v1/maintenance/update", None).await;
+    assert_eq!(
+        held.body["ready"], true,
+        "an open stream lets the gate close"
+    );
+    drop(socket);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_fails_after_its_lease_releases_it() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    sqlx::query("UPDATE bot_computers SET desktop_generation = NULL WHERE bot_id = ?1")
+        .bind(s.bot.parse::<Uuid>().unwrap())
+        .execute(&s.app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_desktop BEFORE UPDATE OF desktop_generation ON bot_computers
+         WHEN NEW.desktop_generation IS NOT NULL BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+    )
+    .execute(&s.app.db.pool)
+    .await
+    .unwrap();
+
+    let mut socket = s.open("mode=watch").await;
+    ends_with(&mut socket, "computer_unavailable").await;
+    assert_eq!(s.leases("desktop-stream:%").await, 0);
+}

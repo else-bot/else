@@ -246,12 +246,10 @@ async fn maintenance_gate(
     next.run(request).await
 }
 
+const MAINTENANCE: &str = "else.bot is paused for a backup or an update; try again in a moment.";
+
 fn maintenance_response() -> Response {
-    ApiError::unavailable(
-        "maintenance",
-        "else.bot is paused for a backup or an update; try again in a moment.",
-    )
-    .into_response()
+    ApiError::unavailable("maintenance", MAINTENANCE).into_response()
 }
 
 /// A tool call from a running turn (it carries the turn's grant) keeps
