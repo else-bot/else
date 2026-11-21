@@ -357,7 +357,7 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     )
     .await;
     let log = format!("{log} {} {}{note}", created.status(), created.id());
-    Ok(Done::json(value).logged(log))
+    Ok(Done::json(value).parked(created.parked()).logged(log))
 }
 
 const NEXT: Next = Next {

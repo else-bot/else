@@ -189,7 +189,7 @@ pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
     run(c, op).await.map_err(Refusal::enveloped)
 }
 
-/// The shared MCP library's tools, each bound to its name in `tool_defs`.
+/// The shared MCP library's tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(super) enum Op {
     List,
@@ -592,7 +592,7 @@ pub(super) async fn auth_required(
     let declined =
         Declined::SafeMessage("The owner declined this connection. Continue without it.");
     match ask(state, grant, &spec, card, declined).await {
-        Ok(_) => Refusal::json(
+        Ok(_) => Refusal::declined(
             json!({"status":"error","code":"reauth_required","safe_message":"The connection still requires sign-in. Start a new owner request to authorize again."}),
         ),
         Err(refusal) => refusal,

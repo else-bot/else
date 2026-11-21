@@ -288,7 +288,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
                 }
                 None => result["next"] = json!(format!("Say what you need, then {END}")),
             }
-            Ok(Done::json(result).logged(log))
+            Ok(Done::json(result).parked(true).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -399,7 +399,7 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
                 "next": "Tell the owner briefly what you need and end this attempt now. Do not \
                          wait, poll, or call more tools; the answer arrives in a continuation.",
             });
-            Ok(Done::json(result).logged(log))
+            Ok(Done::json(result).parked(true).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -465,7 +465,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
                          Do not wait, poll, or call more tools; their choice arrives in a \
                          continuation.",
             });
-            Ok(Done::json(result).logged(log))
+            Ok(Done::json(result).parked(true).logged(log))
         }
         Err(err) => Err(err.into()),
     }
@@ -602,10 +602,10 @@ pub(crate) async fn ask(
     let log = format!("denied {question} by the owner");
     Err(match declined {
         Declined::Status(next) => {
-            Refusal::json(json!({ "status": "denied", "question_id": question, "next": next }))
+            Refusal::declined(json!({ "status": "denied", "question_id": question, "next": next }))
                 .logged(log)
         }
-        Declined::SafeMessage(message) => Refusal::json(
+        Declined::SafeMessage(message) => Refusal::declined(
             json!({"status": "error", "code": "owner_declined", "safe_message": message}),
         ),
         Declined::Text(message) => Refusal::text(message).logged(log),
@@ -633,11 +633,11 @@ pub(crate) async fn consult(
     };
     state.grants.park(grant.turn_id).await;
     Err(match card.waiting {
-        Waiting::Approval(next) => Refusal::json(json!({ "status": "pending", "parked": true,
+        Waiting::Approval(next) => Refusal::parked(json!({ "status": "pending", "parked": true,
             "question_id": question.id, "kind": question.kind, "next": next }))
         .logged(format!("awaiting approval {}", question.id)),
         Waiting::Result { value, log } => {
-            Refusal::json(value(question.id)).logged(format!("{log} {}", question.id))
+            Refusal::parked(value(question.id)).logged(format!("{log} {}", question.id))
         }
     })
 }

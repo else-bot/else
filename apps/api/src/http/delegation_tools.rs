@@ -232,7 +232,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> T
                          delegate call queues separate work: to change or stop this task later, \
                          use delegation_update or delegation_cancel with its task_id.",
             });
-            Ok(Done::json(result).logged(log))
+            Ok(Done::json(result).parked(true).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -413,7 +413,7 @@ pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> To
             Ok(Done::json(json!({"status": if pending {"pending"} else {"settled"},
                 "parked": pending, "tasks": tasks,
                 "next": if pending {"End this attempt. All reports arrive in a continuation; combine them and preserve failures and disagreements."}
-                    else {"Use the recorded reports. Do not resubmit completed work."}})).logged(format!("council reports from {} bots", tasks.len())))
+                    else {"Use the recorded reports. Do not resubmit completed work."}})).parked(pending).logged(format!("council reports from {} bots", tasks.len())))
         }
         Err(err) => Err(Refusal::text(format!("COUNCIL_REFUSED: {err}")).logged("council refused")),
     }

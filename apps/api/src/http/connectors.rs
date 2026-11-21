@@ -927,7 +927,7 @@ fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
     }
 }
 
-/// The email tools, each bound to its name in `tool_defs`.
+/// The email tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(super) enum Op {
     Accounts,

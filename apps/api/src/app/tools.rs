@@ -4,10 +4,10 @@
 //! name with no row is not a tool. `http::tool_defs` binds each [`ToolId`]
 //! to its schema and handler.
 //!
-//! Rows are in listed order, then deferred order: provider adapters hash
-//! and allowlist [`TOOL_NAMES`], `tools/list` follows it, and `find_tool`
-//! breaks ties by it, so moving a listed row rebuilds every native session
-//! and invalidates every provider's prompt cache.
+//! Rows are in listed order, then deferred order. Provider adapters hash
+//! and allowlist [`TOOL_NAMES`] and `tools/list` follows it, so moving a
+//! listed row rebuilds every native session and invalidates every
+//! provider's prompt cache. `find_tool` breaks ties by deferred row order.
 
 use serde_json::{Value, json};
 

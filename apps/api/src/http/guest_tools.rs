@@ -32,7 +32,7 @@ pub(crate) use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
 use input_progress::InputProgress;
 
-/// The computer tools, each bound to its name in `tool_defs`.
+/// The computer tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(crate) enum Op {
     Run,

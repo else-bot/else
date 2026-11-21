@@ -139,7 +139,9 @@ pub(super) async fn install(state: &AppState, grant: &Grant, args: &Value) -> To
                 "next": "Tell the owner briefly what the skill does and end this attempt now. Do not \
                          wait, poll, or call more tools; the answer arrives in a continuation.",
             });
-            Ok(Done::json(result).logged(format!("pending {} for {}", card.id, card.skill_id)))
+            Ok(Done::json(result)
+                .parked(true)
+                .logged(format!("pending {} for {}", card.id, card.skill_id)))
         }
         Err(err) => {
             let code = match err {

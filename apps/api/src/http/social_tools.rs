@@ -76,7 +76,7 @@ struct Status {
     connection_id: Uuid,
     action_id: Uuid,
 }
-/// The native social tools, each bound to its name in `tool_defs`.
+/// The native social tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(super) enum Op {
     Connect,
@@ -125,7 +125,8 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         } else {
             "The owner settled this setup. Discover social_connections to inspect current access and instructions."
         }
-    })))
+    }))
+    .parked(pending))
 }
 
 async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {

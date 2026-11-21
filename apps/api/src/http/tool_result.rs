@@ -11,12 +11,25 @@ pub(crate) type ToolResult = Result<Done, Refusal>;
 #[derive(Debug)]
 pub(crate) struct Done(Reply);
 
-/// How a tool ended early or failed, in the wire dialect its file uses: a
-/// text error, a JSON error envelope, or a plain result such as a pending
-/// approval. Some effects may already have run, as the message says. A
-/// refusal writes no memory line unless it says so.
+/// How a tool ended early, in the wire dialect its file uses: a text error,
+/// a JSON error envelope, a declined call, or a call parked on the owner.
+/// Some effects may already have run, as the message says. A refusal writes
+/// no memory line unless it says so.
 #[derive(Debug)]
 pub(crate) struct Refusal(Reply);
+
+/// How a call ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Outcome {
+    Done,
+    /// The turn waits for the owner or other work; the result says
+    /// `"parked": true`.
+    Parked,
+    /// Not run and not an error: the owner declined, or must act first.
+    Declined,
+    /// An error result, flagged `isError`.
+    Failed,
+}
 
 #[derive(Debug)]
 struct Reply {
@@ -24,9 +37,17 @@ struct Reply {
     log: Option<String>,
 }
 
+/// How a call with a result that is not flagged `isError` ended.
+#[derive(Debug, Clone, Copy)]
+enum Unflagged {
+    Done,
+    Parked,
+    Declined,
+}
+
 #[derive(Debug)]
 enum Body {
-    Json(Value),
+    Json(Value, Unflagged),
     FlaggedJson(Value),
     Text(String),
     Image { meta: Value, png: Vec<u8> },
@@ -34,11 +55,19 @@ enum Body {
 
 impl Done {
     pub(crate) fn json(value: Value) -> Self {
-        Self(Reply::new(Body::Json(value)))
+        Self(Reply::new(Body::Json(value, Unflagged::Done)))
     }
 
     pub(crate) fn image(meta: Value, png: Vec<u8>) -> Self {
         Self(Reply::new(Body::Image { meta, png }))
+    }
+
+    /// Sets the result's `parked` field, which providers read, and the
+    /// outcome. Give the field its place in the JSON: providers see its
+    /// bytes, and a field set here for the first time goes last.
+    pub(crate) fn parked(mut self, parked: bool) -> Self {
+        self.0.park(parked);
+        self
     }
 
     pub(crate) fn logged(mut self, log: impl Into<String>) -> Self {
@@ -58,9 +87,17 @@ impl Refusal {
         Self::text(format!("{code}: {message}")).logged(format!("rejected {code}"))
     }
 
-    /// A result that is not an error, such as a pending or declined approval.
-    pub(crate) fn json(value: Value) -> Self {
-        Self(Reply::new(Body::Json(value)))
+    /// A call the owner declined or must act on first, as a result that is
+    /// not an error.
+    pub(crate) fn declined(value: Value) -> Self {
+        Self(Reply::new(Body::Json(value, Unflagged::Declined)))
+    }
+
+    /// A call that parked the turn on the owner.
+    pub(crate) fn parked(value: Value) -> Self {
+        let mut reply = Reply::new(Body::Json(value, Unflagged::Done));
+        reply.park(true);
+        Self(reply)
     }
 
     /// A JSON result flagged `isError`.
@@ -109,6 +146,28 @@ impl Reply {
     fn new(body: Body) -> Self {
         Self { body, log: None }
     }
+
+    fn park(&mut self, parked: bool) {
+        let Body::Json(Value::Object(payload), ended) = &mut self.body else {
+            unreachable!("only a JSON object result parks")
+        };
+        payload.insert("parked".into(), json!(parked));
+        if parked {
+            *ended = Unflagged::Parked;
+        }
+    }
+}
+
+/// How the call that returned `result` ended.
+pub(crate) fn outcome(result: &ToolResult) -> Outcome {
+    match result {
+        Ok(Done(reply)) | Err(Refusal(reply)) => match reply.body {
+            Body::Json(_, Unflagged::Done) | Body::Image { .. } => Outcome::Done,
+            Body::Json(_, Unflagged::Parked) => Outcome::Parked,
+            Body::Json(_, Unflagged::Declined) => Outcome::Declined,
+            Body::FlaggedJson(_) | Body::Text(_) => Outcome::Failed,
+        },
+    }
 }
 
 /// Decodes a tool's arguments, refusing as `invalid` says when they do not fit.
@@ -127,7 +186,7 @@ pub(crate) fn amend(
     log: impl FnOnce(Option<String>) -> Option<String>,
 ) -> ToolResult {
     let amend = |mut reply: Reply| {
-        if let Body::Json(value) | Body::FlaggedJson(value) = &mut reply.body
+        if let Body::Json(value, _) | Body::FlaggedJson(value) = &mut reply.body
             && value.is_object()
         {
             payload(value);
@@ -156,7 +215,7 @@ pub(crate) fn render(result: ToolResult) -> (Value, Option<String>) {
         Ok(Done(reply)) | Err(Refusal(reply)) => reply,
     };
     let value = match body {
-        Body::Json(value) => text_result(value),
+        Body::Json(value, _) => text_result(value),
         Body::FlaggedJson(value) => {
             let mut value = text_result(value);
             value["isError"] = json!(true);
@@ -210,6 +269,21 @@ mod tests {
     }
 
     #[test]
+    fn a_parked_result_keeps_its_parked_field_where_the_tool_wrote_it() {
+        let parked =
+            Done::json(json!({ "status": "pending", "parked": true, "next": "End." })).parked(true);
+        assert_eq!(outcome(&Ok(parked)), Outcome::Parked);
+        let parked =
+            Done::json(json!({ "status": "pending", "parked": true, "next": "End." })).parked(true);
+        assert_eq!(
+            render(Ok(parked)).0["content"][0]["text"],
+            "{\"status\":\"pending\",\"parked\":true,\"next\":\"End.\"}"
+        );
+        let settled = Done::json(json!({ "status": "settled", "parked": false })).parked(false);
+        assert_eq!(outcome(&Ok(settled)), Outcome::Done);
+    }
+
+    #[test]
     fn a_plain_text_refusal_becomes_the_json_error_envelope() {
         let denied = Refusal::text("DENIED: the owner declined this external action.")
             .logged("denied")
@@ -240,8 +314,8 @@ mod tests {
             "JSON text is kept"
         );
         assert_eq!(
-            wire(Refusal::json(json!({"status": "pending"})).enveloped()),
-            json!({"content": [{"type": "text", "text": "{\"status\":\"pending\"}"}]}),
+            wire(Refusal::declined(json!({"status": "denied"})).enveloped()),
+            json!({"content": [{"type": "text", "text": "{\"status\":\"denied\"}"}]}),
             "a result that is not an error is kept"
         );
     }

@@ -381,6 +381,7 @@ async fn draft(
                  attempt now. Do not send it, wait, poll, or call more tools; their decision \
                  arrives in a continuation.",
     }))
+    .parked(true)
     .logged(log))
 }
 
