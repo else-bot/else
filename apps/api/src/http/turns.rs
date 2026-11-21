@@ -235,9 +235,11 @@ async fn accept_send(
             })?;
             // The owner may have fixed the CLI since it was last checked,
             // such as by logging in again on the host.
-            if provider.availability() != Availability::Available
-                && let Availability::Unavailable(reason) = provider.reprobe().await
-            {
+            if provider.availability() != Availability::Available {
+                let recheck = provider.reprobe();
+                let _ = tokio::time::timeout(crate::providers::RECHECK_WAIT, recheck).await;
+            }
+            if let Availability::Unavailable(reason) = provider.availability() {
                 return Err(with_id(ApiError::unavailable(
                     "provider_unavailable",
                     reason,

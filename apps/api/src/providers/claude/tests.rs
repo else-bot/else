@@ -1193,39 +1193,51 @@ fn initialize_lists_models_by_their_exact_ids() {
     );
 }
 
+/// A probe that counts its runs and waits for the gate.
+fn gated_probe(
+    probes: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    gate: &std::sync::Arc<tokio::sync::Semaphore>,
+    entered: &std::sync::Arc<tokio::sync::Notify>,
+) -> turn::Probe<Login> {
+    let (probes, gate, entered) = (probes.clone(), gate.clone(), entered.clone());
+    Box::new(move || {
+        let (probes, gate, entered) = (probes.clone(), gate.clone(), entered.clone());
+        Box::pin(async move {
+            let n = probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            entered.notify_one();
+            let _open = gate.acquire().await.unwrap();
+            Err(format!("signed out ({n})"))
+        })
+    })
+}
+
 /// Rechecks made while a probe runs wait for it and share its answer; the
 /// next recheck probes again.
 #[tokio::test(flavor = "current_thread")]
 async fn rechecks_during_a_probe_share_it() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let probes = std::sync::Arc::new(AtomicUsize::new(0));
+    use std::sync::atomic::Ordering;
+    let probes = std::sync::Arc::default();
     let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-    let probe: turn::Probe<Login> = {
-        let (probes, gate) = (probes.clone(), gate.clone());
-        Box::new(move || {
-            let (probes, gate) = (probes.clone(), gate.clone());
-            Box::pin(async move {
-                let n = probes.fetch_add(1, Ordering::SeqCst) + 1;
-                let _open = gate.acquire().await.unwrap();
-                Err(format!("signed out ({n})"))
-            })
-        })
-    };
+    let entered = std::sync::Arc::default();
+    let probe = gated_probe(&probes, &gate, &entered);
     let claude = std::sync::Arc::new(Claude::probed(ClaudeCode, probe).await);
+    entered.notified().await;
     assert_eq!(probes.load(Ordering::SeqCst), 1, "probed at startup");
 
     let held = gate.clone().acquire_owned().await.unwrap();
-    let rechecks: Vec<_> = (0..3)
-        .map(|_| {
-            let claude = claude.clone();
-            tokio::spawn(async move { claude.reprobe().await })
-        })
-        .collect();
+    let recheck = |claude: &std::sync::Arc<Claude>| {
+        let claude = claude.clone();
+        tokio::spawn(async move { claude.reprobe().await })
+    };
+    let first = recheck(&claude);
+    entered.notified().await;
+    let others = [recheck(&claude), recheck(&claude)];
+    // On this one-thread runtime the others run up to the probe's lock.
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
     drop(held);
-    for recheck in rechecks {
+    for recheck in std::iter::once(first).chain(others) {
         assert_eq!(
             recheck.await.unwrap(),
             Availability::Unavailable("signed out (2)".into())
@@ -1241,4 +1253,111 @@ async fn rechecks_during_a_probe_share_it() {
         claude.reprobe().await,
         Availability::Unavailable("signed out (3)".into())
     );
+}
+
+/// A recheck whose caller goes away still finishes and is published, so
+/// the next caller does not start it over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recheck_outlives_its_caller() {
+    use std::sync::atomic::Ordering;
+    let probes = std::sync::Arc::default();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let entered = std::sync::Arc::default();
+    let probe = gated_probe(&probes, &gate, &entered);
+    let claude = std::sync::Arc::new(Claude::probed(ClaudeCode, probe).await);
+    entered.notified().await;
+
+    let held = gate.clone().acquire_owned().await.unwrap();
+    let caller = {
+        let claude = claude.clone();
+        tokio::spawn(async move { claude.reprobe().await })
+    };
+    entered.notified().await;
+    caller.abort();
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while claude.availability() != Availability::Unavailable("signed out (2)".into()) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the abandoned recheck was published");
+    assert_eq!(probes.load(Ordering::SeqCst), 2);
+}
+
+/// A login that expires mid-turn makes the provider unavailable for the
+/// turns after it, without a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_that_expires_mid_turn_is_picked_up() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let login = dir.join("logged-in");
+    std::fs::write(&login, "").unwrap();
+    let program = dir.join("claude");
+    std::fs::write(
+        &program,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+login = {login:?}
+if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
+if a[:1] == ["auth"]:
+    print(json.dumps({{"loggedIn": os.path.exists(login)}})); sys.exit(0 if os.path.exists(login) else 1)
+out = lambda e: print(json.dumps(e), flush=True)
+out({{"type": "system", "subtype": "init", "model": a[a.index("--model") + 1],
+     "tools": a[a.index("--tools") + 1].split(","),
+     "mcp_servers": [{{"name": "elsebot", "status": "connected"}}]}})
+msg = json.loads(sys.stdin.readline())
+out({{"type": "user", "uuid": msg["uuid"], "isReplay": True}})
+os.remove(login)
+failure = "Failed to authenticate. API Error: 401 OAuth access token is invalid."
+out({{"type": "assistant", "parent_tool_use_id": None, "error": "authentication_failed",
+     "is_api_error_message": True, "api_error_status": 401,
+     "message": {{"model": "<synthetic>", "role": "assistant", "content": [{{"type": "text", "text": failure}}]}}}})
+out({{"type": "result", "subtype": "success", "is_error": True, "result": failure, "num_turns": 1,
+     "terminal_reason": "api_error"}})
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = claude_home::HostConfig {
+        dir: dir.join("config"),
+        explicit: true,
+    };
+    let claude = Claude::detect(
+        Some(Host::new(dir, &dir.join("bots"))),
+        Some(program),
+        Some(config),
+        String::new(),
+    )
+    .await;
+    assert_eq!(claude.availability(), Availability::Available);
+
+    let sink = super::super::recording::Recorded::default();
+    let outcome = claude
+        .run(specialist_turn(None), &sink, Stop::default())
+        .await;
+    assert!(
+        matches!(
+            &outcome,
+            TurnOutcome::Failed {
+                code: FailureCode::ProviderFailed,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let signed_out = Availability::Unavailable(
+        "Claude Code is not logged in on the host (run `claude` and log in).".into(),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while claude.availability() != signed_out {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the failed turn rechecked the login");
 }

@@ -137,7 +137,7 @@ pub struct Launch<P> {
 #[async_trait]
 pub trait Adapter: Send + Sync + Sized + 'static {
     /// The adapter's readiness beyond a running CLI, such as its login.
-    type Login: Send + Sync;
+    type Login: Send + Sync + 'static;
 
     const DEFINITION: &'static Definition;
     /// The CLI's name in messages, such as "Claude Code".
@@ -245,17 +245,37 @@ pub trait Stream: Adapter {
     }
 }
 
+/// A CLI's current readiness and the probe that replaces it. A probe runs
+/// on its own task, so it finishes and is published even when every
+/// caller that asked for it has gone.
+struct Readiness<L> {
+    /// A turn keeps the readiness it started with when a probe replaces it.
+    ready: watch::Sender<Result<Arc<Ready<L>>, String>>,
+    probe: Option<Probe<L>>,
+    probing: tokio::sync::Mutex<()>,
+    /// Probes that finished, so a recheck that waited on one shares it.
+    probes: AtomicU64,
+}
+
+impl<L: Send + Sync + 'static> Readiness<L> {
+    async fn reprobe(self: Arc<Self>) {
+        let Some(probe) = &self.probe else { return };
+        let seen = self.probes.load(Ordering::Acquire);
+        let _probing = self.probing.lock().await;
+        if self.probes.load(Ordering::Acquire) == seen {
+            let ready = probe().await;
+            self.ready
+                .send_modify(|current| *current = ready.map(Arc::new));
+            self.probes.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
 /// A streaming CLI provider.
 pub struct Cli<A: Adapter> {
     pub(in crate::providers) adapter: A,
     pub(in crate::providers) models: Models,
-    /// A turn keeps the readiness it started with when a probe replaces it.
-    ready: watch::Sender<Result<Arc<Ready<A::Login>>, String>>,
-    probe: Option<Probe<A::Login>>,
-    /// Held while a probe runs.
-    probing: tokio::sync::Mutex<()>,
-    /// Probes that finished, so a recheck that waited on one shares it.
-    probes: AtomicU64,
+    readiness: Arc<Readiness<A::Login>>,
     pub(in crate::providers) tool_url: Option<String>,
 }
 
@@ -264,10 +284,12 @@ impl<A: Adapter> Cli<A> {
         Self {
             adapter,
             models: Models::new(A::DEFINITION),
-            ready: watch::Sender::new(ready.map(Arc::new)),
-            probe: None,
-            probing: tokio::sync::Mutex::new(()),
-            probes: AtomicU64::new(0),
+            readiness: Arc::new(Readiness {
+                ready: watch::Sender::new(ready.map(Arc::new)),
+                probe: None,
+                probing: tokio::sync::Mutex::new(()),
+                probes: AtomicU64::new(0),
+            }),
             tool_url: None,
         }
     }
@@ -275,10 +297,11 @@ impl<A: Adapter> Cli<A> {
     /// Run `probe` now, and again on each [`Provider::reprobe`].
     pub async fn probed(adapter: A, probe: Probe<A::Login>) -> Self {
         let ready = probe().await;
-        Self {
-            probe: Some(probe),
-            ..Self::new(adapter, ready)
-        }
+        let mut cli = Self::new(adapter, ready);
+        Arc::get_mut(&mut cli.readiness)
+            .expect("a new provider's readiness is unshared")
+            .probe = Some(probe);
+        cli
     }
 
     /// Offer else.bot's tools at this MCP URL.
@@ -288,7 +311,7 @@ impl<A: Adapter> Cli<A> {
     }
 
     pub(in crate::providers) fn ready(&self) -> Result<Arc<Ready<A::Login>>, String> {
-        self.ready.borrow().clone()
+        self.readiness.ready.borrow().clone()
     }
 
     /// The session fingerprint, with the adapter's `policy` in order.
@@ -491,15 +514,9 @@ impl<A: Adapter> Provider for Cli<A> {
     }
 
     async fn reprobe(&self) -> Availability {
-        if let Some(probe) = &self.probe {
-            let seen = self.probes.load(Ordering::Acquire);
-            let _probing = self.probing.lock().await;
-            if self.probes.load(Ordering::Acquire) == seen {
-                let ready = probe().await;
-                self.ready
-                    .send_modify(|current| *current = ready.map(Arc::new));
-                self.probes.fetch_add(1, Ordering::Release);
-            }
+        let probe = tokio::spawn(self.readiness.clone().reprobe());
+        if let Err(err) = probe.await {
+            tracing::warn!(provider = A::DEFINITION.id, %err, "the readiness probe failed");
         }
         self.availability()
     }
@@ -547,8 +564,23 @@ impl<A: Adapter> Provider for Cli<A> {
         if let Err(reason) = self.models.validate(profile) {
             return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
-        self.adapter
+        let outcome = self
+            .adapter
             .run(self, &ready, profile, &input, sink, stop)
-            .await
+            .await;
+        // A login that lapsed or a CLI that moved since the last probe
+        // shows as unavailable from now on, not only in this turn. Claude
+        // reports an expired login as a failed API call.
+        if let TurnOutcome::Failed {
+            code:
+                FailureCode::ProviderUnavailable
+                | FailureCode::ProviderFailed
+                | FailureCode::StartFailed,
+            ..
+        } = &outcome
+        {
+            tokio::spawn(self.readiness.clone().reprobe());
+        }
+        outcome
     }
 }

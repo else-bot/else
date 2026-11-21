@@ -46,7 +46,7 @@ impl Listed {
     }
 }
 
-/// One provider's current catalog. The refresher is its only writer.
+/// One provider's current catalog, written by model refreshes.
 pub struct Models {
     definition: &'static Definition,
     catalog: watch::Sender<Arc<Catalog>>,
@@ -70,9 +70,12 @@ impl Models {
         self.catalog.borrow().clone()
     }
 
-    /// Adopt what the CLI listed at `at`. A list with no model this adapter
-    /// can apply counts as a failed ask.
+    /// Adopt what the CLI listed at `at`, unless a later list is shown. A
+    /// list with no model this adapter can apply counts as a failed ask.
     pub fn listed(&self, listed: Vec<Listed>, at: DateTime<Utc>) -> Result<(), String> {
+        if self.current().listed_at.is_some_and(|shown| shown > at) {
+            return Ok(());
+        }
         let models = catalog_models(self.definition, listed);
         if models.is_empty() {
             let error = format!("{} listed no model else.bot can run", self.definition.label);
@@ -330,7 +333,15 @@ impl Cache {
         self.0
             .call(move |path| {
                 let mut saved = read_cache(path);
-                saved.providers.extend(answers);
+                for (id, answer) in answers {
+                    let newer = saved
+                        .providers
+                        .get(&id)
+                        .is_none_or(|cached| cached.listed_at <= answer.listed_at);
+                    if newer {
+                        saved.providers.insert(id, answer);
+                    }
+                }
                 let (Some(dir), Some(name)) =
                     (path.parent(), path.file_name().and_then(|n| n.to_str()))
                 else {
@@ -375,12 +386,11 @@ pub async fn refresh(providers: &[Arc<dyn Provider>], cache: &Cache) {
                         ASK_TIMEOUT.as_secs()
                     ))
                 });
-            (provider, listed)
+            (provider, listed, Utc::now())
         });
     let answers = futures_util::future::join_all(asks).await;
     let mut saved = Vec::new();
-    let now = Utc::now();
-    for (provider, listed) in answers {
+    for (provider, listed, now) in answers {
         let Some(models) = provider.models() else {
             continue;
         };

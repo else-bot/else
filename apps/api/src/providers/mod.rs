@@ -77,6 +77,11 @@ pub async fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
     (Registry::new(providers), summarizer)
 }
 
+/// How long a request waits for a provider recheck before answering with
+/// what is known; the check goes on and is published when it ends. Below
+/// the desktop's 15-second request deadline.
+pub const RECHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long an outgoing provider may take to produce a checkpoint.
 pub const CHECKPOINT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Byte cap for a checkpoint's text.

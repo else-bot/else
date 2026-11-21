@@ -377,14 +377,19 @@ fn provider_info(
     }
 }
 
-/// Check one provider's CLI again, list its models if it can run, and
-/// return it as capabilities list it.
+/// Check one provider's CLI again, start listing its models if it can
+/// run, and return it as capabilities list it.
 pub(super) async fn recheck_provider(
     state: &AppState,
     provider: &Arc<dyn crate::app::providers::Provider>,
 ) -> ProviderInfo {
-    if provider.reprobe().await == Availability::Available {
-        crate::providers::models::refresh(std::slice::from_ref(provider), &state.model_cache).await;
+    let recheck = provider.reprobe();
+    let _ = tokio::time::timeout(crate::providers::RECHECK_WAIT, recheck).await;
+    if provider.availability() == Availability::Available {
+        let (provider, cache) = (provider.clone(), state.model_cache.clone());
+        tokio::spawn(async move {
+            crate::providers::models::refresh(std::slice::from_ref(&provider), &cache).await;
+        });
     }
     let configured = configured_profiles(&state.db).await;
     provider_info(provider.as_ref(), configured.as_deref())

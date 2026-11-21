@@ -23,7 +23,6 @@ const FAST: &str = "priority";
 /// back through [`ProfilePicker::rechecked`].
 pub type Recheck = Rc<dyn Fn(String, WeakEntity<ProfilePicker>, &mut Window, &mut App)>;
 
-/// A provider check the owner asked for.
 enum Check {
     Running,
     Failed(String),

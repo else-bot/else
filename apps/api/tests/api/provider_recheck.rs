@@ -99,7 +99,6 @@ async fn a_recheck_shows_a_host_login_without_a_restart() {
     assert_eq!(back["id"], "claude");
     assert_eq!(back["cli_available"], true, "{back}");
     assert_eq!(back["available"], true);
-    assert!(!back["catalog"]["models"].as_array().unwrap().is_empty());
     let caps = fx.app.owner("GET", "/v1/capabilities", None).await;
     assert_eq!(caps.body["providers"][0]["cli_available"], true);
 }
