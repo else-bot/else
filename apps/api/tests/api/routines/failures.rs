@@ -622,6 +622,217 @@ async fn the_next_turn_waits_for_the_failure_notice_of_an_ended_run() {
     );
 }
 
+/// Seed a failed run whose review fails until the `failing_review`
+/// trigger is dropped, since it aborts counting the routine's failure, and
+/// the owner's next message behind it. Returns the next turn.
+async fn unreviewable_run(pool: &sqlx::SqlitePool, bot: Uuid) -> Uuid {
+    unreviewed_run(
+        &mut pool.acquire().await.unwrap(),
+        bot,
+        "Tickets",
+        DUE,
+        Some("policy_violation"),
+    )
+    .await;
+    sqlx::query(
+        "CREATE TRIGGER failing_review BEFORE UPDATE OF failed_runs ON routines
+         BEGIN SELECT RAISE(ABORT, 'the review fails'); END",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    common::seed::turn(bot)
+        .message(ItemKind::User, "Any news on the tickets?")
+        .insert(pool)
+        .await
+}
+
+async fn review(pool: &sqlx::SqlitePool) {
+    else_api::db::routines::review_ended(
+        pool,
+        &else_api::providers::Registry::new(vec![]),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn claim(pool: &sqlx::SqlitePool) -> Option<Uuid> {
+    else_api::db::turns::claim_next(pool, &[], true)
+        .await
+        .unwrap()
+        .map(|claimed| claimed.id)
+}
+
+#[tokio::test]
+async fn a_run_whose_review_keeps_failing_stops_holding_the_owners_next_message() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    let next = unreviewable_run(pool, bot.id).await;
+
+    for _ in 0..4 {
+        review(pool).await;
+    }
+    assert_eq!(claim(pool).await, None, "four failed reviews still hold it");
+    review(pool).await;
+    assert_eq!(claim(pool).await, Some(next), "the fifth releases it");
+    let input = else_api::db::turns::input(pool, next).await.unwrap();
+    assert!(
+        input.history.iter().any(|entry| entry.text
+            == "I couldn't finish checking how the routine **Tickets** went, so I didn't retry \
+                it or count it as a failure. If this keeps happening, ask me to look into it."),
+        "the owner reads why: {:?}",
+        input.history
+    );
+    let failed_runs: i64 =
+        sqlx::query_scalar("SELECT failed_runs FROM routines WHERE name = 'Tickets'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(failed_runs, 0, "the unreviewed failure is not counted");
+}
+
+#[tokio::test]
+async fn a_run_given_up_before_a_restart_is_released_not_reviewed() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    unreviewed_run(
+        &mut pool.acquire().await.unwrap(),
+        bot.id,
+        "Tickets",
+        DUE,
+        Some("policy_violation"),
+    )
+    .await;
+    sqlx::query("UPDATE routine_runs SET review_failures = 5")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    review(pool).await;
+    let (failed_runs, notices): (i64, i64) = sqlx::query_as(
+        "SELECT r.failed_runs, (SELECT count(*) FROM items i JOIN routine_runs rr
+                 ON rr.turn_id = i.turn_id WHERE i.kind = 'assistant'
+                 AND i.text LIKE 'I couldn''t finish checking%')
+         FROM routines r WHERE r.name = 'Tickets'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (failed_runs, notices),
+        (0, 1),
+        "released with its notice, though the review would now succeed"
+    );
+}
+
+#[tokio::test]
+async fn a_run_is_released_even_when_its_notice_cannot_be_written() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    unreviewed_run(
+        &mut pool.acquire().await.unwrap(),
+        bot.id,
+        "Tickets",
+        DUE,
+        Some("policy_violation"),
+    )
+    .await;
+    sqlx::query(
+        "CREATE TRIGGER failing_notice BEFORE INSERT ON items
+         WHEN NEW.kind = 'assistant' AND NEW.turn_id IN (SELECT turn_id FROM routine_runs)
+         BEGIN SELECT RAISE(ABORT, 'the notice fails'); END",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let next = common::seed::turn(bot.id)
+        .message(ItemKind::User, "Any news on the tickets?")
+        .insert(pool)
+        .await;
+
+    for _ in 0..5 {
+        review(pool).await;
+    }
+    assert_eq!(claim(pool).await, Some(next), "the fifth releases it");
+}
+
+#[tokio::test]
+async fn a_released_quiet_run_with_no_news_shows_its_notice() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    let run = unreviewed_run(
+        &mut pool.acquire().await.unwrap(),
+        bot.id,
+        "Tickets",
+        DUE,
+        None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE routines SET quiet = true, failed_runs = 1;
+         UPDATE routine_runs SET report = 'no_news';
+         CREATE TRIGGER failing_review BEFORE UPDATE OF failed_runs ON routines
+         BEGIN SELECT RAISE(ABORT, 'the review fails'); END",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for _ in 0..5 {
+        review(pool).await;
+    }
+    let no_news: Option<bool> = sqlx::query_scalar(
+        "SELECT json_extract(data, '$.turn.routine.no_news') FROM bot_events
+         WHERE kind = 'turn.updated' AND json_extract(data, '$.turn.id') = ?1
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(run.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        no_news,
+        Some(false),
+        "open chats learn the run no longer folds its notice away"
+    );
+}
+
+#[tokio::test]
+async fn a_review_that_succeeds_after_a_failure_reports_the_run() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = common::seed::bot(pool, "Scout").await;
+    let next = unreviewable_run(pool, bot.id).await;
+
+    review(pool).await;
+    assert_eq!(claim(pool).await, None, "a failed review holds it");
+    sqlx::query("DROP TRIGGER failing_review")
+        .execute(pool)
+        .await
+        .unwrap();
+    review(pool).await;
+    assert_eq!(claim(pool).await, Some(next), "the review lets it start");
+    let input = else_api::db::turns::input(pool, next).await.unwrap();
+    assert!(
+        input.history.iter().any(|entry| entry.text.starts_with(
+            "I paused the routine **Tickets** because it tried to use a tool it is not allowed \
+             to use."
+        )),
+        "the next turn reads the usual notice: {:?}",
+        input.history
+    );
+}
+
 #[tokio::test]
 async fn a_routine_retry_takes_the_last_queue_slot_before_a_watcher_wake() {
     // No run slots, so queued turns stay queued and the queue stays full.
