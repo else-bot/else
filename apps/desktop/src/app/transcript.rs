@@ -877,7 +877,7 @@ pub(super) fn build<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::conversation::ConversationView;
+    use crate::app::conversation::row_index;
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
     use else_wire::bots::ReplyPosition;
@@ -1563,12 +1563,9 @@ mod tests {
                 .prompt,
             "Complete original task"
         );
-        let mut view = ConversationView::new(Uuid::from_u128(80));
-        view.conversation = Some(c);
-        view.rows = rows;
-        assert_eq!(view.row_index(item(2)), Some(0));
-        assert_eq!(view.row_index(item(5)), Some(2));
-        assert_eq!(view.row_index(item(6)), Some(3));
+        assert_eq!(row_index(&rows, Some(&c), item(2)), Some(0));
+        assert_eq!(row_index(&rows, Some(&c), item(5)), Some(2));
+        assert_eq!(row_index(&rows, Some(&c), item(6)), Some(3));
     }
 
     #[test]
@@ -1635,11 +1632,8 @@ mod tests {
             [Uuid::from_u128(2), Uuid::from_u128(5)],
             "the file reply and the final answer stay reachable"
         );
-        let mut view = ConversationView::new(Uuid::from_u128(80));
-        view.conversation = Some(c);
-        view.rows = rows;
         assert_eq!(
-            view.row_index(item(5)),
+            row_index(&rows, Some(&c), item(5)),
             Some(0),
             "the answer scrolls to its exchange row"
         );
@@ -1838,9 +1832,8 @@ mod tests {
 
     #[test]
     fn folded_text_remeasures_its_capsule_and_plain_rows_keep_their_own_slot() {
-        let mut view = ConversationView::new(Uuid::from_u128(80));
-        view.conversation = Some(routine_conversation());
-        view.rows = [
+        let c = routine_conversation();
+        let rows: Vec<_> = [
             RowKey::Item(Uuid::from_u128(3)),
             RowKey::Task(Uuid::from_u128(10)),
         ]
@@ -1862,10 +1855,10 @@ mod tests {
             state: None,
         })
         .collect();
-        assert_eq!(view.row_index(item(3)), Some(0));
-        assert_eq!(view.row_index(item(1)), Some(1));
-        assert_eq!(view.row_index(item(2)), Some(1));
-        assert_eq!(view.row_index(item(999)), None);
+        assert_eq!(row_index(&rows, Some(&c), item(3)), Some(0));
+        assert_eq!(row_index(&rows, Some(&c), item(1)), Some(1));
+        assert_eq!(row_index(&rows, Some(&c), item(2)), Some(1));
+        assert_eq!(row_index(&rows, Some(&c), item(999)), None);
     }
 
     #[test]

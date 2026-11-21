@@ -1,4 +1,5 @@
 use super::ElseApp;
+use super::conversation::on_app;
 use super::task_reply::state::format_elapsed;
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
@@ -103,40 +104,42 @@ fn elapsed_since(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String
 
 impl ElseApp {
     pub(super) fn toggle_waiting_tray(&mut self, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
-            view.tray_expanded.toggle();
+        if let Some(view) = &self.view {
+            view.update(cx, |view, _| view.tray_expanded.toggle());
         }
         cx.notify();
     }
 
     fn toggle_wait(&mut self, wait: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut()
-            && !view.expanded_waits.remove(&wait)
-        {
-            view.expanded_waits.insert(wait);
+        if let Some(view) = &self.view {
+            view.update(cx, |view, _| {
+                if !view.expanded_waits.remove(&wait) {
+                    view.expanded_waits.insert(wait);
+                }
+            });
         }
         cx.notify();
     }
 
     /// Stop one wait. The turn update that settles it arrives on the stream.
     fn stop_wait(&mut self, bot: Uuid, wait: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+        let Some(view) = self.view_of(bot, cx).filter(|_| self.shows(bot, cx)) else {
             return;
         };
-        if !view.stopping_waits.insert(wait) {
+        if !view.update(cx, |view, _| view.stopping_waits.insert(wait)) {
             return;
         }
         cx.notify();
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.cancel_wait(bot, wait).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if let Some(view) = app.view_of(bot) {
-                    view.stopping_waits.remove(&wait);
+            let _ = this.update(cx, |app, cx| {
+                if let Some(view) = app.view_of(bot, cx) {
+                    view.update(cx, |view, _| view.stopping_waits.remove(&wait));
                 }
                 match result {
                     Ok(()) => {}
-                    Err(err) if app.unauthorized(&err, window, cx) => {}
+                    Err(err) if app.unauthorized(&err, cx) => {}
                     // It ended first; the stream shows how.
                     Err(err) if err.code() == Some("wait_ended") => {}
                     Err(err) => app.notice = Some(err.to_string()),
@@ -150,7 +153,11 @@ impl ElseApp {
     /// What this bot waits on, docked above the composer: one row per job
     /// or task, each stoppable on its own.
     pub(super) fn render_waiting_tray(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
+        // The rows borrow the shown conversation, so their handlers reach
+        // this window through a handle instead of `cx.listener`.
+        let this = cx.entity().downgrade();
+        let cx: &App = cx;
+        let view = self.shown(cx)?;
         let waits = view.conversation.as_ref()?.waiting_on();
         if waits.is_empty() {
             return None;
@@ -177,7 +184,12 @@ impl ElseApp {
             .when(!collapsed, |row| {
                 row.border_b_1().border_color(theme.border.opacity(0.6))
             })
-            .children(self.face_stack("tray-stack", tasks, px(16.)))
+            .children(super::view::face_stack(
+                &self.bots,
+                "tray-stack",
+                tasks,
+                px(16.),
+            ))
             .child(
                 div()
                     .min_w_0()
@@ -199,7 +211,7 @@ impl ElseApp {
                     } else {
                         "Hide what this bot is waiting on"
                     })
-                    .on_click(cx.listener(|app, _, _, cx| app.toggle_waiting_tray(cx))),
+                    .on_click(on_app(&this, |app, _, _, cx| app.toggle_waiting_tray(cx))),
             );
 
         let rows = (!collapsed).then(|| {
@@ -208,8 +220,8 @@ impl ElseApp {
                 .enumerate()
                 .map(|(ix, wait)| {
                     let row = match wait {
-                        Wait::Task(task) => self.render_task_row(task, &sender_name, cx),
-                        _ => self.render_job_row(wait, cx),
+                        Wait::Task(task) => self.render_task_row(task, &sender_name, &this, cx),
+                        _ => self.render_job_row(wait, &this, cx),
                     };
                     div()
                         .w_full()
@@ -247,8 +259,14 @@ impl ElseApp {
         )
     }
 
-    fn stop_button(&self, wait: &Wait<'_>, label: &str, cx: &mut Context<Self>) -> Option<Button> {
-        let view = self.view.as_ref()?;
+    fn stop_button(
+        &self,
+        wait: &Wait<'_>,
+        label: &str,
+        this: &WeakEntity<Self>,
+        cx: &App,
+    ) -> Option<Button> {
+        let view = self.shown(cx)?;
         if !wait.stoppable() {
             return None;
         }
@@ -259,19 +277,18 @@ impl ElseApp {
                 .control(Tier::Ghost, Scale::Compact, stopping, cx)
                 .label(if stopping { "Stopping…" } else { "Stop" })
                 .accessibility_label(format!("Stop {label}"))
-                .on_click(cx.listener(move |app, _, window, cx| {
+                .on_click(on_app(this, move |app, _, window, cx| {
                     cx.stop_propagation();
                     app.stop_wait(bot, id, window, cx);
                 })),
         )
     }
 
-    fn render_job_row(&self, wait: &Wait<'_>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_job_row(&self, wait: &Wait<'_>, this: &WeakEntity<Self>, cx: &App) -> AnyElement {
         let theme = cx.theme().clone();
         let id = wait.id();
         let expanded = self
-            .view
-            .as_ref()
+            .shown(cx)
             .is_some_and(|view| view.expanded_waits.contains(&id));
         let title = wait_title(wait);
         let source = match wait {
@@ -309,7 +326,7 @@ impl ElseApp {
             .rounded(theme.radius)
             .cursor_pointer()
             .hover(|row| row.bg(theme.foreground.opacity(0.03)))
-            .on_click(cx.listener(move |app, _, _, cx| app.toggle_wait(id, cx)))
+            .on_click(on_app(this, move |app, _, _, cx| app.toggle_wait(id, cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -394,7 +411,7 @@ impl ElseApp {
                                         .xsmall(),
                                     ),
                             )
-                            .children(self.stop_button(wait, &title, cx)),
+                            .children(self.stop_button(wait, &title, this, cx)),
                     ),
             )
             .when_some(details, |row, details| {
@@ -446,7 +463,8 @@ impl ElseApp {
         &self,
         d: &Delegation,
         sender_name: &str,
-        cx: &mut Context<Self>,
+        this: &WeakEntity<Self>,
+        cx: &App,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let bot = |id| self.bots.iter().find(|bot| bot.id == id);
@@ -496,7 +514,7 @@ impl ElseApp {
         } else {
             dot.bg(color)
         };
-        let stop = self.stop_button(&Wait::Task(d), &format!("the task for {name}"), cx);
+        let stop = self.stop_button(&Wait::Task(d), &format!("the task for {name}"), this, cx);
         h_flex()
             .id(SharedString::from(format!("tray-row-{}", d.id)))
             .w_full()
@@ -576,7 +594,7 @@ impl ElseApp {
                                     .control(Tier::Ghost, Scale::Compact, false, cx)
                                     .label("Open chat")
                                     .accessibility_label(format!("Open chat with {}", b.name))
-                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                    .on_click(on_app(this, move |app, _, window, cx| {
                                         app.open_bot(target, window, cx)
                                     }))
                             }))

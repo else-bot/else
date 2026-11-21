@@ -1,4 +1,5 @@
 use crate::app::clip;
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use else_wire::questions::QuestionStatus;
@@ -18,7 +19,7 @@ use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
 use super::super::message_row::CardPlacement;
-use super::{Connection, ElseApp, Extent, QuestionForm, Request, RowKey, callout, letter, receipt};
+use super::{Extent, QuestionForm, Request, RowKey, callout, letter, receipt};
 use else_wire::questions::{Question, QuestionAnswer};
 
 /// The field on a pending single-choice card for an answer its options don't
@@ -34,25 +35,22 @@ fn takes_write_in(question: &Question) -> bool {
     question.is_pending() && !question.is_approval() && !question.multiple
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(in crate::app) fn sync_write_ins(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let open: HashMap<Uuid, bool> = view
+        let open: HashMap<Uuid, bool> = self
             .conversation
             .iter()
             .flat_map(|c| c.questions())
             .filter(|q| takes_write_in(q))
             .map(|q| (q.id, q.choices.is_empty()))
             .collect();
-        for (id, card) in &mut view.cards.questions {
+        for (id, card) in &mut self.cards.questions {
             if !open.contains_key(id) {
                 card.write_in = None;
             }
         }
         for (id, reply) in open {
-            view.cards.question_mut(id).write_in.get_or_insert_with(|| {
+            self.cards.question_mut(id).write_in.get_or_insert_with(|| {
                 let input = cx.new(|cx| {
                     InputState::new(window, cx).placeholder(if reply {
                         "Write your answer"
@@ -77,16 +75,13 @@ impl ElseApp {
     }
 
     fn send_write_in(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_ref() else {
-            return;
-        };
-        let open = view
+        let open = self
             .conversation
             .as_ref()
             .and_then(|c| c.question(id))
             .is_some_and(takes_write_in)
-            && !view.cards.submit(id).is_some_and(QuestionForm::locks);
-        let Some(input) = view
+            && !self.cards.submit(id).is_some_and(QuestionForm::locks);
+        let Some(input) = self
             .cards
             .questions
             .get(&id)
@@ -99,34 +94,32 @@ impl ElseApp {
         if !open || text.is_empty() {
             return;
         }
-        if self.enqueue(
-            view.bot_id,
-            text,
-            Vec::new(),
-            super::super::SendKind::Message { quoted: None },
-            window,
-            cx,
-        ) {
-            input.update(cx, |state, cx| state.set_value("", window, cx));
-        }
+        let (app, bot) = (self.app.clone(), self.bot_id);
+        // The app redraws this view when it sends, so it sends after this update.
+        window.defer(cx, move |window, cx| {
+            let sent = app.update(cx, |app, cx| {
+                let kind = super::super::SendKind::Message { quoted: None };
+                app.enqueue(bot, text, Vec::new(), kind, window, cx)
+            });
+            if sent.unwrap_or(false) {
+                input.update(cx, |state, cx| state.set_value("", window, cx));
+            }
+        });
     }
 
     fn toggle_question_choice(&mut self, id: Uuid, choice: &str, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let Some(question) = view.conversation.as_ref().and_then(|c| c.question(id)) else {
+        let Some(question) = self.conversation.as_ref().and_then(|c| c.question(id)) else {
             return;
         };
         if !question.is_pending()
             || !question.multiple
-            || self.connection != Connection::Connected
+            || !self.inputs.connected
             || !question.choices.iter().any(|c| c.id == choice)
-            || view.cards.submit(id).is_some_and(QuestionForm::locks)
+            || self.cards.submit(id).is_some_and(QuestionForm::locks)
         {
             return;
         }
-        let form = view
+        let form = self
             .cards
             .question_mut(id)
             .submit
@@ -155,18 +148,15 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
         let theme = cx.theme().clone();
         let id = question.id;
         if !question.is_pending() || form.is_some_and(QuestionForm::locks) {
-            let reply = view
+            let reply = self
                 .conversation
                 .as_ref()
                 .and_then(|c| c.skipping_reply(question))
                 .map(|item| item.text.as_str());
-            let expanded = view
+            let expanded = self
                 .cards
                 .questions
                 .get(&id)
@@ -238,7 +228,7 @@ impl ElseApp {
                 .child(card)
                 .into_any_element();
         }
-        let locked = self.connection != Connection::Connected;
+        let locked = !self.inputs.connected;
         let answer = form.map(|f| &f.answer);
         let selected: Vec<_> = question
             .choices
@@ -360,7 +350,7 @@ impl ElseApp {
                 ));
             }
         }
-        if let Some(write_in) = view
+        if let Some(write_in) = self
             .cards
             .questions
             .get(&id)

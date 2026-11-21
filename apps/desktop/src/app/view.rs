@@ -1,3 +1,4 @@
+use super::conversation::ConversationView;
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
 use super::{
@@ -346,45 +347,14 @@ impl ElseApp {
             .child(self.sidebar_handle(SidebarEdge::Left, cx))
     }
 
-    /// Up to three overlapping faces of the bots in `ids`, each once.
-    pub(super) fn face_stack(
-        &self,
-        key: &str,
-        ids: impl IntoIterator<Item = Uuid>,
-        size: Pixels,
-    ) -> Option<Div> {
-        let mut shown: Vec<&Bot> = Vec::new();
-        for id in ids {
-            if shown.len() < 3
-                && !shown.iter().any(|bot| bot.id == id)
-                && let Some(bot) = self.bots.iter().find(|bot| bot.id == id)
-            {
-                shown.push(bot);
-            }
-        }
-        (!shown.is_empty()).then(|| {
-            h_flex()
-                .flex_none()
-                .children(shown.into_iter().enumerate().map(|(ix, bot)| {
-                    div().when(ix > 0, |face| face.ml(px(-5.))).child(
-                        bot_avatar(
-                            SharedString::from(format!("{key}-{}", bot.id)),
-                            bot.avatar,
-                            size,
-                        )
-                        .still(),
-                    )
-                }))
-        })
-    }
-
     /// The faces of the bots `bot` waits on, before its status text.
     fn waiting_faces(&self, key: &str, bot: &Bot) -> Option<Div> {
         if bot.waiting().is_some() {
             return None;
         }
         let waiting = bot.activity.as_ref()?.waiting_on.as_ref()?;
-        self.face_stack(
+        face_stack(
+            &self.bots,
             &format!("{key}-{}", bot.id),
             waiting.bots.iter().map(|b| b.id),
             px(14.),
@@ -627,13 +597,22 @@ impl ElseApp {
 
     fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let app = cx.entity().downgrade();
         let unshown_status = self
-            .view
-            .as_ref()
+            .shown(cx)
             .and_then(|view| view.conversation.as_ref())
-            .and_then(|conversation| conversation.latest_unshown_turn())
             .filter(|_| bot.waiting().is_none())
-            .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
+            .and_then(|conversation| {
+                super::message_row::turn_status(
+                    conversation.latest_unshown_turn()?,
+                    bot.id,
+                    &self.bots,
+                    conversation.routines(),
+                    self.connection == Connection::Connected,
+                    &app,
+                    cx,
+                )
+            });
         let mut actions = h_flex().flex_none().gap_1().items_center().child(
             Button::new("find-in-conversation")
                 .focus_ring(false)
@@ -712,9 +691,13 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
-        let transcript: AnyElement = match view {
-            Some(view) if view.conversation.is_some() || !view.rows.is_empty() => {
+        let entity = self
+            .view
+            .clone()
+            .filter(|view| view.read(cx).bot_id == bot.id);
+        let view = entity.as_ref().map(|view| view.read(cx));
+        let transcript: AnyElement = match (&entity, view) {
+            (Some(entity), Some(view)) if view.conversation.is_some() || !view.rows.is_empty() => {
                 if view.rows.is_empty() {
                     v_flex()
                         .flex_1()
@@ -742,74 +725,30 @@ impl ElseApp {
                         .conversation
                         .as_ref()
                         .is_some_and(|c| c.older_before_seq.is_some());
+                    let loading = view.older.is_some();
                     let mut column = v_flex().flex_1().min_w_0().min_h_0();
                     if older {
-                        let loading = view.older.is_some();
-                        column =
-                            column.child(
-                                h_flex().justify_center().py_1().child(
-                                    Button::new("load-older")
-                                        .control(Tier::Ghost, Scale::Compact, loading, cx)
-                                        .label(if loading {
-                                            "Loading…"
-                                        } else {
-                                            "Load older messages"
-                                        })
-                                        .on_click(cx.listener(|app, _, window, cx| {
-                                            app.load_older(window, cx)
-                                        })),
-                                ),
-                            );
+                        column = column.child(
+                            h_flex().justify_center().py_1().child(
+                                Button::new("load-older")
+                                    .control(Tier::Ghost, Scale::Compact, loading, cx)
+                                    .label(if loading {
+                                        "Loading…"
+                                    } else {
+                                        "Load older messages"
+                                    })
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.update_view(cx, |view, cx| view.load_older(window, cx));
+                                    })),
+                            ),
+                        );
                     }
                     let mut transcript = div().relative().flex_1().min_w_0().min_h_0().child(
-                        list(
-                            view.list.clone(),
-                            cx.processor(|app, ix, window, cx| {
-                                let row = h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .justify_center()
-                                    .child(app.render_row(ix, window, cx));
-                                app.center_row(ix, row, cx).into_any_element()
-                            }),
-                        )
-                        .size_full()
-                        .py(TRANSCRIPT_FADE),
+                        entity
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
                     );
-                    // Rows dissolve under the header and above the composer only
-                    // where rows have actually scrolled past that edge; a resting
-                    // transcript shows every row at full strength. The band next to
-                    // each edge is opaque and taller than a line, so a sliced
-                    // line never shows as half-legible text. Plain divs take no
-                    // pointer input.
-                    // The list draws rows into its top padding but clips them at
-                    // its bottom padding, so the bottom fade starts its opaque
-                    // band at that clip line.
-                    let page = theme.background;
-                    let fade = |angle: f32, inset: Pixels| {
-                        let height = inset + TRANSCRIPT_EDGE;
-                        let opaque = f32::from(inset + TRANSCRIPT_EDGE_OPAQUE) / f32::from(height);
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .h(height)
-                            .bg(linear_gradient(
-                                angle,
-                                linear_color_stop(page, opaque),
-                                linear_color_stop(page.opacity(0.), 1.),
-                            ))
-                    };
-                    let past_top = view.list.scroll_px_offset_for_scrollbar().y < px(0.);
-                    let past_bottom = view.list.is_scrolled_to_end() == Some(false);
-                    transcript = transcript
-                        .when(past_top, |transcript| {
-                            transcript.child(fade(180., px(0.)).top_0())
-                        })
-                        .when(past_bottom, |transcript| {
-                            transcript.child(fade(0., TRANSCRIPT_FADE).bottom_0())
-                        });
-                    if self.unseen_below() {
+                    if self.unseen_below(cx) {
                         transcript = transcript.child(
                             h_flex()
                                 .absolute()
@@ -843,6 +782,7 @@ impl ElseApp {
                 .child("Loading conversation…")
                 .into_any_element(),
         };
+        let view = self.shown(cx).filter(|view| view.bot_id == bot.id);
         let mut notices = v_flex().gap_1();
         if view
             .and_then(|v| v.conversation.as_ref())
@@ -891,9 +831,7 @@ impl ElseApp {
                         matches!(file.state, super::attachments::UploadState::Ready { .. })
                     })
             });
-        let activity = self
-            .view
-            .as_ref()
+        let activity = view
             .and_then(|v| v.conversation.as_ref())
             .and_then(|c| c.activity.clone())
             .or(bot.activity.clone());
@@ -905,7 +843,7 @@ impl ElseApp {
             || activity
                 .as_ref()
                 .and_then(|a| a.active_turn_id)
-                .and_then(|id| self.view.as_ref()?.conversation.as_ref()?.turn(id))
+                .and_then(|id| view?.conversation.as_ref()?.turn(id))
                 .is_some_and(|turn| turn.status == TurnStatus::Waiting);
         let turn = composer_turn(phase, self.stopping.contains(&bot.id), parked);
         let actions = composer_actions(turn, can_send);
@@ -1088,6 +1026,39 @@ impl ElseApp {
     }
 }
 
+/// Up to three overlapping faces of the bots in `ids`, each once, or
+/// `None` when none of them is in `bots`.
+pub(super) fn face_stack(
+    bots: &[Bot],
+    key: &str,
+    ids: impl IntoIterator<Item = Uuid>,
+    size: Pixels,
+) -> Option<Div> {
+    let mut shown: Vec<&Bot> = Vec::new();
+    for id in ids {
+        if shown.len() < 3
+            && !shown.iter().any(|bot| bot.id == id)
+            && let Some(bot) = bots.iter().find(|bot| bot.id == id)
+        {
+            shown.push(bot);
+        }
+    }
+    (!shown.is_empty()).then(|| {
+        h_flex()
+            .flex_none()
+            .children(shown.into_iter().enumerate().map(|(ix, bot)| {
+                div().when(ix > 0, |face| face.ml(px(-5.))).child(
+                    bot_avatar(
+                        SharedString::from(format!("{key}-{}", bot.id)),
+                        bot.avatar,
+                        size,
+                    )
+                    .still(),
+                )
+            }))
+    })
+}
+
 /// Three dots that ripple left to right in place of a spinner icon.
 pub(super) fn working_dots(id: Uuid, color: Hsla) -> impl IntoElement {
     looping(move |moving| {
@@ -1174,6 +1145,77 @@ pub(super) fn reading_column() -> Div {
         .max_w(READING_WIDTH)
         .mx_auto()
         .px_5()
+}
+
+impl Render for ConversationView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(debug_assertions)]
+        count_transcript_render();
+        self.sightings.clear();
+        let page = cx.theme().background;
+        // Rows dissolve under the header and above the composer only where
+        // rows have actually scrolled past that edge; a resting transcript
+        // shows every row at full strength. The band next to each edge is
+        // opaque and taller than a line, so a sliced line never shows as
+        // half-legible text. Plain divs take no pointer input.
+        // The list draws rows into its top padding but clips them at its
+        // bottom padding, so the bottom fade starts its opaque band at that
+        // clip line.
+        let fade = |angle: f32, inset: Pixels| {
+            let height = inset + TRANSCRIPT_EDGE;
+            let opaque = f32::from(inset + TRANSCRIPT_EDGE_OPAQUE) / f32::from(height);
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(height)
+                .bg(linear_gradient(
+                    angle,
+                    linear_color_stop(page, opaque),
+                    linear_color_stop(page.opacity(0.), 1.),
+                ))
+        };
+        let past_top = self.list.scroll_px_offset_for_scrollbar().y < px(0.);
+        let past_bottom = self.list.is_scrolled_to_end() == Some(false);
+        div()
+            .relative()
+            .size_full()
+            .child(
+                list(
+                    self.list.clone(),
+                    cx.processor(|view, ix, window, cx| {
+                        let row = h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .justify_center()
+                            .child(view.render_row(ix, window, cx));
+                        view.center_row(ix, row, cx).into_any_element()
+                    }),
+                )
+                .size_full()
+                .py(TRANSCRIPT_FADE),
+            )
+            .when(past_top, |transcript| {
+                transcript.child(fade(180., px(0.)).top_0())
+            })
+            .when(past_bottom, |transcript| {
+                transcript.child(fade(0., TRANSCRIPT_FADE).bottom_0())
+            })
+    }
+}
+
+/// Counts transcript draws in a debug build and, with `ELSE_COUNT_RENDERS`
+/// set, logs each one, to check what redraws the transcript.
+#[cfg(debug_assertions)]
+fn count_transcript_render() {
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RENDERS: AtomicUsize = AtomicUsize::new(0);
+    static LOG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ELSE_COUNT_RENDERS").is_some());
+    let count = RENDERS.fetch_add(1, Ordering::Relaxed) + 1;
+    if *LOG {
+        eprintln!("transcript render {count}");
+    }
 }
 
 impl Render for ElseApp {

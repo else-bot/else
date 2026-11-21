@@ -1,6 +1,6 @@
-use super::ElseApp;
 use super::task_reply::state::format_elapsed;
 use super::transcript::RowKey;
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use chrono::Utc;
@@ -35,20 +35,20 @@ impl Phase {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn render_handoff(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
         self.handoff_row(id, cx)
             .unwrap_or_else(|| div().into_any_element())
     }
 
     fn handoff_row(&self, id: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
-        let (_, group) = view.conversation.as_ref()?.handoff(id)?;
+        let (_, group) = self.conversation.as_ref()?.handoff(id)?;
         let theme = cx.theme();
         let phase = Phase::of(&group);
-        let expanded = view.expanded_councils.contains(&id);
+        let expanded = self.expanded_councils.contains(&id);
         let name = |d: &Delegation| {
-            self.bots
+            self.inputs
+                .bots
                 .iter()
                 .find(|b| b.id == d.target_bot_id)
                 .map_or(d.target_name.clone(), |b| b.name.clone())
@@ -125,10 +125,8 @@ impl ElseApp {
                         )),
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(view) = app.view.as_mut()
-                        && !view.expanded_councils.remove(&id)
-                    {
-                        view.expanded_councils.insert(id);
+                    if !app.expanded_councils.remove(&id) {
+                        app.expanded_councils.insert(id);
                     }
                     app.remeasure_row(RowKey::Card(CardKey::Handoff(id)), cx);
                 }));
@@ -167,7 +165,7 @@ impl ElseApp {
                                     .control(
                                         Tier::Ghost,
                                         Scale::Compact,
-                                        !self.bots.iter().any(|bot| bot.id == target),
+                                        !self.inputs.bots.iter().any(|bot| bot.id == target),
                                         cx,
                                     )
                                     .label("Open chat")
@@ -175,7 +173,7 @@ impl ElseApp {
                                         "Open chat with {}",
                                         name(delegation)
                                     ))
-                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                    .on_click(self.on_app(move |app, _, window, cx| {
                                         app.open_bot(target, window, cx)
                                     })),
                                 ),

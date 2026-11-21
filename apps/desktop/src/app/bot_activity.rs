@@ -4,10 +4,11 @@
 //! machine-written, waits behind its own "Show task". A block that needs
 //! nothing from the owner sits on one line until opened.
 
+use super::RowKey;
 use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
-use super::conversation::{ReplyLayout, Reveal, Spot};
+use super::conversation::{Reveal, Spot};
 use super::transcript::TranscriptRow;
-use super::{ElseApp, RowKey};
+use crate::app::conversation::ConversationView;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::Conversation;
 use else_wire::items::BotCreated;
@@ -502,9 +503,9 @@ impl ActivityStatus {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     fn exchange_blocks<'a>(&'a self, activity: &BotActivity) -> Vec<Block<'a>> {
-        let Some(c) = self.view.as_ref().and_then(|v| v.conversation.as_ref()) else {
+        let Some(c) = self.conversation.as_ref() else {
             return Vec::new();
         };
         activity
@@ -515,11 +516,7 @@ impl ElseApp {
     }
 
     fn exchange_open(&self, block: &Block) -> bool {
-        match self
-            .view
-            .as_ref()
-            .and_then(|view| view.exchange_folds.get(&block.item.id))
-        {
+        match self.exchange_folds.get(&block.item.id) {
             Some(fold) => *fold == Fold::Open,
             None => block.fold() == Fold::Open,
         }
@@ -539,25 +536,22 @@ impl ElseApp {
     /// the row starts above the viewport and the exchange is its first:
     /// then its header, off screen or partly so, comes to the top.
     fn refold_exchange(&mut self, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_ref()
-            && let Some(ix) = view.row_index(RowKey::Item(item))
-            && !view.list.is_following_tail()
-            && view.list.logical_scroll_top().item_ix == ix
-            && view.rows[ix]
+        if let Some(ix) = self.row_index(RowKey::Item(item))
+            && !self.list.is_following_tail()
+            && self.list.logical_scroll_top().item_ix == ix
+            && self.rows[ix]
                 .activity
                 .as_ref()
                 .is_some_and(|activity| activity.items.first() == Some(&item))
         {
-            view.list.scroll_to(ListOffset {
+            self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
         }
         self.sync_rows(window, cx);
-        if let Some(view) = self.view.as_ref()
-            && let Some(ix) = view.row_index(RowKey::Item(item))
-        {
-            view.list.remeasure_items(ix..(ix + 2).min(view.rows.len()));
+        if let Some(ix) = self.row_index(RowKey::Item(item)) {
+            self.list.remeasure_items(ix..(ix + 2).min(self.rows.len()));
         }
         cx.notify();
     }
@@ -570,23 +564,17 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        view.exchange_folds.insert(item, Fold::Open);
-        view.expanded_events.insert(item);
+        self.exchange_folds.insert(item, Fold::Open);
+        self.expanded_events.insert(item);
         self.refold_exchange(item, window, cx);
-        let Some(view) = self.view.as_ref() else {
+        let Some(ix) = self.row_index(RowKey::Item(item)) else {
             return;
         };
-        let Some(ix) = view.row_index(RowKey::Item(item)) else {
-            return;
-        };
-        view.list.scroll_to(ListOffset {
+        self.list.scroll_to(ListOffset {
             item_ix: ix,
             offset_in_item: px(0.),
         });
-        let row = view.rows[ix].key;
+        let row = self.rows[ix].key;
         self.start_reveal(Reveal::new(row, Spot::Row), cx);
     }
 
@@ -600,10 +588,7 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let Some((default, replies)) = view.conversation.as_ref().and_then(|c| {
+        let Some((default, replies)) = self.conversation.as_ref().and_then(|c| {
             let block = Block::of(c.item(item)?, c)?;
             let replies: Vec<Uuid> = block.replies.iter().map(|reply| reply.id).collect();
             Some((block.fold(), replies))
@@ -613,21 +598,21 @@ impl ElseApp {
         match fold {
             Fold::Open => {
                 // Opened by hand, it stays open once its ask settles.
-                view.exchange_folds.insert(item, Fold::Open);
-                view.full_replies.extend(replies);
-                view.landing = Some(item);
+                self.exchange_folds.insert(item, Fold::Open);
+                self.full_replies.extend(replies);
+                self.landing = Some(item);
             }
             Fold::Folded => {
                 if default == Fold::Open {
-                    view.exchange_folds.insert(item, Fold::Folded);
+                    self.exchange_folds.insert(item, Fold::Folded);
                 } else {
-                    view.exchange_folds.remove(&item);
+                    self.exchange_folds.remove(&item);
                 }
                 for reply in &replies {
-                    view.full_replies.remove(reply);
+                    self.full_replies.remove(reply);
                 }
-                view.expanded_events.remove(&item);
-                view.landing.take_if(|id| *id == item);
+                self.expanded_events.remove(&item);
+                self.landing.take_if(|id| *id == item);
             }
         }
         self.refold_exchange(item, window, cx);
@@ -637,10 +622,9 @@ impl ElseApp {
     /// laying out: Markdown parses in the background, and only the full
     /// height says whether the exchange fits on screen.
     fn landing_ready(&self, activity: &BotActivity, cx: &App) -> Option<Uuid> {
-        let view = self.view.as_ref()?;
-        let id = view.landing.filter(|id| activity.items.contains(id))?;
+        let id = self.landing.filter(|id| activity.items.contains(id))?;
         let laid_out = activity.answers.iter().chain([&id]).all(|reply| {
-            view.texts
+            self.texts
                 .get(&RowKey::Item(*reply))
                 .is_none_or(|text| text.laid_out(cx))
         });
@@ -650,14 +634,11 @@ impl ElseApp {
     /// Ends the landing of `item`. When its exchange did not fit, the
     /// list scrolls to it: `offset` into row `ix`, as far as it scrolls.
     fn landed(&mut self, item: Uuid, ix: usize, offset: Option<Pixels>, window: &mut Window) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        if view.landing.take_if(|id| *id == item).is_none() {
+        if self.landing.take_if(|id| *id == item).is_none() {
             return;
         }
         if let Some(offset) = offset {
-            view.list.scroll_to(ListOffset {
+            self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: offset,
             });
@@ -672,13 +653,13 @@ impl ElseApp {
     ) -> Option<AnyElement> {
         let activity = row.activity.as_ref()?;
         let landing = self.landing_ready(activity, cx);
-        let view = self.view.as_ref()?;
-        let conversation = view.conversation.as_ref()?;
+        let conversation = self.conversation.as_ref()?;
         let me = self
+            .inputs
             .bots
             .iter()
-            .find(|bot| bot.id == view.bot_id)
-            .map_or((view.bot_id, "This bot"), |bot| (bot.id, bot.name.as_str()));
+            .find(|bot| bot.id == self.bot_id)
+            .map_or((self.bot_id, "This bot"), |bot| (bot.id, bot.name.as_str()));
         let blocks = self.exchange_blocks(activity);
         if blocks.is_empty() {
             return None;
@@ -704,7 +685,7 @@ impl ElseApp {
             });
         }
         if let Some(item) = landing
-            && let Some(ix) = view.row_index(RowKey::Item(item))
+            && let Some(ix) = self.row_index(RowKey::Item(item))
         {
             column = land(column, item, ix, landed, cx.entity().downgrade());
         }
@@ -712,19 +693,11 @@ impl ElseApp {
             .latest_reply()
             .filter(|reply| activity.answers.contains(&reply.id))
         {
-            let owner = cx.entity().downgrade();
-            let bot = view.bot_id;
             let position = else_wire::bots::ReplyPosition {
                 item_seq: latest.seq,
                 text_bytes: latest.text.len() as i64,
             };
-            column = column.on_prepaint(move |bounds, window, cx| {
-                window.defer(cx, move |window, cx| {
-                    let _ = owner.update(cx, |app, cx| {
-                        app.reply_laid_out(bot, ReplyLayout { position, bounds }, window, cx)
-                    });
-                });
-            });
+            column = self.report_reply_layout(column, position);
         }
         Some(column.into_any_element())
     }
@@ -802,12 +775,9 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
         let id = block.item.id;
         let ((speaker, speaker_name), verb) = Self::exchange_voice(block, me);
-        let task_open = view.expanded_events.contains(&id);
+        let task_open = self.expanded_events.contains(&id);
         let default = block.fold();
         let header = super::action_card::event_row(&theme)
             .child(self.event_faces(&format!("exchange-{id}"), [speaker]))
@@ -850,13 +820,10 @@ impl ElseApp {
                     ))
                     .label(if task_open { "Hide task" } else { "Show task" })
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        let Some(view) = app.view.as_mut() else {
-                            return;
-                        };
-                        if !view.expanded_events.remove(&id) {
-                            view.expanded_events.insert(id);
+                        if !app.expanded_events.remove(&id) {
+                            app.expanded_events.insert(id);
                             // What the owner opened stays open once its ask settles.
-                            view.exchange_folds.insert(id, Fold::Open);
+                            app.exchange_folds.insert(id, Fold::Open);
                         }
                         app.refold_exchange(id, window, cx);
                     })),
@@ -920,7 +887,7 @@ impl ElseApp {
         let mut reply = v_flex().w_full().min_w_0().gap_2();
         let mut shown = false;
         for item in &block.replies {
-            if let Some(text) = view.texts.get(&RowKey::Item(item.id)) {
+            if let Some(text) = self.texts.get(&RowKey::Item(item.id)) {
                 shown |= !item.text.trim().is_empty() || !item.parts.is_empty();
                 reply = reply.child(div().w_full().min_w_0().child(text.render(cx)));
             }
@@ -955,7 +922,7 @@ impl ElseApp {
             .replies
             .iter()
             .any(|reply| excerpt(&reply.text).is_some());
-        let full = reply_ids.iter().all(|id| view.full_replies.contains(id));
+        let full = reply_ids.iter().all(|id| self.full_replies.contains(id));
         let by_hand = default == Fold::Folded;
         if cut || by_hand {
             let less = by_hand || full;
@@ -976,16 +943,13 @@ impl ElseApp {
                             app.fold_exchange(id, Fold::Folded, window, cx);
                             return;
                         }
-                        let Some(view) = app.view.as_mut() else {
-                            return;
-                        };
                         if less {
                             for reply in &reply_ids {
-                                view.full_replies.remove(reply);
+                                app.full_replies.remove(reply);
                             }
                         } else {
-                            view.exchange_folds.insert(id, Fold::Open);
-                            view.full_replies.extend(reply_ids.iter().copied());
+                            app.exchange_folds.insert(id, Fold::Open);
+                            app.full_replies.extend(reply_ids.iter().copied());
                         }
                         app.refold_exchange(id, window, cx);
                     })),
@@ -1018,7 +982,7 @@ fn land(
     item: Uuid,
     ix: usize,
     exchange: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    app: WeakEntity<ElseApp>,
+    view: WeakEntity<ConversationView>,
 ) -> Div {
     column.on_prepaint(move |column, window, cx| {
         let Some(exchange) = exchange.get() else {
@@ -1029,12 +993,12 @@ fn land(
             && exchange.bottom() <= viewport.bottom() - super::view::TRANSCRIPT_FADE;
         let offset = (!fits).then(|| exchange.top() - column.top());
         window.defer(cx, move |window, cx| {
-            let _ = app.update(cx, |app, _| app.landed(item, ix, offset, window));
+            let _ = view.update(cx, |view, _| view.landed(item, ix, offset, window));
         });
     })
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn render_bot_created(
         &self,
         item: Uuid,
@@ -1043,15 +1007,12 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let bot = |id: Uuid| self.bots.iter().find(|bot| bot.id == id);
+        let bot = |id: Uuid| self.inputs.bots.iter().find(|bot| bot.id == id);
         let creator = bot(created.creator_bot_id);
         let child = bot(created.bot_id);
         let creator_name = creator.map_or(created.creator_name.clone(), |b| b.name.clone());
         let name = child.map_or(created.name.clone(), |b| b.name.clone());
-        let expanded = self
-            .view
-            .as_ref()
-            .is_some_and(|view| view.expanded_events.contains(&item));
+        let expanded = self.expanded_events.contains(&item);
         let details = super::action_card::event_action(
             SharedString::from(format!("created-details-{item}")),
             "Details",
@@ -1060,10 +1021,8 @@ impl ElseApp {
         )
         .accessibility_label("Show created bot details")
         .on_click(cx.listener(move |app, _, _, cx| {
-            if let Some(view) = app.view.as_mut()
-                && !view.expanded_events.remove(&item)
-            {
-                view.expanded_events.insert(item);
+            if !app.expanded_events.remove(&item) {
+                app.expanded_events.insert(item);
             }
             app.remeasure_row(RowKey::Item(item), cx);
         }));
@@ -1076,7 +1035,7 @@ impl ElseApp {
                 cx,
             )
             .accessibility_label(format!("Open chat with {name}"))
-            .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
+            .on_click(self.on_app(move |app, _, window, cx| app.open_bot(id, window, cx)))
         });
         let row = super::action_card::event_row(&theme)
             .child(self.event_faces(&format!("created-{item}"), child.map(|bot| bot.id)))

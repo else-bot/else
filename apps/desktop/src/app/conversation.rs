@@ -1,18 +1,21 @@
 use super::ElseApp;
-use super::reply::Author;
-use super::row_text::RowText;
+use super::bot_mention::MentionRegistry;
+use super::pending_send::PendingSend;
+use super::reply::{Author, Quote};
+use super::row_text::{RowHost, RowText};
 use super::task_reply::state::ReplyState;
 use super::transcript::{self, Folds, RowKey, Transcript, TranscriptRow, group_open};
-use crate::api::{ClientError, LiveCommand, StreamMessage};
+use crate::api::{Client, ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation};
 use chrono::Local;
-use else_wire::bots::Phase;
 use else_wire::bots::ReplyPosition;
+use else_wire::bots::{Bot, Phase};
 use else_wire::conversation::Snapshot;
 use else_wire::items::ItemKind;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -38,8 +41,33 @@ impl Unread {
     }
 }
 
+/// What the transcript reads from the window. The window pushes it after
+/// each of its notifies, and the view redraws only when it changed.
+#[derive(Clone, Default, PartialEq)]
+pub(super) struct TranscriptInputs {
+    pub(super) connected: bool,
+    pub(super) hidden: bool,
+    pub(super) bots: Vec<Bot>,
+    pub(super) mention_bots: Arc<MentionRegistry>,
+    pub(super) pending: Vec<PendingSend>,
+    pub(super) quotes: Vec<Quote>,
+    pub(super) restoring_rules: bool,
+}
+
+/// Whether the window shows a view or keeps it warm. A warm view keeps its
+/// conversation current but builds no rows or cards until it is shown.
+enum Presence {
+    Shown,
+    Parked,
+}
+
+/// One bot's transcript: its rows, their cards and the list they scroll in.
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
+    presence: Presence,
+    pub(super) app: WeakEntity<ElseApp>,
+    pub(super) client: Arc<Client>,
+    pub(super) inputs: TranscriptInputs,
     pub(super) unread: Option<Unread>,
     pub(super) conversation: Option<Conversation>,
     pub(super) stream_problem: Option<String>,
@@ -156,25 +184,31 @@ impl Reveal {
 
 impl ConversationView {
     pub(super) fn row_index(&self, key: RowKey) -> Option<usize> {
-        let task = match key {
-            RowKey::Item(id) => self
-                .conversation
-                .as_ref()
-                .and_then(|c| c.item(id))
-                .map(|i| RowKey::Task(i.turn_id)),
-            _ => None,
-        };
-        self.rows
-            .iter()
-            .position(|row| row.contains(key))
-            .or_else(|| task.and_then(|task| self.rows.iter().position(|row| row.key == task)))
+        row_index(&self.rows, self.conversation.as_ref(), key)
     }
 
-    pub(super) fn new(bot_id: Uuid) -> Self {
+    pub(super) fn new(
+        bot_id: Uuid,
+        app: WeakEntity<ElseApp>,
+        client: Arc<Client>,
+        inputs: TranscriptInputs,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
         list.set_follow_mode(FollowMode::Tail);
+        let (view, owner) = (cx.entity().downgrade(), app.clone());
+        list.set_scroll_handler(move |_, window, cx| {
+            // The owner scrolled, so an exchange still laying out no longer
+            // moves the view when it lands.
+            let _ = view.update(cx, |view, _| view.landing = None);
+            let _ = owner.update(cx, |app, cx| app.check_reading(window, cx));
+        });
         Self {
             bot_id,
+            presence: Presence::Parked,
+            app,
+            client,
+            inputs,
             unread: None,
             conversation: None,
             stream_problem: None,
@@ -211,7 +245,17 @@ impl ConversationView {
     /// Settles what only the shown view finishes, before switching away:
     /// older pages and gaps that were loading, a pending jump and the
     /// unread divider. Its newest page keeps loading.
+    pub(super) fn show(&mut self) {
+        self.presence = Presence::Shown;
+    }
+
+    pub(super) fn shown(&self) -> bool {
+        matches!(self.presence, Presence::Shown)
+    }
+
     pub(super) fn park(&mut self) {
+        self.presence = Presence::Parked;
+        self.park_find();
         self.cards.park();
         self._reply_clock = None;
         self.unread = None;
@@ -225,17 +269,8 @@ impl ConversationView {
 }
 
 impl ElseApp {
-    pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_ref()
-            && let Some(ix) = view.row_index(key)
-        {
-            view.list.remeasure_items(ix..ix + 1);
-        }
-        cx.notify();
-    }
-
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(bot) = self.view.as_ref().map(|view| view.bot_id) {
+        if let Some(bot) = self.shown_bot(cx) {
             self.load_into(bot, window, cx);
         }
     }
@@ -244,43 +279,42 @@ impl ElseApp {
     /// nothing to draw shows the saved page while the server's loads.
     pub(super) fn load_into(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let (client, saved) = (self.client.clone(), self.saved.clone());
-        let Some(view) = self.view_of(bot) else {
+        let Some(view) = self.view_of(bot, cx) else {
             return;
         };
-        let cold = view.conversation.is_none();
-        view.load = Load::Running {
-            _task: cx.spawn_in(window, async move |this, cx| {
-                let fetch = cx.background_executor().spawn(client.latest(bot));
-                if cold
-                    && let Some(saved) = saved.clone()
-                    && let Some(page) = cx
-                        .background_executor()
-                        .spawn(async move { saved.load(bot) })
-                        .await
-                {
-                    let _ = this
-                        .update_in(cx, |app, window, cx| app.apply_saved(bot, page, window, cx));
+        let cold = view.read(cx).conversation.is_none();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let fetch = cx.background_executor().spawn(client.latest(bot));
+            if cold
+                && let Some(saved) = saved.clone()
+                && let Some(page) = cx
+                    .background_executor()
+                    .spawn(async move { saved.load(bot) })
+                    .await
+            {
+                let _ =
+                    this.update_in(cx, |app, window, cx| app.apply_saved(bot, page, window, cx));
+            }
+            let snapshot = fetch.await.map(|crate::api::Latest { snapshot, raw }| {
+                if let Some(saved) = saved {
+                    let ticket = saved.ticket();
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(err) = saved.save(bot, &raw, ticket) {
+                                eprintln!("{err}");
+                            }
+                        })
+                        .detach();
                 }
-                let snapshot = fetch.await.map(|crate::api::Latest { snapshot, raw }| {
-                    if let Some(saved) = saved {
-                        let ticket = saved.ticket();
-                        cx.background_executor()
-                            .spawn(async move {
-                                if let Err(err) = saved.save(bot, &raw, ticket) {
-                                    eprintln!("{err}");
-                                }
-                            })
-                            .detach();
-                    }
-                    snapshot
-                });
-                let _ = this.update_in(cx, |app, window, cx| {
-                    if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
-                        app.live_command(LiveCommand::Subscribe { bot, cursor });
-                    }
-                });
-            }),
-        };
+                snapshot
+            });
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
+                    app.live_command(LiveCommand::Subscribe { bot, cursor });
+                }
+            });
+        });
+        view.update(cx, |view, _| view.load = Load::Running { _task: task });
     }
 
     /// Shows the saved page of a view still waiting for its first one.
@@ -291,14 +325,17 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let shown = self.shows(bot);
-        let Some(view) = self.view_of(bot).filter(|v| v.conversation.is_none()) else {
+        let shown = self.shows(bot, cx);
+        let Some(view) = self
+            .view_of(bot, cx)
+            .filter(|view| view.read(cx).conversation.is_none())
+        else {
             return;
         };
         let Ok(conversation) = Conversation::from_saved(page) else {
             return;
         };
-        view.conversation = Some(conversation);
+        view.update(cx, |view, _| view.conversation = Some(conversation));
         if shown {
             self.sync_rows(window, cx);
         }
@@ -313,16 +350,24 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let shown = self.shows(bot);
-        let view = self.view_of(bot)?;
-        view.load = Load::Failed { _retry: None };
+        let shown = self.shows(bot, cx);
+        let view = self.view_of(bot, cx)?;
+        let failed = |problem: String, retry: Option<Task<()>>, cx: &mut Context<Self>| {
+            view.update(cx, |view, _| {
+                view.stream_problem = Some(problem);
+                view.load = Load::Failed { _retry: retry };
+            });
+            cx.notify();
+        };
         match snapshot.map(Conversation::from_snapshot) {
             Ok(Ok(conversation)) => {
                 let cursor = conversation.cursor();
-                view.conversation = Some(conversation);
-                view.load = Load::Settled;
-                view.loading_gap = None;
-                view.stream_problem = None;
+                view.update(cx, |view, _| {
+                    view.conversation = Some(conversation);
+                    view.load = Load::Settled;
+                    view.loading_gap = None;
+                    view.stream_problem = None;
+                });
                 if !shown {
                     return None;
                 }
@@ -331,29 +376,26 @@ impl ElseApp {
                 Some(cursor)
             }
             Ok(Err(_)) => {
-                view.stream_problem = Some("The server sent an invalid snapshot.".into());
-                cx.notify();
+                failed("The server sent an invalid snapshot.".into(), None, cx);
                 None
             }
             Err(ClientError::Api { status: 410, .. }) => {
+                view.update(cx, |view, _| view.load = Load::Failed { _retry: None });
                 self.refresh_now(window, cx);
                 None
             }
             Err(err) => {
-                view.stream_problem = Some(format!("Could not load history: {err}"));
-                cx.notify();
-                if shown {
-                    view.load = Load::Failed {
-                        _retry: Some(cx.spawn_in(window, async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_secs(2)).await;
-                            let _ = this.update_in(cx, |app, window, cx| {
-                                if app.shows(bot) {
-                                    app.load_conversation(window, cx);
-                                }
-                            });
-                        })),
-                    };
-                }
+                let retry = shown.then(|| {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
+                        let _ = this.update_in(cx, |app, window, cx| {
+                            if app.shows(bot, cx) {
+                                app.load_conversation(window, cx);
+                            }
+                        });
+                    })
+                });
+                failed(format!("Could not load history: {err}"), retry, cx);
                 None
             }
         }
@@ -368,25 +410,31 @@ impl ElseApp {
     ) {
         // A warm view keeps applying what arrives until its unsubscribe
         // lands, so the cursor it resumes from is the one it applied.
-        let shown = self.shows(bot);
-        let Some(view) = self.view_of(bot) else {
+        let shown = self.shows(bot, cx);
+        let Some(view) = self.view_of(bot, cx) else {
             return;
         };
         let failed = match message {
             StreamMessage::Frame(frame) => {
-                let Some(conversation) = view.conversation.as_mut() else {
+                let Some(applied) = view.update(cx, |view, _| {
+                    let conversation = view.conversation.as_mut()?;
+                    Some(
+                        conversation
+                            .apply(&frame)
+                            .map(|applied| (applied, conversation.activity.clone())),
+                    )
+                }) else {
                     return;
                 };
-                match conversation.apply(&frame) {
-                    Ok(Applied::Duplicate) => false,
+                match applied {
+                    Ok((Applied::Duplicate, _)) => false,
                     // The bot list stays authoritative for a warm bot's
                     // activity: its last frames can trail the list.
-                    Ok(Applied::Changed) if !shown => {
-                        self.prune_pending(bot);
+                    Ok((Applied::Changed, _)) if !shown => {
+                        self.prune_pending(bot, cx);
                         false
                     }
-                    Ok(Applied::Changed) => {
-                        let activity = conversation.activity.clone();
+                    Ok((Applied::Changed, activity)) => {
                         if activity.as_ref().is_some_and(|a| a.phase == Phase::Idle) {
                             self.stopping.remove(&bot);
                         }
@@ -416,43 +464,203 @@ impl ElseApp {
         self.live_command(LiveCommand::Unsubscribe { bot });
         if shown {
             self.load_conversation(window, cx);
-        } else if let Some(view) = self.view_of(bot)
-            && matches!(view.load, Load::Settled)
-        {
-            view.load = Load::Failed { _retry: None };
+        } else {
+            view.update(cx, |view, _| {
+                if matches!(view.load, Load::Settled) {
+                    view.load = Load::Failed { _retry: None };
+                }
+            });
         }
     }
 
     /// Drops `bot`'s pending sends its conversation now holds.
-    pub(super) fn prune_pending(&mut self, bot: Uuid) {
-        let view = match self.view.as_ref() {
-            Some(view) if view.bot_id == bot => Some(view),
-            _ => self.warm.get(bot),
+    pub(super) fn prune_pending(&mut self, bot: Uuid, cx: &App) {
+        let Some(view) = self.view_of(bot, cx) else {
+            return;
         };
         if let (Some(conversation), Some(pending)) = (
-            view.and_then(|v| v.conversation.as_ref()),
+            view.read(cx).conversation.as_ref(),
             self.pending.get_mut(&bot),
         ) {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
     }
 
+    pub(super) fn transcript_inputs(&self, bot: Uuid) -> TranscriptInputs {
+        TranscriptInputs {
+            connected: self.connection == super::Connection::Connected,
+            hidden: self.hidden,
+            bots: self.bots.clone(),
+            mention_bots: self.mention_bots.clone(),
+            pending: self.pending.get(&bot).cloned().unwrap_or_default(),
+            quotes: self.quotes_of(bot).to_vec(),
+            restoring_rules: self.restoring_rules(bot),
+        }
+    }
+
+    fn quotes_of(&self, bot: Uuid) -> &[Quote] {
+        self.drafts.get(&bot).map_or(&[], |draft| &draft.quotes)
+    }
+
+    /// Pushes what the shown view reads, if it changed. It runs after each
+    /// notify of the window, so a change to what the view reads must notify
+    /// the window.
+    pub(super) fn sync_view_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let current = view.read(cx);
+        let bot = current.bot_id;
+        let current = &current.inputs;
+        if current.connected == (self.connection == super::Connection::Connected)
+            && current.hidden == self.hidden
+            && current.bots == self.bots
+            && current.mention_bots == self.mention_bots
+            && current.pending[..] == *self.pending.get(&bot).map_or(&[][..], Vec::as_slice)
+            && current.quotes[..] == *self.quotes_of(bot)
+            && current.restoring_rules == self.restoring_rules(bot)
+        {
+            return;
+        }
+        let inputs = self.transcript_inputs(bot);
+        view.update(cx, |view, cx| view.set_inputs(inputs, window, cx));
+    }
+
+    pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let bot = view.read(cx).bot_id;
+        self.prune_pending(bot, cx);
+        let inputs = self.transcript_inputs(bot);
+        view.update(cx, |view, cx| {
+            view.set_inputs(inputs, window, cx);
+            view.sync_rows(window, cx);
+        });
+        cx.notify();
+    }
+}
+
+/// The row that shows `key`, or for an item folded into a task, the task's
+/// row.
+pub(super) fn row_index(
+    rows: &[TranscriptRow],
+    conversation: Option<&Conversation>,
+    key: RowKey,
+) -> Option<usize> {
+    let task = match key {
+        RowKey::Item(id) => conversation
+            .and_then(|c| c.item(id))
+            .map(|i| RowKey::Task(i.turn_id)),
+        _ => None,
+    };
+    rows.iter()
+        .position(|row| row.contains(key))
+        .or_else(|| task.and_then(|task| rows.iter().position(|row| row.key == task)))
+}
+
+pub(super) fn on_app<E: ?Sized>(
+    app: &WeakEntity<ElseApp>,
+    f: impl Fn(&mut ElseApp, &E, &mut Window, &mut Context<ElseApp>) + 'static,
+) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+    let app = app.clone();
+    move |event, window, cx| {
+        let _ = app.update(cx, |app, cx| f(app, event, window, cx));
+    }
+}
+
+impl ConversationView {
+    pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
+        if let Some(ix) = self.row_index(key) {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_inputs(
+        &mut self,
+        inputs: TranscriptInputs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.inputs == inputs {
+            return;
+        }
+        let reach = |inputs: &TranscriptInputs| (inputs.connected, inputs.hidden);
+        let reached = reach(&self.inputs) != reach(&inputs);
+        let quoted = self.inputs.quotes != inputs.quotes;
+        self.inputs = inputs;
+        if reached {
+            if !self.inputs.connected {
+                self.clear_secret_forms(window, cx);
+            }
+            self.sync_skill_cards(window, cx);
+            self.sync_secret_cards(window, cx);
+            self.sync_social_cards(window, cx);
+        }
+        if quoted {
+            self.paint_quotes(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_app<E: ?Sized>(
+        &self,
+        f: impl Fn(&mut ElseApp, &E, &mut Window, &mut Context<ElseApp>) + 'static,
+    ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+        on_app(&self.app, f)
+    }
+
+    /// Hands a rejected owner token to the window once this update ends.
+    /// Returns whether `err` was that rejection.
+    pub(super) fn unauthorized(&self, err: &ClientError, cx: &mut Context<Self>) -> bool {
+        if !matches!(err, ClientError::Unauthorized) {
+            return false;
+        }
+        let app = self.app.clone();
+        cx.defer(move |cx| {
+            let _ = app.update(cx, |app, cx| {
+                app.unauthorized(&ClientError::Unauthorized, cx)
+            });
+        });
+        true
+    }
+
+    /// Shows `notice` under the composer once this update ends.
+    pub(super) fn notice(&self, notice: String, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        cx.defer(move |cx| {
+            let _ = app.update(cx, |app, cx| {
+                app.notice = Some(notice);
+                cx.notify();
+            });
+        });
+    }
+
+    /// Asks the window to check what the owner has read, once this view is
+    /// no longer being updated.
+    pub(super) fn check_reading(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shown() {
+            return;
+        }
+        let app = self.app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, cx| app.check_reading(window, cx));
+        });
+    }
+
     /// Scrolls to the message a reply quotes, loading older pages until it
     /// is found or the history runs out.
     pub(super) fn reveal_quoted(
         &mut self,
-        bot: Uuid,
         from: RowKey,
         author: Author,
         original: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
-            return;
-        };
-        view.pending_reveal = None;
-        let Some(conversation) = view.conversation.as_ref() else {
+        self.pending_reveal = None;
+        let Some(conversation) = self.conversation.as_ref() else {
             return;
         };
         let before = match from {
@@ -474,18 +682,15 @@ impl ElseApp {
             .map(|item| item.id);
         let older = conversation.older_before_seq.is_some();
         let found = target.and_then(|target| Some((target, self.unfold_item(target, window, cx)?)));
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
         if let Some((target, ix)) = found
-            && let Some(conversation) = view.conversation.as_ref()
+            && let Some(conversation) = self.conversation.as_ref()
         {
-            view.list.scroll_to(ListOffset {
+            self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
             let item = RowKey::Item(target);
-            let spot = if view.texts.get(&item).is_some_and(RowText::is_markdown) {
+            let spot = if self.texts.get(&item).is_some_and(RowText::is_markdown) {
                 let whole = conversation
                     .item(target)
                     .is_some_and(|item| super::reply::quotes_whole(&item.text, original));
@@ -497,10 +702,10 @@ impl ElseApp {
             } else {
                 Spot::Row
             };
-            let row = view.rows[ix].key;
+            let row = self.rows[ix].key;
             self.start_reveal(Reveal::new(row, spot), cx);
         } else if older {
-            view.pending_reveal = Some((from, author, original.to_owned()));
+            self.pending_reveal = Some((from, author, original.to_owned()));
             self.load_older(window, cx);
         } else {
             window.push_notification(
@@ -519,11 +724,10 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> Option<usize> {
         self.open_quiet_run_of(target, window, cx);
-        let view = self.view.as_mut()?;
-        let conversation = view.conversation.as_ref()?;
+        let conversation = self.conversation.as_ref()?;
         // An exchange reply may be folded or cut to an excerpt.
-        let folded = !view.full_replies.contains(&target)
-            && view.rows.iter().any(|row| {
+        let folded = !self.full_replies.contains(&target)
+            && self.rows.iter().any(|row| {
                 row.activity
                     .as_ref()
                     .is_some_and(|activity| activity.answers.contains(&target))
@@ -533,30 +737,29 @@ impl ElseApp {
                 .item(target)
                 .and_then(|item| conversation.task_receipt(item.turn_id))
             {
-                view.exchange_folds
+                self.exchange_folds
                     .insert(receipt.id, super::bot_activity::Fold::Open);
             }
-            view.full_replies.insert(target);
+            self.full_replies.insert(target);
             self.sync_rows(window, cx);
         }
-        let view = self.view.as_mut()?;
-        let conversation = view.conversation.as_ref()?;
-        let ix = view.row_index(RowKey::Item(target))?;
-        if let RowKey::Item(reply) = view.rows[ix].key
-            && view.rows[ix].folded.contains(&target)
+        let conversation = self.conversation.as_ref()?;
+        let ix = self.row_index(RowKey::Item(target))?;
+        if let RowKey::Item(reply) = self.rows[ix].key
+            && self.rows[ix].folded.contains(&target)
         {
-            view.expanded_folds.insert(reply);
-            view.list.remeasure_items(ix..ix + 1);
+            self.expanded_folds.insert(reply);
+            self.list.remeasure_items(ix..ix + 1);
         }
-        if let Some(task) = &view.rows[ix].task
+        if let Some(task) = &self.rows[ix].task
             && (task.history.contains(&target)
                 || (task.kept.contains(&target) && task.reply_superseded(conversation, target))
                 || (task.latest == Some(target)
                     && !task.latest_kept
                     && matches!(task.state, ReplyState::Queued | ReplyState::Working)))
         {
-            view.expanded_tasks.insert(task.turn);
-            view.list.remeasure_items(ix..ix + 1);
+            self.expanded_tasks.insert(task.turn);
+            self.list.remeasure_items(ix..ix + 1);
         }
         Some(ix)
     }
@@ -564,19 +767,16 @@ impl ElseApp {
     /// Opens the no-news run holding item `target`, and the group of runs
     /// it folds into, so a find match inside it shows.
     fn open_quiet_run_of(&mut self, target: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let Some(turn) = view
+        let Some(turn) = self
             .conversation
             .as_ref()
             .and_then(|c| c.item(target))
             .map(|item| item.turn_id)
-            .filter(|&turn| view.conversation.as_ref().is_some_and(|c| c.no_news(turn)))
+            .filter(|&turn| self.conversation.as_ref().is_some_and(|c| c.no_news(turn)))
         else {
             return;
         };
-        if view.open_quiet.insert(RowKey::QuietRun(turn)) {
+        if self.open_quiet.insert(RowKey::QuietRun(turn)) {
             self.sync_rows(window, cx);
         }
     }
@@ -588,38 +788,30 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let runs = view
+        let runs = self
             .rows
             .iter()
             .find(|row| row.key == key)
             .map(|row| row.quiet_runs.clone())
             .unwrap_or_default();
-        if !runs.is_empty() && group_open(&runs, &view.open_quiet) {
+        if !runs.is_empty() && group_open(&runs, &self.open_quiet) {
             for turn in runs {
-                view.open_quiet.remove(&RowKey::QuietRuns(turn));
-                view.open_quiet.remove(&RowKey::QuietRun(turn));
+                self.open_quiet.remove(&RowKey::QuietRuns(turn));
+                self.open_quiet.remove(&RowKey::QuietRun(turn));
             }
-        } else if !view.open_quiet.remove(&key) {
-            view.open_quiet.insert(key);
+        } else if !self.open_quiet.remove(&key) {
+            self.open_quiet.insert(key);
         }
         self.sync_rows(window, cx);
         // The rows below a folded or unfolded run keep their keys, but their
         // spacing depends on the row above.
-        if let Some(view) = self.view.as_ref() {
-            view.list.remeasure();
-        }
+        self.list.remeasure();
     }
 
     /// Flashes `reveal` until it fades out, painting its passage on each
     /// frame and asking the list to center the passage once it is found.
     pub(super) fn start_reveal(&mut self, reveal: Reveal, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let previous = view.revealed.replace(reveal);
+        let previous = self.revealed.replace(reveal);
         if let Some(Reveal {
             spot: Spot::Passage { item, .. },
             ..
@@ -628,15 +820,12 @@ impl ElseApp {
             self.paint_row_quotes(item, cx);
         }
         self.tick_reveal(cx);
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        view._reveal_clock = Some(cx.spawn(async move |this, cx| {
+        self._reveal_clock = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
-                let live = this.update(cx, |app, cx| app.tick_reveal(cx));
+                let live = this.update(cx, |view, cx| view.tick_reveal(cx));
                 if !live.unwrap_or(false) {
                     break;
                 }
@@ -648,10 +837,7 @@ impl ElseApp {
     /// Repaints the revealed passage, and drops the reveal once it has faded
     /// out. Returns whether it is still showing.
     fn tick_reveal(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(view) = self.view.as_mut() else {
-            return false;
-        };
-        let Some(reveal) = view.revealed.as_mut() else {
+        let Some(reveal) = self.revealed.as_mut() else {
             return false;
         };
         reveal.shown = reveal.strength();
@@ -661,7 +847,7 @@ impl ElseApp {
             Spot::Row => None,
         };
         if !live {
-            view.revealed = None;
+            self.revealed = None;
         }
         match passage {
             Some(item) => self.paint_row_quotes(item, cx),
@@ -671,23 +857,16 @@ impl ElseApp {
     }
 
     pub(super) fn load_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
+        let Some(before) = self.conversation.as_ref().and_then(|c| c.older_before_seq) else {
             return;
         };
-        let Some(before) = view.conversation.as_ref().and_then(|c| c.older_before_seq) else {
-            return;
-        };
-        if view.older.is_some() {
+        if self.older.is_some() {
             return;
         }
-        let bot = view.bot_id;
-        view.older = Some(cx.spawn_in(window, async move |this, cx| {
+        let (client, app, bot) = (self.client.clone(), self.app.clone(), self.bot_id);
+        self.older = Some(cx.spawn_in(window, async move |this, cx| {
             let page = client.snapshot(bot, Some(before)).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                let Some(view) = app.view_of(bot) else {
-                    return;
-                };
+            let failed = this.update_in(cx, |view, window, cx| {
                 view.older = None;
                 match page {
                     Ok(page) => {
@@ -695,32 +874,51 @@ impl ElseApp {
                             conversation.merge_older(page);
                         }
                         let pending = view.pending_reveal.take();
-                        app.sync_rows(window, cx);
+                        view.sync_rows(window, cx);
                         if let Some((from, author, original)) = pending {
-                            app.reveal_quoted(bot, from, author, &original, window, cx);
+                            view.reveal_quoted(from, author, &original, window, cx);
                         }
+                        None
                     }
                     Err(err) => {
-                        app.notice = Some(format!("Could not load older messages: {err}"));
                         cx.notify();
+                        Some(err)
                     }
                 }
             });
+            if let Ok(Some(err)) = failed {
+                let _ = app.update(cx, |app, cx| {
+                    app.notice = Some(format!("Could not load older messages: {err}"));
+                    cx.notify();
+                });
+            }
         }));
         cx.notify();
     }
 
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
+        if !self.shown() {
             return;
-        };
-        let bot = view.bot_id;
-        if self.bots.iter().any(|b| b.id == bot && b.silenced()) {
-            view.unread = None;
         }
-        let conversation = view.conversation.as_ref();
-        if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
-            pending.retain(|p| !conversation.has_request(p.request_id));
+        let bot = self.bot_id;
+        if self.inputs.bots.iter().any(|b| b.id == bot && b.silenced()) {
+            self.unread = None;
+        }
+        let conversation = self.conversation.as_ref();
+        let pending: Vec<PendingSend> = self
+            .inputs
+            .pending
+            .iter()
+            .filter(|p| conversation.is_none_or(|c| !c.has_request(p.request_id)))
+            .cloned()
+            .collect();
+        if pending.len() < self.inputs.pending.len() {
+            // A loaded page confirmed a send; the window drops it and
+            // rebuilds these rows.
+            let app = self.app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.sync_rows(window, cx));
+            });
         }
         let Transcript {
             rows,
@@ -729,16 +927,16 @@ impl ElseApp {
             ticking,
         } = transcript::build(
             conversation,
-            self.pending.get(&bot).map_or(&[], Vec::as_slice),
+            &pending,
             &Folds {
-                quiet: &view.open_quiet,
-                full_replies: &view.full_replies,
+                quiet: &self.open_quiet,
+                full_replies: &self.full_replies,
             },
-            view.unread.as_ref().map(|unread| unread.since),
+            self.unread.as_ref().map(|unread| unread.since),
             &Local,
         );
-        let old = std::mem::take(&mut view.rows);
-        view.reply_transitions
+        let old = std::mem::take(&mut self.rows);
+        self.reply_transitions
             .retain(|_, at| at.elapsed() < Duration::from_millis(320));
         for task in tasks.values() {
             if task.state.terminal()
@@ -748,10 +946,10 @@ impl ElseApp {
                         .is_some_and(|prior| prior.turn == task.turn && !prior.state.terminal())
                 })
             {
-                view.reply_transitions
+                self.reply_transitions
                     .insert(task.turn, std::time::Instant::now());
                 if task.state == ReplyState::Complete {
-                    view.expanded_tasks.remove(&task.turn);
+                    self.expanded_tasks.remove(&task.turn);
                 }
             }
         }
@@ -770,47 +968,43 @@ impl ElseApp {
             .take_while(|(a, b)| same(a, b))
             .count();
         if prefix + suffix != old.len() || old.len() != rows.len() {
-            view.list
+            self.list
                 .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
         }
         let previous: HashMap<_, _> = old.iter().map(|row| (row.key, row)).collect();
         for (ix, row) in rows.iter().enumerate() {
             if previous.get(&row.key).is_some_and(|old| *old != row) {
-                view.list.remeasure_items(ix..ix + 1);
+                self.list.remeasure_items(ix..ix + 1);
             }
         }
         let mut changed = Vec::new();
         let mut created = false;
         let text_keys: HashSet<_> = texts.iter().map(|(key, ..)| *key).collect();
+        let mention_bots = self.inputs.mention_bots.clone();
+        let host = RowHost {
+            client: self.client.clone(),
+            bot,
+            app: self.app.clone(),
+        };
         for (key, source) in texts {
-            match view.texts.get_mut(&key) {
+            match self.texts.get_mut(&key) {
                 Some(row) if row.format() == source.format => {
-                    if row.sync(source, &self.mention_bots, window, cx) {
+                    if row.sync(source, &mention_bots, window, cx) {
                         changed.push(key);
                     }
                 }
                 _ => {
-                    view.texts.insert(
-                        key,
-                        RowText::new(
-                            key,
-                            source,
-                            self.client.clone(),
-                            &self.mention_bots,
-                            bot,
-                            window,
-                            cx,
-                        ),
-                    );
+                    let text = RowText::new(key, source, &host, &mention_bots, window, cx);
+                    self.texts.insert(key, text);
                     created = true;
                 }
             }
         }
-        view.texts.retain(|key, _| text_keys.contains(key));
+        self.texts.retain(|key, _| text_keys.contains(key));
         if created {
             // New text views learn their wrapped height during their first
             // layout; measure the rows again once that has happened.
-            let list = view.list.clone();
+            let list = self.list.clone();
             window.on_next_frame(move |window, _| {
                 let list = list.clone();
                 window.on_next_frame(move |window, _| {
@@ -819,6 +1013,7 @@ impl ElseApp {
                 });
             });
         }
+        let conversation = self.conversation.as_ref();
         for key in changed {
             let key = match key {
                 RowKey::Item(id) => conversation
@@ -830,30 +1025,24 @@ impl ElseApp {
                 _ => key,
             };
             if let Some(ix) = rows.iter().position(|r| r.contains(key)) {
-                view.list.remeasure_items(ix..ix + 1);
+                self.list.remeasure_items(ix..ix + 1);
             }
         }
-        view.rows = rows;
+        self.rows = rows;
         if created {
-            super::quotes::paint_view(view, &self.drafts, cx);
+            self.paint_quotes(cx);
         }
         if !ticking {
-            view._reply_clock = None;
-        } else if view._reply_clock.is_none() {
-            view._reply_clock = Some(cx.spawn(async move |this, cx| {
+            self._reply_clock = None;
+        } else if self._reply_clock.is_none() {
+            self._reply_clock = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
-                    let keep = this.update(cx, |app, cx| {
-                        let ticking = app
-                            .view
-                            .as_ref()
-                            .filter(|view| view.bot_id == bot)
-                            .is_some_and(|view| {
-                                transcript::ticking(
-                                    view.rows.iter().filter_map(|row| row.task.as_ref()),
-                                    view.conversation.as_ref(),
-                                )
-                            });
+                    let keep = this.update(cx, |view, cx| {
+                        let ticking = transcript::ticking(
+                            view.rows.iter().filter_map(|row| row.task.as_ref()),
+                            view.conversation.as_ref(),
+                        );
                         if ticking {
                             cx.notify();
                         }

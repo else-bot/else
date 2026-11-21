@@ -2,6 +2,7 @@
 //! and the transcript loads only a window around the one shown.
 
 use super::ElseApp;
+use super::conversation::ConversationView;
 use super::row_text::{Highlights, RowText};
 use super::transcript::RowKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
@@ -95,27 +96,24 @@ impl Found {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let input = match &view.find {
+        let input = match &self.find {
             Some(find) => find.input.clone(),
             None => {
                 let input =
                     cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
                 let subscription =
-                    cx.subscribe_in(&input, window, |app, _, event: &InputEvent, window, cx| {
+                    cx.subscribe_in(&input, window, |view, _, event: &InputEvent, window, cx| {
                         match event {
-                            InputEvent::Change => app.find_changed(window, cx),
+                            InputEvent::Change => view.find_changed(window, cx),
                             InputEvent::PressEnter { shift, .. } => {
-                                app.step_find(!shift, window, cx)
+                                view.step_find(!shift, window, cx)
                             }
                             _ => {}
                         }
                     });
-                view.find = Some(Find {
+                self.find = Some(Find {
                     input: input.clone(),
                     phase: Phase::Empty,
                     centering: None,
@@ -131,28 +129,19 @@ impl ElseApp {
         cx.notify();
     }
 
-    /// Closes the find bar, clears its highlights, and returns to the
-    /// latest messages. Loaded windows stay.
-    pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        if view.find.take().is_none() {
-            return;
+    /// Closes the find bar and clears its highlights. Returns whether it
+    /// was open.
+    fn close_find(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.find.take().is_none() {
+            return false;
         }
         self.paint_quotes(cx);
-        self.jump_to_latest(window, cx);
-        self.composer
-            .update(cx, |composer, cx| composer.focus(window, cx));
+        true
     }
 
     fn find_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let Some(find) = view.find.as_mut() else {
+        let (client, bot) = (self.client.clone(), self.bot_id);
+        let Some(find) = self.find.as_mut() else {
             return;
         };
         let query = find.input.read(cx).value().to_string();
@@ -166,8 +155,8 @@ impl ElseApp {
             _task: cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(DEBOUNCE).await;
                 let hits = client.search(bot, query).await;
-                let _ = this.update_in(cx, |app, window, cx| {
-                    let Some(find) = app.view_of(bot).and_then(|view| view.find.as_mut()) else {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    let Some(find) = view.find.as_mut() else {
                         return;
                     };
                     find.phase = match hits {
@@ -181,8 +170,8 @@ impl ElseApp {
                         }),
                         Err(_) => Phase::Failed,
                     };
-                    if app.shows(bot) {
-                        app.show_match(window, cx);
+                    if view.shown() {
+                        view.show_match(window, cx);
                     }
                 });
             }),
@@ -192,12 +181,7 @@ impl ElseApp {
 
     /// Moves to the next match toward older messages, or toward newer ones.
     pub(super) fn step_find(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Phase::Found(found)) = self
-            .view
-            .as_mut()
-            .and_then(|view| view.find.as_mut())
-            .map(|find| &mut find.phase)
-        else {
+        let Some(Phase::Found(found)) = self.find.as_mut().map(|find| &mut find.phase) else {
             return;
         };
         if found.total == 0 {
@@ -213,9 +197,8 @@ impl ElseApp {
     /// its messages loaded while the view was warm.
     pub(super) fn resume_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let unlanded = self
-            .view
+            .find
             .as_ref()
-            .and_then(|view| view.find.as_ref())
             .is_some_and(|find| matches!(&find.phase, Phase::Found(found) if !found.landed));
         if unlanded {
             self.show_match(window, cx);
@@ -225,12 +208,8 @@ impl ElseApp {
     /// Scrolls to the current match, unfolding what hides it, or first
     /// loads a window of messages around it.
     fn show_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let (Some(conversation), Some(find)) = (view.conversation.as_ref(), view.find.as_mut())
+        let (client, app, bot) = (self.client.clone(), self.app.clone(), self.bot_id);
+        let (Some(conversation), Some(find)) = (self.conversation.as_ref(), self.find.as_mut())
         else {
             return;
         };
@@ -250,30 +229,29 @@ impl ElseApp {
                 let loaded = client
                     .window(bot, hit.seq, (NEIGHBOURS, NEIGHBOURS), around)
                     .await;
-                let _ = this.update_in(cx, |app, window, cx| {
-                    let Some(view) = app.view.as_mut().filter(|view| view.bot_id == bot) else {
-                        return;
-                    };
-                    match loaded {
-                        Ok(loaded) => {
-                            let merged = view.conversation.as_mut().is_some_and(|conversation| {
-                                conversation.merge_window(loaded, around.0, around.1)
-                            });
-                            if !merged {
-                                // Another load changed what is loaded there;
-                                // ask again around the match.
-                                app.show_match(window, cx);
-                                return;
-                            }
-                            app.sync_rows(window, cx);
-                            app.land_on(hit.item_id, window, cx);
+                let failed = this.update_in(cx, |view, window, cx| match loaded {
+                    Ok(loaded) => {
+                        let merged = view.conversation.as_mut().is_some_and(|conversation| {
+                            conversation.merge_window(loaded, around.0, around.1)
+                        });
+                        if !merged {
+                            // Another load changed what is loaded there;
+                            // ask again around the match.
+                            view.show_match(window, cx);
+                            return None;
                         }
-                        Err(err) => {
-                            app.notice = Some(format!("Could not load that message: {err}"));
-                            cx.notify();
-                        }
+                        view.sync_rows(window, cx);
+                        view.land_on(hit.item_id, window, cx);
+                        None
                     }
+                    Err(err) => Some(err),
                 });
+                if let Ok(Some(err)) = failed {
+                    let _ = app.update(cx, |app, cx| {
+                        app.notice = Some(format!("Could not load that message: {err}"));
+                        cx.notify();
+                    });
+                }
             }));
             cx.notify();
             return;
@@ -282,15 +260,13 @@ impl ElseApp {
     }
 
     fn land_on(&mut self, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.unfold_item(item, window, cx)
-            && let Some(view) = self.view.as_mut()
-        {
-            view.list.scroll_to(ListOffset {
+        if let Some(ix) = self.unfold_item(item, window, cx) {
+            self.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
-            let lead = view.list.viewport_bounds().size.height * 0.4;
-            if let Some(find) = view.find.as_mut() {
+            let lead = self.list.viewport_bounds().size.height * 0.4;
+            if let Some(find) = self.find.as_mut() {
                 find.centering = Some((ix, lead));
             }
         }
@@ -301,58 +277,53 @@ impl ElseApp {
     /// Loads the newest page of the unloaded stretch just below the loaded
     /// item `above`.
     pub(super) fn load_gap(&mut self, above: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
+        let (client, app, bot) = (self.client.clone(), self.app.clone(), self.bot_id);
+        let Some(conversation) = self.conversation.as_ref() else {
             return;
         };
-        let Some(conversation) = view.conversation.as_ref() else {
-            return;
-        };
-        if view.loading_gap.is_some() {
+        if self.loading_gap.is_some() {
             return;
         }
-        let bot = view.bot_id;
         let (below, _) = conversation.loaded_around(above);
         let task = cx.spawn_in(window, async move |this, cx| {
             let page = client
                 .window(bot, above - 1, (GAP_PAGE, 0), (below, Some(above)))
                 .await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                let Some(view) = app.view_of(bot) else {
-                    return;
-                };
+            let failed = this.update_in(cx, |view, window, cx| {
                 view.loading_gap = None;
+                cx.notify();
                 match page {
                     Ok(page) => {
-                        let Some(conversation) = view.conversation.as_mut() else {
-                            return;
-                        };
+                        let conversation = view.conversation.as_mut()?;
                         if conversation.merge_window(page, below, Some(above)) {
-                            app.sync_rows(window, cx);
+                            view.sync_rows(window, cx);
                         } else if conversation.gap_below(above).is_some() {
                             // Another load changed what is loaded there.
-                            app.load_gap(above, window, cx);
+                            view.load_gap(above, window, cx);
                         }
+                        None
                     }
-                    Err(err) => {
-                        app.notice = Some(format!("Could not load earlier messages: {err}"));
-                        cx.notify();
-                    }
+                    Err(err) => Some(err),
                 }
             });
+            if let Ok(Some(err)) = failed {
+                let _ = app.update(cx, |app, cx| {
+                    app.notice = Some(format!("Could not load earlier messages: {err}"));
+                    cx.notify();
+                });
+            }
         });
-        view.loading_gap = Some((above, task));
+        self.loading_gap = Some((above, task));
         cx.notify();
     }
 
     pub(super) fn render_gap(&self, above: i64, cx: &mut Context<Self>) -> AnyElement {
-        let view = self.view.as_ref();
-        let size = view
-            .and_then(|view| view.conversation.as_ref())
+        let size = self
+            .conversation
+            .as_ref()
             .and_then(|c| c.gap_below(above))
             .unwrap_or(GapSize::Uncounted);
-        let loading =
-            view.is_some_and(|view| matches!(view.loading_gap, Some((at, _)) if at == above));
+        let loading = matches!(self.loading_gap, Some((at, _)) if at == above);
         let label = match (loading, size) {
             (true, _) => "Loading…".to_owned(),
             (false, GapSize::Counted(1)) => "… 1 earlier message …".to_owned(),
@@ -379,9 +350,9 @@ impl ElseApp {
     /// measures the rows above it as it walks back.
     pub(super) fn center_row(&self, ix: usize, row: Div, cx: &mut Context<Self>) -> Div {
         let Some((_, lead)) = self
-            .view
+            .find
             .as_ref()
-            .and_then(|view| view.find.as_ref()?.centering)
+            .and_then(|find| find.centering)
             .filter(|(row, _)| *row == ix)
         else {
             return row;
@@ -393,8 +364,8 @@ impl ElseApp {
                 size(bounds.size.width, px(1.)),
             ));
             window.defer(cx, move |_, cx| {
-                let _ = owner.update(cx, |app, _| {
-                    if let Some(find) = app.view.as_mut().and_then(|view| view.find.as_mut()) {
+                let _ = owner.update(cx, |view, _| {
+                    if let Some(find) = view.find.as_mut() {
                         find.centering.take_if(|(row, _)| *row == ix);
                     }
                 });
@@ -402,8 +373,45 @@ impl ElseApp {
         })
     }
 
+    /// Drops the load of an unlanded match, which `resume_find` starts
+    /// again once the view is shown.
+    pub(super) fn park_find(&mut self) {
+        if let Some(Find {
+            phase: Phase::Found(found),
+            ..
+        }) = self.find.as_mut()
+        {
+            found._load = None;
+        }
+    }
+}
+
+impl ElseApp {
+    pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_view(cx, |view, cx| view.open_find(window, cx));
+    }
+
+    /// Closes the find bar, clears its highlights, and returns to the
+    /// latest messages. Loaded windows stay.
+    pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_view(cx, |view, cx| view.close_find(cx)) != Some(true) {
+            return;
+        }
+        self.jump_to_latest(window, cx);
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
+    }
+
+    fn step_find(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_view(cx, |view, cx| view.step_find(older, window, cx));
+    }
+
+    pub(super) fn resume_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_view(cx, |view, cx| view.resume_find(window, cx));
+    }
+
     pub(super) fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let find = self.view.as_ref()?.find.as_ref()?;
+        let find = self.shown(cx)?.find.as_ref()?;
         let theme = cx.theme().clone();
         let (label, can_step) = match &find.phase {
             Phase::Empty => (String::new(), false),

@@ -4,6 +4,7 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, FieldsChanged, Form};
@@ -17,8 +18,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::RowKey;
 use super::request::Request;
-use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 
 pub(super) struct SecretForm {
@@ -32,7 +33,7 @@ impl SecretForm {
     pub(super) fn new(
         request: &SecretRequest,
         window: &mut Window,
-        cx: &mut Context<ElseApp>,
+        cx: &mut Context<ConversationView>,
     ) -> Self {
         let fields = cx.new(|cx| CredentialFields::new(&request.env, Form::Requested, window, cx));
         let id = request.id;
@@ -72,33 +73,30 @@ impl SecretForm {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn sync_secret_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let pending: Vec<SecretRequest> = view
+        let pending: Vec<SecretRequest> = self
             .conversation
             .iter()
             .flat_map(|c| c.secret_requests())
             .filter(|(_, r)| r.is_pending())
             .map(|(_, r)| r.clone())
             .collect();
-        view.cards.secrets.retain(|id, card| {
+        self.cards.secrets.retain(|id, card| {
             let keep = pending.iter().any(|r| r.id == *id);
             if !keep && let Some(form) = card.form.as_mut() {
                 form.clear(window, cx);
             }
             keep
         });
-        let connected = self.connection == Connection::Connected;
+        let connected = self.inputs.connected;
         for request in pending {
-            let card = view.cards.secrets.entry(request.id).or_default();
+            let card = self.cards.secrets.entry(request.id).or_default();
             if !matches!(card.request, Request::Accepted(())) && card.form.is_none() {
                 card.form = Some(SecretForm::new(&request, window, cx));
             }
         }
-        for card in view.cards.secrets.values() {
+        for card in self.cards.secrets.values() {
             let Some(form) = card.form.as_ref() else {
                 continue;
             };
@@ -114,12 +112,10 @@ impl ElseApp {
 
     pub(super) fn clear_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_skill_cards(window, cx);
-        if let Some(view) = self.view.as_mut() {
-            // An answered request stays locked until it settles.
-            for card in view.cards.secrets.values_mut() {
-                if let Some(mut form) = card.form.take() {
-                    form.clear(window, cx);
-                }
+        // An answered request stays locked until it settles.
+        for card in self.cards.secrets.values_mut() {
+            if let Some(mut form) = card.form.take() {
+                form.clear(window, cx);
             }
         }
     }
@@ -132,11 +128,8 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let Some(card) = view.cards.secrets.get_mut(&request) else {
+        let bot = self.bot_id;
+        let Some(card) = self.cards.secrets.get_mut(&request) else {
             return;
         };
         let Some(form) = card.form.as_ref().filter(|_| !card.request.busy()) else {
@@ -161,10 +154,14 @@ impl ElseApp {
         let Some(attempt) = card.request.begin(()) else {
             return;
         };
+        let app = self.app.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_secret(bot, request, env).await;
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
             let _ = this.update_in(cx, |app, window, cx| {
-                app.secret_answered(bot, request, attempt, result, window, cx)
+                app.secret_answered(request, attempt, result, window, cx)
             });
         });
         task.detach();
@@ -173,7 +170,6 @@ impl ElseApp {
 
     fn secret_answered(
         &mut self,
-        bot: Uuid,
         request: Uuid,
         attempt: Uuid,
         result: Result<(), ClientError>,
@@ -181,19 +177,15 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         let settled = self
-            .view_of(bot)
-            .and_then(|view| view.cards.secrets.get_mut(&request))
+            .cards
+            .secrets
+            .get_mut(&request)
             .is_some_and(|card| card.request.settle(attempt, &result));
-        let rejected = result
-            .as_ref()
-            .is_err_and(|err| self.unauthorized(err, window, cx));
+        let rejected = matches!(result, Err(ClientError::Unauthorized));
         if rejected || !settled {
             return;
         }
-        let Some(card) = self
-            .view_of(bot)
-            .and_then(|view| view.cards.secrets.get_mut(&request))
-        else {
+        let Some(card) = self.cards.secrets.get_mut(&request) else {
             return;
         };
         if result.is_ok() {
@@ -210,10 +202,7 @@ impl ElseApp {
     }
 
     pub(super) fn render_secret_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(request) = view
+        let Some(request) = self
             .conversation
             .as_ref()
             .and_then(|c| c.secret_request(id))
@@ -222,9 +211,10 @@ impl ElseApp {
         };
         let theme = cx.theme().clone();
         let bot_name = self
+            .inputs
             .bots
             .iter()
-            .find(|b| b.id == view.bot_id)
+            .find(|b| b.id == self.bot_id)
             .map(|b| b.name.clone())
             .unwrap_or_default();
         let note = |text: String| {
@@ -235,7 +225,7 @@ impl ElseApp {
                 .child(text)
         };
         let row = v_flex().w_full();
-        let card_state = view.cards.secrets.get(&id);
+        let card_state = self.cards.secrets.get(&id);
         let form = card_state.and_then(|card| card.form.as_ref());
         let (Some(form), Some(card_state), true) = (form, card_state, request.is_pending()) else {
             let text = match request.status {
@@ -254,7 +244,7 @@ impl ElseApp {
             return row.child(note(text)).into_any_element();
         };
         let sending = card_state.request.busy();
-        let busy = sending || self.connection != Connection::Connected;
+        let busy = sending || !self.inputs.connected;
         let fields = v_flex()
             .w_full()
             .gap_2()
@@ -269,7 +259,7 @@ impl ElseApp {
                 text_field(Input::new(&form.website).aria_label("Website host"), cx).disabled(busy),
             )
             .child(form.fields.clone());
-        let expanded = view.expanded_events.contains(&id);
+        let expanded = self.expanded_events.contains(&id);
         let mut card = super::action_card::card(
             IconName::Lock,
             format!(
@@ -315,10 +305,8 @@ impl ElseApp {
                         "About saving credentials"
                     })
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(view) = app.view.as_mut()
-                            && !view.expanded_events.remove(&id)
-                        {
-                            view.expanded_events.insert(id);
+                        if !app.expanded_events.remove(&id) {
+                            app.expanded_events.insert(id);
                         }
                         app.remeasure_row(super::RowKey::Card(CardKey::SecretRequest(id)), cx);
                     })),
@@ -347,7 +335,7 @@ impl ElseApp {
         if sending {
             card
         } else {
-            self.sighted(RowKey::Card(CardKey::SecretRequest(id)), card, cx)
+            self.sighted(RowKey::Card(CardKey::SecretRequest(id)), card)
         }
     }
 }

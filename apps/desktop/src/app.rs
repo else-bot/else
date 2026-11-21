@@ -253,7 +253,9 @@ pub(crate) fn on_commands<E: InteractiveElement>(element: E, app: &Entity<ElseAp
             app.open_delete_dialog(id, window, cx);
         }
     });
-    let element = on::<LoadOlder, _>(element, app, |app, window, cx| app.load_older(window, cx));
+    let element = on::<LoadOlder, _>(element, app, |app, window, cx| {
+        app.update_view(cx, |view, cx| view.load_older(window, cx));
+    });
     let element =
         on::<FindInConversation, _>(element, app, |app, window, cx| app.open_find(window, cx));
     let element = on::<NewCategory, _>(element, app, |app, window, cx| {
@@ -357,9 +359,9 @@ pub struct ElseApp {
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
     selected: Option<Uuid>,
-    view: Option<ConversationView>,
+    view: Option<Entity<ConversationView>>,
     /// Bots' views kept after switching away.
-    warm: warm::Warm<ConversationView>,
+    warm: warm::Warm<Entity<ConversationView>>,
     /// Starts preloading a bot's view once the pointer rests on it.
     _preload: Option<(Uuid, Task<()>)>,
     saved: Option<crate::saved_conversations::SavedConversations>,
@@ -460,6 +462,9 @@ impl ElseApp {
         let bounds =
             cx.observe_window_bounds(window, |app, window, cx| app.check_reading(window, cx));
         let panels = cx.observe_self(|app, cx| app.sync_panel_inputs(cx));
+        let transcript = cx.observe_in(&cx.entity(), window, |app, _, window, cx| {
+            app.sync_view_inputs(window, cx)
+        });
         let mut app = Self {
             client,
             connection: Connection::Connecting,
@@ -519,6 +524,7 @@ impl ElseApp {
                 visibility,
                 bounds,
                 panels,
+                transcript,
             ],
         };
         app.start_live(window, cx);
@@ -590,31 +596,31 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                self.sync_skill_cards(window, cx);
-                self.sync_secret_cards(window, cx);
-                self.sync_social_cards(window, cx);
-                self.warm.for_each(|view| view.stream_problem = None);
-                if let Some(view) = self.view.as_mut() {
-                    view.stream_problem = None;
-                    if view.conversation.is_none() {
-                        self.load_conversation(window, cx);
-                    }
+                for view in self.warm.iter() {
+                    view.update(cx, |view, _| view.stream_problem = None);
+                }
+                let cold = self.view.as_ref().is_some_and(|view| {
+                    view.update(cx, |view, _| {
+                        view.stream_problem = None;
+                        view.conversation.is_none()
+                    })
+                });
+                if cold {
+                    self.load_conversation(window, cx);
                 }
                 self.resolve_unknown_sends(window, cx);
                 self.resume_reads(cx);
             }
             LiveEvent::Disconnected(reason) => {
                 self.connection = Connection::Disconnected(reason.clone());
-                if let Some(view) = self.view.as_mut() {
-                    view.stream_problem = Some(format!("Reconnecting… {reason}"));
+                if let Some(view) = &self.view {
+                    view.update(cx, |view, _| {
+                        view.stream_problem = Some(format!("Reconnecting… {reason}"));
+                    });
                 }
-                self.clear_secret_forms(window, cx);
-                self.clear_social_forms(window, cx);
-                self.sync_skill_cards(window, cx);
-                self.sync_secret_cards(window, cx);
             }
             LiveEvent::Unauthorized => {
-                self.unauthorized(&ClientError::Unauthorized, window, cx);
+                self.unauthorized(&ClientError::Unauthorized, cx);
             }
             LiveEvent::ServerPause(pause) => self.set_server_pause(pause, window, cx),
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
@@ -639,7 +645,7 @@ impl ElseApp {
                 self.caps = Some(Arc::new(caps));
             }
             Err(err) => {
-                self.unauthorized(&err, window, cx);
+                self.unauthorized(&err, cx);
             }
         }
         cx.notify();
@@ -648,20 +654,11 @@ impl ElseApp {
     /// On a rejected owner token, marks the connection invalid and clears
     /// every credential form. Returns whether `err` was that rejection, so
     /// the caller stops handling the result.
-    pub(super) fn unauthorized(
-        &mut self,
-        err: &ClientError,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub(super) fn unauthorized(&mut self, err: &ClientError, cx: &mut Context<Self>) -> bool {
         if !matches!(err, ClientError::Unauthorized) {
             return false;
         }
         self.connection = Connection::InvalidCredentials(err.to_string());
-        self.clear_secret_forms(window, cx);
-        self.clear_social_forms(window, cx);
-        self.sync_skill_cards(window, cx);
-        self.sync_secret_cards(window, cx);
         cx.notify();
         true
     }
@@ -807,12 +804,14 @@ impl ElseApp {
                 .map(|bot| self.inbox.seen_through(bot))
         });
         if id == self.selected
-            && let Some(view) = self.view.as_mut()
+            && let Some(view) = self.view.clone()
         {
-            if view.unread.is_none()
+            if view.read(cx).unread.is_none()
                 && let Some(since) = unread_since
             {
-                view.unread = Some(conversation::Unread::since(since));
+                view.update(cx, |view, _| {
+                    view.unread = Some(conversation::Unread::since(since));
+                });
                 self.sync_rows(window, cx);
             }
             return;
@@ -845,11 +844,11 @@ impl ElseApp {
             state.set_placeholder(placeholder, window, cx);
         });
         self.notice = None;
-        self.clear_secret_forms(window, cx);
-        self.clear_social_forms(window, cx);
-        self.swap_view(id, cx);
-        if let Some(view) = self.view.as_mut() {
-            view.unread = unread_since.map(conversation::Unread::since);
+        self.swap_view(id, window, cx);
+        if let Some(view) = &self.view {
+            view.update(cx, |view, _| {
+                view.unread = unread_since.map(conversation::Unread::since);
+            });
         }
         self.ensure_settings(window, cx);
         if id.is_some() {
@@ -920,7 +919,7 @@ impl ElseApp {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.drafts.remove(&bot);
-        self.paint_quotes(cx);
+        cx.notify();
     }
 
     fn enqueue(
@@ -949,7 +948,7 @@ impl ElseApp {
             SendKind::Reaction(reaction) => (Some(reaction), None),
         };
         let open_draft = if reaction.is_none() {
-            self.outgoing_attachment(cx)
+            self.shown(cx).and_then(|view| view.outgoing_attachment(cx))
         } else {
             None
         };
@@ -1019,10 +1018,18 @@ impl ElseApp {
 
     fn accept_sent(&mut self, bot: Uuid, sent: Sent, window: &mut Window, cx: &mut Context<Self>) {
         let Sent { item, turn } = sent;
-        if let Some(conversation) = self.view_of(bot).and_then(|v| v.conversation.as_mut()) {
-            conversation.insert_item(item);
-            conversation.insert_turn(turn);
-            self.prune_pending(bot);
+        let inserted = self.view_of(bot, cx).is_some_and(|view| {
+            view.update(cx, |view, _| {
+                let Some(conversation) = view.conversation.as_mut() else {
+                    return false;
+                };
+                conversation.insert_item(item.clone());
+                conversation.insert_turn(turn);
+                true
+            })
+        });
+        if inserted {
+            self.prune_pending(bot, cx);
         } else if let Some(list) = self.pending.get_mut(&bot) {
             list.retain(|p| Some(p.request_id) != item.request_id);
         }

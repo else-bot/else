@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::ElseApp;
 use super::conversation::{ConversationView, Load};
 use crate::api::LiveCommand;
+use crate::model::Conversation;
 
 /// How many conversations a server keeps besides the shown one.
 const WARM_VIEWS: usize = 8;
@@ -51,15 +52,8 @@ impl<V> Warm<V> {
             .map(|(_, view)| view)
     }
 
-    pub(super) fn get_mut(&mut self, bot: Uuid) -> Option<&mut V> {
-        self.views
-            .iter_mut()
-            .find(|(id, _)| *id == bot)
-            .map(|(_, view)| view)
-    }
-
-    pub(super) fn for_each(&mut self, f: impl FnMut(&mut V)) {
-        self.views.iter_mut().map(|(_, view)| view).for_each(f);
+    pub(super) fn iter(&self) -> impl Iterator<Item = &V> {
+        self.views.iter().map(|(_, view)| view)
     }
 
     pub(super) fn contains(&self, bot: Uuid) -> bool {
@@ -84,68 +78,94 @@ pub(super) enum Resume {
 
 impl ConversationView {
     pub(super) fn resume(&self) -> Resume {
-        match (&self.load, &self.conversation) {
-            (Load::Running { .. }, _) => Resume::Wait,
-            (Load::Settled, Some(conversation)) if !conversation.is_saved() => {
-                Resume::Follow(conversation.cursor())
-            }
-            _ => Resume::Load,
+        resume(&self.load, self.conversation.as_ref())
+    }
+}
+
+fn resume(load: &Load, conversation: Option<&Conversation>) -> Resume {
+    match (load, conversation) {
+        (Load::Running { .. }, _) => Resume::Wait,
+        (Load::Settled, Some(conversation)) if !conversation.is_saved() => {
+            Resume::Follow(conversation.cursor())
         }
+        _ => Resume::Load,
     }
 }
 
 impl ElseApp {
-    pub(super) fn shows(&self, bot: Uuid) -> bool {
-        self.view.as_ref().is_some_and(|view| view.bot_id == bot)
+    pub(super) fn shows(&self, bot: Uuid, cx: &App) -> bool {
+        self.shown_bot(cx) == Some(bot)
     }
 
-    pub(super) fn view_of(&mut self, bot: Uuid) -> Option<&mut ConversationView> {
-        match self.view.as_mut() {
-            Some(view) if view.bot_id == bot => Some(view),
-            _ => self.warm.get_mut(bot),
+    pub(super) fn shown_bot(&self, cx: &App) -> Option<Uuid> {
+        self.view.as_ref().map(|view| view.read(cx).bot_id)
+    }
+
+    pub(super) fn shown<'a>(&self, cx: &'a App) -> Option<&'a ConversationView> {
+        self.view.as_ref().map(|view| view.read(cx))
+    }
+
+    pub(super) fn update_view<R>(
+        &self,
+        cx: &mut App,
+        f: impl FnOnce(&mut ConversationView, &mut Context<ConversationView>) -> R,
+    ) -> Option<R> {
+        self.view.as_ref().map(|view| {
+            view.update(cx, |view, cx| {
+                let result = f(view, cx);
+                cx.notify();
+                result
+            })
+        })
+    }
+
+    pub(super) fn view_of(&self, bot: Uuid, cx: &App) -> Option<Entity<ConversationView>> {
+        match &self.view {
+            Some(view) if view.read(cx).bot_id == bot => Some(view.clone()),
+            _ => self.warm.get(bot).cloned(),
         }
     }
 
-    pub(super) fn swap_view(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
+    pub(super) fn swap_view(
+        &mut self,
+        bot: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Taken before parking the shown view, which could evict it.
         let next = bot.map(|bot| {
             self.warm
                 .take(bot)
                 .unwrap_or_else(|| self.new_view(bot, cx))
         });
-        if let Some(mut old) = std::mem::replace(&mut self.view, next) {
-            self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
-            old.park();
-            self.warm.keep(old.bot_id, old);
+        if let Some(next) = &next {
+            next.update(cx, |view, _| view.show());
+        }
+        if let Some(old) = std::mem::replace(&mut self.view, next) {
+            let bot = old.update(cx, |view, cx| {
+                view.clear_secret_forms(window, cx);
+                view.clear_social_forms(window, cx);
+                view.park();
+                view.bot_id
+            });
+            self.live_command(LiveCommand::Unsubscribe { bot });
+            self.warm.keep(bot, old);
         }
     }
 
-    fn new_view(&self, bot: Uuid, cx: &mut Context<Self>) -> ConversationView {
-        let view = ConversationView::new(bot);
-        let this = cx.entity().downgrade();
-        view.list.set_scroll_handler(move |_, window, cx| {
-            let _ = this.update(cx, |app, cx| {
-                // The owner scrolled, so an exchange still laying out
-                // no longer moves the view when it lands.
-                if let Some(view) = app.view.as_mut() {
-                    view.landing = None;
-                }
-                app.check_reading(window, cx)
-            });
-        });
-        view
+    fn new_view(&self, bot: Uuid, cx: &mut Context<Self>) -> Entity<ConversationView> {
+        let (app, client) = (cx.entity().downgrade(), self.client.clone());
+        let inputs = self.transcript_inputs(bot);
+        cx.new(|cx| ConversationView::new(bot, app, client, inputs, cx))
     }
 
     pub(super) fn resume_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_ref() else {
+        let Some(view) = self.shown(cx) else {
             return;
         };
         let bot = view.bot_id;
         match view.resume() {
-            Resume::Follow(cursor) => self.live_command(LiveCommand::Subscribe {
-                bot: view.bot_id,
-                cursor,
-            }),
+            Resume::Follow(cursor) => self.live_command(LiveCommand::Subscribe { bot, cursor }),
             Resume::Wait => {}
             Resume::Load => self.load_conversation(window, cx),
         }
@@ -172,7 +192,10 @@ impl ElseApp {
     }
 
     fn preload(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shows(bot) || self.warm.contains(bot) || !self.active_bots().any(|b| b.id == bot) {
+        if self.shows(bot, cx)
+            || self.warm.contains(bot)
+            || !self.active_bots().any(|b| b.id == bot)
+        {
             return;
         }
         let view = self.new_view(bot, cx);
@@ -183,7 +206,7 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationView, Load, Resume, Warm};
+    use super::{Load, Resume, Warm, resume};
     use crate::model::Conversation;
     use gpui_kit::Task;
     use uuid::Uuid;
@@ -217,27 +240,34 @@ mod tests {
 
     #[test]
     fn a_view_shown_again_follows_from_its_cursor_unless_it_needs_a_load() {
-        let mut view = ConversationView::new(Uuid::from_u128(1));
-        assert_eq!(view.resume(), Resume::Load, "nothing loaded yet");
-        view.load = Load::Running {
+        assert_eq!(
+            resume(&Load::Settled, None),
+            Resume::Load,
+            "nothing loaded yet"
+        );
+        let running = Load::Running {
             _task: Task::ready(()),
         };
         assert_eq!(
-            view.resume(),
+            resume(&running, None),
             Resume::Wait,
             "its load subscribes on landing"
         );
-        view.load = Load::Settled;
-        view.conversation = Some(Conversation::from_snapshot(page(42)).unwrap());
-        assert_eq!(view.resume(), Resume::Follow("server:bot:42".into()));
-        view.load = Load::Failed { _retry: None };
+        let live = Conversation::from_snapshot(page(42)).unwrap();
         assert_eq!(
-            view.resume(),
+            resume(&Load::Settled, Some(&live)),
+            Resume::Follow("server:bot:42".into())
+        );
+        assert_eq!(
+            resume(&Load::Failed { _retry: None }, Some(&live)),
             Resume::Load,
             "a failed load or a reset reloads"
         );
-        view.load = Load::Settled;
-        view.conversation = Some(Conversation::from_saved(page(42)).unwrap());
-        assert_eq!(view.resume(), Resume::Load, "a saved page is replaced");
+        let saved = Conversation::from_saved(page(42)).unwrap();
+        assert_eq!(
+            resume(&Load::Settled, Some(&saved)),
+            Resume::Load,
+            "a saved page is replaced"
+        );
     }
 }

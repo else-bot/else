@@ -1,3 +1,4 @@
+use super::conversation::ConversationView;
 use super::reply::Feedback as _;
 use super::reply::{Author, MessageReference, Quote};
 use super::{Connection, ElseApp, RowKey};
@@ -13,15 +14,10 @@ use gpui_kit::component::{Disableable as _, Sizable as _, h_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
-impl ElseApp {
-    pub(super) fn message_actions(
-        &self,
-        bot: Uuid,
-        item: Uuid,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let connected = self.connection == Connection::Connected;
-        let owner = cx.entity().downgrade();
+impl ConversationView {
+    pub(super) fn message_actions(&self, bot: Uuid, item: Uuid) -> AnyElement {
+        let connected = self.inputs.connected;
+        let owner = self.app.clone();
         h_flex()
             .gap_1()
             .child(
@@ -71,13 +67,15 @@ impl ElseApp {
                     .icon(IconName::Reply)
                     .tooltip("Reply")
                     .accessibility_label("Reply to message")
-                    .on_click(cx.listener(move |app, _, window, cx| {
+                    .on_click(self.on_app(move |app, _, window, cx| {
                         app.start_reply(bot, item, window, cx);
                     })),
             )
             .into_any_element()
     }
+}
 
+impl ElseApp {
     pub(super) fn message_menu(
         owner: WeakEntity<Self>,
         bot: Uuid,
@@ -138,10 +136,9 @@ impl ElseApp {
         )
     }
 
-    fn reference(&self, bot: Uuid, item: Uuid) -> Option<MessageReference> {
+    fn reference(&self, bot: Uuid, item: Uuid, cx: &App) -> Option<MessageReference> {
         let item = self
-            .view
-            .as_ref()
+            .shown(cx)
             .filter(|v| v.bot_id == bot && self.selected == Some(bot))?
             .conversation
             .as_ref()?
@@ -154,7 +151,7 @@ impl ElseApp {
     }
 
     fn start_reply(&mut self, bot: Uuid, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(reference) = self.reference(bot, item) else {
+        let Some(reference) = self.reference(bot, item, cx) else {
             return;
         };
         self.add_quote(bot, Quote::reply(reference), window, cx);
@@ -172,7 +169,7 @@ impl ElseApp {
             return;
         }
         let Some(reference) = self
-            .reference(bot, item)
+            .reference(bot, item, cx)
             .filter(|r| r.author == Author::Bot)
         else {
             return;
@@ -198,8 +195,7 @@ impl ElseApp {
             return;
         }
         let Some(text) = self
-            .view
-            .as_ref()
+            .shown(cx)
             .filter(|v| v.bot_id == bot)
             .and_then(|v| v.texts.get(&RowKey::Item(item)))
             .map(|row| row.copy_text(cx))

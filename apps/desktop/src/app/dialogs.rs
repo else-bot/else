@@ -87,9 +87,7 @@ impl ElseApp {
                     .welcome
                     .as_mut()
                     .is_some_and(|welcome| welcome.request.settle(attempt, &result));
-                let rejected = result
-                    .as_ref()
-                    .is_err_and(|err| app.unauthorized(err, window, cx));
+                let rejected = result.as_ref().is_err_and(|err| app.unauthorized(err, cx));
                 if rejected || !settled {
                     return;
                 }

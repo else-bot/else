@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::conversation::ConversationView;
 use super::{APP_CONTEXT, ElseApp, TakeOverComputer};
 use crate::api::HandoffAction;
 use else_wire::bots::Bot;
@@ -20,8 +21,8 @@ use else_wire::computers::ComputerHandoff;
 use else_wire::computers::HandoffStatus;
 
 impl ElseApp {
-    fn open_handoff(&self) -> Option<(Uuid, ComputerHandoff)> {
-        let view = self.view.as_ref()?;
+    fn open_handoff(&self, cx: &App) -> Option<(Uuid, ComputerHandoff)> {
+        let view = self.shown(cx)?;
         let handoff = view.conversation.as_ref()?.open_handoff()?.clone();
         Some((view.bot_id, handoff))
     }
@@ -29,7 +30,7 @@ impl ElseApp {
     /// Open the bot's screen in control. The first time, record that the
     /// owner took over; the bot keeps waiting until they hand it back.
     pub(super) fn take_over_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((bot, handoff)) = self.open_handoff() else {
+        let Some((bot, handoff)) = self.open_handoff(cx) else {
             return;
         };
         if self.selected != Some(bot) {
@@ -51,7 +52,7 @@ impl ElseApp {
 
     /// Return control to the bot and let its waiting turn continue.
     fn hand_back_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((bot, handoff)) = self.open_handoff() else {
+        let Some((bot, handoff)) = self.open_handoff(cx) else {
             return;
         };
         if let Some(computer) = self.details.computer().cloned() {
@@ -71,10 +72,10 @@ impl ElseApp {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.settle_handoff(bot, handoff, action).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update(cx, |app, cx| {
                 match result {
                     Ok(()) => return,
-                    Err(err) if app.unauthorized(&err, window, cx) => {}
+                    Err(err) if app.unauthorized(&err, cx) => {}
                     Err(err) => app.notice = Some(err.to_string()),
                 }
                 cx.notify();
@@ -97,7 +98,7 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (bot_id, handoff) = self.open_handoff().filter(|(id, _)| *id == bot.id)?;
+        let (bot_id, handoff) = self.open_handoff(cx).filter(|(id, _)| *id == bot.id)?;
         let taken = handoff.status == HandoffStatus::Taken;
         let theme = cx.theme();
         let connected = self.connection == super::Connection::Connected;
@@ -178,7 +179,7 @@ impl ElseApp {
     /// Beside the expanded screen while the owner holds it: what the bot
     /// asked for, and Hand back.
     pub(super) fn render_handoff_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (bot_id, handoff) = self.open_handoff()?;
+        let (bot_id, handoff) = self.open_handoff(cx)?;
         if handoff.status != HandoffStatus::Taken || self.selected != Some(bot_id) {
             return None;
         }
@@ -247,12 +248,11 @@ impl ElseApp {
                 .into_any_element(),
         )
     }
+}
 
+impl ConversationView {
     pub(super) fn render_handoff_row(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return div().into_any_element();
-        };
-        let Some(handoff) = view
+        let Some(handoff) = self
             .conversation
             .as_ref()
             .and_then(|c| c.computer_handoff(id))
@@ -261,9 +261,10 @@ impl ElseApp {
         };
         let theme = cx.theme();
         let name = self
+            .inputs
             .bots
             .iter()
-            .find(|b| b.id == view.bot_id)
+            .find(|b| b.id == self.bot_id)
             .map_or("The bot", |b| b.name.as_str());
         let outcome = match handoff.status {
             HandoffStatus::Pending => "Waiting",

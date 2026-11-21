@@ -398,7 +398,7 @@ impl ElseApp {
             let answer = client.recheck_provider(id.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 if let Err(err) = &answer {
-                    app.unauthorized(err, window, cx);
+                    app.unauthorized(err, cx);
                 }
                 if let (Ok(info), Some(caps)) = (&answer, app.caps.as_mut())
                     && let Some(slot) = Arc::make_mut(caps)

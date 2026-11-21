@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier, text_field};
 use else_wire::email::EmailProvider;
@@ -33,13 +34,10 @@ enum Phase {
     Cancelled,
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(in crate::app) fn sync_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let conversation = view.conversation.as_ref();
-        let missing = view
+        let conversation = self.conversation.as_ref();
+        let missing = self
             .rows
             .iter()
             .filter_map(|row| {
@@ -47,7 +45,7 @@ impl ElseApp {
                     return None;
                 };
                 let question = conversation?.question(id)?;
-                if !question.is_pending() || view.cards.connection(id).is_some() {
+                if !question.is_pending() || self.cards.connection(id).is_some() {
                     return None;
                 }
                 Some((id, Consent::of(question)?))
@@ -56,7 +54,7 @@ impl ElseApp {
         for (question, consent) in missing {
             let flow = Flow {
                 client: self.client.clone(),
-                bot: view.bot_id,
+                bot: self.bot_id,
                 question,
                 consent,
             };
@@ -67,7 +65,7 @@ impl ElseApp {
                         .placeholder("App-specific password")
                 })
             });
-            view.cards.question_mut(question).connection = Some(Form {
+            self.cards.question_mut(question).connection = Some(Form {
                 flow,
                 phase: Phase::Checking,
                 request: None,
@@ -75,7 +73,7 @@ impl ElseApp {
                 password,
             });
         }
-        let checking = view
+        let checking = self
             .cards
             .questions
             .iter()
@@ -94,18 +92,14 @@ impl ElseApp {
         flow: &Flow,
         result: Result<Resolution, ClientError>,
         hint: Option<String>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A rejected token still ends the step, as a failed check the owner
         // can repeat once the token is fixed.
         if let Err(err) = &result {
-            self.unauthorized(err, window, cx);
+            self.unauthorized(err, cx);
         }
-        let Some(form) = self
-            .view_of(flow.bot)
-            .and_then(|v| v.cards.connection_mut(flow.question))
-        else {
+        let Some(form) = self.cards.connection_mut(flow.question) else {
             return;
         };
         form.phase = match result {
@@ -119,30 +113,20 @@ impl ElseApp {
     }
 
     fn check_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self
-            .view
-            .as_mut()
-            .and_then(|v| v.cards.connection_mut(question))
-        else {
+        let Some(form) = self.cards.connection_mut(question) else {
             return;
         };
         form.phase = Phase::Checking;
         let flow = form.flow.clone();
         form.request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = flow.recover().await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.resolved(&flow, result, None, window, cx)
-            });
+            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn activate_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self
-            .view
-            .as_mut()
-            .and_then(|v| v.cards.connection_mut(question))
-        else {
+        let Some(form) = self.cards.connection_mut(question) else {
             return;
         };
         match form.phase {
@@ -154,9 +138,7 @@ impl ElseApp {
                 let flow = form.flow.clone();
                 form.request = Some(cx.spawn_in(window, async move |this, cx| {
                     let result = flow.confirm().await;
-                    let _ = this.update_in(cx, |app, window, cx| {
-                        app.resolved(&flow, result, None, window, cx)
-                    });
+                    let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
                 }));
                 self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
             }
@@ -165,11 +147,7 @@ impl ElseApp {
     }
 
     fn sign_in(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self
-            .view
-            .as_mut()
-            .and_then(|v| v.cards.connection_mut(question))
-        else {
+        let Some(form) = self.cards.connection_mut(question) else {
             return;
         };
         form.phase = Phase::SigningIn;
@@ -181,18 +159,13 @@ impl ElseApp {
                 let opened = this
                     .update(cx, |app, cx| {
                         let pending = app
-                            .view
+                            .conversation
                             .as_ref()
-                            .filter(|v| v.bot_id == flow.bot)
-                            .and_then(|v| v.conversation.as_ref())
                             .and_then(|c| c.question(question))
                             .is_some_and(Question::is_pending);
                         if pending {
                             cx.open_url(signin.url());
-                            if let Some(form) = app
-                                .view_of(flow.bot)
-                                .and_then(|v| v.cards.connection_mut(question))
-                            {
+                            if let Some(form) = app.cards.connection_mut(question) {
                                 form.signin_url = Some(signin.url().to_owned());
                             }
                         }
@@ -207,9 +180,7 @@ impl ElseApp {
                 signin
                     .complete(|| {
                         this.update(cx, |app, cx| {
-                            let Some(view) = app.view_of(flow.bot) else {
-                                return false;
-                            };
+                            let view = app;
                             if !view
                                 .conversation
                                 .as_ref()
@@ -221,7 +192,7 @@ impl ElseApp {
                             if let Some(form) = view.cards.connection_mut(question) {
                                 form.phase = Phase::Exchanging;
                             }
-                            app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
+                            view.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
                             true
                         })
                         .unwrap_or(false)
@@ -232,10 +203,7 @@ impl ElseApp {
             let (result, hint) = match signin {
                 Ok(()) => {
                     let _ = this.update(cx, |app, cx| {
-                        if let Some(form) = app
-                            .view_of(flow.bot)
-                            .and_then(|v| v.cards.connection_mut(question))
-                        {
+                        if let Some(form) = app.cards.connection_mut(question) {
                             form.phase = Phase::Confirming;
                         }
                         app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
@@ -244,19 +212,13 @@ impl ElseApp {
                 }
                 Err(error) => (flow.recover().await, Some(error.to_string())),
             };
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.resolved(&flow, result, hint, window, cx)
-            });
+            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn save_password(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self
-            .view
-            .as_mut()
-            .and_then(|v| v.cards.connection_mut(question))
-        else {
+        let Some(form) = self.cards.connection_mut(question) else {
             return;
         };
         let Some(input) = form.password.clone() else {
@@ -275,10 +237,7 @@ impl ElseApp {
                 Ok(()) => {
                     let _ = this.update_in(cx, |app, window, cx| {
                         input.update(cx, |state, cx| state.set_value("", window, cx));
-                        if let Some(form) = app
-                            .view_of(flow.bot)
-                            .and_then(|v| v.cards.connection_mut(question))
-                        {
+                        if let Some(form) = app.cards.connection_mut(question) {
                             form.phase = Phase::Confirming;
                         }
                         app.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
@@ -287,18 +246,15 @@ impl ElseApp {
                 }
                 Err(error) => (flow.recover().await, Some(error.to_string())),
             };
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.resolved(&flow, result, hint, window, cx)
-            });
+            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
 
     fn reopen_signin(&mut self, question: Uuid, cx: &mut Context<Self>) {
         let url = self
-            .view
-            .as_ref()
-            .and_then(|v| v.cards.connection(question))
+            .cards
+            .connection(question)
             .filter(|form| matches!(form.phase, Phase::SigningIn))
             .and_then(|form| form.signin_url.clone());
         if let Some(url) = url {
@@ -307,11 +263,7 @@ impl ElseApp {
     }
 
     fn cancel_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self
-            .view
-            .as_mut()
-            .and_then(|v| v.cards.connection_mut(question))
-        else {
+        let Some(form) = self.cards.connection_mut(question) else {
             return;
         };
         if !matches!(
@@ -327,9 +279,7 @@ impl ElseApp {
                 Resolution::Recorded => Resolution::Cancelled,
                 other => other,
             });
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.resolved(&flow, result, None, window, cx)
-            });
+            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
         self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
     }
@@ -343,9 +293,10 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let id = question.id;
         let expanded = self
-            .view
-            .as_ref()
-            .is_some_and(|v| v.cards.questions.get(&id).is_some_and(|card| card.expanded));
+            .cards
+            .questions
+            .get(&id)
+            .is_some_and(|card| card.expanded);
         let note = |text: SharedString| {
             div()
                 .text_xs()
@@ -406,7 +357,7 @@ impl ElseApp {
             }
             return card.into_any_element();
         }
-        let form = self.view.as_ref().and_then(|v| v.cards.connection(id));
+        let form = self.cards.connection(id);
         let phase = form.map_or(&Phase::Checking, |f| &f.phase);
         let error = match phase {
             Phase::Ready(Some(error))
@@ -569,7 +520,7 @@ impl ElseApp {
                     )),
             );
         }
-        let locked = self.connection != Connection::Connected;
+        let locked = !self.inputs.connected;
         if let Some(input) = password {
             let editable = !locked && matches!(phase, Phase::Ready(_));
             let help = question
@@ -669,7 +620,7 @@ fn password_field(
     input: &Entity<InputState>,
     editable: bool,
     help: Option<AppPasswordHelp>,
-    cx: &mut Context<ElseApp>,
+    cx: &mut Context<ConversationView>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     v_flex()

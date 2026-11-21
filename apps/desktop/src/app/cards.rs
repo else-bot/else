@@ -1,4 +1,3 @@
-use super::ElseApp;
 use super::draft_card::{DraftForm, DraftImages};
 use super::question_card::choice::WriteIn;
 use super::question_card::connection::Form as ConnectionForm;
@@ -7,6 +6,7 @@ use super::request::Request;
 use super::secret_card::SecretForm;
 use super::skill_card::SkillCard;
 use super::social_card::SocialCard;
+use crate::app::conversation::ConversationView;
 use gpui_kit::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -91,7 +91,7 @@ impl Cards {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     /// Brings each card's state in line with the shown conversation.
     pub(super) fn sync_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_skill_cards(window, cx);

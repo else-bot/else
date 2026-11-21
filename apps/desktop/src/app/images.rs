@@ -4,6 +4,7 @@ pub(super) use viewer::ImageViewer;
 
 use super::{ElseApp, RowKey};
 use crate::api::Client;
+use crate::app::conversation::ConversationView;
 use else_wire::items::Attachment;
 use else_wire::items::MessagePart;
 use gpui_kit::assets::IconName;
@@ -476,16 +477,16 @@ impl Render for MessageImages {
     }
 }
 
-impl ElseApp {
+impl ConversationView {
     pub(super) fn message_images(
         client: Arc<Client>,
         key: RowKey,
         bot: Uuid,
+        owner: WeakEntity<ElseApp>,
         parts: &[MessagePart],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Entity<MessageImages>, Subscription) {
-        let owner = cx.entity().downgrade();
         let images = cx.new(|cx| {
             let mut gallery = MessageImages::new(client, bot, owner);
             gallery.sync(parts, cx);

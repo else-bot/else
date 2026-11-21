@@ -1,4 +1,5 @@
-use super::{Connection, ElseApp};
+use crate::api::ClientError;
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use else_wire::notices::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
@@ -8,7 +9,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::*;
 use uuid::Uuid;
 
-impl ElseApp {
+impl ConversationView {
     fn dismiss_owner_notice(
         &mut self,
         bot: Uuid,
@@ -16,23 +17,24 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.dismiss_owner_notice(bot, notice).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
+            let _ = this.update_in(cx, |view, window, cx| {
                 match result {
                     Ok(notice) => {
-                        if let Some(view) = app.view_of(bot)
-                            && let Some(c) = view.conversation.as_mut()
-                        {
+                        if let Some(c) = view.conversation.as_mut() {
                             c.apply_owner_notice(notice);
                         }
-                        app.sync_rows(window, cx);
+                        view.sync_rows(window, cx);
                     }
-                    Err(err) if app.unauthorized(&err, window, cx) => {}
+                    Err(ClientError::Unauthorized) => {}
                     // The owner's message settled it first; the stream shows that.
                     Err(err) if err.code() == Some("owner_notice_settled") => {}
-                    Err(err) => app.notice = Some(err.to_string()),
+                    Err(err) => view.notice(err.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -45,13 +47,13 @@ impl ElseApp {
         id: Uuid,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let view = self.view.as_ref()?;
-        let c = view.conversation.as_ref()?;
+        let c = self.conversation.as_ref()?;
         let notice = c.owner_notice(id)?;
         if notice.status == OwnerNoticeStatus::Superseded {
             return None;
         }
         let name = self
+            .inputs
             .bots
             .iter()
             .find(|b| b.id == notice.bot_id)
@@ -62,9 +64,9 @@ impl ElseApp {
             .map(|task| &task.sender_name);
         // A received task's ask is its own row. Right under its exchange,
         // the exchange's header names the task; further down, the card does.
-        let here = view.row_index(super::RowKey::Card(CardKey::OwnerNotice(id)));
+        let here = self.row_index(super::RowKey::Card(CardKey::OwnerNotice(id)));
         let exchange =
-            receipt.and_then(|r| Some((r.id, view.row_index(super::RowKey::Item(r.id))?)));
+            receipt.and_then(|r| Some((r.id, self.row_index(super::RowKey::Item(r.id))?)));
         let below = exchange.is_some_and(|(_, ix)| here == Some(ix + 1));
         let subtitle = sender
             .filter(|_| !below)
@@ -109,8 +111,8 @@ impl ElseApp {
             OwnerNoticeKind::Other(_) => format!("{name} needs you"),
         };
         let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
-        let connected = self.connection == Connection::Connected;
-        let here = self.view.as_ref().is_some_and(|view| view.bot_id == bot);
+        let connected = self.inputs.connected;
+        let here = self.bot_id == bot;
         let button = |action: &str, label: String, tier: Tier, disabled: bool| {
             Button::new(SharedString::from(format!("notice-{id}-{action}")))
                 .control(tier, Scale::Compact, disabled, cx)
@@ -137,7 +139,7 @@ impl ElseApp {
             .child({
                 let summary = notice.summary.clone();
                 button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
-                    cx.listener(move |app, _, window, cx| {
+                    self.on_app(move |app, _, window, cx| {
                         // The asking bot answers in its own chat. The reply
                         // quotes the ask, and settles only it where the
                         // server can.

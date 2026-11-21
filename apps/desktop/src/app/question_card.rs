@@ -5,6 +5,7 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
 use else_wire::questions::{Question, QuestionAnswer, QuestionKind, QuestionStatus, QuestionUse};
@@ -24,7 +25,7 @@ use uuid::Uuid;
 use super::card_markdown::{self, CardText};
 use super::message_row::CardPlacement;
 use super::request::Request;
-use super::{Connection, ElseApp, RowKey};
+use super::{ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY};
 
@@ -124,32 +125,27 @@ fn letter(choice_id: &str) -> String {
     choice_id.to_uppercase()
 }
 
-impl ElseApp {
+impl ConversationView {
     fn toggle_question_details(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
-            let card = view.cards.question_mut(id);
-            card.expanded = !card.expanded;
-        }
+        let card = self.cards.question_mut(id);
+        card.expanded = !card.expanded;
         self.remeasure_row(RowKey::Card(CardKey::Question(id)), cx);
     }
 
     /// Keeps one entry per loaded question, and drops what a question
     /// keeps only while it is pending once it settles.
     pub(super) fn sync_question_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let pending: HashMap<Uuid, bool> = view
+        let pending: HashMap<Uuid, bool> = self
             .conversation
             .iter()
             .flat_map(|c| c.questions())
             .map(|q| (q.id, q.is_pending()))
             .collect();
-        view.cards
+        self.cards
             .questions
             .retain(|id, _| pending.contains_key(id));
         for (id, pending) in pending {
-            let card = view.cards.question_mut(id);
+            let card = self.cards.question_mut(id);
             if !pending {
                 card.submit = None;
                 card.scope = None;
@@ -164,11 +160,8 @@ impl ElseApp {
     /// Parses each question context that formats, so its card measures
     /// with the formatted height once the background parse finishes.
     pub(super) fn sync_card_contexts(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
         let mut wanted = Vec::new();
-        for question in view.conversation.iter().flat_map(|c| c.questions()) {
+        for question in self.conversation.iter().flat_map(|c| c.questions()) {
             let Some(context) = &question.context else {
                 continue;
             };
@@ -190,12 +183,12 @@ impl ElseApp {
                 wanted.push(((question.id, Extent::Preview), short));
             }
         }
-        for (id, card) in &mut view.cards.questions {
+        for (id, card) in &mut self.cards.questions {
             card.contexts
                 .retain(|extent, _| wanted.iter().any(|(key, _)| *key == (*id, *extent)));
         }
         for ((id, extent), source) in wanted {
-            let card = view.cards.question_mut(id);
+            let card = self.cards.question_mut(id);
             if card.contexts.contains_key(&extent) {
                 continue;
             }
@@ -217,14 +210,7 @@ impl ElseApp {
         code_background: Hsla,
         cx: &App,
     ) -> Option<AnyElement> {
-        let context = self
-            .view
-            .as_ref()?
-            .cards
-            .questions
-            .get(&id)?
-            .contexts
-            .get(&extent)?;
+        let context = self.cards.questions.get(&id)?.contexts.get(&extent)?;
         Some(
             super::row_text::card_markdown_view(&context.state, ink, code_background, cx)
                 .into_any_element(),
@@ -238,20 +224,17 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        let pending = view
+        let (client, app) = (self.client.clone(), self.app.clone());
+        let bot = self.bot_id;
+        let pending = self
             .conversation
             .as_ref()
             .and_then(|c| c.question(question))
             .is_some_and(Question::is_pending);
-        if !pending || view.cards.submit(question).is_some_and(QuestionForm::locks) {
+        if !pending || self.cards.submit(question).is_some_and(QuestionForm::locks) {
             return;
         }
-        let card = view.cards.question_mut(question);
+        let card = self.cards.question_mut(question);
         card.expanded = false;
         let form = card.submit.insert(QuestionForm {
             answer: answer.clone(),
@@ -262,8 +245,11 @@ impl ElseApp {
         };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_question(bot, question, answer).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.question_answered(bot, question, attempt, result, window, cx)
+            if let Err(err) = &result {
+                super::settings::report_unauthorized(&app, err, cx);
+            }
+            let _ = this.update(cx, |app, cx| {
+                app.question_answered(question, attempt, result, cx)
             });
         });
         task.detach();
@@ -272,16 +258,16 @@ impl ElseApp {
 
     fn question_answered(
         &mut self,
-        bot: Uuid,
         question: Uuid,
         attempt: Uuid,
         result: Result<(), ClientError>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let settled = self
-            .view_of(bot)
-            .and_then(|view| view.cards.questions.get_mut(&question)?.submit.as_mut())
+            .cards
+            .questions
+            .get_mut(&question)
+            .and_then(|card| card.submit.as_mut())
             .is_some_and(|submit| {
                 submit.state.settle_as(attempt, &result, |err| match err {
                     ClientError::Api { code, message, .. } if code == "routine_changed" => {
@@ -294,9 +280,7 @@ impl ElseApp {
                     err => err.to_string(),
                 })
             });
-        let rejected = result
-            .as_ref()
-            .is_err_and(|err| self.unauthorized(err, window, cx));
+        let rejected = matches!(result, Err(ClientError::Unauthorized));
         if rejected || !settled {
             return;
         }
@@ -310,17 +294,15 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
+        let Some(question) = self.conversation.as_ref().and_then(|c| c.question(id)) else {
             return div().into_any_element();
         };
-        let Some(question) = view.conversation.as_ref().and_then(|c| c.question(id)) else {
-            return div().into_any_element();
-        };
-        let submit = view.cards.submit(id);
+        let submit = self.cards.submit(id);
         let bot_name = self
+            .inputs
             .bots
             .iter()
-            .find(|b| b.id == view.bot_id)
+            .find(|b| b.id == self.bot_id)
             .map(|b| b.name.clone())
             .unwrap_or_default();
         let waiting = question.is_pending() && !submit.is_some_and(QuestionForm::locks);
@@ -332,7 +314,7 @@ impl ElseApp {
             self.render_approval_card(question, submit, &bot_name, cx)
         };
         if waiting {
-            self.sighted(RowKey::Card(CardKey::Question(id)), card, cx)
+            self.sighted(RowKey::Card(CardKey::Question(id)), card)
         } else {
             card
         }
@@ -342,8 +324,8 @@ impl ElseApp {
 impl ElseApp {
     /// The conversation rows still waiting on the owner's answer, in
     /// timeline order: questions, approvals, and credential requests.
-    fn waiting_question_rows(&self) -> Vec<usize> {
-        let Some(view) = self.view.as_ref() else {
+    fn waiting_question_rows(&self, cx: &App) -> Vec<usize> {
+        let Some(view) = self.shown(cx) else {
             return Vec::new();
         };
         let Some(conversation) = view.conversation.as_ref() else {
@@ -374,19 +356,18 @@ impl ElseApp {
     }
 
     fn jump_to_question(&mut self, cx: &mut Context<Self>) {
-        let Some(ix) = self.waiting_question_rows().first().copied() else {
+        let Some(ix) = self.waiting_question_rows(cx).first().copied() else {
             return;
         };
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        view.list.scroll_to(ListOffset {
-            item_ix: ix,
-            offset_in_item: px(0.),
+        self.update_view(cx, |view, cx| {
+            view.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.),
+            });
+            let reveal =
+                super::conversation::Reveal::new(view.rows[ix].key, super::conversation::Spot::Row);
+            view.start_reveal(reveal, cx);
         });
-        let reveal =
-            super::conversation::Reveal::new(view.rows[ix].key, super::conversation::Spot::Row);
-        self.start_reveal(reveal, cx);
     }
 
     /// The strip above the composer while the bot waits on the owner. It
@@ -397,28 +378,27 @@ impl ElseApp {
         bot_name: &str,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let rows = self.waiting_question_rows();
-        let view = self.view.as_ref()?;
+        let rows = self.waiting_question_rows(cx);
+        let view = self.shown(cx)?;
         let mut sightings = view.sightings.0.borrow_mut();
-        let painted = std::mem::take(&mut sightings.painted);
         let viewport = view.list.viewport_bounds();
-        sightings.hidden = rows.iter().any(|ix| {
-            painted
+        let hidden = rows.iter().any(|ix| {
+            sightings
+                .painted
                 .get(&view.rows[*ix].key)
                 .is_some_and(|bounds| shows(*bounds, viewport))
         });
+        sightings.hidden = hidden;
         drop(sightings);
-        if sightings_hide(view) {
+        if hidden {
             return None;
         }
         let waiting = rows.len();
         let first = *rows.first()?;
-        let secret = self.view.as_ref().is_some_and(|view| {
-            matches!(
-                view.rows[first].key,
-                RowKey::Card(CardKey::SecretRequest(_))
-            )
-        });
+        let secret = matches!(
+            view.rows[first].key,
+            RowKey::Card(CardKey::SecretRequest(_))
+        );
         let theme = cx.theme();
         Some(
             h_flex()
@@ -491,8 +471,12 @@ struct Painted {
     hidden: bool,
 }
 
-fn sightings_hide(view: &super::conversation::ConversationView) -> bool {
-    view.sightings.0.borrow().hidden
+impl Sightings {
+    /// Forgets where cards were painted, before the transcript paints anew.
+    /// A cached transcript keeps its last paint, and with it these bounds.
+    pub(super) fn clear(&self) {
+        self.0.borrow_mut().painted.clear();
+    }
 }
 
 /// Whether enough of a card shows inside the conversation viewport to act on.
@@ -501,21 +485,13 @@ fn shows(card: Bounds<Pixels>, viewport: Bounds<Pixels>) -> bool {
     shown >= px(VISIBLE_ENOUGH).min(card.size.height)
 }
 
-impl ElseApp {
+impl ConversationView {
     /// Records where a pausing card was painted. When that flips whether
     /// the paused strip should show, the app renders again to follow it.
-    pub(super) fn sighted(
-        &self,
-        key: RowKey,
-        card: AnyElement,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(view) = self.view.as_ref() else {
-            return card;
-        };
-        let sightings = view.sightings.clone();
-        let list = view.list.clone();
-        let owner = cx.entity().downgrade();
+    pub(super) fn sighted(&self, key: RowKey, card: AnyElement) -> AnyElement {
+        let sightings = self.sightings.clone();
+        let list = self.list.clone();
+        let owner = self.app.clone();
         div()
             .w_full()
             .child(card)
