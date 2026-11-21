@@ -149,8 +149,8 @@ async fn revoke_routine_kind(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, routine_id, kind)): ApiPath<(Uuid, Uuid, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let kind = crate::app::questions::Kind::approval(&kind).ok_or_else(ApiError::not_found)?;
-    revoke_routine_grant(&state, bot_id, routine_id, Some(kind)).await
+    let kind = crate::app::questions::ApprovalKind::parse(&kind).ok_or_else(ApiError::not_found)?;
+    revoke_routine_grant(&state, bot_id, routine_id, Some(kind.into())).await
 }
 
 async fn revoke_routine_grant(

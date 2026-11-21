@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{AppState, Grant, Op, slice, summarize_input};
-use crate::app::questions::{Effect, Kind, TaskScope};
+use crate::app::questions::{ApprovalKind, Effect, TaskScope};
 use crate::computers::browser_refs::RefLabel;
 use crate::http::tool_defs::{Call, ToolDef};
 use crate::http::tool_result::{self, Refusal, ToolResult};
@@ -226,7 +226,7 @@ pub(crate) async fn approve(
     grant: &Grant,
     name: &str,
     args: &Value,
-    kind: Kind,
+    kind: ApprovalKind,
 ) -> Result<Option<&'static str>, Refusal> {
     let label = match (name, args["selector"].as_str(), state.computers.manager()) {
         ("computer_browser", Some(selector), Some(computers)) => {
@@ -244,7 +244,7 @@ pub(crate) async fn approve_card(
     grant: &Grant,
     name: &str,
     args: &Value,
-    kind: Kind,
+    kind: ApprovalKind,
     title: String,
     context: String,
 ) -> Result<Option<&'static str>, Refusal> {

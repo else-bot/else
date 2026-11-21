@@ -81,7 +81,7 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
     assert_eq!(parked.status, StatusCode::CONFLICT, "the attempt must end");
     let args = send_args();
     let spec = else_api::app::questions::Spec::tool_approval(
-        else_api::app::questions::Kind::External,
+        else_api::app::questions::ApprovalKind::External,
         "computer_run",
         &args,
         None,

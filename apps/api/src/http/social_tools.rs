@@ -3,7 +3,7 @@ use super::owner_tools::{Card, Declined, ask};
 use super::tool_defs::Call;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
-    app::questions::{Kind, Spec},
+    app::questions::{ApprovalKind, Spec},
     grants::Grant,
     socials::{store, types::*},
 };
@@ -266,9 +266,9 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         )
         .await?;
         let kind = if matches!(input.command, Command::Delete { .. }) {
-            Kind::Destructive
+            ApprovalKind::Destructive
         } else {
-            Kind::External
+            ApprovalKind::External
         };
         let spec = Spec::tool_approval(
             kind,
