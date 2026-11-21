@@ -612,43 +612,14 @@ impl ElseApp {
                     cx,
                 )
             });
-        let mut actions = h_flex().flex_none().gap_1().items_center().child(
-            Button::new("find-in-conversation")
-                .focus_ring(false)
-                .cursor_pointer()
-                .icon(IconName::Search)
-                .small()
-                .ghost()
-                .accessibility_label("Find in conversation")
-                .tooltip_with_action(
-                    "Find in conversation",
-                    &FindInConversation,
-                    Some(APP_CONTEXT),
-                )
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.update_view(cx, |view, cx| view.open_find(window, cx));
-                })),
-        );
-        if !self.details.open() {
-            actions = actions.child(
-                Button::new("toggle-settings")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .icon(IconName::PanelRightOpen)
-                    .small()
-                    .ghost()
-                    .accessibility_label("Show bot details")
-                    .tooltip_with_action("Show bot details", &ToggleSettings, Some(APP_CONTEXT))
-                    .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
-            );
-        }
         let main = self.default_bot_id == Some(bot.id);
         h_flex()
             .flex_none()
             .h(HEADER_HEIGHT)
             .border_b_1()
             .border_color(theme.foreground.opacity(0.06))
-            .px_5()
+            .pl_5()
+            .pr(HEADER_END_PADDING)
             .gap_3()
             .items_center()
             .child(self.render_bot_identity_avatar(
@@ -682,7 +653,49 @@ impl ElseApp {
                     ),
             )
             .children(unshown_status)
-            .child(actions)
+            .children((!self.details.open()).then(|| self.header_actions(cx)))
+    }
+
+    /// Find and the details toggle, at the end of whichever header meets the
+    /// window's edge, so a second click on the toggle lands on it again.
+    pub(super) fn header_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (icon, label) = if self.details.open() {
+            (IconName::PanelRightClose, "Hide bot details")
+        } else {
+            (IconName::PanelRightOpen, "Show bot details")
+        };
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .items_center()
+            .child(
+                Button::new("find-in-conversation")
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .icon(IconName::Search)
+                    .small()
+                    .ghost()
+                    .accessibility_label("Find in conversation")
+                    .tooltip_with_action(
+                        "Find in conversation",
+                        &FindInConversation,
+                        Some(APP_CONTEXT),
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.update_view(cx, |view, cx| view.open_find(window, cx));
+                    })),
+            )
+            .child(
+                Button::new("toggle-settings")
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .icon(icon)
+                    .small()
+                    .ghost()
+                    .accessibility_label(label)
+                    .tooltip_with_action(label, &ToggleSettings, Some(APP_CONTEXT))
+                    .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
+            )
     }
 
     fn render_conversation(
@@ -1128,6 +1141,7 @@ fn subtitle(bot: &Bot, main: bool) -> String {
 }
 
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
+pub(super) const HEADER_END_PADDING: Pixels = px(20.);
 /// The transcript list's padding, so a resting transcript starts and ends
 /// with room under the header and above the composer.
 pub(super) const TRANSCRIPT_FADE: Pixels = px(24.);
