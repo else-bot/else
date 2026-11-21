@@ -254,7 +254,7 @@ impl Action {
 
 /// A tool whose calls one standing grant per tool and effect may cover.
 fn computer_tool(tool: &str) -> bool {
-    crate::http::tool_defs::get(tool).is_some_and(|tool| tool.standing)
+    crate::app::tools::ToolDef::named(tool).is_some_and(crate::app::tools::ToolDef::standing_grants)
 }
 
 /// Whether an owner message says only to always allow the card it answers,

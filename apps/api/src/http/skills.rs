@@ -21,8 +21,6 @@ use crate::db::skills::{self, RequestError, Scope, SettleError, Settled, Status}
 use crate::grants::Grant;
 use crate::skills::{FetchError, valid_id};
 
-pub const INSTALL: &str = "skill_install";
-pub const READ: &str = "skill_read";
 const MAX_READ: usize = 64 * 1024;
 
 pub(super) fn install_schema() -> Value {
@@ -141,7 +139,9 @@ pub(super) async fn install(state: &AppState, grant: &Grant, args: &Value) -> To
                 "next": "Tell the owner briefly what the skill does and end this attempt now. Do not \
                          wait, poll, or call more tools; the answer arrives in a continuation.",
             });
-            Ok(Done::json(result).logged(format!("pending {} for {}", card.id, card.skill_id)))
+            Ok(Done::json(result)
+                .parked(true)
+                .logged(format!("pending {} for {}", card.id, card.skill_id)))
         }
         Err(err) => {
             let code = match err {
@@ -188,7 +188,7 @@ pub(super) async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolR
         .as_u64()
         .and_then(|o| usize::try_from(o).ok())
         .unwrap_or(0);
-    let (from, part) = super::mcp::slice(content, offset, MAX_READ);
+    let (from, part) = super::tool_result::slice(content, offset, MAX_READ);
     let end = from + part.len();
     let mut result = json!({
         "id": skill.id,

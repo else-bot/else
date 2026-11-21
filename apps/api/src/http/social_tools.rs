@@ -1,6 +1,7 @@
 use super::AppState;
 use super::owner_tools::{Card, Declined, ask};
 use super::tool_defs::Call;
+use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
     app::questions::{ApprovalKind, Spec},
@@ -75,7 +76,7 @@ struct Status {
     connection_id: Uuid,
     action_id: Uuid,
 }
-/// The native social tools, each bound to its name in `tool_defs`.
+/// The native social tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(super) enum Op {
     Connect,
@@ -124,7 +125,8 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         } else {
             "The owner settled this setup. Discover social_connections to inspect current access and instructions."
         }
-    })))
+    }))
+    .parked(pending))
 }
 
 async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
@@ -272,7 +274,7 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         };
         let spec = Spec::tool_approval(
             kind,
-            "social_action",
+            ToolId::SocialAction.def(),
             args,
             None,
             format!("{} social action", connection.provider.label()),

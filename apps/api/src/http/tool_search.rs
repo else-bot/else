@@ -5,26 +5,31 @@
 
 use serde_json::{Value, json};
 
-use crate::app::tools::{DEFERRED_TOOLS, TOOL_NAMES};
+use super::tool_defs::definition;
+use crate::app::tools::{DEFERRED_TOOLS, TOOL_NAMES, TOOLS, ToolDef};
+pub use crate::app::tools::{FIND, USE};
 
-pub const FIND: &str = "find_tool";
-pub const USE: &str = "use_tool";
 /// Tools one `find_tool` call returns.
 const MAX_FOUND: usize = 5;
 
-/// The tool definitions a turn lists: the direct ones from `all`, then the
-/// two search tools.
-pub fn listed(all: Vec<Value>) -> Vec<Value> {
-    let mut tools: Vec<Value> = all
-        .into_iter()
-        .filter(|tool| {
-            tool["name"]
-                .as_str()
-                .is_some_and(|name| TOOL_NAMES.contains(&name))
-        })
+/// The tool definitions a turn lists: the direct ones, then the two search
+/// tools.
+pub fn listed() -> Vec<Value> {
+    let mut tools: Vec<Value> = TOOLS
+        .iter()
+        .filter(|tool| tool.is_listed())
+        .map(definition)
         .collect();
     tools.extend(schemas());
     tools
+}
+
+/// The deferred tools' definitions, in row order.
+pub fn deferred() -> impl Iterator<Item = (&'static ToolDef, Value)> {
+    TOOLS
+        .iter()
+        .filter(|tool| !tool.is_listed())
+        .map(|tool| (tool, definition(tool)))
 }
 
 fn schemas() -> [Value; 2] {
@@ -64,10 +69,10 @@ fn schemas() -> [Value; 2] {
     ]
 }
 
-/// The deferred tools from `all` that best match `query`: only the ones it
-/// names exactly when it names any, else by words shared with each tool's
-/// name and description.
-pub fn find(all: &[Value], query: &str) -> Value {
+/// The deferred tools that best match `query`: only the ones it names
+/// exactly when it names any, else by words shared with each tool's name
+/// and description.
+pub fn find(query: &str) -> Value {
     let query = query.to_lowercase();
     let bare = query.trim().trim_start_matches("mcp__elsebot__");
     if TOOL_NAMES.contains(&bare) {
@@ -76,16 +81,15 @@ pub fn find(all: &[Value], query: &str) -> Value {
              prefix: call it directly."
         ) });
     }
+    let all: Vec<(&ToolDef, Value)> = deferred().collect();
     let named: Vec<&Value> = all
         .iter()
-        .filter(|tool| {
-            tool["name"].as_str().is_some_and(|name| {
-                DEFERRED_TOOLS.contains(&name)
-                    && query
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|token| token.trim_start_matches("mcp__elsebot__") == name)
-            })
+        .filter(|(tool, _)| {
+            query
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|token| token.trim_start_matches("mcp__elsebot__") == tool.name)
         })
+        .map(|(_, definition)| definition)
         .collect();
     if !named.is_empty() {
         return json!({ "tools": named });
@@ -96,12 +100,9 @@ pub fn find(all: &[Value], query: &str) -> Value {
         .collect();
     let mut scored: Vec<(usize, &Value)> = all
         .iter()
-        .filter_map(|tool| {
-            let name = tool["name"].as_str()?;
-            if !DEFERRED_TOOLS.contains(&name) {
-                return None;
-            }
-            let description = tool["description"]
+        .filter_map(|(tool, definition)| {
+            let name = tool.name;
+            let description = definition["description"]
                 .as_str()
                 .unwrap_or_default()
                 .to_lowercase();
@@ -118,7 +119,7 @@ pub fn find(all: &[Value], query: &str) -> Value {
                     }
                 })
                 .sum();
-            (score > 0).then_some((score, tool))
+            (score > 0).then_some((score, definition))
         })
         .collect();
     scored.sort_by_key(|a| std::cmp::Reverse(a.0));
@@ -133,21 +134,19 @@ pub fn find(all: &[Value], query: &str) -> Value {
 /// its schema does not declare are refused before dispatch: an undeclared
 /// `effect` would otherwise reach the shared approval path and park the turn
 /// under `use_tool`, a name no provider recognizes as parking.
-pub fn target<'a>(all: &[Value], args: &'a Value) -> Result<(&'a str, &'a Value), &'static str> {
+pub fn target(args: &Value) -> Result<(&'static ToolDef, &Value), &'static str> {
     let name = args["name"].as_str().unwrap_or_default();
-    if TOOL_NAMES.contains(&name) {
-        return Err("That tool is in your tool list: call it directly. Nothing was done.");
-    }
-    if !DEFERRED_TOOLS.contains(&name) {
-        return Err("Name a tool that find_tool returned. Nothing was done.");
-    }
+    let tool = match ToolDef::named(name) {
+        Some(tool) if !tool.is_listed() => tool,
+        Some(_) => return Err(LISTED),
+        None if TOOL_NAMES.contains(&name) => return Err(LISTED),
+        None => return Err("Name a tool that find_tool returned. Nothing was done."),
+    };
     let Value::Object(arguments) = &args["arguments"] else {
         return Err("Give the tool's arguments as an object. Nothing was done.");
     };
-    let declared = all
-        .iter()
-        .find(|tool| tool["name"] == name)
-        .and_then(|tool| tool["inputSchema"]["properties"].as_object());
+    let definition = definition(tool);
+    let declared = definition["inputSchema"]["properties"].as_object();
     if arguments
         .keys()
         .any(|key| declared.is_none_or(|props| !props.contains_key(key)))
@@ -156,20 +155,22 @@ pub fn target<'a>(all: &[Value], args: &'a Value) -> Result<(&'a str, &'a Value)
             "Use only the arguments in the tool's input schema from find_tool. Nothing was done.",
         );
     }
-    Ok((name, &args["arguments"]))
+    Ok((tool, &args["arguments"]))
 }
+
+const LISTED: &str = "That tool is in your tool list: call it directly. Nothing was done.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tools::ToolId;
 
     #[test]
     fn find_returns_matching_deferred_schemas_only() {
-        let all = super::super::tool_defs::definitions();
-        let exact = find(&all, "routine_create");
+        let exact = find("routine_create");
         assert_eq!(exact["tools"][0]["name"], "routine_create");
         assert!(exact["tools"][0]["inputSchema"].is_object());
-        let words = find(&all, "save a recurring schedule");
+        let words = find("save a recurring schedule");
         let names: Vec<&str> = words["tools"]
             .as_array()
             .unwrap()
@@ -178,14 +179,14 @@ mod tests {
             .collect();
         assert!(names.contains(&"routine_create"), "{names:?}");
         assert!(
-            find(&all, "computer_run")["tools"]
+            find("computer_run")["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .all(|t| t["name"] != "computer_run")
         );
-        assert_eq!(find(&all, "zzzz")["available"], json!(DEFERRED_TOOLS));
-        let listed = find(&all, "delegate");
+        assert_eq!(find("zzzz")["available"], json!(DEFERRED_TOOLS));
+        let listed = find("delegate");
         assert!(
             listed["listed"]
                 .as_str()
@@ -196,9 +197,8 @@ mod tests {
 
     #[test]
     fn find_returns_only_the_deferred_tools_a_query_names() {
-        let all = super::super::tool_defs::definitions();
         let names = |query: &str| -> Vec<String> {
-            find(&all, query)["tools"]
+            find(query)["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -219,31 +219,29 @@ mod tests {
 
     #[test]
     fn use_tool_runs_only_deferred_tools_with_declared_arguments() {
-        let all = super::super::tool_defs::definitions();
         assert_eq!(
-            target(&all, &json!({ "name": "routine_list", "arguments": {} })),
-            Ok(("routine_list", &json!({})))
+            target(&json!({ "name": "routine_list", "arguments": {} }))
+                .map(|(tool, args)| (tool.id, args)),
+            Ok((ToolId::RoutineList, &json!({})))
         );
-        assert!(target(&all, &json!({ "name": "ask_permission", "arguments": {} })).is_err());
-        assert!(target(&all, &json!({ "name": "nope", "arguments": {} })).is_err());
-        assert!(target(&all, &json!({ "name": "routine_list", "arguments": [] })).is_err());
+        assert!(target(&json!({ "name": "ask_permission", "arguments": {} })).is_err());
+        assert!(target(&json!({ "name": "nope", "arguments": {} })).is_err());
+        assert!(target(&json!({ "name": "routine_list", "arguments": [] })).is_err());
         let undeclared = json!({ "name": "computer_job_cancel",
                                  "arguments": { "job_id": "j", "effect": "destructive" } });
-        assert!(target(&all, &undeclared).is_err());
+        assert!(target(&undeclared).is_err());
     }
 
     #[test]
     fn no_deferred_tool_declares_an_approval_effect() {
-        for tool in super::super::tool_defs::definitions() {
-            let name = tool["name"].as_str().unwrap();
-            if DEFERRED_TOOLS.contains(&name) {
-                let props = &tool["inputSchema"]["properties"];
-                assert!(props.get("effect").is_none(), "{name} declares effect");
-                assert!(
-                    props.get("approved_draft").is_none(),
-                    "{name} declares approved_draft"
-                );
-            }
+        for (tool, definition) in deferred() {
+            let name = tool.name;
+            let props = &definition["inputSchema"]["properties"];
+            assert!(props.get("effect").is_none(), "{name} declares effect");
+            assert!(
+                props.get("approved_draft").is_none(),
+                "{name} declares approved_draft"
+            );
         }
     }
 
@@ -266,9 +264,9 @@ mod tests {
                 _ => {}
             }
         }
-        for tool in listed(super::super::tool_defs::definitions())
+        for tool in listed()
             .into_iter()
-            .chain(super::super::tool_defs::definitions())
+            .chain(deferred().map(|(_, definition)| definition))
         {
             let name = tool["name"].as_str().unwrap();
             let text = tool["description"].as_str().unwrap();

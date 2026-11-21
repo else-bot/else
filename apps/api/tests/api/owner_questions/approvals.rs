@@ -82,7 +82,7 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
     let args = send_args();
     let spec = else_api::app::questions::Spec::tool_approval(
         else_api::app::questions::ApprovalKind::External,
-        "computer_run",
+        else_api::app::tools::ToolId::ComputerRun.def(),
         &args,
         None,
         args["purpose"].as_str().unwrap().to_owned(),

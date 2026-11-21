@@ -2,6 +2,7 @@
 //! the trigger route, authenticated by the webhook's own token. A pace
 //! faster than the default needs the owner's approval of the exact call.
 
+use crate::app::tools::{ToolDef, ToolId};
 use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use std::sync::Arc;
 
@@ -271,7 +272,7 @@ pub fn delete_schema() -> Value {
 async fn approve_pace(
     state: &AppState,
     grant: &Grant,
-    tool: &str,
+    tool: &ToolDef,
     args: &Value,
     name: &str,
     pace: Pace,
@@ -336,7 +337,7 @@ pub(crate) async fn create(state: &AppState, grant: &Grant, args: &Value) -> Too
     let note = approve_pace(
         state,
         grant,
-        "webhook_create",
+        ToolId::WebhookCreate.def(),
         args,
         name.as_str(),
         pace,
@@ -472,7 +473,7 @@ pub(crate) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Too
     let note = approve_pace(
         state,
         grant,
-        "webhook_update",
+        ToolId::WebhookUpdate.def(),
         args,
         &display,
         pace,

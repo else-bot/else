@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use super::mcp::slice;
+use super::tool_result::slice;
 
 /// Bytes of one `mcp_request` result, before the MCP envelope. A cut
 /// result's whole copy is saved in the bot's project, so the preview stays

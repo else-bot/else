@@ -6,6 +6,7 @@ use super::{
     MAX_CHOICES, MAX_CONTEXT, MAX_TITLE, MIN_CHOICES, MailAttachments, McpConnection,
     PermissionTarget, Standing, TaskScope, hash,
 };
+use crate::app::tools::ToolDef;
 
 /// The options of an approval card, including the standing scope offered by the gate.
 fn approval_choices(kind: ApprovalKind, offer: Option<Standing>) -> Vec<Choice> {
@@ -429,7 +430,7 @@ impl Spec {
     /// of the bot-wide destructive one.
     pub fn tool_approval(
         kind: ApprovalKind,
-        tool: &str,
+        tool: &ToolDef,
         args: &Value,
         task_scope: Option<TaskScope>,
         title: String,
@@ -449,11 +450,11 @@ impl Spec {
             title,
             context,
             Action::Tool {
-                tool: tool.to_owned(),
-                args: crate::http::tool_defs::loggable_args(tool, args),
+                tool: tool.name.to_owned(),
+                args: (tool.loggable)(args),
                 task_scope,
             },
-            hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()]),
+            hash(&[b"tool", tool.name.as_bytes(), canonical.as_bytes()]),
         )
     }
 }
@@ -463,6 +464,8 @@ mod tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
+
+    use crate::app::tools::ToolId;
 
     #[test]
     fn a_choice_question_parses_only_its_fields_and_letters_its_options() {
@@ -670,7 +673,7 @@ mod tests {
             .unwrap(),
             Spec::tool_approval(
                 ApprovalKind::Destructive,
-                "computer_run",
+                ToolId::ComputerRun.def(),
                 &json!({"command": "rm a", "effect": "destructive"}),
                 None,
                 "Run rm".into(),
@@ -678,7 +681,7 @@ mod tests {
             ),
             Spec::tool_approval(
                 ApprovalKind::External,
-                "computer_run",
+                ToolId::ComputerRun.def(),
                 &json!({"command": "./send", "effect": "external"}),
                 TaskScope::new("Send", "list"),
                 "Run send".into(),
@@ -716,7 +719,7 @@ mod tests {
     fn a_tool_approval_hashes_the_exact_arguments_regardless_of_key_order() {
         let a = Spec::tool_approval(
             ApprovalKind::External,
-            "computer_run",
+            ToolId::ComputerRun.def(),
             &json!({ "command": "./send.sh", "effect": "external" }),
             None,
             "t".into(),
@@ -724,7 +727,7 @@ mod tests {
         );
         let b = Spec::tool_approval(
             ApprovalKind::External,
-            "computer_run",
+            ToolId::ComputerRun.def(),
             &json!({ "effect": "external", "command": "./send.sh" }),
             None,
             "t".into(),
@@ -732,7 +735,7 @@ mod tests {
         );
         let c = Spec::tool_approval(
             ApprovalKind::External,
-            "computer_run",
+            ToolId::ComputerRun.def(),
             &json!({ "command": "./send.sh --all", "effect": "external" }),
             None,
             "t".into(),
@@ -744,7 +747,7 @@ mod tests {
             a.approval().map(|a| a.hash),
             Spec::tool_approval(
                 ApprovalKind::External,
-                "computer_job_start",
+                ToolId::ComputerJobStart.def(),
                 &json!({ "command": "./send.sh", "effect": "external" }),
                 None,
                 "t".into(),

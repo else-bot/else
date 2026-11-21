@@ -20,13 +20,12 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::ApiError;
-use super::tool_defs::ToolDef;
-use super::tool_result::{self, Refusal, text_result};
+use super::tool_result::{self, Outcome, Refusal, ToolResult, text_result};
 use super::tools::check;
+use crate::app::tools::{SERVER_NAME, ToolDef, ToolId};
 use crate::db::memory::{self, Kind, NewEntry};
 use crate::grants::{Grant, Tool};
 
-use crate::app::tools::SERVER_NAME;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 
 pub async fn endpoint(
@@ -67,26 +66,21 @@ pub async fn endpoint(
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            Ok(json!({ "tools": super::tool_search::listed(super::tool_defs::definitions()) }))
-        }
+        "tools/list" => Ok(json!({ "tools": super::tool_search::listed() })),
         "tools/call" if params["name"] == super::tool_search::FIND => {
             match params["arguments"]["query"].as_str() {
-                Some(query) if !query.trim().is_empty() && query.len() <= 200 => Ok(text_result(
-                    super::tool_search::find(&super::tool_defs::definitions(), query),
-                )),
+                Some(query) if !query.trim().is_empty() && query.len() <= 200 => {
+                    Ok(text_result(super::tool_search::find(query)))
+                }
                 _ => Ok(refused("Give a query of at most 200 bytes.")),
             }
         }
         "tools/call" => {
             // use_tool runs a deferred tool exactly as a direct call would:
             // the same grant check below, under the deferred tool's name.
-            let (name, arguments) = if params["name"] == super::tool_search::USE {
-                match super::tool_search::target(
-                    &super::tool_defs::definitions(),
-                    &params["arguments"],
-                ) {
-                    Ok((name, arguments)) => (Some(name), arguments),
+            let (tool, arguments) = if params["name"] == super::tool_search::USE {
+                match super::tool_search::target(&params["arguments"]) {
+                    Ok(target) => target,
                     Err(message) => {
                         return Json(
                             json!({ "jsonrpc": "2.0", "id": id, "result": refused(message) }),
@@ -95,18 +89,18 @@ pub async fn endpoint(
                     }
                 }
             } else {
-                (params["name"].as_str(), &params["arguments"])
+                let Some(name) = params["name"].as_str() else {
+                    return rpc_error(id, -32602, "Invalid params: name and object arguments");
+                };
+                let Some(tool) = ToolDef::named(name) else {
+                    return Json(
+                        json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
+                    )
+                    .into_response();
+                };
+                (tool, &params["arguments"])
             };
-            let Some(name) = name else {
-                return rpc_error(id, -32602, "Invalid params: name and object arguments");
-            };
-            let Some(tool) = super::tool_defs::get(name) else {
-                return Json(
-                    json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
-                )
-                .into_response();
-            };
-            if matches!(tool.name, "delegate" | "council")
+            if matches!(tool.id, ToolId::Delegate | ToolId::Council)
                 && !grant.allows(Tool::Delegate)
                 && let Some(refusal) = task_cannot_delegate(&state, &grant).await
             {
@@ -179,30 +173,15 @@ fn refused(message: impl Into<String>) -> Value {
     tool_result::render(Err(Refusal::text(message))).0
 }
 
-pub(crate) fn wire_size(value: &Value) -> usize {
-    text_result(value.clone()).to_string().len()
-}
-
-pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
-    let mut from = start.min(text.len());
-    while !text.is_char_boundary(from) {
-        from -= 1;
-    }
-    let mut to = from.saturating_add(max).min(text.len());
-    while !text.is_char_boundary(to) {
-        to -= 1;
-    }
-    (from, &text[from..to])
-}
-
 async fn call(state: &AppState, grant: &Grant, tool: &'static ToolDef, args: &Value) -> Value {
     use crate::db::owner_questions::{self, UseOutcome};
-    let name = tool.name;
-    let (result, used) = owner_questions::track_use(tool.run(state, grant, args)).await;
-    let (result, log) = tool_result::render(result);
+    let (result, used) =
+        owner_questions::track_use(super::tool_defs::run(tool, state, grant, args)).await;
+    let outcome = tool_result::outcome(&result);
+    let parked = outcome == Outcome::Parked && tool.parks();
     // A parked call may or may not have run its effect: its use stays started.
-    if let Some(question) = used.filter(|_| !crate::app::tools::parks(tool.name, &result)) {
-        let outcome = if result["isError"] == true {
+    if let Some(question) = used.filter(|_| !parked) {
+        let outcome = if outcome == Outcome::Failed {
             UseOutcome::Error
         } else {
             UseOutcome::Completed
@@ -211,11 +190,12 @@ async fn call(state: &AppState, grant: &Grant, tool: &'static ToolDef, args: &Va
             tracing::warn!(error = %err, %question, "an approved call's outcome was not recorded");
         }
     }
+    let result = if parked { with_next(result) } else { result };
+    let (result, log) = tool_result::render(result);
     if let Some(log) = log {
-        let logged = (tool.loggable)(args);
-        record(state, grant, name, &logged, &log).await;
+        record(state, grant, tool.name, &(tool.loggable)(args), &log).await;
     }
-    with_next(name, result)
+    result
 }
 
 /// What the server tells a client about itself on initialize. Codex appends
@@ -228,27 +208,17 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = "else.bot's tools.";
 pub(crate) const PARKED_NEXT: &str = "Tell the owner briefly what you are waiting for and end this \
     attempt now, without more tool calls. You continue automatically when it is settled.";
 
-fn with_next(name: &str, mut result: Value) -> Value {
-    if !crate::app::tools::parks(name, &result) {
-        return result;
-    }
-    let Some(block) = result["content"]
-        .as_array_mut()
-        .and_then(|blocks| blocks.iter_mut().find(|b| b["type"] == "text"))
-    else {
-        return result;
-    };
-    let Some(mut payload) = block["text"]
-        .as_str()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
-    else {
-        return result;
-    };
-    if payload.get("next").is_none() {
-        payload["next"] = json!(PARKED_NEXT);
-        block["text"] = json!(payload.to_string());
-    }
-    result
+/// A parked result that does not say what to do next gets [`PARKED_NEXT`].
+fn with_next(result: ToolResult) -> ToolResult {
+    tool_result::amend(
+        result,
+        |payload| {
+            if payload.get("next").is_none() {
+                payload["next"] = json!(PARKED_NEXT);
+            }
+        },
+        |log| log,
+    )
 }
 
 async fn record(state: &AppState, grant: &Grant, name: &str, args: &Value, log: &str) {
@@ -290,21 +260,18 @@ pub async fn no_stream() -> ApiError {
 #[cfg(test)]
 mod next_tests {
     use super::*;
+    use crate::http::tool_result::Done;
 
     #[test]
     fn a_parked_result_without_guidance_gets_the_next_step() {
-        let parked = text_result(json!({ "status": "pending", "parked": true }));
-        let text = with_next("delegate", parked)["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(
-            serde_json::from_str::<Value>(&text).unwrap()["next"],
-            PARKED_NEXT
-        );
-        let own = text_result(json!({ "parked": true, "next": "Own guidance." }));
-        assert_eq!(with_next("ask_owner", own.clone()), own);
-        let done = text_result(json!({ "status": "done" }));
-        assert_eq!(with_next("delegate", done.clone()), done);
+        let next = |result| {
+            let (value, _) = tool_result::render(with_next(result));
+            let text = value["content"][0]["text"].as_str().unwrap().to_owned();
+            serde_json::from_str::<Value>(&text).unwrap()["next"].clone()
+        };
+        let parked = Done::json(json!({ "status": "pending" })).parked(true);
+        assert_eq!(next(Ok(parked)), PARKED_NEXT);
+        let own = Done::json(json!({ "next": "Own guidance." })).parked(true);
+        assert_eq!(next(Ok(own)), "Own guidance.");
     }
 }

@@ -36,7 +36,7 @@ pub(crate) fn mcps_block(input: &TurnInput) -> String {
         text.push_str("(none installed)\n");
     }
     for mcp in mcps {
-        let description = crate::http::mcp::slice(&mcp.description, 0, 200).1;
+        let description = crate::http::tool_result::slice(&mcp.description, 0, 200).1;
         text.push_str(&format!("- {} ({}): {description}\n", mcp.id, mcp.name));
     }
     text.push('\n');
@@ -111,7 +111,7 @@ pub(crate) fn skills_block(input: &TurnInput) -> String {
         text.push_str("(none installed)\n");
     }
     for skill in skills {
-        let description = crate::http::mcp::slice(&skill.description, 0, 300).1;
+        let description = crate::http::tool_result::slice(&skill.description, 0, 300).1;
         let keys = if skill.env.is_empty() {
             String::new()
         } else {

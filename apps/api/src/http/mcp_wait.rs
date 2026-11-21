@@ -1,6 +1,7 @@
 //! `mcp_wait`: park a request on a long-running job in an installed MCP,
 //! and the watcher that repeats its status call until the job stops.
 
+use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,7 @@ use crate::grants::Grant;
 use crate::http::waits::{Next, waited};
 use crate::mcp::{Error, Library, PackageId};
 
-pub const NAME: &str = "mcp_wait";
+const NAME: &str = ToolId::McpWait.def().name;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const CONCURRENT_CHECKS: usize = 4;
@@ -281,10 +282,18 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
                 spec.timeout_minutes,
                 spec.arguments,
             );
-            approve_card(state, grant, NAME, args, kind, title, context)
-                .await?
-                .map(|n| format!("; {n}"))
-                .unwrap_or_default()
+            approve_card(
+                state,
+                grant,
+                ToolId::McpWait.def(),
+                args,
+                kind,
+                title,
+                context,
+            )
+            .await?
+            .map(|n| format!("; {n}"))
+            .unwrap_or_default()
         }
     };
     match qualify(library, &spec.mcp_id, &spec.tool).await {
@@ -348,7 +357,7 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     )
     .await;
     let log = format!("{log} {} {}{note}", created.status(), created.id());
-    Ok(Done::json(value).logged(log))
+    Ok(Done::json(value).parked(created.parked()).logged(log))
 }
 
 const NEXT: Next = Next {
@@ -541,9 +550,7 @@ mod tests {
         ] {
             assert!(wait.contains(needle), "mcp_wait lacks {needle}: {wait}");
         }
-        let request = crate::http::tool_defs::get("mcp_request")
-            .unwrap()
-            .definition();
+        let request = crate::http::tool_defs::definition(ToolId::McpRequest.def());
         assert!(
             request["description"]
                 .as_str()

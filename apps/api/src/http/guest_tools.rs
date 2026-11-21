@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{slice, wire_size};
+use super::tool_result::{slice, wire_size};
 use crate::app::tools::summarize_input;
 use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
@@ -32,7 +32,7 @@ pub(crate) use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
 use input_progress::InputProgress;
 
-/// The computer tools, each bound to its name in `tool_defs`.
+/// The computer tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(crate) enum Op {
     Run,

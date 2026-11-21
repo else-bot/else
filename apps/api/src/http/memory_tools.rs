@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{slice, wire_size};
 use super::tool_defs::read_only;
 use super::tool_result::{Done, Refusal, ToolResult};
+use super::tool_result::{slice, wire_size};
 use crate::app::memory_tree::NodeId;
 use crate::db::memory::{self, EntryRow, RESPONSE_BUDGET};
 use crate::db::memory_tree;

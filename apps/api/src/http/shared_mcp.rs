@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::owner_tools::{Card, Declined, ask};
 use super::tool_defs::Call;
 use crate::app::questions::Effect;
+use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -188,7 +189,7 @@ pub(super) async fn call(c: Call<'_>, op: Op) -> ToolResult {
     run(c, op).await.map_err(Refusal::enveloped)
 }
 
-/// The shared MCP library's tools, each bound to its name in `tool_defs`.
+/// The shared MCP library's tools, each bound to its `ToolId` in `tool_defs`.
 #[derive(Clone, Copy)]
 pub(super) enum Op {
     List,
@@ -301,7 +302,7 @@ async fn run(c: Call<'_>, op: Op) -> ToolResult {
                 };
                 if let Some(kind) = kind {
                     approval =
-                        super::guest_tools::approval::approve(state, grant, c.tool.name, args, kind)
+                        super::guest_tools::approval::approve(state, grant, c.tool, args, kind)
                             .await?
                 }
             }
@@ -491,7 +492,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     };
     let title = format!("Replace the {} MCP", existing.manifest.name);
     let context = existing.replacement(&input);
-    let context = super::mcp::slice(&context, 0, crate::app::questions::MAX_CONTEXT)
+    let context = super::tool_result::slice(&context, 0, crate::app::questions::MAX_CONTEXT)
         .1
         .to_owned();
     // Replacing changes where every bot's MCP data and sign-ins go, an access
@@ -500,7 +501,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     let note = super::guest_tools::approval::approve_card(
         state,
         grant,
-        "mcp_install",
+        ToolId::McpInstall.def(),
         args,
         crate::app::questions::ApprovalKind::External,
         title,
@@ -591,7 +592,7 @@ pub(super) async fn auth_required(
     let declined =
         Declined::SafeMessage("The owner declined this connection. Continue without it.");
     match ask(state, grant, &spec, card, declined).await {
-        Ok(_) => Refusal::json(
+        Ok(_) => Refusal::declined(
             json!({"status":"error","code":"reauth_required","safe_message":"The connection still requires sign-in. Start a new owner request to authorize again."}),
         ),
         Err(refusal) => refusal,

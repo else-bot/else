@@ -74,7 +74,7 @@ pub(super) async fn wait_job(
         created.status(),
         created.id()
     );
-    Ok(Done::json(value).logged(log))
+    Ok(Done::json(value).parked(created.parked()).logged(log))
 }
 
 const NEXT: Next = Next {

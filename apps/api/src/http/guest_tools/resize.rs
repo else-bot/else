@@ -5,6 +5,7 @@
 //! N GiB" grant applies the size without a card, but never runs a job the
 //! owner did not see.
 
+use crate::app::tools::ToolId;
 use crate::http::owner_tools::{Card, Declined, ask};
 use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use serde_json::{Value, json};
@@ -17,7 +18,7 @@ use crate::computers::jobs::{JobStatus, Rerun, Started};
 use crate::computers::memory::{MEMORY_SIZES_MIB, MemorySizes, gib};
 use crate::db::task_secrets;
 
-pub(super) const NAME: &str = "computer_resize";
+const NAME: &str = ToolId::ComputerResize.def().name;
 const MAX_REASON: usize = 300;
 const GRANT_TASK: &str = "Raise this bot's computer memory";
 
@@ -58,7 +59,7 @@ fn card(sizes: &MemorySizes, memory_mib: u32, reason: &str, rerun: Option<&Rerun
     );
     if let Some(rerun) = rerun {
         let room = crate::app::questions::MAX_CONTEXT.saturating_sub(context.len() + 64);
-        let command = crate::http::mcp::slice(&rerun.command, 0, room).1;
+        let command = crate::http::tool_result::slice(&rerun.command, 0, room).1;
         context.push_str(&format!("\nRe-runs this job after the restart:\n{command}"));
         if rerun.command.len() > command.len() {
             context.push('…');
@@ -156,7 +157,7 @@ pub(super) async fn resize(
     let scope = covering_scope(state, grant, memory_mib).await;
     let spec = Spec::tool_approval(
         ApprovalKind::Destructive,
-        NAME,
+        ToolId::ComputerResize.def(),
         args,
         Some(scope),
         format!("Raise this bot's computer memory to {}", gib(memory_mib)),

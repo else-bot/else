@@ -6,8 +6,6 @@ use serde_json::{Value, json};
 use super::AppState;
 use crate::grants::Grant;
 
-pub const NAME: &str = "visual_preview";
-
 pub(super) fn schema() -> Value {
     json!({
         "description": "Without path: the rules for writing an HTML visual (theme variables, \

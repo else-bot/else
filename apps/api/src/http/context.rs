@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::app::providers::{DelegationContext, InstalledMcp, Origin, TurnInput};
-use crate::app::tools::DEFERRED_TOOLS;
 
 /// Which representative turn to export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,16 +133,10 @@ pub fn export(turn: Turn) -> Value {
         rules: None,
     };
     let instructions = crate::providers::prompt::instructions(&input, "/eval/project");
-    let all = super::tool_defs::definitions();
-    let deferred: Vec<&Value> = all
-        .iter()
-        .filter(|tool| {
-            tool["name"]
-                .as_str()
-                .is_some_and(|n| DEFERRED_TOOLS.contains(&n))
-        })
+    let deferred: Vec<Value> = super::tool_search::deferred()
+        .map(|(_, definition)| definition)
         .collect();
-    let listed = super::tool_search::listed(all.clone());
+    let listed = super::tool_search::listed();
     // What a first turn's packet carries ahead of the message.
     let blocks = crate::providers::context::for_session(&input, None)
         .text
@@ -163,7 +156,11 @@ pub fn export(turn: Turn) -> Value {
         "codex_deferred_tools": crate::providers::codex::deferred_tools(),
         "grok_tool_note": crate::providers::grok::tool_note(),
         "parked_next": super::mcp::PARKED_NEXT,
-        "parking_tools": crate::app::tools::PARKING_TOOLS,
+        "parking_tools": crate::app::tools::TOOLS
+            .iter()
+            .filter(|tool| tool.parks())
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>(),
         "host_tools": crate::providers::claude_home::HOST_TOOLS,
     })
 }
@@ -171,7 +168,7 @@ pub fn export(turn: Turn) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tools::TOOL_NAMES;
+    use crate::app::tools::{DEFERRED_TOOLS, TOOL_NAMES};
     use std::collections::BTreeSet;
 
     #[test]
