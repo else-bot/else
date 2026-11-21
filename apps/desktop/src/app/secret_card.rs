@@ -19,7 +19,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::request::Request;
+use super::request::{Request, Settle};
 use crate::api::ClientError;
 
 pub(super) struct SecretForm {
@@ -158,7 +158,7 @@ impl ConversationView {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_secret(bot, request, env).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |app, window, cx| {
                 app.secret_answered(request, attempt, result, window, cx)
@@ -176,29 +176,25 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let settled = self
-            .cards
-            .secrets
-            .get_mut(&request)
-            .is_some_and(|card| card.request.settle(attempt, &result));
-        let rejected = matches!(result, Err(ClientError::Unauthorized));
-        if rejected || !settled {
-            return;
-        }
         let Some(card) = self.cards.secrets.get_mut(&request) else {
             return;
         };
+        let outcome = card.request.settle(attempt, &result);
+        if outcome == Settle::Stale {
+            return;
+        }
         if result.is_ok() {
             if let Some(mut form) = card.form.take() {
                 form.clear(window, cx);
             }
         } else if let Some(form) = &card.form {
+            let busy = card.request.busy() || !self.inputs.connected;
             form.fields.update(cx, |fields, cx| {
-                fields.busy = false;
+                fields.busy = busy;
                 cx.notify();
             });
         }
-        self.remeasure_row(RowKey::Card(CardKey::SecretRequest(request)), cx);
+        let _ = self.settle_card(CardKey::SecretRequest(request), outcome, cx);
     }
 
     pub(super) fn render_secret_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {

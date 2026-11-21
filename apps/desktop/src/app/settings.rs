@@ -10,7 +10,7 @@ use super::panel::{hairline, list_rows, muted, section};
 use super::rules::{RulesSummary, RulesTab};
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
-use crate::api::{Client, ClientError};
+use crate::api::Client;
 use crate::app::request::Request;
 use crate::controls::{segment, segment_track};
 use crate::model::Conversation;
@@ -89,16 +89,6 @@ pub(super) enum PanelEvent {
 }
 
 impl EventEmitter<PanelEvent> for BotPanel {}
-
-/// Hands a rejected owner token to the window, even after the panel that
-/// sent the request is gone.
-pub(super) fn report_unauthorized(
-    app: &WeakEntity<ElseApp>,
-    err: &ClientError,
-    cx: &mut AsyncWindowContext,
-) {
-    let _ = app.update(cx, |app, cx| app.unauthorized(err, cx));
-}
 
 /// A bot's panel and its event subscription.
 pub(super) struct PanelSlot {

@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use super::card_markdown::{self, CardText};
 use super::message_row::CardPlacement;
-use super::request::Request;
+use super::request::{Request, Settle};
 use super::{ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY};
@@ -246,7 +246,7 @@ impl ConversationView {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_question(bot, question, answer).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update(cx, |app, cx| {
                 app.question_answered(question, attempt, result, cx)
@@ -263,12 +263,12 @@ impl ConversationView {
         result: Result<(), ClientError>,
         cx: &mut Context<Self>,
     ) {
-        let settled = self
+        let outcome = self
             .cards
             .questions
             .get_mut(&question)
             .and_then(|card| card.submit.as_mut())
-            .is_some_and(|submit| {
+            .map_or(Settle::Stale, |submit| {
                 submit.state.settle_as(attempt, &result, |err| match err {
                     ClientError::Api { code, message, .. } if code == "routine_changed" => {
                         message.clone()
@@ -280,11 +280,7 @@ impl ConversationView {
                     err => err.to_string(),
                 })
             });
-        let rejected = matches!(result, Err(ClientError::Unauthorized));
-        if rejected || !settled {
-            return;
-        }
-        self.remeasure_row(RowKey::Card(CardKey::Question(question)), cx);
+        let _ = self.settle_card(CardKey::Question(question), outcome, cx);
     }
 
     pub(super) fn render_question_card(

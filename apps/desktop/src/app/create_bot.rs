@@ -1,5 +1,5 @@
 use super::ElseApp;
-use super::request::Request;
+use super::request::{Request, Settle};
 use crate::api::CreateBotRequest;
 use crate::avatar::{AvatarLook, AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
@@ -375,7 +375,8 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.create_bot(payload).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
+                let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result))
+                    != Settle::Stale;
                 let rejected = settled
                     && app.create_attempt == Some(attempt)
                     && !holder.read(cx).form.request.unconfirmed();
@@ -425,9 +426,8 @@ impl ElseApp {
                                     .is_some_and(|op| op.request_id == request_id)
                         });
                         if let Some(current) = reopened {
-                            let error = holder.read(cx).form.request.error().unwrap_or_default();
-                            let error = error.to_owned();
-                            current.update(cx, |h, _| h.form.request = Request::Failed(error));
+                            let request = holder.read(cx).form.request.clone();
+                            current.update(cx, |h, _| h.form.request = request);
                             forms.push(current);
                         }
                         for form in forms {

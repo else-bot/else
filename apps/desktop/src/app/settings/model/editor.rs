@@ -1,6 +1,6 @@
 use super::super::routines::RoutineChange;
 use crate::app::panel::{muted, note};
-use crate::app::request::Request;
+use crate::app::request::{Request, Settle};
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use crate::profile_picker::ProfilePicker;
@@ -359,7 +359,8 @@ impl ElseApp {
                         panel.finish_routine_change(routine, routine_attempt, &result, cx)
                     });
                 }
-                if !holder.update(cx, |form, _| form.save.settle(attempt, &result)) {
+                if holder.update(cx, |form, _| form.save.settle(attempt, &result)) == Settle::Stale
+                {
                     return;
                 }
                 match result {

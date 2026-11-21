@@ -9,7 +9,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::request::Request;
+use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
 use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
@@ -105,9 +105,12 @@ impl ConversationView {
         }
         card.files.loading = true;
         card.files.error = None;
-        let client = self.client.clone();
+        let (client, app) = (self.client.clone(), self.app.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.skill_install(bot, id).await;
+            let rejected = result
+                .as_ref()
+                .is_err_and(|err| super::report_unauthorized(&app, err, cx));
             let _ = this.update_in(cx, |app, _, cx| {
                 let Some(card) = app.cards.skills.get_mut(&id) else {
                     return;
@@ -115,6 +118,7 @@ impl ConversationView {
                 card.files.loading = false;
                 match result {
                     Ok(detail) => card.files.contents = Some(detail.contents),
+                    Err(_) if rejected => {}
                     Err(err) => card.files.error = Some(err.to_string()),
                 }
                 app.remeasure_row(RowKey::Card(CardKey::SkillInstall(id)), cx);
@@ -185,7 +189,7 @@ impl ConversationView {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.answer_skill_install(bot, id, approval).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |app, window, cx| {
                 app.skill_answered(id, attempt, result, window, cx)
@@ -203,14 +207,12 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(result, Err(ClientError::Unauthorized)) {
-            return;
-        }
         // A card rebuilt after a disconnect no longer knows the attempt; it
         // still shows the result.
         if let Some(card) = self.cards.skills.get_mut(&id) {
-            if !card.request.settle(attempt, &result)
+            if card.request.settle(attempt, &result) == Settle::Stale
                 && let Err(err) = &result
+                && !matches!(err, ClientError::Unauthorized)
             {
                 card.request.reject(err.to_string());
             }

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::RowKey;
 use super::images::{MessageImages, is_image};
 use super::message_row::{CardPlacement, short_stamp};
-use super::request::Request;
+use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::attachments::byte_size;
 use crate::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
@@ -259,7 +259,7 @@ impl ConversationView {
                 Operation::Discard => client.discard_draft(bot, id).await,
             };
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |view, window, cx| {
                 view.draft_acted(id, Some(attempt), result, window, cx)
@@ -280,19 +280,21 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) {
         let form = self.cards.draft_form_mut(id);
-        let tracked = match (form, attempt) {
-            (Some(form), Some(attempt)) => Some(form.request.settle(attempt, &result)),
+        let tracked = form.is_some();
+        let outcome = match (form, attempt) {
+            (Some(form), Some(attempt)) => form.request.settle(attempt, &result),
+            _ if matches!(result, Err(ClientError::Unauthorized)) => Settle::Rejected,
             (Some(form), None) => {
                 if let Err(err) = &result
                     && !form.locked()
                 {
                     form.request.reject(err.to_string());
                 }
-                Some(true)
+                Settle::Settled
             }
-            (None, _) => None,
+            (None, _) => Settle::Settled,
         };
-        if matches!(result, Err(ClientError::Unauthorized)) || tracked == Some(false) {
+        if !self.settle_card(CardKey::Draft(id), outcome, cx) {
             return;
         }
         match result {
@@ -302,12 +304,8 @@ impl ConversationView {
                 }
                 self.sync_rows(window, cx);
             }
-            Err(err) => {
-                if tracked.is_none() {
-                    self.notice(err.to_string(), cx);
-                }
-                self.remeasure_row(RowKey::Card(CardKey::Draft(id)), cx);
-            }
+            Err(err) if !tracked => self.notice(err.to_string(), cx),
+            Err(_) => {}
         }
     }
 
@@ -317,7 +315,7 @@ impl ConversationView {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.stop_approving_always(bot, id).await;
             if let Err(err) = &result {
-                super::settings::report_unauthorized(&app, err, cx);
+                super::report_unauthorized(&app, err, cx);
             }
             let _ = this.update_in(cx, |view, window, cx| {
                 if let Err(err) = result {

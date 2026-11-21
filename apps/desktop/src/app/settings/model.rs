@@ -6,7 +6,7 @@ use else_wire::settings::BotProfile;
 
 use else_wire::settings::Capabilities;
 
-use super::{BotPanel, PanelEvent, report_unauthorized};
+use super::{BotPanel, PanelEvent};
 use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
 use crate::app::request::Request;
@@ -315,13 +315,12 @@ impl BotPanel {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_bot_profile(bot, choice).await;
             if let Err(err) = &result {
-                report_unauthorized(&app, err, cx);
+                crate::app::report_unauthorized(&app, err, cx);
             }
             let _ = this.update(cx, |panel, cx| {
-                if !panel.model_upgrade.settle(attempt, &result) {
-                    return;
-                }
-                if let Ok(saved) = result {
+                if panel.model_upgrade.settle(attempt, &result).settled()
+                    && let Ok(saved) = result
+                {
                     panel.model.saved(saved);
                     panel.model_upgrade = Request::Idle;
                 }
@@ -397,8 +396,9 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let answer = client.recheck_provider(id.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                if let Err(err) = &answer {
-                    app.unauthorized(err, cx);
+                if answer.as_ref().is_err_and(|err| app.unauthorized(err, cx)) {
+                    let _ = picker.update(cx, |picker, cx| picker.recheck_dropped(&id, cx));
+                    return;
                 }
                 if let (Ok(info), Some(caps)) = (&answer, app.caps.as_mut())
                     && let Some(slot) = Arc::make_mut(caps)
