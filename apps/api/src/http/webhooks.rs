@@ -206,7 +206,6 @@ fn fields() -> Value {
 
 pub fn create_schema() -> Value {
     json!({
-        "name": "webhook_create",
         "description": "Save a webhook: a task you are woken for in your owner conversation when an event \
             fires it. Events during a pending wake combine, and wakes stay min_interval_minutes \
             apart. Fire it from a job by passing webhook_id to computer_job_start and exiting 0 \
@@ -224,7 +223,6 @@ pub fn create_schema() -> Value {
 
 pub fn list_schema() -> Value {
     json!({
-        "name": "webhook_list",
         "description": "List your webhooks with their pace, whether each is enabled, a wake \
             waiting and when it may run, and the last wake's outcome.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
@@ -240,7 +238,6 @@ pub fn update_schema() -> Value {
     properties["rotate_token"] = json!({ "type": "boolean",
         "description": "True replaces the token; the old one stops working. Returns the new one once." });
     json!({
-        "name": "webhook_update",
         "description": "Change one of your webhooks: pass only the fields to set. A faster pace \
             needs the owner's approval.",
         "inputSchema": {
@@ -255,7 +252,6 @@ pub fn update_schema() -> Value {
 
 pub fn delete_schema() -> Value {
     json!({
-        "name": "webhook_delete",
         "description": "Delete one of your webhooks. Its token stops working and a waiting wake \
             is dropped; a wake already queued still runs. Stop any job watching for it too.",
         "inputSchema": {

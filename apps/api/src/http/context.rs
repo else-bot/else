@@ -134,7 +134,7 @@ pub fn export(turn: Turn) -> Value {
         rules: None,
     };
     let instructions = crate::providers::prompt::instructions(&input, "/eval/project");
-    let all = super::mcp::all_tools();
+    let all = super::tool_defs::definitions();
     let deferred: Vec<&Value> = all
         .iter()
         .filter(|tool| {

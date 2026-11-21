@@ -25,46 +25,45 @@ pub const INSTALL: &str = "skill_install";
 pub const READ: &str = "skill_read";
 const MAX_READ: usize = 64 * 1024;
 
-pub(super) fn schemas() -> Vec<Value> {
-    vec![
-        json!({
-            "name": INSTALL,
-            "description": "Install an Agent Skill from a github.com link to its directory (one holding SKILL.md) when the owner asks. \
-                The owner reviews its files, picks which bots get it, and can enter its keys in a card. Returns parked: end the attempt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "minLength": 1, "maxLength": 2048,
-                             "description": "github.com link to the skill directory or its SKILL.md." },
-                    "reason": { "type": "string", "minLength": 1, "maxLength": skills::MAX_REASON,
-                                "description": "Shown to the owner: why install it." },
-                    "env": { "type": "array", "maxItems": 16, "uniqueItems": true,
-                             "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" },
-                             "description": "Key variables the skill's docs say it needs, e.g. TREG_TOKEN. Names only." },
-                },
-                "required": ["url", "reason"],
-                "additionalProperties": false,
+pub(super) fn install_schema() -> Value {
+    json!({
+        "description": "Install an Agent Skill from a github.com link to its directory (one holding SKILL.md) when the owner asks. \
+            The owner reviews its files, picks which bots get it, and can enter its keys in a card. Returns parked: end the attempt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "minLength": 1, "maxLength": 2048,
+                         "description": "github.com link to the skill directory or its SKILL.md." },
+                "reason": { "type": "string", "minLength": 1, "maxLength": skills::MAX_REASON,
+                            "description": "Shown to the owner: why install it." },
+                "env": { "type": "array", "maxItems": 16, "uniqueItems": true,
+                         "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" },
+                         "description": "Key variables the skill's docs say it needs, e.g. TREG_TOKEN. Names only." },
             },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": true },
-        }),
-        json!({
-            "name": READ,
-            "description": "Read an installed skill: without path, its SKILL.md and file list; with path, one of its files.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Skill id from the installed skills list." },
-                    "path": { "type": "string", "description": "File path inside the skill, e.g. scripts/run.py." },
-                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to continue a long file from next_offset." },
-                },
-                "required": ["id"],
-                "additionalProperties": false,
+            "required": ["url", "reason"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": true },
+    })
+}
+
+pub(super) fn read_schema() -> Value {
+    json!({
+        "description": "Read an installed skill: without path, its SKILL.md and file list; with path, one of its files.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Skill id from the installed skills list." },
+                "path": { "type": "string", "description": "File path inside the skill, e.g. scripts/run.py." },
+                "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to continue a long file from next_offset." },
             },
-            "annotations": { "readOnlyHint": true, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        }),
-    ]
+            "required": ["id"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": true, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 fn env_names(args: &Value) -> Result<Vec<String>, &'static str> {

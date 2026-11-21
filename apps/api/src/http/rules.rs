@@ -45,7 +45,6 @@ impl From<RulesError> for ApiError {
 
 pub(super) fn schema() -> Value {
     json!({
-        "name": "rules_update",
         "description": "Set one section of your rules file, which reaches you at the start of \
             every turn, routine, webhook, and event turns included. Pass the section's whole new \
             text; other sections stay. Put text the owner wants sent or typed exactly in backticks, \

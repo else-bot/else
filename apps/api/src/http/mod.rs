@@ -445,6 +445,18 @@ fn provider_view(
 
 /// What a bot reports when else.bot itself seems broken: the version and
 /// each part's state with the reason it gives.
+fn status_schema() -> serde_json::Value {
+    json!({
+        "description": "This else.bot installation's version and the state of each part \
+            the owner sees: every provider CLI (available, or the exact reason it is not, \
+            such as a path that fails or a missing login), whether it has a saved model \
+            profile, bot computers, and backups. Call it before reporting that a provider, \
+            model, computer, or backup is missing or broken, and quote its reasons.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": tool_defs::read_only(),
+    })
+}
+
 pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     let (saved, backups) = tokio::join!(saved_models(&state.db), async {
         let backups = state.backups.as_ref().ok()?;

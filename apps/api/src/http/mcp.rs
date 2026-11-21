@@ -20,7 +20,6 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::ApiError;
-use super::memory_tools::{MAX_QUERY, MAX_READ};
 use super::tool_defs::ToolDef;
 use super::tool_result::{self, Refusal, text_result};
 use super::tools::check;
@@ -29,9 +28,6 @@ use crate::grants::{Grant, Tool};
 
 use crate::app::tools::SERVER_NAME;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
-/// The owner reads a task by this line; the task text stays folded.
-const TITLE_DESCRIPTION: &str =
-    "A short name for the task, for the owner, e.g. Triage overnight WhatsApp DMs. No IDs.";
 
 pub async fn endpoint(
     State(state): State<Arc<AppState>>,
@@ -71,12 +67,14 @@ pub async fn endpoint(
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": super::tool_search::listed(all_tools()) })),
+        "tools/list" => {
+            Ok(json!({ "tools": super::tool_search::listed(super::tool_defs::definitions()) }))
+        }
         "tools/call" if params["name"] == super::tool_search::FIND => {
             match params["arguments"]["query"].as_str() {
-                Some(query) if !query.trim().is_empty() && query.len() <= 200 => {
-                    Ok(text_result(super::tool_search::find(&all_tools(), query)))
-                }
+                Some(query) if !query.trim().is_empty() && query.len() <= 200 => Ok(text_result(
+                    super::tool_search::find(&super::tool_defs::definitions(), query),
+                )),
                 _ => Ok(refused("Give a query of at most 200 bytes.")),
             }
         }
@@ -84,7 +82,10 @@ pub async fn endpoint(
             // use_tool runs a deferred tool exactly as a direct call would:
             // the same grant check below, under the deferred tool's name.
             let (name, arguments) = if params["name"] == super::tool_search::USE {
-                match super::tool_search::target(&all_tools(), &params["arguments"]) {
+                match super::tool_search::target(
+                    &super::tool_defs::definitions(),
+                    &params["arguments"],
+                ) {
                     Ok((name, arguments)) => (Some(name), arguments),
                     Err(message) => {
                         return Json(
@@ -173,336 +174,9 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Response {
         .into_response()
 }
 
-fn tool_list() -> Value {
-    let read_only = json!({ "readOnlyHint": true, "destructiveHint": false,
-                            "idempotentHint": true, "openWorldHint": false });
-    let bot = json!({ "type": "string", "format": "uuid",
-                      "description": "Another bot's ID from memory_bots. Omit for your own memory." });
-    json!([
-        {
-            "name": "memory_bots",
-            "description": "List the bots whose memory you may read: yourself, and bots the owner shared.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-            "annotations": read_only,
-        },
-        {
-            "name": "memory_search",
-            "description": "Search original memory entries (messages, corrections, tool activity) by words. \
-                Returns up to 20 hits, best first, with sequence numbers to read in full. Entries an owner \
-                correction replaced are hidden unless include_superseded is true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY },
-                    "bot_id": bot,
-                    "include_superseded": { "type": "boolean" },
-                    "cursor": { "type": "string", "description": "next_cursor from a previous page" },
-                },
-                "required": ["query"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        },
-        {
-            "name": "memory_read",
-            "description": "Read original memory entries in order from start_seq (count up to 20). \
-                With count 1, offset pages through a long entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "start_seq": { "type": "integer", "minimum": 0 },
-                    "count": { "type": "integer", "minimum": 1, "maximum": MAX_READ },
-                    "offset": { "type": "integer", "minimum": 0 },
-                    "bot_id": bot,
-                },
-                "required": ["start_seq"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        },
-        {
-            "name": "memory_view",
-            "description": "The saved overview of a bot's memory: ordered nodes, each covering a range of \
-                entries (start+span), oldest first. Summaries are exact copies or joins of originals; \
-                zoom into a node, or read originals, before relying on it. Reports covered and pending \
-                ranges explicitly.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "bot_id": bot,
-                    "from_index": { "type": "integer", "minimum": 0,
-                                    "description": "next_index from a previous page" },
-                },
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        },
-        {
-            "name": "memory_zoom",
-            "description": "Open one node from memory_view or a previous zoom: its two halves, or for \
-                span 1 the original entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "start_seq": { "type": "integer", "minimum": 0 },
-                    "span": { "type": "integer", "minimum": 1 },
-                    "bot_id": bot,
-                },
-                "required": ["start_seq", "span"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        },
-        {
-            "name": "list_bots",
-            "description": "Discover all other active bots and categories, including the main bot ID. Filter by category_id to find council members. This does not grant access to their private memory.",
-            "inputSchema": {"type": "object", "properties": {"category_id": {"type": "string", "format": "uuid"}}, "additionalProperties": false},
-            "annotations": read_only,
-        },
-        {
-            "name": "council",
-            "description": "Ask 1 to 32 distinct bots for reports on the same self-contained task. Use list_bots with category_id to find every member of a category. Accepted atomically; runs asynchronously and returns all outcomes in a continuation. After pending, end this attempt immediately. Delegated tasks cannot create councils. No memory or permissions are shared.",
-            "inputSchema": {"type": "object", "properties": {
-                "target_bot_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 1, "maxItems": crate::db::delegations::MAX_COUNCIL_BOTS, "uniqueItems": true},
-                "task": {"type": "string", "minLength": 1, "maxLength": 4000},
-                "title": {"type": "string", "minLength": 1, "maxLength": crate::db::delegations::MAX_TITLE_CHARS, "description": TITLE_DESCRIPTION}
-            }, "required": ["target_bot_ids", "task", "title"], "additionalProperties": false},
-            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
-        },
-        {
-            "name": "delegate",
-            "description": "Hand one subtask to another registered bot (the main bot included) \
-                from your registry or a create_bot result, by its exact bot_id. It is for work, not \
-                status reports. Returns status pending with a task_id at once. Then tell the owner \
-                briefly and end this attempt; the other bot's reply arrives later in a \
-                continuation. At most one per attempt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_bot_id": { "type": "string", "format": "uuid" },
-                    "task": { "type": "string", "minLength": 1, "maxLength": 4000,
-                              "description": "What the other bot should do, self-contained." },
-                    "title": { "type": "string", "minLength": 1,
-                               "maxLength": crate::db::delegations::MAX_TITLE_CHARS,
-                               "description": TITLE_DESCRIPTION },
-                    "files": { "type": "array", "maxItems": crate::app::messages::MAX_MESSAGE_FILES,
-                               "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
-                               "description": "Project paths of files the other bot needs, up to 10 MiB \
-                                   each. It gets exact copies, never your project. Its replies can \
-                                   attach files back the same way you attach them for the owner." },
-                    "owner_answer": { "type": "string", "format": "uuid",
-                                      "description": "ID of an answered choice card, yours or from a task you delegated, \
-                                          that decides this task. The other bot sees the answer as the owner's words. \
-                                          It does not use the request's delegate budget." },
-                },
-                "required": ["target_bot_id", "task", "title"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "delegation_update",
-            "description": "Change a task you delegated that is still in progress, by its task_id. \
-                The other bot stops its current attempt and continues the same task with your \
-                message and its earlier work; the result still arrives in a continuation. Returns \
-                the task's state. An ended task is not changed; its outcome arrives in a continuation.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "format": "uuid" },
-                    "message": { "type": "string", "minLength": 1, "maxLength": 4000,
-                                 "description": "The change, written to the other bot as a follow-up to its task." },
-                },
-                "required": ["task_id", "message"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "delegation_cancel",
-            "description": "Stop a task you delegated that is still in progress, by its task_id. \
-                Returns its state: stopping until the other bot's attempt ends; the outcome, \
-                normally cancelled with any partial reply, arrives in a continuation. An ended task is not changed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "format": "uuid" },
-                },
-                "required": ["task_id"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": true,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "create_bot",
-            "description": "Register a new else.bot specialist for an owner request, with no shared memory or \
-                access. Pass its purpose, which is saved to its memory, and model only when the \
-                owner named one. Returns its bot_id at once: delegate its first task to it in this \
-                attempt. Repeating the same name in this request returns the same bot. category_id \
-                comes from list_bots.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "minLength": 1,
-                              "maxLength": crate::app::bots::MAX_NAME_CHARS,
-                              "description": "Short display name, for example GitHub." },
-                    "purpose": { "type": "string", "minLength": 1, "maxLength": crate::app::bots::MAX_PURPOSE_CHARS },
-                    "category_id": { "type": "string", "format": "uuid" },
-                    "model": { "type": "string", "maxLength": super::routines::MAX_MODEL_CHARS,
-                               "description": "Only when the owner named the model: its ID or name, such as grok-4.7 or Claude Opus \
-                                   5.5; it selects the provider. Omit it for the default. An unmatched name creates \
-                                   nothing; the error lists models." },
-                    "provider_id": { "type": "string",
-                                     "description": format!(
-                                         "With model, only when the owner named the provider ({}).",
-                                         crate::providers::definitions::id_list()
-                                     ) },
-                    "reasoning_effort": { "type": "string",
-                                          "description": "With model, only when the owner asked for \
-                                              one (low, medium, high, xhigh, max)." },
-                    "service_tier": { "type": "string",
-                                      "description": "With model, only when the owner asked: \
-                                          priority is the Fast tier, default the standard one." },
-                },
-                "required": ["name"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "rename_bot",
-            "description": "Rename an existing else.bot when asked, including yourself or another bot. \
-                Available to any bot for work rooted in an owner request. Use the exact target_bot_id \
-                from your registry, task, or a create_bot result. Changes only the display name; \
-                repeating the same name changes nothing. Confirm the saved name from the result.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_bot_id": { "type": "string", "format": "uuid" },
-                    "name": { "type": "string", "minLength": 1,
-                              "maxLength": crate::app::bots::MAX_NAME_CHARS },
-                },
-                "required": ["target_bot_id", "name"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "set_bot_model",
-            "description": "Set an else.bot's own model, reasoning effort, and service tier when the owner asks, \
-                including yours or another bot's, by exact target_bot_id. Its next turn uses it; a \
-                running turn and routines with their own model keep theirs. An unmatched model \
-                changes nothing and the error lists models. Confirm the saved model from the result.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_bot_id": { "type": "string", "format": "uuid" },
-                    "model": { "type": "string", "minLength": 1,
-                               "maxLength": super::routines::MAX_MODEL_CHARS,
-                               "description": "Its ID or name, such as gpt-6.1-sol or Claude Opus 5.5; it selects the provider. Omit to keep the bot's model." },
-                    "provider_id": { "type": "string",
-                                     "description": format!(
-                                         "With model, only when the owner named the provider ({}).",
-                                         crate::providers::definitions::id_list()
-                                     ) },
-                    "reasoning_effort": { "type": "string",
-                                          "description": "low, medium, high, xhigh, or max. Omit to keep the bot's current effort for that provider." },
-                    "service_tier": { "type": "string",
-                                      "description": "priority is the Fast tier, default the standard one. Omit to keep the bot's current tier." },
-                },
-                "required": ["target_bot_id"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        {
-            "name": "delete_bot",
-            "description": "Ask the owner to delete another else.bot by exact target_bot_id, for an owner request. \
-                The owner always approves on a card listing its routines, triggers and tasks that \
-                stop; this parks. Once approved, call it again with the same target_bot_id. Never \
-                yourself or the main bot.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_bot_id": { "type": "string", "format": "uuid" },
-                    "reason": { "type": "string", "maxLength": crate::app::questions::MAX_TITLE,
-                                "description": "Why, in the owner's words. Shown on the card." },
-                },
-                "required": ["target_bot_id"],
-                "additionalProperties": false,
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": true,
-                             "idempotentHint": true, "openWorldHint": false },
-        },
-        super::rules::schema(),
-        super::visual_tools::schema(),
-        super::owner_tools::secret_schema(),
-        super::owner_tools::handoff_schema(),
-        super::owner_tools::notice_schema(),
-        super::owner_tools::choice_schema(),
-        super::owner_tools::permission_schema(),
-        super::owner_tools::confirm_permission_schema(),
-        super::routines::create_schema(),
-        super::routines::list_schema(),
-        super::routines::update_schema(),
-        super::routines::delete_schema(),
-        super::routines::run_schema(),
-        super::routines::reminder_schema(),
-        super::routines::no_news_schema(),
-        super::webhooks::create_schema(),
-        super::webhooks::list_schema(),
-        super::webhooks::update_schema(),
-        super::webhooks::delete_schema(),
-        {
-            "name": "else_status",
-            "description": "This else.bot installation's version and the state of each part \
-                the owner sees: every provider CLI (available, or the exact reason it is not, \
-                such as a path that fails or a missing login), whether it has a saved model \
-                profile, bot computers, and backups. Call it before reporting that a provider, \
-                model, computer, or backup is missing or broken, and quote its reasons.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-            "annotations": read_only,
-        },
-        {
-            "name": "memory_date",
-            "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "seq": { "type": "integer", "minimum": 0 },
-                    "end_seq": { "type": "integer", "minimum": 0 },
-                    "bot_id": bot,
-                },
-                "required": ["seq"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        }
-    ])
-}
-
 /// A plain-text tool error outside a handler, rendered like a handler's.
 fn refused(message: impl Into<String>) -> Value {
     tool_result::render(Err(Refusal::text(message))).0
-}
-
-/// Every else.bot tool definition, listed or deferred.
-pub(super) fn all_tools() -> Vec<Value> {
-    let mut tools = tool_list().as_array().cloned().unwrap_or_default();
-    tools.extend(super::outgoing_tools::schemas());
-    tools.extend(super::guest_tools::tool_list());
-    tools.extend(super::connectors::tool_list());
-    tools.extend(super::social_tools::schemas());
-    tools.extend(super::shared_mcp::schemas());
-    tools.push(super::mcp_wait::schema());
-    tools.extend(super::skills::schemas());
-    tools
 }
 
 pub(crate) fn wire_size(value: &Value) -> usize {
