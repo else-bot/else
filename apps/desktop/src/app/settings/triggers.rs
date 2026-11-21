@@ -1,0 +1,506 @@
+use super::BotSettings;
+use crate::api::socials::Provider;
+use crate::app::panel::{alert, item_name, list_rows, meta, meta_line, muted, section};
+use crate::app::{Connection, ElseApp, delete_dialog::DeleteTarget};
+use crate::controls::toggle;
+use crate::model::Conversation;
+use chrono::{DateTime, Utc};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
+};
+use gpui_kit::*;
+use uuid::Uuid;
+
+pub(super) enum TriggerSave {
+    Saving { attempt: Uuid, enabled: bool },
+    Deleting { attempt: Uuid },
+    Failed(String),
+}
+
+impl TriggerSave {
+    fn attempt(&self) -> Option<Uuid> {
+        match self {
+            Self::Saving { attempt, .. } | Self::Deleting { attempt } => Some(*attempt),
+            Self::Failed(_) => None,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.attempt().is_some()
+    }
+}
+
+impl BotSettings {
+    pub(super) fn sync_triggers(&mut self, conversation: &Conversation) {
+        let cards = trigger_cards(conversation);
+        self.triggers.retain(|key, save| {
+            let enabled = cards
+                .iter()
+                .find(|card| card.source.key() == *key)
+                .map(|card| card.enabled);
+            still_pending(save, enabled)
+        });
+    }
+}
+
+impl ElseApp {
+    fn changeable_trigger(&self, bot: Uuid, source: TriggerSource) -> Option<TriggerCard> {
+        if self.connection != Connection::Connected {
+            return None;
+        }
+        let entry = self.settings.get(&bot)?;
+        if entry
+            .triggers
+            .get(&source.key())
+            .is_some_and(TriggerSave::busy)
+        {
+            return None;
+        }
+        let conversation = self
+            .view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())?;
+        trigger_cards(conversation)
+            .into_iter()
+            .find(|card| card.source == source)
+    }
+
+    /// Pause or resume a trigger, or delete it with `None`.
+    fn change_trigger(
+        &mut self,
+        bot: Uuid,
+        source: TriggerSource,
+        enabled: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.changeable_trigger(bot, source).is_none() {
+            return;
+        }
+        let attempt = Uuid::new_v4();
+        let change = match enabled {
+            Some(enabled) => TriggerSave::Saving { attempt, enabled },
+            None => TriggerSave::Deleting { attempt },
+        };
+        let Some(entry) = self.settings.get_mut(&bot) else {
+            return;
+        };
+        entry.triggers.insert(source.key(), change);
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match (source, enabled) {
+                (TriggerSource::Mail { account }, Some(wake)) => {
+                    client.set_email_wake(account, bot, wake).await
+                }
+                (TriggerSource::Mail { account }, None) => {
+                    client.delete_email_trigger(account, bot).await
+                }
+                (TriggerSource::Social { id }, Some(enabled)) => client
+                    .set_social_trigger_enabled(bot, id, enabled)
+                    .await
+                    .map(|_| ()),
+                (TriggerSource::Social { id }, None) => client.delete_social_trigger(bot, id).await,
+                (TriggerSource::Webhook { id }, Some(enabled)) => {
+                    client.set_webhook_enabled(bot, id, enabled).await
+                }
+                (TriggerSource::Webhook { id }, None) => client.delete_webhook(bot, id).await,
+            };
+            let _ = this.update(cx, |app, cx| {
+                let Some(entry) = app.settings.get_mut(&bot) else {
+                    return;
+                };
+                if entry
+                    .triggers
+                    .get(&source.key())
+                    .and_then(TriggerSave::attempt)
+                    != Some(attempt)
+                {
+                    return;
+                }
+                if let Err(error) = result {
+                    let action = if enabled.is_some() { "save" } else { "delete" };
+                    entry.triggers.insert(
+                        source.key(),
+                        TriggerSave::Failed(format!("Couldn't {action}. {error}")),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_trigger_delete_dialog(
+        &mut self,
+        bot: Uuid,
+        source: TriggerSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = self.changeable_trigger(bot, source) else {
+            return;
+        };
+        let target = match source {
+            TriggerSource::Webhook { .. } => DeleteTarget::Webhook(card.title),
+            TriggerSource::Mail { .. } | TriggerSource::Social { .. } => {
+                DeleteTarget::Trigger(card.delete_name)
+            }
+        };
+        self.open_delete_confirmation(target, window, cx, move |app, window, cx| {
+            app.change_trigger(bot, source, None, window, cx);
+        });
+    }
+
+    pub(super) fn render_triggers(
+        &self,
+        bot: Uuid,
+        entry: &BotSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = section("Triggers", cx);
+        let Some(conversation) = self
+            .view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+        else {
+            return body.child(muted("Loading…", cx)).into_any_element();
+        };
+        let cards = trigger_cards(conversation);
+        if cards.is_empty() {
+            return body
+                .child(muted(
+                    "No triggers yet. Ask the bot in chat to react to something, for example \
+                     \"wake up when new mail arrives from my accountant\", \"answer mentions in \
+                     our Telegram group\", or \"give me a webhook for failed deploys\". Its \
+                     triggers appear here.",
+                    cx,
+                ))
+                .into_any_element();
+        }
+        let rows = cards
+            .into_iter()
+            .map(|card| {
+                let save = entry.triggers.get(&card.source.key());
+                self.render_trigger(bot, card, save, cx)
+            })
+            .collect::<Vec<_>>();
+        body.child(list_rows(rows)).into_any_element()
+    }
+
+    fn render_trigger(
+        &self,
+        bot: Uuid,
+        card: TriggerCard,
+        save: Option<&TriggerSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let source = card.source;
+        let key = source.key();
+        let checked = match save {
+            Some(TriggerSave::Saving { enabled, .. }) => *enabled,
+            _ => card.enabled,
+        };
+        let disabled =
+            save.is_some_and(TriggerSave::busy) || self.connection != Connection::Connected;
+        let switch = toggle(
+            ElementId::Name(format!("trigger-{key}").into()),
+            checked,
+            disabled,
+            cx,
+        )
+        .accessibility_label(format!("Run the trigger for {}", card.title))
+        .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
+            app.change_trigger(bot, source, Some(*enabled), window, cx)
+        }));
+        let delete = Button::new(ElementId::Name(format!("trigger-delete-{key}").into()))
+            .focus_ring(false)
+            .cursor_pointer()
+            .ghost()
+            .opacity(0.)
+            .group_hover("automation-card", |style| style.opacity(1.))
+            .focus(|style| style.opacity(1.))
+            .xsmall()
+            .icon(gpui_kit::assets::IconName::Trash)
+            .accessibility_label(format!("Delete the trigger for {}", card.title))
+            .loading(matches!(save, Some(TriggerSave::Deleting { .. })))
+            .disabled(disabled)
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.open_trigger_delete_dialog(bot, source, window, cx)
+            }));
+        let error = match save {
+            Some(TriggerSave::Failed(error)) => Some(error.clone()),
+            _ => None,
+        };
+        let mut facts = card.pills;
+        if !checked {
+            facts.push("Paused".to_owned());
+        }
+        if let Some(at) = card.last_woke {
+            facts.push(format!(
+                "Last woke {}",
+                at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
+            ));
+        }
+        // Same anatomy as a routine: the name over one meta line, beside a
+        // centred switch. What the trigger asks for follows as its body.
+        let mut tokens = vec![
+            h_flex()
+                .flex_none()
+                .gap_1p5()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child(card.icon.clone().size_3().flex_none())
+                .child(meta(facts.first().cloned().unwrap_or_default(), cx).whitespace_nowrap())
+                .into_any_element(),
+        ];
+        tokens.extend(facts.into_iter().skip(1).map(|fact| {
+            meta(fact, cx)
+                .flex_none()
+                .whitespace_nowrap()
+                .into_any_element()
+        }));
+        v_flex()
+            .w_full()
+            .py_0()
+            .gap_1()
+            .group("automation-card")
+            .child(
+                // The switch lines up with the name, the row's first line.
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(item_name(card.title.clone()))
+                            .child(meta_line(tokens, cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .items_center()
+                            .child(delete)
+                            .child(switch),
+                    ),
+            )
+            .child(meta(card.instructions, cx).pt_0p5())
+            .children(error.map(|error| alert(error, theme.danger, cx)))
+            .into_any_element()
+    }
+}
+
+/// What a trigger card changes: each kind has its own routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerSource {
+    Mail { account: Uuid },
+    Social { id: Uuid },
+    Webhook { id: Uuid },
+}
+
+impl TriggerSource {
+    /// Unique across kinds, since every ID is a random UUID.
+    fn key(self) -> Uuid {
+        match self {
+            Self::Mail { account } => account,
+            Self::Social { id } | Self::Webhook { id } => id,
+        }
+    }
+}
+
+/// One trigger as its sidebar card shows it.
+struct TriggerCard {
+    source: TriggerSource,
+    icon: Icon,
+    title: String,
+    /// How the delete dialog names it.
+    delete_name: String,
+    instructions: String,
+    pills: Vec<String>,
+    enabled: bool,
+    last_woke: Option<DateTime<Utc>>,
+}
+
+/// Every trigger that can wake the bot: mail, then chats, then webhooks.
+fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
+    let mail = conversation.mail_triggers().iter().map(|trigger| {
+        let mut pills = vec!["Email".to_owned(), "New mail".to_owned()];
+        if trigger.state == crate::api::AccountState::Paused {
+            pills.push("inbox paused".to_owned());
+        }
+        TriggerCard {
+            source: TriggerSource::Mail {
+                account: trigger.account_id,
+            },
+            icon: Icon::new(gpui_kit::assets::IconName::Mail),
+            title: trigger.address.clone(),
+            delete_name: format!("the trigger for {}", trigger.address),
+            instructions: trigger
+                .instructions
+                .clone()
+                .unwrap_or_else(|| "Wakes the bot when new mail arrives.".to_owned()),
+            pills,
+            enabled: trigger.wake,
+            last_woke: trigger.last_woke_at,
+        }
+    });
+    let social = conversation.social_triggers().iter().map(|trigger| {
+        let connection = trigger
+            .username
+            .as_ref()
+            .map(|username| format!("@{username}"))
+            .unwrap_or_else(|| trigger.connection_name.clone());
+        TriggerCard {
+            source: TriggerSource::Social { id: trigger.id },
+            icon: match trigger.provider {
+                Provider::Telegram => Icon::new(gpui_kit::assets::IconName::Send),
+                Provider::Discord => Icon::empty().path(crate::DISCORD_ICON),
+                Provider::WhatsApp => Icon::new(gpui_kit::assets::IconName::MessageSquare),
+            },
+            title: trigger.title().to_owned(),
+            delete_name: match trigger.destination {
+                Some(_) => format!("the trigger for {}", trigger.title()),
+                None => "the trigger for any chat".to_owned(),
+            },
+            instructions: trigger.instructions.clone(),
+            pills: vec![
+                trigger.provider.label().to_owned(),
+                connection,
+                trigger.wake.label().to_owned(),
+            ],
+            enabled: trigger.enabled,
+            last_woke: trigger.last_woke_at,
+        }
+    });
+    let webhooks = conversation.webhooks().iter().map(|webhook| TriggerCard {
+        source: TriggerSource::Webhook { id: webhook.id },
+        icon: Icon::new(gpui_kit::assets::IconName::Webhook),
+        title: webhook.name.clone(),
+        delete_name: webhook.name.clone(),
+        instructions: webhook.prompt.clone(),
+        pills: vec!["Webhook".to_owned(), pace(webhook.min_interval_minutes)],
+        enabled: webhook.enabled,
+        last_woke: webhook.last_wake.as_ref().map(|wake| wake.woke_at),
+    });
+    mail.chain(social).chain(webhooks).collect()
+}
+
+/// How often a webhook may wake the bot, at most.
+fn pace(minutes: i64) -> String {
+    match minutes {
+        1 => "at most every minute".to_owned(),
+        m if m % 60 == 0 && m > 60 => format!("at most every {} hours", m / 60),
+        60 => "at most hourly".to_owned(),
+        m => format!("at most every {m} min"),
+    }
+}
+
+/// Whether a trigger's local change still waits for the server: a save until
+/// the trigger reports the saved state, a failure until the trigger is gone.
+fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
+    match (save, current) {
+        (_, None) => false,
+        (TriggerSave::Saving { enabled, .. }, Some(current)) => *enabled != current,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TriggerSave, pace, still_pending, trigger_cards};
+    use crate::api::socials::Trigger;
+    use crate::model::{Conversation, Snapshot};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn trigger(enabled: bool) -> Trigger {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1), "connection_id": Uuid::from_u128(2), "bot_id": Uuid::from_u128(3),
+            "provider": "telegram", "connection_name": "Proliquid", "username": "proliquid_bot",
+            "destination": null, "destination_name": null, "wake": "mentions",
+            "instructions": "Answer questions.", "enabled": enabled,
+            "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-01T07:00:00.123+00:00"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_trigger_switch_stays_busy_until_the_server_reports_the_saved_state() {
+        let saving = TriggerSave::Saving {
+            attempt: Uuid::new_v4(),
+            enabled: false,
+        };
+        assert!(
+            still_pending(&saving, Some(trigger(true).enabled)),
+            "a stale event keeps it busy"
+        );
+        assert!(!still_pending(&saving, Some(trigger(false).enabled)));
+        let failed = TriggerSave::Failed("Couldn't save.".into());
+        assert!(
+            still_pending(&failed, Some(trigger(true).enabled)),
+            "the error stays visible"
+        );
+        let deleting = TriggerSave::Deleting {
+            attempt: Uuid::new_v4(),
+        };
+        assert!(
+            !still_pending(&deleting, None),
+            "a deleted trigger drops its state"
+        );
+        assert!(!still_pending(&failed, None));
+    }
+
+    #[test]
+    fn every_trigger_kind_becomes_one_card_in_a_stable_order() {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "event_cursor": "server:bot:1", "items": [], "turns": [],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 },
+            "mail_triggers": [{
+                "account_id": Uuid::from_u128(1), "address": "owner@example.com",
+                "state": "paused", "health": "connected", "wake": false
+            }],
+            "social_triggers": [{
+                "id": Uuid::from_u128(2), "connection_id": Uuid::from_u128(4),
+                "bot_id": Uuid::from_u128(5), "provider": "telegram",
+                "connection_name": "Team", "username": null, "destination": null,
+                "destination_name": null, "wake": "mentions", "instructions": "Answer.",
+                "enabled": true, "created_at": "2026-11-01T07:00:00Z",
+                "updated_at": "2026-11-01T07:00:00Z"
+            }],
+            "webhooks": [{
+                "id": Uuid::from_u128(3), "name": "Deploys", "prompt": "Open an issue.",
+                "min_interval_minutes": 120, "enabled": true, "last_wake": null
+            }]
+        }))
+        .unwrap();
+        let conversation = Conversation::from_snapshot(snapshot).unwrap();
+        let cards = trigger_cards(&conversation);
+        let titles: Vec<_> = cards.iter().map(|card| card.title.as_str()).collect();
+        assert_eq!(titles, ["owner@example.com", "Any chat", "Deploys"]);
+        let mail = &cards[0];
+        assert_eq!(mail.instructions, "Wakes the bot when new mail arrives.");
+        assert_eq!(mail.pills, ["Email", "New mail", "inbox paused"]);
+        assert!(!mail.enabled);
+        assert_eq!(cards[1].delete_name, "the trigger for any chat");
+        assert_eq!(cards[2].pills, ["Webhook", "at most every 2 hours"]);
+        let keys: std::collections::HashSet<_> =
+            cards.iter().map(|card| card.source.key()).collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn webhook_paces_read_naturally() {
+        assert_eq!(pace(1), "at most every minute");
+        assert_eq!(pace(15), "at most every 15 min");
+        assert_eq!(pace(60), "at most hourly");
+        assert_eq!(pace(90), "at most every 90 min");
+        assert_eq!(pace(1440), "at most every 24 hours");
+    }
+}
