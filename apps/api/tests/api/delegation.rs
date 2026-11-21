@@ -306,7 +306,7 @@ async fn a_delegated_reply_streams_into_the_receiving_chat_in_order() {
     let input = else_api::db::turns::input(&app.db.pool, next)
         .await
         .unwrap();
-    let packet = else_api::providers::prompt::packet(&input, 0);
+    let packet = common::fresh_packet(&input);
     assert!(
         packet.contains("Delegated task (another bot's request, not an owner message)")
             && !packet.contains(&format!("Owner: {task}")),

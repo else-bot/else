@@ -504,10 +504,14 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
         steered,
         [("After the job finishes, upload the report.", true)]
     );
-    let request = else_api::providers::prompt::request_text(&input);
+    let request = common::fresh_packet(&input);
     assert!(
-        request.starts_with("Patch the sender script.")
-            && request.ends_with("After the job finishes, upload the report."),
+        request.ends_with(
+            "\n\nPatch the sender script.\n\n[else.bot] The owner sent this while you were \
+             working. Take it into the work in progress: keep doing everything still asked \
+             unless this message changes or cancels it, and stop only if it asks you to.\n\n\
+             After the job finishes, upload the report."
+        ),
         "the continuation asks for the added message too: {request}"
     );
     let claimed = else_api::db::turns::claim_next(pool, &[], true)

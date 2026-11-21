@@ -193,11 +193,9 @@ pub struct Identity<'a> {
 pub fn fingerprint(input: &TurnInput, profile: &Profile, identity: &Identity<'_>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
-    // The registry's mode line only: the bot list rides in the packet.
-    let registry = prompt::registry_text(input);
-    let mode = registry.lines().next().unwrap_or_default();
+    let mode = prompt::fingerprint_tag(input);
     let head = [
-        mode,
+        mode.as_str(),
         identity.prompt_version,
         identity.version,
         identity.runtime,

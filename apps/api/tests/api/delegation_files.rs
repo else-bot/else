@@ -114,7 +114,7 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
     assert_eq!(child.files.len(), 1, "only the named file is sent");
     assert_eq!(child.files[0].attachment.name, "whale.png");
     assert_eq!(*child.files[0].data, *card, "exact bytes");
-    let request = else_api::providers::prompt::request_text(child);
+    let request = common::fresh_packet(child);
     assert!(
         request.contains(task)
             && request.contains("whale.png (image/png")
@@ -255,7 +255,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
         .find(|file| file.attachment.name == "whale.png")
         .expect("the task's file is staged for it");
     assert_eq!(*staged.data, *card);
-    let packet = else_api::providers::prompt::packet(given, 0);
+    let packet = common::fresh_packet(given);
     assert!(
         packet.contains(&format!(
             "saved at .attachments/{}/whale.png",
@@ -263,7 +263,7 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
         )),
         "{packet}"
     );
-    let packet = else_api::providers::prompt::packet(task, 0);
+    let packet = common::fresh_packet(task);
     assert!(packet.contains(text), "{packet}");
     h.release(asking).await;
 }

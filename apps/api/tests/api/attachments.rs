@@ -279,13 +279,14 @@ async fn ordered_parts_persist_through_events_restart_and_provider_input() {
         .collect();
     assert_eq!(names, ["shot.png", "notes.txt"]);
     assert_eq!(&*input.files[0].data, PNG);
-    let packet = else_api::providers::prompt::packet(&input, 0);
+    let packet = common::fresh_packet(&input);
     assert!(
-        packet.starts_with("  Look at [File: shot.png (image/png, "),
-        "{packet}"
-    );
-    assert!(
-        packet.contains(&format!("saved at .attachments/{notes}/notes.txt]")),
+        packet.ends_with(&format!(
+            "\n\n  Look at [File: shot.png (image/png, {} bytes), saved at \
+             .attachments/{image}/shot.png]\n\nthen [File: notes.txt (text/plain, 5 bytes), \
+             saved at .attachments/{notes}/notes.txt]",
+            PNG.len()
+        )),
         "{packet}"
     );
 
@@ -317,7 +318,7 @@ async fn ordered_parts_persist_through_events_restart_and_provider_input() {
         .await
         .unwrap();
     assert!(input.parts.is_empty());
-    let packet = else_api::providers::prompt::packet(&input, 0);
+    let packet = common::fresh_packet(&input);
     assert!(
         packet.contains(&format!("saved at .attachments/{image}/shot.png]")),
         "{packet}"
