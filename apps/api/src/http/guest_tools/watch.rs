@@ -42,7 +42,7 @@ pub(in crate::http) fn start_schema() -> Value {
                 "description": "Vault entry names (see computer_secrets) whose variables every \
                     check gets. Read them from the environment; never print them." } },
             "required": ["check", "hours", "purpose", "prompt"], "additionalProperties": false },
-        "annotations": super::guest_annotations(),
+        "annotations": super::schemas::guest_annotations(),
     })
 }
 
