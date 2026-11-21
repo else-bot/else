@@ -31,7 +31,7 @@ fn input(
     value: &str,
     placeholder: &'static str,
     window: &mut Window,
-    cx: &mut Context<Shell>,
+    cx: &mut Context<View>,
 ) -> Entity<InputState> {
     cx.new(|cx| {
         InputState::new(window, cx)
@@ -41,7 +41,7 @@ fn input(
 }
 
 impl DestinationForm {
-    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<Shell>) -> Self {
+    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<View>) -> Self {
         let destination = snapshot.destination.as_ref();
         let endpoint = input(
             destination.map_or("", |d| &d.endpoint),
@@ -85,15 +85,13 @@ impl DestinationForm {
         let subscriptions = [&endpoint, &bucket, &prefix, &access, &secret, &region]
             .into_iter()
             .map(|state| {
-                cx.subscribe_in(state, window, |shell, _, event: &InputEvent, _, cx| {
+                cx.subscribe_in(state, window, |view, _, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::Change) {
-                        if let Some(view) = &mut shell.backups {
-                            if let Some(Editor::Destination(form)) = &mut view.editor {
-                                form.verified = false;
-                            }
-                            view.feedback = None;
-                            view.error = None;
+                        if let Some(Editor::Destination(form)) = &mut view.editor {
+                            form.verified = false;
                         }
+                        view.feedback = None;
+                        view.error = None;
                         cx.notify();
                     }
                 })
@@ -151,7 +149,7 @@ impl DestinationForm {
             )
     }
 
-    pub fn render(&self, busy: bool, stacked: bool, cx: &mut Context<Shell>) -> Div {
+    pub fn render(&self, busy: bool, stacked: bool, cx: &mut Context<View>) -> Div {
         let theme = cx.theme();
         let mut services = segment_track(cx).w_full();
         for service in [
@@ -159,19 +157,20 @@ impl DestinationForm {
             BackupService::S3,
             BackupService::Compatible,
         ] {
-            services = services.child(
-                segment(
-                    ElementId::Name(format!("backup-service-{service:?}").into()),
-                    service.label(),
-                    self.service == service,
-                    busy,
-                    cx,
-                )
-                .toggled(self.service == service)
-                .on_click(cx.listener(move |shell, _, window, cx| {
-                    shell.select_backup_service(service, window, cx)
-                })),
-            );
+            services =
+                services.child(
+                    segment(
+                        ElementId::Name(format!("backup-service-{service:?}").into()),
+                        service.label(),
+                        self.service == service,
+                        busy,
+                        cx,
+                    )
+                    .toggled(self.service == service)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.select_service(service, window, cx)
+                    })),
+                );
         }
         v_flex().gap_4()
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Backup destination"))
@@ -181,12 +180,12 @@ impl DestinationForm {
             .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Access key ID", &self.access, busy, cx)).child(self.field("Secret access key", &self.secret, busy, cx)))
             .child(div().text_xs().text_color(theme.muted_foreground).child(if self.saved_secret { "Leave the secret blank to keep the saved key. A new key replaces it only after saving." } else { "Credentials are encrypted on the workspace server." }))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Backups share unchanged data between copies. Do not add a bucket rule that expires objects under this prefix: it would delete data newer backups still use."))
-            .child(Button::new("backup-advanced").control(Tier::Ghost, Scale::Compact, busy, cx).label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).on_click(cx.listener(|shell, _, _, cx| {
-                if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced.toggle(); }
+            .child(Button::new("backup-advanced").control(Tier::Ghost, Scale::Compact, busy, cx).label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).on_click(cx.listener(|view, _, _, cx| {
+                if let Some(Editor::Destination(form)) = view.editor.as_mut() { form.advanced.toggle(); }
                 cx.notify();
             })))
-            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy, cx)).child(h_flex().gap_3().child(toggle("backup-path-style", self.path_style, busy, cx).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {
-                if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.path_style = *checked; form.verified = false; }
+            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy, cx)).child(h_flex().gap_3().child(toggle("backup-path-style", self.path_style, busy, cx).accessibility_label("Use path-style addressing").on_click(cx.listener(|view, checked: &bool, _, cx| {
+                if let Some(Editor::Destination(form)) = view.editor.as_mut() { form.path_style = *checked; form.verified = false; }
                 cx.notify();
             }))).child(div().text_xs().child("Use path-style addressing"))))
     }
@@ -204,7 +203,7 @@ impl PolicyForm {
         (seconds as f64 / 3600.).to_string()
     }
 
-    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<Shell>) -> Self {
+    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<View>) -> Self {
         let hours = input(&Self::hours_value(snapshot.interval_secs), "24", window, cx);
         let keep = input(&snapshot.keep.to_string(), "7", window, cx);
         let edits = [&hours, &keep]
@@ -249,7 +248,7 @@ impl PolicyForm {
         snapshot: &BackupSnapshot,
         busy: bool,
         stacked: bool,
-        cx: &mut Context<Shell>,
+        cx: &mut Context<View>,
     ) -> Div {
         let theme = cx.theme();
         let field = |label, state| {
@@ -275,10 +274,8 @@ impl PolicyForm {
                 Button::new(ElementId::Name(format!("backup-interval-{seconds}").into()))
                     .control(Tier::Secondary, Scale::Compact, busy, cx)
                     .label(label)
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if let Some(Editor::Policy(form)) =
-                            shell.backups.as_mut().and_then(|view| view.editor.as_mut())
-                        {
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if let Some(Editor::Policy(form)) = view.editor.as_mut() {
                             form.hours.update(cx, |input, cx| {
                                 input.set_value(Self::hours_value(seconds), window, cx)
                             });
@@ -296,16 +293,14 @@ impl PolicyForm {
     }
 }
 
-impl Shell {
-    fn select_backup_service(
+impl View {
+    fn select_service(
         &mut self,
         service: BackupService,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = &mut self.backups else {
-            return;
-        };
+        let view = self;
         let Some(Editor::Destination(form)) = &mut view.editor else {
             return;
         };
@@ -365,7 +360,7 @@ impl LocalForm {
         revision: i64,
         local: &LocalBackupSettings,
         window: &mut Window,
-        cx: &mut Context<Shell>,
+        cx: &mut Context<View>,
     ) -> Self {
         let time = input(&local.time, "03:00", window, cx);
         let keep = input(&local.keep.to_string(), "7", window, cx);
@@ -405,7 +400,7 @@ impl LocalForm {
         saving: bool,
         busy: bool,
         stacked: bool,
-        cx: &mut Context<Shell>,
+        cx: &mut Context<View>,
     ) -> Div {
         let theme = cx.theme();
         let managed = local.managed_by_env;
@@ -423,12 +418,8 @@ impl LocalForm {
                     })
                     .selected(selected.as_ref() == time)
                     .toggled(selected.as_ref() == time)
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if let Some(form) = shell
-                            .backups
-                            .as_mut()
-                            .and_then(|view| view.local_form.as_mut())
-                        {
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if let Some(form) = view.local_form.as_mut() {
                             form.time
                                 .update(cx, |field, cx| field.set_value(time, window, cx));
                         }
@@ -458,12 +449,8 @@ impl LocalForm {
         let automatic = |label: &'static str| {
             toggle("local-backups-enabled", self.enabled, disabled, cx)
                 .accessibility_label(label)
-                .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
-                    if let Some(form) = shell
-                        .backups
-                        .as_mut()
-                        .and_then(|view| view.local_form.as_mut())
-                    {
+                .on_click(cx.listener(|view, enabled: &bool, _, cx| {
+                    if let Some(form) = view.local_form.as_mut() {
                         form.enabled = *enabled;
                     }
                     cx.notify();
@@ -623,8 +610,8 @@ impl LocalForm {
                                 cx,
                             )
                             .label("Cancel")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.cancel_local_backup_edit(window, cx)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.cancel_local_edit(window, cx)
                             })),
                     )
                     .child(
@@ -637,8 +624,8 @@ impl LocalForm {
                             )
                             .label("Save schedule")
                             .loading(saving)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.save_local_backup_schedule(window, cx)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.save_local_schedule(window, cx)
                             })),
                     ),
             )

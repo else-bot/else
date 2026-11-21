@@ -228,7 +228,7 @@ pub struct Shell {
     setup: Option<Setup>,
     settings_focus: FocusHandle,
     updates: updates::View,
-    backups: Option<backups::View>,
+    backups: Option<pane::Mounted<backups::View>>,
     mcp: Option<pane::Mounted<mcp::View>>,
     skills: Option<pane::Mounted<skills::View>>,
     vault: Option<Entity<vault::View>>,

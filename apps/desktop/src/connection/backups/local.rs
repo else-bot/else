@@ -54,15 +54,15 @@ fn result(status: LocalBackupStatus, theme: &Theme) -> (&'static str, Hsla) {
     }
 }
 
-impl Shell {
-    pub(super) fn render_local_backups(
+impl View {
+    pub(super) fn render_local(
         &self,
-        view: &View,
         snapshot: &BackupSnapshot,
         local: &LocalBackupSettings,
         stacked: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        let view = self;
         let theme = cx.theme();
         let stamp = |value: &str| server_timestamp(value, &local.timezone, local.utc_offset_secs);
         let running = snapshot

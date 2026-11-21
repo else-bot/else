@@ -244,6 +244,7 @@ impl Shell {
             SettingsSection::Computers => self.open_computers(window, cx),
             SettingsSection::Mcp => self.open_mcp(window, cx),
             SettingsSection::Skills => self.open_skills(window, cx),
+            SettingsSection::Backups => self.open_backups(window, cx),
             _ => {}
         }
     }
@@ -385,25 +386,23 @@ impl Shell {
                 .children(self.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
-            SettingsSection::Mcp => div()
-                .children(self.mcp.as_ref().map(|pane| pane.view.clone()))
-                .into_any_element(),
-            SettingsSection::Skills => div()
-                .children(self.skills.as_ref().map(|pane| pane.view.clone()))
-                .into_any_element(),
+            SettingsSection::Mcp => pane_element(self.mcp.as_ref()),
+            SettingsSection::Skills => pane_element(self.skills.as_ref()),
             SettingsSection::Vault => match &self.vault {
                 Some(view) => div().child(view.clone()).into_any_element(),
                 None => div()
                     .child("Reconnect to the server to open the Vault.")
                     .into_any_element(),
             },
-            SettingsSection::Usage => div()
-                .children(self.usage.as_ref().map(|pane| pane.view.clone()))
-                .into_any_element(),
-            SettingsSection::Computers => div()
-                .children(self.computers.as_ref().map(|pane| pane.view.clone()))
-                .into_any_element(),
-            SettingsSection::Backups => self.render_backups(window, cx),
+            SettingsSection::Usage => pane_element(self.usage.as_ref()),
+            SettingsSection::Computers => pane_element(self.computers.as_ref()),
+            SettingsSection::Backups => match &self.backups {
+                Some(pane) => pane.view.clone().into_any_element(),
+                None => div()
+                    .p_8()
+                    .child("Loading backup settings…")
+                    .into_any_element(),
+            },
             SettingsSection::Updates => self.render_updates(cx),
         };
         // Every page scrolls in the same frame, whose 32 px padding keeps
@@ -840,6 +839,14 @@ impl Shell {
                 },
             ))
             .into_any_element()
+    }
+}
+
+/// A pane's page, which fills the settings column like the page it replaced.
+fn pane_element<V: Render>(pane: Option<&pane::Mounted<V>>) -> AnyElement {
+    match pane {
+        Some(pane) => pane.view.clone().into_any_element(),
+        None => div().into_any_element(),
     }
 }
 
