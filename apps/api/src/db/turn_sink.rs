@@ -13,7 +13,7 @@ use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 use crate::db::bots::BotStatus;
 use crate::db::handoffs::{self, Moved, State as HandoffState};
-use crate::db::in_ids;
+use crate::db::holds::{Delivered, Hold};
 
 mod steers;
 
@@ -51,20 +51,12 @@ struct SinkState {
     flush_wanted: Arc<tokio::sync::Notify>,
     fenced: bool,
     attempt: i32,
-    delivered: Vec<Uuid>,
-    delivered_secrets: Vec<Uuid>,
-    delivered_questions: Vec<Uuid>,
-    delivered_drafts: Vec<Uuid>,
-    delivered_socials: Vec<Uuid>,
-    delivered_waits: Vec<Uuid>,
-    delivered_job_waits: Vec<Uuid>,
+    delivered: Delivered,
     /// The attempt tells the provider about the limit cut before it.
     delivers_cut: bool,
     /// A delegated task: its text updates the delegating turn's progress.
     delegated: bool,
     progress_at: Option<std::time::Instant>,
-    delivered_skills: Vec<Uuid>,
-    delivered_handoffs: Vec<Uuid>,
     /// The joined owner messages this attempt's request carries for the
     /// first time ([`crate::db::steers::fold`]).
     folded_steers: Vec<Uuid>,
@@ -99,11 +91,46 @@ impl SqliteSink {
                 flush_wanted: flush_wanted.clone(),
                 fenced: false,
                 attempt: input.attempt,
-                delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
-                delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
-                delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
-                delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
-                delivered_job_waits: input.computer_job_waits.iter().map(|w| w.id).collect(),
+                delivered: Delivered::from_iter([
+                    (
+                        Hold::Delegation,
+                        input.delegation.outcomes.iter().map(|o| o.id).collect(),
+                    ),
+                    (Hold::Secret, input.secrets.iter().map(|o| o.id).collect()),
+                    (
+                        Hold::Question,
+                        input.questions.iter().map(|o| o.id).collect(),
+                    ),
+                    (
+                        Hold::Draft,
+                        input
+                            .outgoing_drafts
+                            .iter()
+                            .filter(|n| n.decided)
+                            .map(|n| n.id)
+                            .collect(),
+                    ),
+                    (
+                        Hold::Social,
+                        input.social_setups.iter().map(|o| o.id).collect(),
+                    ),
+                    (
+                        Hold::McpWait,
+                        input.mcp_waits.iter().map(|o| o.id).collect(),
+                    ),
+                    (
+                        Hold::JobWait,
+                        input.computer_job_waits.iter().map(|o| o.id).collect(),
+                    ),
+                    (
+                        Hold::Skill,
+                        input.skill_installs.iter().map(|o| o.id).collect(),
+                    ),
+                    (
+                        Hold::Handoff,
+                        input.computer_handoffs.iter().map(|o| o.id).collect(),
+                    ),
+                ]),
                 delivers_cut: input.limit_continuation.is_some(),
                 delegated: input.delegation.delegated_task(),
                 folded_steers: input
@@ -113,15 +140,6 @@ impl SqliteSink {
                     .map(|steered| steered.message.turn_id)
                     .collect(),
                 progress_at: None,
-                delivered_skills: input.skill_installs.iter().map(|o| o.id).collect(),
-                delivered_handoffs: input.computer_handoffs.iter().map(|o| o.id).collect(),
-                delivered_questions: input.questions.iter().map(|o| o.id).collect(),
-                delivered_drafts: input
-                    .outgoing_drafts
-                    .iter()
-                    .filter(|n| n.decided)
-                    .map(|n| n.id)
-                    .collect(),
             }),
             flush_wanted,
         }
@@ -477,62 +495,12 @@ impl SinkState {
     async fn running(&mut self) -> Result<(), Fenced> {
         match self.transition(Step::Running).await {
             Ok(()) => {
-                if !self.delivered.is_empty()
-                    || !self.delivered_secrets.is_empty()
-                    || !self.delivered_questions.is_empty()
-                    || !self.delivered_drafts.is_empty()
-                    || !self.delivered_socials.is_empty()
-                    || !self.delivered_waits.is_empty()
-                    || !self.delivered_job_waits.is_empty()
-                    || self.delivers_cut
-                    || !self.delivered_skills.is_empty()
-                    || !self.delivered_handoffs.is_empty()
-                {
+                if !self.delivered.is_empty() || self.delivers_cut {
                     let marked = async {
                         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                        crate::db::delegations::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered,
-                        )
-                        .await?;
-                        crate::db::secret_requests::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_secrets,
-                        )
-                        .await?;
-                        crate::db::owner_questions::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_questions,
-                        )
-                        .await?;
-                        crate::db::outgoing_drafts::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_drafts,
-                        )
-                        .await?;
-                        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE social_setups SET delivered_attempt=?3 WHERE turn_id=?1 AND delivered_attempt IS NULL AND {}", in_ids("id", "?2")))).bind(self.turn_id).bind(sqlx::types::Json(&self.delivered_socials)).bind(self.attempt).execute(&mut *tx).await?;
-                        crate::db::mcp_waits::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_waits,
-                        )
-                        .await?;
-                        crate::db::computer_job_waits::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_job_waits,
-                        )
-                        .await?;
+                        self.delivered
+                            .mark(&mut tx, self.bot_id, self.turn_id, self.attempt)
+                            .await?;
                         if self.delivers_cut {
                             crate::db::limit_cuts::mark_delivered(
                                 &mut tx,
@@ -541,24 +509,6 @@ impl SinkState {
                             )
                             .await?;
                         }
-                        if !self.delivered.is_empty() {
-                            crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id)
-                                .await?;
-                        }
-                        crate::db::skills::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_skills,
-                        )
-                        .await?;
-                        crate::db::computer_handoffs::mark_delivered(
-                            &mut tx,
-                            self.turn_id,
-                            self.attempt,
-                            &self.delivered_handoffs,
-                        )
-                        .await?;
                         tx.commit().await
                     }
                     .await;

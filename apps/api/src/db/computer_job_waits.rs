@@ -187,11 +187,7 @@ pub async fn pending_for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<Pending>> = HashMap::new();
-    for wait in rows {
-        by_turn.entry(wait.turn_id).or_default().push(wait);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
 /// How a waited-on job ended, given to the continuation as task data.
@@ -283,27 +279,6 @@ pub async fn withdraw_for_turn(
          WHERE turn_id = ?1 AND status = 'pending'",
     )
     .bind(turn_id)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
-
-/// Record that `attempt` received these outcomes.
-pub async fn mark_delivered(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    attempt: i32,
-    ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE computer_job_waits SET delivered_attempt = ?3
-         WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND {}",
-        in_ids("id", "?2")
-    )))
-    .bind(turn_id)
-    .bind(Json(ids))
-    .bind(attempt)
     .execute(&mut *conn)
     .await?;
     Ok(())

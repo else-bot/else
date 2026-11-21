@@ -188,11 +188,7 @@ pub async fn for_turns(
     .bind(sqlx::types::Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<Handoff>> = HashMap::new();
-    for row in rows {
-        by_turn.entry(row.turn_id).or_default().push(row);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
 /// Accept a delegation from the provider attempt of `turn_id`. The target

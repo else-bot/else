@@ -218,12 +218,10 @@ pub async fn for_turns(
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<Handoff>> = HashMap::new();
-    for row in rows {
-        let h = handoff(row);
-        by_turn.entry(h.turn_id).or_default().push(h);
-    }
-    Ok(by_turn)
+    Ok(super::holds::by_turn(
+        rows.into_iter().map(handoff),
+        |row| row.turn_id,
+    ))
 }
 
 /// What the owner did with a request, for the attempt that continues the
@@ -253,27 +251,6 @@ pub async fn undelivered(
         .into_iter()
         .map(|(id, reason, status)| Outcome { id, reason, status })
         .collect())
-}
-
-/// Record that `attempt` received these outcomes.
-pub async fn mark_delivered(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    attempt: i32,
-    ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE computer_handoffs SET delivered_attempt = ?3
-         WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND {}",
-        in_ids("id", "?2")
-    )))
-    .bind(turn_id)
-    .bind(Json(ids))
-    .bind(attempt)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 /// The bot's latest request the owner took over, for the context every
