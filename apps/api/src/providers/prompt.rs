@@ -22,6 +22,8 @@ use crate::app::providers::{
 use crate::db::turns::{ItemKind, TurnStatus};
 
 mod outcomes;
+#[cfg(test)]
+mod snapshots;
 
 pub use outcomes::outcomes_block;
 pub(super) use outcomes::ran_actions_block;
