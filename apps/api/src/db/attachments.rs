@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::app::messages::Attachment;
 use crate::app::providers::InputFile;
+use crate::db::bots::{self, BotStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -56,13 +57,9 @@ pub(super) async fn store_in(
     data: &[u8],
 ) -> Result<(Attachment, bool), StoreError> {
     let digest = Sha256::digest(data).to_vec();
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&mut *conn, bot_id).await? {
         None => return Err(StoreError::NotFound),
-        Some("active") => {}
+        Some(BotStatus::Active) => {}
         Some(_) => return Err(StoreError::Deleted),
     }
     let saved: Option<(Uuid, String, String, Vec<u8>)> =

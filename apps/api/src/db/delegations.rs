@@ -43,6 +43,7 @@ use super::events;
 use super::turns::TurnStatus;
 use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
+use crate::db::bots::BotStatus;
 use crate::db::in_ids;
 use crate::providers::output_files::OutputFile;
 
@@ -132,7 +133,7 @@ pub struct Accepted {
     pub delegation_id: Uuid,
     pub target_bot_id: Uuid,
     pub target_name: String,
-    pub status: String,
+    pub status: Status,
     /// For a retry of a child that already ended: its result or error.
     pub outcome: Option<String>,
     /// False when this was a retry of an existing delegation.
@@ -150,7 +151,7 @@ pub struct Handoff {
     pub target_bot_id: Uuid,
     pub target_name: String,
     pub task: String,
-    pub status: String,
+    pub status: Status,
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     /// An attempt of the delegating turn has received the outcome.
@@ -282,7 +283,7 @@ async fn create_in(
         .bind(parent_bot)
         .execute(&mut *conn)
         .await?;
-    let caller: Option<(Uuid, TurnStatus, i32, String, String)> = sqlx::query_as(
+    let caller: Option<(Uuid, TurnStatus, i32, String, BotStatus)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
          FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN bots b ON b.id = t.bot_id
@@ -294,7 +295,7 @@ async fn create_in(
     let Some((parent, status, attempt, kind, bot_status)) = caller else {
         return Err(DelegateError::NotRunning);
     };
-    if !status.serves_tools() || bot_status != "active" {
+    if !status.serves_tools() || !bot_status.is_active() {
         return Err(DelegateError::NotRunning);
     }
     let chain = chain(conn, turn_id).await?;
@@ -350,7 +351,7 @@ async fn create_in(
         hasher.update(question.as_bytes());
     }
     let hash = hasher.finalize().to_vec();
-    let existing: Option<(Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
+    let existing: Option<(Uuid, Uuid, String, Status, Option<String>)> = sqlx::query_as(
         "SELECT d.id, d.target_bot_id, b.name, d.status, coalesce(d.result, d.error)
          FROM delegations d
          JOIN bots b ON b.id = d.target_bot_id
@@ -400,7 +401,7 @@ async fn create_in(
     {
         return Err(DelegateError::AttemptParked);
     }
-    let target_row: Option<(String, String, bool, Option<String>, Uuid, i64)> = sqlx::query_as(
+    let target_row: Option<(BotStatus, String, bool, Option<String>, Uuid, i64)> = sqlx::query_as(
         "SELECT b.status, b.name, b.cancel_pending, b.selected_provider_id, c.id, c.last_turn_no
          FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
          WHERE b.id = ?1",
@@ -419,7 +420,7 @@ async fn create_in(
     else {
         return Err(DelegateError::BotUnavailable);
     };
-    if target_status != "active" || cancel_pending {
+    if !target_status.is_active() || cancel_pending {
         return Err(DelegateError::BotUnavailable);
     }
     let own: Option<String> =
@@ -550,7 +551,7 @@ async fn create_in(
         delegation_id,
         target_bot_id: target,
         target_name,
-        status: "queued".into(),
+        status: Status::Queued,
         outcome: None,
         created: true,
     })
@@ -987,7 +988,7 @@ pub async fn mark_delivered(
         id: Uuid,
         parent_bot_id: Uuid,
         conversation_id: Uuid,
-        status: String,
+        status: Status,
         task: String,
         result: Option<String>,
         error: Option<String>,
@@ -1017,7 +1018,8 @@ pub async fn mark_delivered(
     {
         let key = format!("delegation:{id}");
         let body = format!(
-            "delegated task {id} ({status}): {task}\n-> {}",
+            "delegated task {id} ({}): {task}\n-> {}",
+            status.as_str(),
             result.or(error).unwrap_or_default()
         );
         let entry = crate::db::memory::NewEntry {

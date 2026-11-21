@@ -21,9 +21,10 @@ use crate::db::turns::TurnStatus;
 use crate::db::turns::lifecycle;
 
 /// A delegation's lifecycle, as stored in `delegations.status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr, serde::Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Queued,
     Running,
@@ -37,7 +38,7 @@ impl Status {
         self.into()
     }
 
-    fn is_ended(self) -> bool {
+    pub fn is_ended(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }

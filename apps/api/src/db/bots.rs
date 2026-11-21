@@ -33,6 +33,23 @@ pub enum BotStatus {
     Deleted,
 }
 
+impl BotStatus {
+    pub fn is_active(self) -> bool {
+        self == Self::Active
+    }
+}
+
+/// The bot's status, or `None` when no such bot exists.
+pub async fn status<'e>(
+    conn: impl sqlx::SqliteExecutor<'e>,
+    bot_id: Uuid,
+) -> Result<Option<BotStatus>, sqlx::Error> {
+    sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(conn)
+        .await
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct BotRecord {
     pub id: Uuid,

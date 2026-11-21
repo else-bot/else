@@ -22,6 +22,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::events;
+use crate::db::bots::{self, BotStatus};
 
 pub const MAX_NAME: usize = 80;
 
@@ -274,13 +275,9 @@ pub async fn assign(
             return Err(CategoryError::NotFound);
         }
     }
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&mut *tx, bot_id).await? {
         None => return Err(CategoryError::BotNotFound),
-        Some("active") => {}
+        Some(BotStatus::Active) => {}
         Some(_) => return Err(CategoryError::BotDeleted),
     }
     let changed = sqlx::query(

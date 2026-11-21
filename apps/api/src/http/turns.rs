@@ -1,3 +1,4 @@
+use crate::db::bots::{self, BotStatus};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -39,13 +40,9 @@ pub fn bot_deleted() -> ApiError {
 }
 
 pub(super) async fn active_bot(state: &AppState, bot_id: Uuid) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&state.db, bot_id).await? {
         None => Err(ApiError::not_found()),
-        Some("active") => Ok(()),
+        Some(BotStatus::Active) => Ok(()),
         Some(_) => Err(bot_deleted()),
     }
 }
@@ -262,7 +259,7 @@ async fn by_request(
     let bot = crate::db::bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    if bot.status != crate::db::bots::BotStatus::Active {
+    if bot.status != BotStatus::Active {
         return Err(bot_deleted());
     }
     let (turn, item) = turns::find_by_request(&state.db, bot_id, request_id)

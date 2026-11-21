@@ -29,6 +29,7 @@
 //! lane and starts a fresh one there, so it neither resets nor replays the
 //! bot's chat session or earlier runs.
 
+use crate::db::bots::{self, BotStatus};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
@@ -361,7 +362,7 @@ pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
-    let row: Option<(Uuid, Uuid, TurnStatus, String, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, Uuid, TurnStatus, BotStatus, Uuid)> = sqlx::query_as(
         "SELECT t.bot_id, t.conversation_id, t.status, b.status, o.id
          FROM turns t JOIN bots b ON b.id = t.bot_id
          JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
@@ -381,7 +382,7 @@ pub(crate) async fn authorized_owner_conversation(
     {
         return Err(RoutineError::NotAllowed);
     }
-    if !status.serves_tools() || bot_status != "active" {
+    if !status.serves_tools() || !bot_status.is_active() {
         return Err(RoutineError::NotRunning);
     }
     Ok(owner_conversation)
@@ -390,18 +391,11 @@ pub(crate) async fn authorized_owner_conversation(
 pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {
     match by {
         By::Turn(caller) => authorized_owner_conversation(conn, caller).await.map(drop),
-        By::Owner { bot_id } => {
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-                    .bind(bot_id)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-            match status.as_deref() {
-                None => Err(RoutineError::NotFound),
-                Some("active") => Ok(()),
-                Some(_) => Err(RoutineError::BotDeleted),
-            }
-        }
+        By::Owner { bot_id } => match bots::status(&mut *conn, bot_id).await? {
+            None => Err(RoutineError::NotFound),
+            Some(BotStatus::Active) => Ok(()),
+            Some(_) => Err(RoutineError::BotDeleted),
+        },
     }
 }
 

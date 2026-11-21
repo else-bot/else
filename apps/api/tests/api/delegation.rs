@@ -2018,7 +2018,7 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
             .await
             .unwrap();
     assert!(!retry.created);
-    assert_eq!(retry.status, "completed");
+    assert_eq!(retry.status, else_api::db::delegations::Status::Completed);
 }
 
 #[tokio::test(flavor = "multi_thread")]

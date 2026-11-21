@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
+use crate::db::bots::BotStatus;
 use crate::db::in_ids;
 pub use crate::db::steers::Placement;
 use crate::db::steers::STEERED;
@@ -505,7 +506,7 @@ pub async fn accept(
 ) -> Result<Accepted, AcceptError> {
     let hash = request_hash(&req);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let bot: Option<(String, Uuid, i64, i64, bool)> = sqlx::query_as(
+    let bot: Option<(BotStatus, Uuid, i64, i64, bool)> = sqlx::query_as(
         "SELECT b.status, c.id, c.last_turn_no, c.last_item_seq, b.cancel_pending
          FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
          WHERE b.id = ?1",
@@ -516,7 +517,7 @@ pub async fn accept(
     let Some((status, conversation_id, last_turn_no, last_item_seq, cancel_pending)) = bot else {
         return Err(AcceptError::NotFound);
     };
-    if status != "active" {
+    if !status.is_active() {
         return Err(AcceptError::Deleted);
     }
     let existing: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
@@ -885,7 +886,7 @@ pub async fn existing_send(
 ) -> Result<Option<Accepted>, AcceptError> {
     let hash = request_hash(req);
     let mut conn = pool.acquire().await?;
-    let row: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
+    let row: Option<(Uuid, Vec<u8>, BotStatus)> = sqlx::query_as(
         "SELECT t.id, t.request_hash, b.status FROM turns t JOIN bots b ON b.id = t.bot_id
          WHERE t.bot_id = ?1 AND t.request_id = ?2",
     )
@@ -895,7 +896,7 @@ pub async fn existing_send(
     .await?;
     match row {
         None => Ok(None),
-        Some((_, _, status)) if status != "active" => Err(AcceptError::Deleted),
+        Some((_, _, status)) if !status.is_active() => Err(AcceptError::Deleted),
         Some((_, saved, _)) if saved != hash => Err(AcceptError::RequestConflict),
         Some((turn_id, _, _)) => {
             let (turn, item) = load_turn_and_item(&mut conn, turn_id).await?;

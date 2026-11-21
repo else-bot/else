@@ -19,6 +19,7 @@ use crate::db::computer_handoffs as handoffs;
 use super::error::{ApiError, ApiPath};
 use super::turns::bot_deleted;
 use super::{AppState, Routes};
+use crate::db::bots::{self, BotStatus};
 
 pub fn routes() -> Routes {
     Routes {
@@ -111,13 +112,9 @@ pub(super) async fn require_bot(
     bot_id: Uuid,
     active: bool,
 ) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&state.db, bot_id).await? {
         None => Err(ApiError::not_found()),
-        Some("active") => Ok(()),
+        Some(BotStatus::Active) => Ok(()),
         Some(_) if active => Err(bot_deleted()),
         Some(_) => Ok(()),
     }

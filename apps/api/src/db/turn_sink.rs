@@ -1,3 +1,4 @@
+use crate::db::bots::BotStatus;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -209,7 +210,7 @@ impl SinkState {
         conn: &mut SqliteConnection,
         allowed: impl Fn(TurnStatus) -> bool,
     ) -> Result<Option<OwnerTranscript>, sqlx::Error> {
-        let row: Option<(String, Uuid, i64)> = sqlx::query_as(
+        let row: Option<(BotStatus, Uuid, i64)> = sqlx::query_as(
             "SELECT b.status, c.id, c.last_item_seq
              FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
              WHERE b.id = ?1",
@@ -217,7 +218,7 @@ impl SinkState {
         .bind(self.bot_id)
         .fetch_optional(&mut *conn)
         .await?;
-        let Some((_, conversation_id, last_seq)) = row.filter(|(status, ..)| status == "active")
+        let Some((_, conversation_id, last_seq)) = row.filter(|(status, ..)| status.is_active())
         else {
             return Ok(None);
         };

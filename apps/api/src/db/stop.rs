@@ -11,6 +11,7 @@
 //! running, and the turn parks on them; the owner stops each one on its own
 //! ([`super::waits::stop`]). Deletion ends them all.
 
+use crate::db::bots;
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -182,11 +183,7 @@ pub async fn stop_work(
     if crate::db::categories::used_by_category(&mut tx, request_id).await? {
         return Err(BotError::RequestConflict.into());
     }
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(status) = status else {
+    let Some(status) = bots::status(&mut *tx, bot_id).await? else {
         return Err(BotError::NotFound.into());
     };
     let last_turn_no: i64 = sqlx::query_scalar(
@@ -214,7 +211,7 @@ pub async fn stop_work(
             created: false,
         });
     }
-    if status != "active" {
+    if !status.is_active() {
         return Err(StopError::Deleted);
     }
     sqlx::query(

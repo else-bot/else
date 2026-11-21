@@ -192,7 +192,7 @@ pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {
 /// Startup check. Reads only; an empty installation is an error that points
 /// at explicit setup rather than something startup repairs.
 pub async fn check_installed(pool: &SqlitePool) -> Result<Option<Uuid>, InstallError> {
-    let row: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+    let row: Option<(Option<Uuid>, Option<super::bots::BotStatus>)> = sqlx::query_as(
         "SELECT i.default_bot_id, b.status
          FROM installation i LEFT JOIN bots b ON b.id = i.default_bot_id",
     )
@@ -209,7 +209,7 @@ pub async fn check_installed(pool: &SqlitePool) -> Result<Option<Uuid>, InstallE
                 InstallError::NotInstalled
             })
         }
-        Some((Some(id), status)) if status.as_deref() != Some("active") => {
+        Some((Some(id), status)) if !status.is_some_and(super::bots::BotStatus::is_active) => {
             Err(InstallError::InactiveDefault(id))
         }
         Some((default, _)) => Ok(default),

@@ -15,6 +15,7 @@ use crate::app::providers::Origin;
 use crate::app::rules::{
     Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules, RulesUpdate,
 };
+use crate::db::bots::{self, BotStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RulesError {
@@ -295,13 +296,9 @@ pub async fn restore(
     expected: Option<i64>,
 ) -> Result<i64, RulesError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status.as_deref() {
+    match bots::status(&mut *tx, bot_id).await? {
         None => return Err(RulesError::NotFound),
-        Some("active") => {}
+        Some(BotStatus::Active) => {}
         Some(_) => return Err(RulesError::BotDeleted),
     }
     let target: Option<String> = if version == 0 {
