@@ -1333,7 +1333,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     let turn = mail_event(
         &h,
         &account,
-        &format!("INBOX {GATE}"),
+        &format!("INBOX {GATE_EVERY_ATTEMPT}"),
         "Pass X Ads emails to the Marketing Manager bot.",
     )
     .await;
@@ -1734,7 +1734,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     let (turn, token) = h
         .running(
             &bot,
-            &format!("{GATE} Handle my Gmail inbox owner@gmail.com"),
+            &format!("{GATE_EVERY_ATTEMPT} Handle my Gmail inbox owner@gmail.com"),
         )
         .await;
     let unsupported = tool(

@@ -667,7 +667,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
         app,
         &token,
         "routine_create",
-        json!({ "name": "Scout", "prompt": format!("{GATE} Scout X leads."),
+        json!({ "name": "Scout", "prompt": format!("{GATE_EVERY_ATTEMPT} Scout X leads."),
                 "cron": "0 9 1 1 *" }),
     )
     .await;
