@@ -520,6 +520,28 @@ async fn any_running_logged_in_version_is_available() {
     }
 }
 
+#[tokio::test]
+async fn only_a_login_check_that_answered_reports_a_signed_out_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let version = "echo '2.1.999 (Claude Code)'";
+    let not_logged_in = Availability::Unavailable(
+        "Claude Code is not logged in on the host (run `claude` and log in).".into(),
+    );
+    assert_eq!(
+        detect_with(dir.path(), version, "exit 1").await,
+        not_logged_in
+    );
+    let flood = "head -c 2000000 /dev/zero | tr '\\0' a";
+    assert_eq!(
+        detect_with(dir.path(), version, flood).await,
+        Availability::Unavailable(
+            "Claude Code could not check its login (`claude auth status`: its output exceeded \
+             1048576 bytes)."
+                .into()
+        )
+    );
+}
+
 fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
     ResultInfo {
         success,
