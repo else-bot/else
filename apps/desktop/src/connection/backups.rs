@@ -140,7 +140,7 @@ impl Shell {
         let view = cx.new(|cx| View::new(client, window, cx));
         let pane = self.mount(view, super::settings::SettingsSection::Backups, window, cx);
         if let Some(settings) = self.front.settings_mut() {
-            settings.backups = Some(pane);
+            settings.set_backups(Some(pane), window, cx);
         }
         cx.notify();
     }
@@ -202,7 +202,7 @@ impl View {
             return;
         };
         let form = DestinationForm::new(snapshot, window, cx);
-        self.editor = Some(Editor::Destination(form));
+        self.set_editor(Some(Editor::Destination(form)), window, cx);
         self.error = None;
         self.feedback = None;
         cx.notify();
@@ -216,17 +216,29 @@ impl View {
             return;
         };
         let form = PolicyForm::new(snapshot, window, cx);
-        self.editor = Some(Editor::Policy(form));
+        self.set_editor(Some(Editor::Policy(form)), window, cx);
         self.error = None;
         self.feedback = None;
         cx.notify();
     }
 
-    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+    /// Replaces the editor. Every editor leaves through here, so a typed
+    /// secret is wiped before it drops.
+    fn set_editor(&mut self, editor: Option<Editor>, window: &mut Window, cx: &mut App) {
+        if let Some(old) = std::mem::replace(&mut self.editor, editor) {
+            old.close(window, cx);
+        }
+    }
+
+    pub(super) fn close(&mut self, window: &mut Window, cx: &mut App) {
+        self.set_editor(None, window, cx);
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy() {
             return;
         }
-        self.editor = None;
+        self.set_editor(None, window, cx);
         self.error = None;
         self.feedback = None;
         cx.notify();
@@ -328,7 +340,7 @@ impl View {
                 match result {
                     Ok(snapshot) => {
                         view.accept(Reply::Operation, snapshot, window, cx);
-                        view.editor = None;
+                        view.set_editor(None, window, cx);
                         view.feedback = Some("Backup settings saved.".into());
                     }
                     Err(err) => view.error = Some(format!("{err} Your edits have been kept. Cancel and reopen the editor to reload saved settings.")),

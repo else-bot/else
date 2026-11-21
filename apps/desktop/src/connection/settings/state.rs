@@ -1,5 +1,6 @@
 //! What the settings sheet shows: its section, the open pane, the two
-//! panes kept warm, and the Servers page.
+//! panes kept warm, and the Servers page. Each leaves through a setter
+//! that wipes its typed secrets before it drops.
 
 use super::super::pane::{Mounted, Pane};
 use super::super::{ConnectForm, backups};
@@ -53,12 +54,16 @@ impl ServerPage {
     }
 }
 
+type EmailPane = (Entity<crate::email::EmailSettings>, Subscription);
+
 pub(in crate::connection) struct Settings {
     pub section: SettingsSection,
     /// Private, so a pane can only leave through [`Settings::show`].
     pane: Pane,
-    pub backups: Option<Mounted<backups::View>>,
-    pub email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
+    /// Private, so the warm panes can only leave through
+    /// [`Settings::set_backups`] and [`Settings::set_email`].
+    backups: Option<Mounted<backups::View>>,
+    email: Option<EmailPane>,
     /// Private, so an editor can only leave through [`Settings::set_servers`].
     servers: ServerPage,
     pub focus: FocusHandle,
@@ -110,8 +115,38 @@ impl Settings {
     pub(in crate::connection) fn clear(&mut self, window: &mut Window, cx: &mut App) {
         self.show(Pane::None, window, cx);
         self.set_servers(ServerPage::List, window, cx);
-        self.backups = None;
-        self.email = None;
+        self.set_backups(None, window, cx);
+        self.set_email(None, window, cx);
+    }
+
+    pub(in crate::connection) fn backups(&self) -> Option<&Mounted<backups::View>> {
+        self.backups.as_ref()
+    }
+
+    pub(in crate::connection) fn set_backups(
+        &mut self,
+        pane: Option<Mounted<backups::View>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(old) = std::mem::replace(&mut self.backups, pane) {
+            old.view.update(cx, |view, cx| view.close(window, cx));
+        }
+    }
+
+    pub(in crate::connection) fn email(&self) -> Option<&EmailPane> {
+        self.email.as_ref()
+    }
+
+    pub(in crate::connection) fn set_email(
+        &mut self,
+        pane: Option<EmailPane>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some((old, _)) = std::mem::replace(&mut self.email, pane) {
+            old.update(cx, |view, cx| view.close(window, cx));
+        }
     }
 
     /// Whether leaving would discard edits: an open server editor, or a
