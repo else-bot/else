@@ -3,6 +3,7 @@ use super::request::Request;
 use crate::api::CreateBotRequest;
 use crate::avatar::{AvatarLook, AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
+use crate::preferences::PendingCreate;
 use crate::profile_picker::ProfilePicker;
 use else_wire::bots::Avatar;
 use else_wire::bots::AvatarColor;
@@ -72,7 +73,7 @@ pub(super) struct CreateFormHolder {
 
 impl ElseApp {
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let resumed = self.preferences.unconfirmed_create.clone();
+        let resumed = self.pending_create();
         let name = cx.new(|cx| {
             let input = InputState::new(window, cx).placeholder("e.g. Research");
             match &resumed {
@@ -347,14 +348,16 @@ impl ElseApp {
         let Some((attempt, payload)) = sent else {
             return;
         };
+        let request_id = payload.request_id;
+        self.set_pending_create(Some(payload.clone()));
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.create_bot(payload).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 let settled = holder.update(cx, |h, _| h.form.request.settle(attempt, &result));
-                if settled {
-                    let unconfirmed = holder.read(cx).form.request.unconfirmed_op().cloned();
-                    app.keep_unconfirmed_create(unconfirmed);
+                if result.is_ok() || settled {
+                    let still = holder.read(cx).form.request.unconfirmed_op().cloned();
+                    app.settle_pending_create(request_id, still.filter(|_| result.is_err()));
                 }
                 if let Err(err) = &result {
                     app.unauthorized(err, window, cx);
@@ -395,14 +398,35 @@ impl ElseApp {
 }
 
 impl ElseApp {
+    /// The create sent to this server whose outcome is not yet known.
+    fn pending_create(&self) -> Option<CreateBotRequest> {
+        self.preferences
+            .pending_create
+            .as_ref()
+            .filter(|pending| pending.origin == self.client.origin().as_str())
+            .map(|pending| pending.request.clone())
+    }
+
     /// Saved now rather than debounced: a changed owner key replaces this
     /// session, and the next one reads the request back from disk.
-    fn keep_unconfirmed_create(&mut self, op: Option<CreateBotRequest>) {
-        if self.preferences.unconfirmed_create != op {
-            self.preferences.unconfirmed_create = op;
+    fn set_pending_create(&mut self, request: Option<CreateBotRequest>) {
+        let pending = request.map(|request| PendingCreate {
+            origin: self.client.origin().as_str().to_owned(),
+            request,
+        });
+        if self.preferences.pending_create != pending {
+            self.preferences.pending_create = pending;
             if let Err(err) = self.preferences.save() {
                 eprintln!("{err}");
             }
+        }
+    }
+
+    /// Settles the pending create sent as `sent`, keeping `still` when its
+    /// outcome remains unknown. A later create's record is left alone.
+    fn settle_pending_create(&mut self, sent: Uuid, still: Option<CreateBotRequest>) {
+        if self.pending_create().map(|request| request.request_id) == Some(sent) {
+            self.set_pending_create(still);
         }
     }
 }

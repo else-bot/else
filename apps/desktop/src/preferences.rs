@@ -23,12 +23,20 @@ pub struct Preferences {
     pub models_seen: HashMap<String, HashSet<String>>,
     /// The bot the owner last opened on this server, reopened at launch.
     pub last_bot: Option<Uuid>,
-    /// The Create bot request whose outcome is unknown. It outlives the
-    /// dialog, a changed owner key and a restart, so the next Create resends
-    /// it under the same request ID. Unreadable reads as none, keeping the
-    /// layout.
+    /// The Create bot request sent and not yet known to have applied or
+    /// failed. It outlives the dialog, a changed owner key and a restart, so
+    /// the next Create resends it under the same request ID. Unreadable
+    /// reads as none, keeping the layout.
     #[serde(deserialize_with = "lenient")]
-    pub unconfirmed_create: Option<crate::api::CreateBotRequest>,
+    pub pending_create: Option<PendingCreate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCreate {
+    /// The server it was sent to. A saved server pointed at another origin
+    /// must not replay it there.
+    pub origin: String,
+    pub request: crate::api::CreateBotRequest,
 }
 
 fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned>(
@@ -49,7 +57,7 @@ impl Default for Preferences {
             rules_seen: HashMap::new(),
             models_seen: HashMap::new(),
             last_bot: None,
-            unconfirmed_create: None,
+            pending_create: None,
         }
     }
 }
@@ -141,24 +149,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_create_survives_a_reload_under_its_request_id() {
+    fn a_pending_create_survives_a_reload_under_its_request_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::config::ProfileStore::at(dir.path().join("desktop.json"));
         let server = Uuid::new_v4();
         let request_id = Uuid::from_u128(706);
         let mut prefs = Preferences::load_for_server(&store, server, false);
-        prefs.unconfirmed_create = Some(crate::api::CreateBotRequest {
-            request_id,
-            name: "Research".into(),
-            profile: None,
-            category_id: None,
-            avatar: None,
+        prefs.pending_create = Some(PendingCreate {
+            origin: "http://127.0.0.1:7879".into(),
+            request: crate::api::CreateBotRequest {
+                request_id,
+                name: "Research".into(),
+                profile: None,
+                category_id: None,
+                avatar: None,
+            },
         });
         prefs.save().unwrap();
         let reloaded = Preferences::load_for_server(&store, server, false);
-        let create = reloaded.unconfirmed_create.unwrap();
-        assert_eq!(create.request_id, request_id);
-        assert_eq!(create.name, "Research");
+        let pending = reloaded.pending_create.unwrap();
+        assert_eq!(pending.origin, "http://127.0.0.1:7879");
+        assert_eq!(pending.request.request_id, request_id);
+        assert_eq!(pending.request.name, "Research");
     }
 
     #[test]
@@ -167,12 +179,12 @@ mod tests {
         let path = dir.path().join("layout.json");
         std::fs::write(
             &path,
-            r#"{"sidebar_width":310,"unconfirmed_create":{"name":7}}"#,
+            r#"{"sidebar_width":310,"pending_create":{"origin":7}}"#,
         )
         .unwrap();
         let prefs = Preferences::load(path);
         assert_eq!(prefs.sidebar_width, 310.);
-        assert!(prefs.unconfirmed_create.is_none());
+        assert!(prefs.pending_create.is_none());
     }
 
     #[test]

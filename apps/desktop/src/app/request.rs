@@ -114,8 +114,8 @@ impl<Op> Request<Op> {
     }
 
     /// Like [`Self::settle`], with `message` describing a failure. A
-    /// rejected token says nothing about an earlier attempt, so a resend
-    /// that gets one stays unconfirmed.
+    /// resend the server never handled says nothing about the earlier
+    /// attempt, so it stays unconfirmed.
     pub(in crate::app) fn settle_as<T>(
         &mut self,
         attempt: Uuid,
@@ -141,7 +141,7 @@ impl<Op> Request<Op> {
             Err(err)
                 if err.outcome_unknown()
                     || err.is_request_conflict()
-                    || (resent && *err == ClientError::Unauthorized) =>
+                    || (resent && err.never_handled()) =>
             {
                 Self::Unconfirmed {
                     op,
@@ -276,14 +276,29 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_token_on_a_resend_keeps_the_op_unconfirmed() {
+    fn a_resend_the_server_never_handled_keeps_the_op_unconfirmed() {
+        for error in [
+            ClientError::Unauthorized,
+            ClientError::Transport("Not on your Tailscale network.".into()),
+        ] {
+            let mut request = Request::Idle;
+            let first = request.begin("create").unwrap();
+            assert!(request.settle(first, &Err::<(), _>(unreachable())));
+            let (resend, _) = request.retry().unwrap();
+            assert!(request.settle(resend, &Err::<(), _>(error)));
+            assert!(request.unconfirmed());
+            assert_eq!(request.retry().unwrap().1, "create");
+        }
+    }
+
+    #[test]
+    fn a_resend_the_server_rejects_fails() {
         let mut request = Request::Idle;
         let first = request.begin("create").unwrap();
         assert!(request.settle(first, &Err::<(), _>(unreachable())));
         let (resend, _) = request.retry().unwrap();
-        assert!(request.settle(resend, &Err::<(), _>(ClientError::Unauthorized)));
-        assert!(request.unconfirmed());
-        assert_eq!(request.retry().unwrap().1, "create");
+        assert!(request.settle(resend, &Err::<(), _>(api(422, "invalid_bot"))));
+        assert_eq!(request, Request::Failed("Nope.".into()));
     }
 
     #[test]

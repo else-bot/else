@@ -141,6 +141,12 @@ impl ClientError {
         matches!(self, Self::Api { code, .. } if code == "request_conflict")
     }
 
+    /// Whether the server never handled the request: it refused the token,
+    /// or the transport check failed before anything was sent.
+    pub fn never_handled(&self) -> bool {
+        matches!(self, Self::Unauthorized | Self::Transport(_))
+    }
+
     /// Whether the outcome of a mutation is unknown (the request may or may
     /// not have been applied), as opposed to definitely rejected.
     pub fn outcome_unknown(&self) -> bool {
@@ -211,6 +217,10 @@ impl Client {
             .request(method, format!("{}{path}", self.origin.as_str()))
             .timeout(Duration::from_secs(15))
             .header(AUTHORIZATION, self.auth.clone())
+    }
+
+    pub fn origin(&self) -> &Origin {
+        &self.origin
     }
 
     async fn verify_transport(&self) -> Result<(), ClientError> {
