@@ -111,14 +111,10 @@ struct Row {
 /// first, as the child's own transactions do, then the root.
 async fn owned(conn: &mut SqliteConnection, caller: Uuid, task: Uuid) -> Result<Row, ControlError> {
     lock_targets_of_root(conn, caller).await?;
-    let running: Option<bool> = sqlx::query_scalar(
-        "SELECT t.status IN ('sending', 'running') AND b.status = 'active'
-         FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
-    )
-    .bind(caller)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if running != Some(true) {
+    if crate::db::turns::asking_caller(conn, caller)
+        .await?
+        .is_none()
+    {
         return Err(ControlError::NotRunning);
     }
     sqlx::query_as(

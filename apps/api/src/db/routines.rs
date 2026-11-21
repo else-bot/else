@@ -358,16 +358,15 @@ pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
-    let row: Option<(Uuid, Uuid, TurnStatus, BotStatus, Uuid)> = sqlx::query_as(
-        "SELECT t.bot_id, t.conversation_id, t.status, b.status, o.id
-         FROM turns t JOIN bots b ON b.id = t.bot_id
-         JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
+    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT t.bot_id, t.conversation_id, o.id
+         FROM turns t JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
          WHERE t.id = ?1",
     )
     .bind(caller.turn_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((bot, conversation, status, bot_status, owner_conversation)) = row else {
+    let Some((bot, conversation, owner_conversation)) = row else {
         return Err(RoutineError::NotRunning);
     };
     if bot != caller.bot_id || conversation != caller.conversation_id {
@@ -378,7 +377,10 @@ pub(crate) async fn authorized_owner_conversation(
     {
         return Err(RoutineError::NotAllowed);
     }
-    if !status.serves_tools() || !bot_status.is_active() {
+    if super::turns::asking_caller(conn, caller.turn_id)
+        .await?
+        .is_none()
+    {
         return Err(RoutineError::NotRunning);
     }
     Ok(owner_conversation)
@@ -1368,20 +1370,22 @@ pub async fn report_no_news(
     turn_id: Uuid,
 ) -> Result<Result<Report, NoNewsRefusal>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let run: Option<(bool, Report, TurnStatus)> = sqlx::query_as(
-        "SELECT r.quiet, rr.report, t.status FROM routine_runs rr
-         JOIN routines r ON r.id = rr.routine_id JOIN turns t ON t.id = rr.turn_id
-         WHERE rr.turn_id = ?1",
+    let run: Option<(bool, Report)> = sqlx::query_as(
+        "SELECT r.quiet, rr.report FROM routine_runs rr
+         JOIN routines r ON r.id = rr.routine_id WHERE rr.turn_id = ?1",
     )
     .bind(turn_id)
     .fetch_optional(&mut *tx)
     .await?;
+    let running = super::turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .is_some();
     let refusal = match run {
         None => NoNewsRefusal::NotARoutineRun,
-        Some((false, _, _)) => NoNewsRefusal::NotQuiet,
-        Some((_, Report::Acted, _)) => NoNewsRefusal::Acted,
-        Some((_, _, status)) if !status.serves_tools() => NoNewsRefusal::NotRunning,
-        Some((true, Report::News | Report::NoNews, _)) => {
+        Some((false, _)) => NoNewsRefusal::NotQuiet,
+        Some((_, Report::Acted)) => NoNewsRefusal::Acted,
+        Some(_) if !running => NoNewsRefusal::NotRunning,
+        Some((true, Report::News | Report::NoNews)) => {
             let report: Report = sqlx::query_scalar(
                 "UPDATE routine_runs SET report = 'no_news'
                  WHERE turn_id = ?1 AND report IN ('news', 'no_news') RETURNING report",
