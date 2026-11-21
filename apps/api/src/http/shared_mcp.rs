@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::owner_tools::{Card, Declined, ask};
 use super::tool_defs::Call;
 use crate::app::questions::Effect;
+use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -301,7 +302,7 @@ async fn run(c: Call<'_>, op: Op) -> ToolResult {
                 };
                 if let Some(kind) = kind {
                     approval =
-                        super::guest_tools::approval::approve(state, grant, c.tool.name, args, kind)
+                        super::guest_tools::approval::approve(state, grant, c.tool, args, kind)
                             .await?
                 }
             }
@@ -500,7 +501,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     let note = super::guest_tools::approval::approve_card(
         state,
         grant,
-        "mcp_install",
+        ToolId::McpInstall.def(),
         args,
         crate::app::questions::ApprovalKind::External,
         title,

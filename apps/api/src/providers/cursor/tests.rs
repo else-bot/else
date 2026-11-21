@@ -823,7 +823,7 @@ fn a_tool_call_outside_the_turns_policy_violates_it() {
 #[test]
 fn a_parked_elsebot_result_parks_the_turn() {
     let mut t = tracker(false);
-    let tool = crate::app::tools::PARKING_TOOLS[0];
+    let tool = "mcp_install";
     t.on_event(
         &json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
         "tool_call":{"mcpToolCall":{"args":{"providerIdentifier":"elsebot","toolName":tool}}}}),

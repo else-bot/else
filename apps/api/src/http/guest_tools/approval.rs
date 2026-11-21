@@ -2,8 +2,9 @@ use serde_json::Value;
 
 use super::{AppState, Grant, Op, slice, summarize_input};
 use crate::app::questions::{ApprovalKind, Effect, TaskScope};
+use crate::app::tools::{Approval, EffectRule, ToolDef, ToolId};
 use crate::computers::browser_refs::RefLabel;
-use crate::http::tool_defs::{Call, ToolDef};
+use crate::http::tool_defs::Call;
 use crate::http::tool_result::{self, Refusal, ToolResult};
 
 pub(super) const MAX_PURPOSE: usize = 300;
@@ -26,8 +27,8 @@ const PURPOSE_REQUIRED: &str = "PURPOSE_REQUIRED: computer_job_start needs purpo
 
 /// A job's purpose titles the owner's view of a wait on it, so every job
 /// needs one; for the other tools it only titles an approval card.
-fn checked_purpose(name: &str, args: &Value) -> Result<(), String> {
-    let required = name == "computer_job_start";
+fn checked_purpose(tool: &ToolDef, args: &Value) -> Result<(), String> {
+    let required = tool.id == ToolId::ComputerJobStart;
     let malformed = || format!("purpose is at most {MAX_PURPOSE} bytes of text.");
     let text = match args.get("purpose") {
         None | Some(Value::Null) if !required => return Ok(()),
@@ -53,12 +54,16 @@ fn checked_purpose(name: &str, args: &Value) -> Result<(), String> {
 /// computer tool given an undeclared effect is refused before approval: its
 /// card would park the turn under a name no provider treats as parking.
 /// (`mcp_request` and `mcp_wait` take an effect too and check it themselves.)
-fn declared_effect(tool: &ToolDef, args: &Value) -> Result<Option<Effect>, String> {
+fn declared_effect(
+    tool: &ToolDef,
+    rule: EffectRule,
+    args: &Value,
+) -> Result<Option<Effect>, String> {
     let name = tool.name;
-    if !tool.effect.declared() && args.get("effect").is_some_and(|e| !e.is_null()) {
+    if !rule.declared() && args.get("effect").is_some_and(|e| !e.is_null()) {
         return Err(format!("{name} takes no effect. Nothing was done."));
     }
-    let needs = tool.effect.required(args);
+    let needs = rule.required(args);
     let effect = match args.get("effect") {
         None | Some(Value::Null) if needs => {
             return Err(format!(
@@ -73,7 +78,7 @@ fn declared_effect(tool: &ToolDef, args: &Value) -> Result<Option<Effect>, Strin
             return Err("effect is local, destructive, or external. Nothing was done.".into());
         }
     };
-    checked_purpose(name, args)?;
+    checked_purpose(tool, args)?;
     match args.get("context") {
         None | Some(Value::Null) => {}
         Some(Value::String(text))
@@ -126,23 +131,24 @@ fn browser_target(selector: &str, label: Option<&RefLabel>) -> String {
     }
 }
 
-fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String, String) {
+fn approval_card(tool: &ToolDef, args: &Value, label: Option<&RefLabel>) -> (String, String) {
     let text = |key: &str| args[key].as_str().unwrap_or_default();
     let purpose = text("purpose").trim();
-    let default = match name {
-        "mcp_request" => "Use a shared MCP",
-        "computer_run" => "Run a command in the bot's computer",
-        "computer_job_start" => "Start a background job in the bot's computer",
-        "computer_input" => "Use the bot's desktop",
-        "computer_write_file" => "Write a file in the bot's computer",
-        _ => "Act in the bot's browser",
+    let default = match tool.id {
+        ToolId::McpRequest => "Use a shared MCP",
+        ToolId::ComputerRun => "Run a command in the bot's computer",
+        ToolId::ComputerJobStart => "Start a background job in the bot's computer",
+        ToolId::ComputerInput => "Use the bot's desktop",
+        ToolId::ComputerWriteFile => "Write a file in the bot's computer",
+        ToolId::ComputerBrowser => "Act in the bot's browser",
+        _ => "Act in the bot's computer",
     };
     let title = if purpose.is_empty() {
         default.to_owned()
     } else {
         purpose.to_owned()
     };
-    if name == "mcp_request" {
+    if tool.id == ToolId::McpRequest {
         let header = format!(
             "MCP: {} / {} ({})\n",
             text("id"),
@@ -157,11 +163,11 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
         let available = crate::app::questions::MAX_CONTEXT.saturating_sub(header.len());
         return (title, format!("{header}{}", slice(&body, 0, available).1));
     }
-    if !text("context").trim().is_empty() && name != "computer_browser" {
+    if !text("context").trim().is_empty() && tool.id != ToolId::ComputerBrowser {
         return (title, text("context").to_owned());
     }
-    let context = match name {
-        "computer_run" | "computer_job_start" => {
+    let context = match tool.id {
+        ToolId::ComputerRun | ToolId::ComputerJobStart => {
             let mut preview = slice(text("command"), 0, MAX_PREVIEW).1.to_owned();
             if preview.len() < text("command").len() {
                 preview.push('…');
@@ -172,12 +178,12 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
             }
             preview
         }
-        "computer_write_file" => format!(
+        ToolId::ComputerWriteFile => format!(
             "Write {} bytes to {}",
             text("content").len(),
             slice(text("path"), 0, 1024).1
         ),
-        "computer_input" => format!(
+        ToolId::ComputerInput => format!(
             "Desktop input: {}",
             summarize_input(
                 args["actions"]
@@ -186,7 +192,7 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
                     .unwrap_or_default()
             )
         ),
-        _ => {
+        ToolId::ComputerBrowser => {
             let action = text("action");
             let selector = browser_target(text("selector"), label);
             let step = match action {
@@ -217,6 +223,7 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
                 format!("{step}\n\n{}", slice(given, 0, room).1)
             }
         }
+        _ => String::new(),
     };
     (title, context)
 }
@@ -224,25 +231,29 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
 pub(crate) async fn approve(
     state: &AppState,
     grant: &Grant,
-    name: &str,
+    tool: &ToolDef,
     args: &Value,
     kind: ApprovalKind,
 ) -> Result<Option<&'static str>, Refusal> {
-    let label = match (name, args["selector"].as_str(), state.computers.manager()) {
-        ("computer_browser", Some(selector), Some(computers)) => {
+    let label = match (
+        tool.id,
+        args["selector"].as_str(),
+        state.computers.manager(),
+    ) {
+        (ToolId::ComputerBrowser, Some(selector), Some(computers)) => {
             computers.browser_ref(grant.bot_id, selector).await
         }
         _ => None,
     };
-    let (title, context) = approval_card(name, args, label.as_ref());
-    approve_card(state, grant, name, args, kind, title, context).await
+    let (title, context) = approval_card(tool, args, label.as_ref());
+    approve_card(state, grant, tool, args, kind, title, context).await
 }
 
 /// Like [`approve`], with a card the caller describes.
 pub(crate) async fn approve_card(
     state: &AppState,
     grant: &Grant,
-    name: &str,
+    tool: &ToolDef,
     args: &Value,
     kind: ApprovalKind,
     title: String,
@@ -250,11 +261,12 @@ pub(crate) async fn approve_card(
 ) -> Result<Option<&'static str>, Refusal> {
     use crate::app::questions::{Spec, Standing};
     use crate::http::owner_tools::{Card, Declined, ask};
-    let declares = crate::http::tool_defs::get(name).is_some_and(|tool| tool.effect.declared());
-    let task_scope = declares
+    let name = tool.name;
+    let task_scope = tool
+        .declares_effect()
         .then(|| TaskScope::from_args(args).ok().flatten())
         .flatten();
-    let spec = Spec::tool_approval(kind, name, args, task_scope, title, context);
+    let spec = Spec::tool_approval(kind, tool, args, task_scope, title, context);
     let card = Card::approval(format!(
         "Nothing was done. The owner sees an approval card for exactly this call. Tell them \
          briefly what it will do and why, then end this attempt now; do not wait, poll, or call \
@@ -303,13 +315,16 @@ pub(crate) async fn call(c: Call<'_>, op: Op) -> ToolResult {
     {
         return Err(Refusal::text(super::JOB_TOO_LONG));
     }
-    let effect = match declared_effect(tool, args) {
+    let Approval::Computer { effect: rule, .. } = tool.approval else {
+        unreachable!("{name} is bound to the computer approval path")
+    };
+    let effect = match declared_effect(tool, rule, args) {
         Ok(effect) => effect,
         Err(message) => return Err(Refusal::text(message)),
     };
     let note = match (effect, args.get("approved_draft").filter(|v| !v.is_null())) {
         (Some(Effect::External), Some(_)) => {
-            Some(crate::http::outgoing_tools::claim_for_tool(state, grant, name, args).await?)
+            Some(crate::http::outgoing_tools::claim_for_tool(state, grant, tool, args).await?)
         }
         (_, Some(_)) => {
             return Err(Refusal::text(
@@ -318,7 +333,7 @@ pub(crate) async fn call(c: Call<'_>, op: Op) -> ToolResult {
             ));
         }
         (effect, None) => match effect.and_then(Effect::approval) {
-            Some(kind) => approve(state, grant, name, args, kind)
+            Some(kind) => approve(state, grant, tool, args, kind)
                 .await?
                 .map(str::to_owned),
             None => None,
@@ -341,7 +356,11 @@ mod tests {
     use serde_json::json;
 
     fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
-        super::declared_effect(crate::http::tool_defs::get(name).unwrap(), args)
+        let tool = ToolDef::named(name).unwrap();
+        let Approval::Computer { effect, .. } = tool.approval else {
+            panic!("{name} is not a computer tool")
+        };
+        super::declared_effect(tool, effect, args)
     }
 
     #[test]
@@ -353,14 +372,15 @@ mod tests {
             declared_effect("computer_read_file", &json!({ "effect": null })),
             Ok(None)
         );
-        for tool in crate::http::tool_defs::definitions() {
-            let name = tool["name"].as_str().unwrap();
-            if !name.starts_with("computer_") {
+        for tool in crate::app::tools::TOOLS {
+            let Approval::Computer { effect, .. } = tool.approval else {
                 continue;
-            }
-            let declared = tool["inputSchema"]["properties"].get("effect").is_some();
-            let rule = crate::http::tool_defs::get(name).unwrap().effect;
-            assert_eq!(rule.declared(), declared, "{name}");
+            };
+            let definition = crate::http::tool_defs::definition(tool);
+            let declared = definition["inputSchema"]["properties"]
+                .get("effect")
+                .is_some();
+            assert_eq!(effect.declared(), declared, "{}", tool.name);
         }
     }
 
@@ -468,7 +488,7 @@ mod tests {
     }
 
     fn card(name: &str, args: &Value) -> (String, String) {
-        approval_card(name, args, None)
+        approval_card(ToolDef::named(name).unwrap(), args, None)
     }
 
     fn label(role: &str, name: &str, url: Option<&str>) -> RefLabel {
@@ -483,7 +503,7 @@ mod tests {
     fn a_browser_card_names_the_control_a_known_ref_points_at() {
         let click = json!({ "action": "click", "selector": "@kqvzb5", "effect": "destructive" });
         let delete = label("button", "Delete project", None);
-        let (_, context) = approval_card("computer_browser", &click, Some(&delete));
+        let (_, context) = approval_card(ToolId::ComputerBrowser.def(), &click, Some(&delete));
         assert_eq!(
             context,
             "Browser: click button \"Delete project\" (@kqvzb5)"
@@ -492,7 +512,7 @@ mod tests {
         let typing = json!({ "action": "type", "selector": "@kqvzb7", "text": "hunter2 here",
                              "effect": "external" });
         let email = label("textbox", "Email", None);
-        let (_, context) = approval_card("computer_browser", &typing, Some(&email));
+        let (_, context) = approval_card(ToolId::ComputerBrowser.def(), &typing, Some(&email));
         assert_eq!(
             context,
             "Browser: type 12 characters into textbox \"Email\" (@kqvzb7)"
@@ -500,14 +520,14 @@ mod tests {
 
         let vault = json!({ "action": "type", "selector": "@kqvzb7", "secret": "x-login",
                             "field": "PASSWORD", "effect": "external" });
-        let (_, context) = approval_card("computer_browser", &vault, Some(&email));
+        let (_, context) = approval_card(ToolId::ComputerBrowser.def(), &vault, Some(&email));
         assert_eq!(
             context,
             "Browser: type x-login.PASSWORD from the Vault into textbox \"Email\" (@kqvzb7)"
         );
 
         let docs = label("link", "Docs", Some("/docs"));
-        let (_, context) = approval_card("computer_browser", &click, Some(&docs));
+        let (_, context) = approval_card(ToolId::ComputerBrowser.def(), &click, Some(&docs));
         assert_eq!(context, "Browser: click link \"Docs\" to /docs (@kqvzb5)");
 
         let (_, context) = card("computer_browser", &click);
@@ -528,7 +548,7 @@ mod tests {
             &format!("Cancel\" (@kq2)\n\u{202e}{}", "a".repeat(200)),
             None,
         );
-        let (_, context) = approval_card("computer_browser", &click, Some(&hostile));
+        let (_, context) = approval_card(ToolId::ComputerBrowser.def(), &click, Some(&hostile));
         let expected = format!(
             "Browser: click buttonx \"Cancel\\\" (@kq2){}…\" (@kq1)\n\nRemove the old project.",
             "a".repeat(66)

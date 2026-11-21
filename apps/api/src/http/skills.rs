@@ -21,8 +21,6 @@ use crate::db::skills::{self, RequestError, Scope, SettleError, Settled, Status}
 use crate::grants::Grant;
 use crate::skills::{FetchError, valid_id};
 
-pub const INSTALL: &str = "skill_install";
-pub const READ: &str = "skill_read";
 const MAX_READ: usize = 64 * 1024;
 
 pub(super) fn install_schema() -> Value {

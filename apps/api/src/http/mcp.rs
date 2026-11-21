@@ -20,13 +20,12 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::ApiError;
-use super::tool_defs::ToolDef;
 use super::tool_result::{self, Refusal, text_result};
 use super::tools::check;
+use crate::app::tools::{SERVER_NAME, ToolDef, ToolId};
 use crate::db::memory::{self, Kind, NewEntry};
 use crate::grants::{Grant, Tool};
 
-use crate::app::tools::SERVER_NAME;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 
 pub async fn endpoint(
@@ -67,26 +66,21 @@ pub async fn endpoint(
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            Ok(json!({ "tools": super::tool_search::listed(super::tool_defs::definitions()) }))
-        }
+        "tools/list" => Ok(json!({ "tools": super::tool_search::listed() })),
         "tools/call" if params["name"] == super::tool_search::FIND => {
             match params["arguments"]["query"].as_str() {
-                Some(query) if !query.trim().is_empty() && query.len() <= 200 => Ok(text_result(
-                    super::tool_search::find(&super::tool_defs::definitions(), query),
-                )),
+                Some(query) if !query.trim().is_empty() && query.len() <= 200 => {
+                    Ok(text_result(super::tool_search::find(query)))
+                }
                 _ => Ok(refused("Give a query of at most 200 bytes.")),
             }
         }
         "tools/call" => {
             // use_tool runs a deferred tool exactly as a direct call would:
             // the same grant check below, under the deferred tool's name.
-            let (name, arguments) = if params["name"] == super::tool_search::USE {
-                match super::tool_search::target(
-                    &super::tool_defs::definitions(),
-                    &params["arguments"],
-                ) {
-                    Ok((name, arguments)) => (Some(name), arguments),
+            let (tool, arguments) = if params["name"] == super::tool_search::USE {
+                match super::tool_search::target(&params["arguments"]) {
+                    Ok(target) => target,
                     Err(message) => {
                         return Json(
                             json!({ "jsonrpc": "2.0", "id": id, "result": refused(message) }),
@@ -95,18 +89,18 @@ pub async fn endpoint(
                     }
                 }
             } else {
-                (params["name"].as_str(), &params["arguments"])
+                let Some(name) = params["name"].as_str() else {
+                    return rpc_error(id, -32602, "Invalid params: name and object arguments");
+                };
+                let Some(tool) = ToolDef::named(name) else {
+                    return Json(
+                        json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
+                    )
+                    .into_response();
+                };
+                (tool, &params["arguments"])
             };
-            let Some(name) = name else {
-                return rpc_error(id, -32602, "Invalid params: name and object arguments");
-            };
-            let Some(tool) = super::tool_defs::get(name) else {
-                return Json(
-                    json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
-                )
-                .into_response();
-            };
-            if matches!(tool.name, "delegate" | "council")
+            if matches!(tool.id, ToolId::Delegate | ToolId::Council)
                 && !grant.allows(Tool::Delegate)
                 && let Some(refusal) = task_cannot_delegate(&state, &grant).await
             {
@@ -182,7 +176,8 @@ fn refused(message: impl Into<String>) -> Value {
 async fn call(state: &AppState, grant: &Grant, tool: &'static ToolDef, args: &Value) -> Value {
     use crate::db::owner_questions::{self, UseOutcome};
     let name = tool.name;
-    let (result, used) = owner_questions::track_use(tool.run(state, grant, args)).await;
+    let (result, used) =
+        owner_questions::track_use(super::tool_defs::run(tool, state, grant, args)).await;
     let (result, log) = tool_result::render(result);
     // A parked call may or may not have run its effect: its use stays started.
     if let Some(question) = used.filter(|_| !crate::app::tools::parks(tool.name, &result)) {

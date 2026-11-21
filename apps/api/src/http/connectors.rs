@@ -1,5 +1,6 @@
 use super::owner_tools::{Card, Declined, ask};
 use super::tool_defs::Call;
+use crate::app::tools::ToolId;
 use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use axum::{
     Json, Router,
@@ -730,7 +731,7 @@ async fn approve_trigger(
         .ok_or(store::StoreError::NotFound)?;
     let spec = Spec::tool_approval(
         ApprovalKind::External,
-        "mail_trigger_set",
+        ToolId::MailTriggerSet.def(),
         args,
         None,
         format!("Wake on new mail in {address}"),

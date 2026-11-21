@@ -7,6 +7,7 @@
 //! tool call naming the approved draft, or its host tools after
 //! `start_draft_send`.
 
+use crate::app::tools::ToolDef;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -676,13 +677,13 @@ pub(super) async fn report(state: &AppState, grant: &Grant, args: &Value) -> Too
 pub(super) async fn claim_for_tool(
     state: &AppState,
     grant: &Grant,
-    name: &str,
+    tool: &ToolDef,
     args: &Value,
 ) -> Result<String, Refusal> {
     let id = id_arg(args, "approved_draft")?;
     let delivery = Delivery::Tool {
-        tool: name.to_owned(),
-        args: crate::http::tool_defs::loggable_args(name, args),
+        tool: tool.name.to_owned(),
+        args: (tool.loggable)(args),
     };
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
         .await
