@@ -549,22 +549,25 @@ fn split_answers(
     reply.answers = answers;
 }
 
-/// Whether `b` delivers file `a` again: a bot that re-uploads a file after a
-/// park sometimes renames an image, so an image of the same type and byte
-/// size counts as the same file.
+/// Whether `b` delivers file `a` again. A bot that re-uploads an image after
+/// a park sometimes renames it, so an image matches by type and byte size. A
+/// document matches by name and type: a long turn re-sends its notes as they
+/// grow, and the newer revision replaces the older one.
 fn same_file(a: &else_wire::items::Attachment, b: &else_wire::items::Attachment) -> bool {
     a.media_type == b.media_type
-        && a.size == b.size
-        && (a.name == b.name || a.media_type.starts_with("image/"))
+        && if a.media_type.starts_with("image/") {
+            a.size == b.size
+        } else {
+            a.name == b.name
+        }
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended each earlier attempt, and a reply
 /// with a file no later reply delivers again. A resumed attempt reports only
-/// what changed, so every attempt's ending reply stays in view. A bot that
-/// re-uploads a file after a park, sometimes renaming an image, delivers the
-/// same file again: an image of the same type and byte size counts as the same
-/// file, and the kept reply shows its text without it. An answer to a joined
+/// what changed, so every attempt's ending reply stays in view. A later reply
+/// can deliver the same file again, per [`same_file`], and the kept reply then
+/// shows its text without it. An answer to a joined
 /// owner message always shows, so it counts among the replies around it the
 /// same way.
 fn keep_earlier_replies(
