@@ -68,6 +68,9 @@ pub(in crate::app) struct TaskReply {
     /// Files of `kept` replies that a later reply delivers again; the kept
     /// reply shows its text without them, so a file appears once.
     pub repeated_files: HashSet<Uuid>,
+    /// Files of `kept` replies that a later reply revises. The kept reply
+    /// still links its older revision, but no longer stays in view for it.
+    pub revised_files: HashSet<Uuid>,
     /// Cards that follow an earlier item of the turn, such as a settled draft
     /// or question; [`TaskReply::earlier`] places each after the item it followed.
     pub cards: Vec<TaskCard>,
@@ -173,7 +176,7 @@ impl TaskReply {
         };
         let delivers = item.parts.iter().any(|part| {
             matches!(part, else_wire::items::MessagePart::File { file }
-                if !self.repeated_files.contains(&file.id))
+                if !self.repeated_files.contains(&file.id) && !self.revised_files.contains(&file.id))
         });
         item.attempt.is_some_and(|earlier| earlier < latest) && !delivers
     }
@@ -258,6 +261,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     since: None,
                     kept: Vec::new(),
                     repeated_files: HashSet::new(),
+                    revised_files: HashSet::new(),
                     cards: Vec::new(),
                     reactions: Vec::new(),
                     started_at: turn.started_at,
@@ -485,13 +489,13 @@ fn split_answers(
             })
     };
     // A reacted reply before a message stays in view, and so does one with a
-    // file no later reply delivers again.
+    // file no later reply delivers again or revises.
     let stays = |id: Uuid| {
         reactions.contains_key(&id)
             || files(id).any(|file| {
                 !(replies.iter().copied())
                     .filter(|&later| seq(later) > seq(id))
-                    .any(|later| files(later).any(|again| same_file(file, again)))
+                    .any(|later| files(later).any(|again| delivered_again(file, again).is_some()))
             })
     };
     let mut boundaries: Vec<_> = joined.to_vec();
@@ -549,22 +553,44 @@ fn split_answers(
     reply.answers = answers;
 }
 
-/// Whether `b` delivers file `a` again: a bot that re-uploads a file after a
-/// park sometimes renames an image, so an image of the same type and byte
-/// size counts as the same file.
-fn same_file(a: &else_wire::items::Attachment, b: &else_wire::items::Attachment) -> bool {
-    a.media_type == b.media_type
-        && a.size == b.size
-        && (a.name == b.name || a.media_type.starts_with("image/"))
+/// How a later file delivers an earlier one again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Again {
+    /// The same bytes, shown once on the later reply.
+    Copy,
+    /// A guess from the name: a long turn re-sends its notes as they grow.
+    /// Each revision keeps its own link, because two documents in different
+    /// folders can share a name.
+    Revision,
+}
+
+/// Whether `b` delivers file `a` again. A bot that re-uploads an image after
+/// a park sometimes renames it, so an image of the same type and byte size is
+/// a copy. Another file of the same name and type is a copy at the same size
+/// and a revision otherwise.
+fn delivered_again(
+    a: &else_wire::items::Attachment,
+    b: &else_wire::items::Attachment,
+) -> Option<Again> {
+    let image = a.media_type.starts_with("image/");
+    if a.media_type != b.media_type || !(image || a.name == b.name) {
+        None
+    } else if a.size == b.size {
+        Some(Again::Copy)
+    } else if image {
+        None
+    } else {
+        Some(Again::Revision)
+    }
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended each earlier attempt, and a reply
 /// with a file no later reply delivers again. A resumed attempt reports only
-/// what changed, so every attempt's ending reply stays in view. A bot that
-/// re-uploads a file after a park, sometimes renaming an image, delivers the
-/// same file again: an image of the same type and byte size counts as the same
-/// file, and the kept reply shows its text without it. An answer to a joined
+/// what changed, so every attempt's ending reply stays in view. A later reply
+/// can deliver a file again, per [`delivered_again`]: a kept reply shows its
+/// text without a copy, and no longer stays in view for a revision. An answer
+/// to a joined
 /// owner message always shows, so it counts among the replies around it the
 /// same way.
 fn keep_earlier_replies(
@@ -606,20 +632,34 @@ fn keep_earlier_replies(
     let mut delivered_later = reply.latest.map(files).unwrap_or_default();
     let mut kept = Vec::new();
     let mut repeated = HashSet::new();
+    let mut revised = HashSet::new();
     for &id in replies.iter().rev().filter(|&&id| reply.latest != Some(id)) {
         let files = files(id);
-        let (again, new): (Vec<&&else_wire::items::Attachment>, Vec<_>) = files
-            .iter()
-            .partition(|file| delivered_later.iter().any(|later| same_file(file, later)));
+        // A copy anywhere later wins over a revision.
+        let again = |file: &else_wire::items::Attachment| {
+            (delivered_later.iter())
+                .filter_map(|&later| delivered_again(file, later))
+                .min()
+        };
+        let mut new = false;
+        let mut copies = Vec::new();
+        let mut revisions = Vec::new();
+        for file in &files {
+            match again(file) {
+                Some(Again::Copy) => copies.push(file.id),
+                Some(Again::Revision) => revisions.push(file.id),
+                None => new = true,
+            }
+        }
         let answer = reply.answers.contains(&id);
         let keep = !answer
-            && (!new.is_empty()
-                || ((reactions.contains_key(&id) || ended.contains(&id)) && has_text(id)));
+            && (new || ((reactions.contains_key(&id) || ended.contains(&id)) && has_text(id)));
         if keep {
             kept.push(id);
+            revised.extend(revisions);
         }
         if keep || answer {
-            repeated.extend(again.iter().map(|file| file.id));
+            repeated.extend(copies);
         }
         delivered_later.extend(files);
     }
@@ -627,6 +667,7 @@ fn keep_earlier_replies(
     kept.reverse();
     reply.kept = kept;
     reply.repeated_files = repeated;
+    reply.revised_files = revised;
 }
 
 #[cfg(test)]
