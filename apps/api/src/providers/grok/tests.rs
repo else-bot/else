@@ -405,6 +405,24 @@ fn a_turn_recovers_after_grok_refuses_search_tool_routed_through_use_tool() {
 }
 
 #[test]
+fn a_use_tool_target_grok_was_expected_to_refuse_fails_the_turn_when_it_succeeds() {
+    for result in [
+        json!({"type":"tool_result","tool_use_id":"c1","content":"done"}),
+        json!({"type":"tool_result","tool_use_id":"c1","content":"done","is_error":false}),
+    ] {
+        let mut t = tracker(false);
+        t.on(&init(false)).unwrap();
+        t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":"run_terminal_command","tool_input":{"command":"touch x"}}}]}})).unwrap();
+        assert_eq!(
+            t.on(&json!({"type":"user","message":{"content":[result]}})),
+            Err(Violation::policy(
+                "Grok ran a use_tool target outside else.bot: run_terminal_command"
+            ))
+        );
+    }
+}
+
+#[test]
 fn a_claude_spelled_elsebot_tool_is_left_to_grok_to_reject() {
     let mut t = tracker(false);
     t.on(&init(false)).unwrap();

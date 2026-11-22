@@ -36,13 +36,21 @@ enum Start {
     Unopened,
 }
 
+/// A tool call whose result the tracker must read.
+enum Call {
+    /// An else.bot tool, whose result may park the turn.
+    Elsebot(String),
+    /// A use_tool target that only Grok's refusal makes harmless.
+    Refused(String),
+}
+
 pub struct Tracker {
     model: String,
     session: String,
     expected: Vec<String>,
     mcp: bool,
     start: Start,
-    calls: HashMap<String, String>,
+    calls: HashMap<String, Call>,
 }
 
 impl Tracker {
@@ -172,15 +180,15 @@ impl Tracker {
             }
             let name = FIELDS.required(&block["name"], "tool call")?;
             let id = FIELDS.required(&block["id"], "tool call")?;
-            let tool = if name == "use_tool" {
+            let call = if name == "use_tool" {
                 let Some(target) = block["input"]["tool_name"].as_str() else {
                     return Err(Violation::policy(
                         "Grok called use_tool without a tool_name, so else.bot could not check which tool it ran",
                     ));
                 };
                 match self.mcp_tool(target) {
-                    Some(tool) => Some(tool),
-                    None if self.refused(target) => None,
+                    Some(tool) => Some(Call::Elsebot(tool.to_owned())),
+                    None if self.refused(target) => Some(Call::Refused(target.to_owned())),
                     None => {
                         return Err(Violation::policy(format!(
                             "Grok called an MCP tool outside else.bot: {target}"
@@ -188,7 +196,7 @@ impl Tracker {
                     }
                 }
             } else if let Some(tool) = self.mcp_tool(name) {
-                Some(tool)
+                Some(Call::Elsebot(tool.to_owned()))
             } else if self.expected.iter().any(|t| t == name) {
                 None
             } else {
@@ -196,14 +204,17 @@ impl Tracker {
                     "Grok called an unexpected tool: {name}"
                 )));
             };
-            if let Some(tool) = tool {
-                self.calls.insert(id.to_owned(), tool.to_owned());
+            if let Some(call) = call {
+                self.calls.insert(id.to_owned(), call);
             }
         }
         Ok(())
     }
 
-    fn parked(&self, event: &Value) -> Result<bool, Violation> {
+    /// Whether the results park the turn. A refused use_tool target that
+    /// came back without an error ran something outside else.bot, so it
+    /// breaks the policy even though Grok was expected to refuse it.
+    fn on_results(&self, event: &Value) -> Result<bool, Violation> {
         let mut parked = false;
         let blocks = match &event["message"]["content"] {
             Value::String(_) => &[],
@@ -213,10 +224,17 @@ impl Tracker {
             let Some(id) = FIELDS.text(&block["tool_use_id"], "tool result")? else {
                 continue;
             };
-            parked |= self
-                .calls
-                .get(id)
-                .is_some_and(|tool| crate::app::tools::parks(tool, &block["content"]));
+            match self.calls.get(id) {
+                Some(Call::Elsebot(tool)) => {
+                    parked |= crate::app::tools::parks(tool, &block["content"]);
+                }
+                Some(Call::Refused(target)) if block["is_error"] != true => {
+                    return Err(Violation::policy(format!(
+                        "Grok ran a use_tool target outside else.bot: {target}"
+                    )));
+                }
+                _ => {}
+            }
         }
         Ok(parked)
     }
@@ -282,7 +300,7 @@ impl Protocol for Tracker {
             }
             "assistant" => self.on_assistant(event)?,
             "user" => {
-                if self.parked(event)? {
+                if self.on_results(event)? {
                     events.push(Event::Parked);
                 }
             }
