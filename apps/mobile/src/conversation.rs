@@ -52,8 +52,8 @@ pub enum Row {
     Owner {
         id: Uuid,
         text: String,
-        /// The reply to it failed or its outcome is unknown.
-        problem: Option<String>,
+        /// What became of the reply to it, when it did not complete.
+        outcome: Option<Outcome>,
     },
     Bot {
         id: Uuid,
@@ -76,6 +76,26 @@ impl Ask {
         match self {
             Self::Question(question) => format!("q-{}", question.id),
             Self::Draft(draft) => format!("d-{}", draft.id),
+        }
+    }
+}
+
+/// A reply that did not complete, as the owner's message shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The owner stopped it.
+    Stopped,
+    Failed(String),
+    /// The server cannot tell whether it ran.
+    Unknown,
+}
+
+impl Outcome {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Stopped => "Stopped",
+            Self::Failed(reason) => reason,
+            Self::Unknown => "The outcome of this reply is unknown",
         }
     }
 }
@@ -216,7 +236,7 @@ impl Conversation {
                     rows.push(Row::Owner {
                         id: item.id,
                         text: item.text.clone(),
-                        problem: turn.and_then(problem),
+                        outcome: turn.and_then(outcome),
                     });
                 }
                 ItemKind::Assistant => {
@@ -322,16 +342,16 @@ impl Conversation {
     }
 }
 
-fn problem(turn: &Turn) -> Option<String> {
+fn outcome(turn: &Turn) -> Option<Outcome> {
     match turn.status {
-        TurnStatus::Failed => Some(
+        TurnStatus::Failed => Some(Outcome::Failed(
             turn.error
                 .as_ref()
                 .and_then(|error| error.message.clone())
-                .unwrap_or_else(|| "The reply failed.".into()),
-        ),
-        TurnStatus::Uncertain => Some("The outcome of this reply is unknown.".into()),
-        TurnStatus::Interrupted => Some("Stopped.".into()),
+                .unwrap_or_else(|| "The reply failed".into()),
+        )),
+        TurnStatus::Uncertain => Some(Outcome::Unknown),
+        TurnStatus::Interrupted => Some(Outcome::Stopped),
         _ => None,
     }
 }
@@ -463,7 +483,7 @@ mod tests {
             Some(&Row::Owner {
                 id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
                 text: "hi".into(),
-                problem: Some("Codex is signed out.".into()),
+                outcome: Some(Outcome::Failed("Codex is signed out.".into())),
             })
         );
     }

@@ -2,13 +2,14 @@
 //! Markdown that streams in, and the composer.
 
 use nsh_base::{MarkdownOptions, TextViewPart, TextViewParts, input, nav_page, text_view};
+use nsh_core::element::AdaptiveColor;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
 use super::parts::{ARROW_UP, STOP, colors};
 use super::session::{self, Chat};
 use crate::api::ClientError;
-use crate::conversation::{Ask, Row};
+use crate::conversation::{Ask, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
 /// is unknown keeps its request ID, so sending again cannot post it twice.
@@ -212,9 +213,9 @@ fn row_text(line: Memo<Option<Line>>) -> impl Fn() -> String + Copy {
 }
 
 fn owner_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
-    let problem = computed(move || {
+    let outcome = computed(move || {
         line.with(|l| match l {
-            Some(Line::Row(Row::Owner { problem, .. })) => problem.clone(),
+            Some(Line::Row(Row::Owner { outcome, .. })) => outcome.clone(),
             _ => None,
         })
     });
@@ -239,11 +240,15 @@ fn owner_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
                 ),
         )
         .child(dynamic(move || {
-            problem.get().map(|problem| {
-                text(problem)
+            outcome.get().map(|outcome| {
+                let color = match outcome {
+                    Outcome::Stopped => colors::secondary(),
+                    Outcome::Failed(_) | Outcome::Unknown => colors::destructive(),
+                };
+                text(outcome.text().to_owned())
                     .pt_1()
                     .text_size(px(12.0))
-                    .text_color(colors::destructive())
+                    .text_color(color)
             })
         }))
 }
@@ -404,25 +409,25 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
         )
     });
 
-    let round_button = |icon: nsh_core::element::ImageAsset, size: f32| {
+    let round_button = |icon: nsh_core::element::ImageAsset, size: f32, tint: AdaptiveColor| {
         view()
             .size(px(32.0))
             .rounded(px(16.0))
             .items_center()
             .justify_center()
             .active(|s| s.opacity(0.6))
-            .child(image(icon).size(px(size)).tint_color(colors::on_tint()))
+            .child(image(icon).size(px(size)).tint_color(tint))
     };
 
     let action = when(show_stop, move || {
-        round_button(STOP, 12.0)
+        round_button(STOP, 12.0, colors::chat())
             .bg(colors::label())
             .role(AccessibilityRole::Button)
             .label("Stop")
             .on_press(stop)
     })
     .otherwise(move || {
-        round_button(ARROW_UP, 16.0)
+        round_button(ARROW_UP, 16.0, colors::on_tint())
             .bg(colors::tint())
             .opacity(move || if can_send.get() { 1.0_f32 } else { 0.35 })
             .role(AccessibilityRole::Button)
