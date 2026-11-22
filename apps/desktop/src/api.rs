@@ -542,6 +542,23 @@ impl Client {
         }
     }
 
+    /// Run a failed owner message again as a new attempt of its turn.
+    /// `attempt` is the attempt shown failing; repeating it is safe.
+    pub async fn retry_turn(
+        self: Arc<Self>,
+        bot: Uuid,
+        turn: Uuid,
+        attempt: i64,
+    ) -> Result<else_wire::turns::Turn, ClientError> {
+        let body = json!({ "attempt": attempt });
+        self.call(
+            Method::POST,
+            format!("/v1/bots/{bot}/turns/{turn}/retry"),
+            Some(body),
+        )
+        .await
+    }
+
     pub async fn cancel(self: Arc<Self>, bot: Uuid, request_id: Uuid) -> Result<(), ClientError> {
         let body = json!({ "request_id": request_id });
         self.call_unit(Method::POST, format!("/v1/bots/{bot}/cancel"), Some(body))

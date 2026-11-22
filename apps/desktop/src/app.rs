@@ -1075,6 +1075,31 @@ impl ElseApp {
         self.submit(bot, request, window, cx);
     }
 
+    /// Run failed owner turn `turn` of `bot` again. The turn update that
+    /// queues it arrives on the stream.
+    fn retry_turn(
+        &mut self,
+        bot: Uuid,
+        turn: Uuid,
+        attempt: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.retry_turn(bot, turn, attempt).await;
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(_) => {}
+                    Err(err) if app.unauthorized(&err, cx) => {}
+                    Err(err) => app.notice = Some(err.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn take_failed(
         &mut self,
         request_id: Uuid,

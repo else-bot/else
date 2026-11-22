@@ -599,8 +599,30 @@ pub(super) fn turn_status(
                     .child(label),
             )
             .children(model_remedy(turn, bot, app, cx))
+            .children(owner_retry(turn, bot, connected, app, cx))
             .children(routine_retry(turn, bot, routines, connected, app, cx)),
     )
+}
+
+/// Retry beside a failed owner message the API marks retryable: the
+/// latest one, after a failure that may pass. It runs the same message
+/// again as a new attempt of its turn.
+pub(super) fn owner_retry(
+    turn: &Turn,
+    bot: Uuid,
+    connected: bool,
+    app: &WeakEntity<ElseApp>,
+    cx: &App,
+) -> Option<Button> {
+    let (id, attempt) = (turn.id, turn.attempt?);
+    turn.retryable.then(|| {
+        Button::new(SharedString::from(format!("turn-retry-{id}")))
+            .control(Tier::Ghost, Scale::Compact, !connected, cx)
+            .label("Retry")
+            .on_click(on_app(app, move |app, _, window, cx| {
+                app.retry_turn(bot, id, attempt, window, cx)
+            }))
+    })
 }
 
 /// Retry beside the failure of a routine's latest run, as in bot details,
