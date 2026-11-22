@@ -315,6 +315,13 @@ impl ConversationView {
         // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
             let remedy = super::message_row::model_remedy(turn, self.bot_id, &self.app, cx);
+            let resend = super::message_row::owner_retry(
+                turn,
+                self.bot_id,
+                self.inputs.connected,
+                &self.app,
+                cx,
+            );
             let retry = super::message_row::routine_retry(
                 turn,
                 self.bot_id,
@@ -332,6 +339,7 @@ impl ConversationView {
                         .gap_2()
                         .children(status)
                         .children(remedy)
+                        .children(resend)
                         .children(retry),
                 )
         } else {

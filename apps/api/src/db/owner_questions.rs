@@ -232,6 +232,10 @@ async fn find_same(
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM owner_questions
                  WHERE turn_id = ?1 AND kind = 'choice' AND title = ?2
+                   -- The owner's retry asks anew what the failed attempt
+                   -- left cancelled.
+                   AND NOT (status = 'cancelled' AND attempt <= (
+                       SELECT coalesce(retried_attempt, 0) FROM turns WHERE id = ?1))
                  ORDER BY created_at DESC, id DESC LIMIT 1"
             )))
             .bind(turn_id)
