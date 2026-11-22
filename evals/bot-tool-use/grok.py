@@ -38,6 +38,13 @@ auto_update = false
 [features]
 managed_config = false
 campaigns = false
+[compat.claude]
+mcps = false
+[compat.cursor]
+mcps = false
+[managed_mcps]
+enabled = false
+gateway_tools_enabled = false
 [subagents]
 enabled = false
 [workflows]
@@ -47,7 +54,7 @@ enabled = false
 [memory_v2]
 enabled = false
 [permission]
-allow = ["MCPTool(elsebot__*)", "MCPTool(mcp__elsebot__*)"]
+allow = ["MCPTool(*)"]
 {deny}
 [mcp_servers.elsebot]
 command = {command}
@@ -63,6 +70,10 @@ HOST_TOOLS = "run_terminal_cmd,read_file,write,search_replace,list_dir,grep,get_
 ENV = {"GROK_DISABLE_AUTOUPDATER": "1", "GROK_SUBAGENTS": "0", "GROK_WORKFLOWS": "0",
        "GROK_MEMORY": "0", "GROK_BACKEND_SEARCH": "0", "GROK_CAMPAIGNS": "0",
        "GROK_DISABLE_EXPERIMENTS": "1"}
+
+
+# Grok's replies to a use_tool target it refuses without running it.
+REFUSALS = ("Tool not found", "not a valid MCP tool", "is a native tool")
 
 
 def transcript(stdout):
@@ -81,7 +92,7 @@ def transcript(stdout):
         if event.get("type") == "user" and isinstance(content, list):
             for block in content:
                 text = json.dumps(block.get("content"))
-                if block.get("is_error") and ("Tool not found" in text or "not a valid MCP tool" in text):
+                if block.get("is_error") and any(m in text for m in REFUSALS):
                     use = uses.get(block.get("tool_use_id"), {})
                     refused.append(use.get("input", {}).get("tool_name") or use.get("name"))
         if event.get("type") == "result":
@@ -129,6 +140,12 @@ def sample(case, context, out, model, effort, host_tools):
         if (out / "calls.jsonl").exists() else []
     checks = run.grade(case["expect"], calls, final, refused, context.get("parking_tools"))
     checks.append({"check": "turn completed with end_turn", "pass": completed})
+    # MCPTool(*) approves any loaded server, as in production; a call that
+    # reached a server besides the mock must fail the sample.
+    checks.append({"check": "use_tool reaches only elsebot", "pass": all(
+        str(u.get("input", {}).get("tool_name") or "").startswith("elsebot__")
+        or u.get("input", {}).get("tool_name") in refused
+        for u in uses if u.get("name") == "use_tool")})
     # Production's tracker ends the turn on a use_tool call whose target it cannot read.
     checks.append({"check": "every use_tool names its tool", "pass": all(
         isinstance(u.get("input", {}).get("tool_name"), str) for u in uses if u.get("name") == "use_tool")})

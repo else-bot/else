@@ -103,6 +103,8 @@ def run(runner):
                          self.call("mcp_request", {"id": "github", "method": "tools/call", "params": {
                              "name": "list_pull_requests", "arguments": {"owner": "acme", "repo": "widget", "state": "open"}}})]
             examples = {
+                "tool-search-is-called-directly": ([self.call("find_tool", {"query": "list routines"}), self.call("use_tool", {
+                    "name": "routine_list", "arguments": {}})], "You have 2 routines."),
                 "rerun-routine-now": ([self.call("find_tool", {"query": "routine_run"}), self.call("use_tool", {
                     "name": "routine_run", "arguments": {"routine_id": routine_id}})], "Queued."),
                 "pause-routine-discovers-update": ([self.call("find_tool", {"query": "routine_update"}), self.call("use_tool", {
@@ -812,11 +814,18 @@ def run(runner):
                    "name": "use_tool", "input": {"tool_name": "elsebot__send_draft", "tool_input": {}}}]}}
             refused = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
                        "is_error": True, "content": "Tool not found: elsebot__send_draft"}]}}
+            native = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2",
+                      "name": "use_tool", "input": {"tool_name": "search_tool", "tool_input": {}}}]}}
+            native_refused = {"type": "user", "message": {"content": [{"type": "tool_result",
+                              "tool_use_id": "t2", "is_error": True, "content": json.dumps({
+                                  "error": "tool_execution_failed",
+                                  "message": "`search_tool` is a native tool, not an MCP integration tool."})}]}}
             done = {"type": "result", "subtype": "success", "is_error": False,
                     "stop_reason": "end_turn", "result": "Sent."}
             lines = lambda *events: "\n".join(json.dumps(e) for e in events)
-            _, names, final, completed = grok.transcript(lines(use, refused, done))
-            self.assertEqual((names, final, completed), (["elsebot__send_draft"], "Sent.", True))
+            _, names, final, completed = grok.transcript(lines(use, refused, native, native_refused, done))
+            self.assertEqual((names, final, completed),
+                             (["elsebot__send_draft", "search_tool"], "Sent.", True))
             for stop in ({"stop_reason": "max_tokens"}, {"stop_reason": "refusal"},
                          {"subtype": "cancelled"}, {"is_error": True}):
                 with self.subTest(stop=stop):

@@ -348,7 +348,7 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
         t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"parked\":true}"}]}})),
         Ok(vec![Event::Parked])
     );
-    for name in ["other-ask_owner", "elsebot__not_real"] {
+    for name in ["other__ask_owner", "elsebot__not_real"] {
         assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"use_tool","input":{"tool_name":name}}]}})).is_err());
     }
     assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c3","name":"run_terminal_command"}]}})).is_err());
@@ -367,7 +367,7 @@ fn a_use_tool_call_that_hides_its_target_in_a_file_names_the_missing_field() {
 }
 
 #[test]
-fn an_elsebot_tool_name_missing_from_the_catalog_is_left_to_grok_to_reject() {
+fn a_use_tool_target_grok_cannot_run_is_left_to_grok_to_reject() {
     let mut t = tracker(false);
     t.on(&init(false)).unwrap();
     for name in [
@@ -375,6 +375,8 @@ fn an_elsebot_tool_name_missing_from_the_catalog_is_left_to_grok_to_reject() {
         "mcp__elsebot__list_bots",
         "list_bots",
         "mcp_list",
+        "run_terminal_command",
+        "web_search",
     ] {
         t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":name,"tool_input":{}}}]}})).unwrap();
     }
@@ -383,6 +385,41 @@ fn an_elsebot_tool_name_missing_from_the_catalog_is_left_to_grok_to_reject() {
         Ok(vec![])
     );
     assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"elsebot__report_draft_send","input":{}}]}})).is_err());
+}
+
+#[test]
+fn a_turn_recovers_after_grok_refuses_search_tool_routed_through_use_tool() {
+    let mut t = tracker(false);
+    t.on(&init(false)).unwrap();
+    t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":"search_tool","tool_input":{"query":"routines"}}}]}})).unwrap();
+    assert_eq!(
+        t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"error\":\"tool_execution_failed\",\"message\":\"`search_tool` is a native tool, not an MCP integration tool. Call `search_tool` directly as its own tool call instead of routing it through `use_tool`.\"}","is_error":true}]}})),
+        Ok(vec![])
+    );
+    t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"search_tool","input":{"query":"routines"}}]}})).unwrap();
+    t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c3","name":"use_tool","input":{"tool_name":"elsebot__use_tool","tool_input":{"name":"routine_list","arguments":{}}}}]}})).unwrap();
+    assert_eq!(
+        finish(&mut t, &result("end_turn"), None),
+        TurnOutcome::Completed
+    );
+}
+
+#[test]
+fn a_use_tool_target_grok_was_expected_to_refuse_fails_the_turn_when_it_succeeds() {
+    for result in [
+        json!({"type":"tool_result","tool_use_id":"c1","content":"done"}),
+        json!({"type":"tool_result","tool_use_id":"c1","content":"done","is_error":false}),
+    ] {
+        let mut t = tracker(false);
+        t.on(&init(false)).unwrap();
+        t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":"run_terminal_command","tool_input":{"command":"touch x"}}}]}})).unwrap();
+        assert_eq!(
+            t.on(&json!({"type":"user","message":{"content":[result]}})),
+            Err(Violation::policy(
+                "Grok ran a use_tool target outside else.bot: run_terminal_command"
+            ))
+        );
+    }
 }
 
 #[test]
@@ -530,7 +567,7 @@ fn provider_homes_link_login_and_keep_grants_out_of_config() {
     );
     let config = std::fs::read_to_string(dirs.provider_home.join("config.toml")).unwrap();
     assert!(config.contains("${ELSE_TASK_GRANT}"));
-    assert!(config.contains(r#"allow = ["MCPTool(elsebot__*)", "MCPTool(mcp__elsebot__*)"]"#));
+    assert!(config.contains(r#"allow = ["MCPTool(*)"]"#));
     assert_eq!(
         std::fs::metadata(dirs.provider_home.join("config.toml"))
             .unwrap()

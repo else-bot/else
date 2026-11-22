@@ -343,7 +343,7 @@ impl Stream for GrokCli {
 /// How Grok reaches else.bot's tools, appended to the shared instructions.
 pub(crate) fn tool_note() -> String {
     format!(
-        "Use inline use_tool calls with tool_name and tool_input. else.bot MCP tool names start with {0}__. A tool that {0}__find_tool returns, such as send_draft or report_draft_send, has no {0}__ name of its own: run it with tool_name {0}__use_tool and tool_input {{\"name\": \"send_draft\", \"arguments\": {{...}}}}. Do not use invocation files that hide tool_name. End this attempt when an else.bot tool returns parked or pending; the app will continue it after the outcome.",
+        "Call search_tool directly to find else.bot tools; never route it through use_tool. use_tool runs only tools named {0}__<tool>, with tool_name and tool_input inline. Do not use invocation files that hide tool_name. A tool that {0}__find_tool returns, such as send_draft or report_draft_send, has no {0}__ name of its own: run it with tool_name {0}__use_tool and tool_input {{\"name\": \"send_draft\", \"arguments\": {{...}}}}. Call else.bot tools only by the exact names that search_tool or {0}__find_tool returned. End this attempt when an else.bot tool returns parked or pending; the app will continue it after the outcome.",
         crate::app::tools::SERVER_NAME,
     )
 }

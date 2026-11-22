@@ -134,17 +134,14 @@ pub fn prepare(
     host_tools: bool,
 ) -> std::io::Result<()> {
     link_login(&dirs.provider_home, "auth.json", &login.join("auth.json"))?;
-    // Grok checks permission on the requested name before resolving it, so a
-    // headless turn cancels on mcp__elsebot__<tool> unless that spelling is
-    // allowed through to Grok's own "Tool not found" reply.
-    let mut launch = json!({
-        "permission": {
-            "allow": [
-                format!("MCPTool({SERVER_NAME}__*)"),
-                format!("MCPTool(mcp__{SERVER_NAME}__*)"),
-            ],
-        },
-    });
+    // Grok checks permission on use_tool's requested name before resolving
+    // it, so a headless turn cancels on a name Grok would refuse, such as
+    // search_tool or mcp__elsebot__<tool>, unless the name is allowed through
+    // to Grok's own refusal. The allow rule covers every loaded MCP server:
+    // managed_config.toml below and the [compat.*] mcps = false settings keep
+    // any server but else.bot from loading, and protocol::Tracker ends a turn
+    // whose inventory lists another one.
+    let mut launch = json!({ "permission": { "allow": ["MCPTool(*)"] } });
     // Grok's use_tool also accepts {"file": path}, which names the tool only
     // inside the file, so protocol::Tracker could not check the call. Grok
     // drops that form for a model that declares no root-union schemas.
