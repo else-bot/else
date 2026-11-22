@@ -11,7 +11,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use else_wire::bots::BotList;
+use else_wire::bots::{Bot, BotEnvelope, BotList, ReplyPosition};
 use else_wire::conversation::{Sent, Snapshot};
 use else_wire::outgoing::OutgoingDraft;
 use else_wire::settings::ErrorBody;
@@ -287,14 +287,19 @@ impl Client {
         .await
     }
 
-    /// Marks everything up to the newest message read.
-    pub async fn mark_read(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        let body = json!({ "action": "mark_read", "position": null });
+    /// Moves the read position up to `position`, the newest reply the
+    /// owner has seen; returns the bot as the server now has it.
+    pub async fn read_through(
+        self: Arc<Self>,
+        bot: Uuid,
+        position: ReplyPosition,
+    ) -> Result<Bot, ClientError> {
+        let body = json!({ "action": "through", "position": position });
         let path = format!("/v1/bots/{bot}/read");
         run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
+            self.call::<BotEnvelope>(Method::POST, &path, Some(body))
                 .await
-                .map(drop)
+                .map(|envelope| envelope.bot)
         })
         .await
     }

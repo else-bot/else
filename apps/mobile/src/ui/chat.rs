@@ -70,22 +70,29 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
 /// Marks the bot read on the server whenever its list row turns unread
 /// while this chat is open.
 fn keep_read(bot: Uuid) {
-    let unread = computed(move || {
+    let unread_through = computed(move || {
         session::bots().with(|b| {
             b.list
                 .iter()
-                .any(|it| it.id == bot && it.read_state.as_ref().is_some_and(|r| r.unread))
+                .find(|it| it.id == bot)
+                .and_then(|it| it.read_state.as_ref())
+                .filter(|read| read.unread)
+                .and_then(|read| read.latest.as_ref().map(|latest| latest.position))
         })
     });
     let marking = stored(false);
     effect(move || {
-        if !unread.get() || marking.get() {
+        let Some(position) = unread_through.get() else {
+            return;
+        };
+        if marking.replace(true) {
             return;
         }
-        marking.replace(true);
         let client = session::server().client.clone();
         spawn(async move {
-            let _ = client.mark_read(bot).await;
+            if let Ok(updated) = client.read_through(bot, position).await {
+                session::update_bot(updated);
+            }
             marking.replace(false);
         });
     });

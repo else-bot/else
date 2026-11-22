@@ -205,6 +205,15 @@ fn handle(event: LiveEvent) {
     }
 }
 
+/// Replaces one bot of the list with the server's newer copy.
+pub fn update_bot(bot: Bot) {
+    bots().update(|bots| {
+        if let Some(slot) = bots.list.iter_mut().find(|b| b.id == bot.id) {
+            *slot = bot;
+        }
+    });
+}
+
 /// Loads the bot list again.
 pub fn refresh_bots() -> Spawned<()> {
     let client = server().client.clone();
@@ -247,7 +256,6 @@ pub fn load(bot: Uuid, chat: Signal<Chat>) {
                 Ok(conversation) => {
                     follow(bot, Some(conversation.cursor()));
                     chat.set(Chat::Ready(Box::new(conversation)));
-                    let _ = client.mark_read(bot).await;
                 }
                 Err(_) => chat.set(Chat::Failed(
                     "The server sent a page this app cannot read.".into(),
