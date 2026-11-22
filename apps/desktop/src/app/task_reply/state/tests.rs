@@ -1589,3 +1589,50 @@ fn a_reply_that_parked_without_writing_works_below_the_message_that_joins_it() {
         ],
     );
 }
+
+/// #764: a long turn re-sends its growing notes file on each wake. Each
+/// revision supersedes the one before, so only the newest stays in view.
+#[test]
+fn a_revised_document_folds_the_replies_carrying_its_earlier_revisions() {
+    let reply = |number: u128, attempt: i64, size: Option<u64>| {
+        let mut reply = item(number, 20, "assistant");
+        reply["attempt"] = json!(attempt);
+        if let Some(size) = size {
+            reply["parts"] = json!([{"type": "text", "text": format!("Message {number}")},
+                {"type": "file", "file": {"id": id(1000 + number), "name": "batch.md",
+                    "media_type": "text/markdown", "size": size}}]);
+        }
+        reply
+    };
+    let mut finished = turn(20, "completed");
+    finished["attempt"] = json!(6);
+    let mut joined = turn(21, "completed");
+    joined["steered_into"] = json!(id(20));
+    joined["steer_status"] = json!("delivered");
+    let c = conversation(
+        vec![
+            item(1, 20, "user"),
+            reply(2, 1, Some(1_170)),
+            reply(3, 2, Some(1_510)),
+            item(4, 21, "user"),
+            reply(5, 3, Some(1_762)),
+            reply(6, 4, Some(2_012)),
+            reply(7, 5, Some(2_270)),
+            reply(8, 6, None),
+        ],
+        vec![finished, joined],
+    );
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.latest, Some(id(8)));
+    assert_eq!(
+        task.answers,
+        [id(3), id(5)],
+        "the replies around the message"
+    );
+    assert_eq!(task.folds, HashMap::from([(id(3), vec![id(2)])]));
+    assert_eq!(
+        task.earlier(&c, &task.history, false),
+        [Earlier::Reply(id(7))],
+        "only the newest revision stays beside the final reply"
+    );
+}
