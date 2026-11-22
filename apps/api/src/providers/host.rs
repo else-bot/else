@@ -866,11 +866,13 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn gone(pid: i32) -> bool {
         fs::read_to_string(format!("/proc/{pid}/stat"))
             .map_or(true, |stat| stat.split_whitespace().nth(2) == Some("Z"))
     }
 
+    #[cfg(target_os = "linux")]
     async fn wait_gone(pid: i32) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !gone(pid) && std::time::Instant::now() < deadline {
