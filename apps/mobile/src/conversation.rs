@@ -184,9 +184,12 @@ impl Conversation {
 
     /// Records the owner message the server accepted, before its event
     /// arrives; the event replaces it with the same item.
+    /// A late response never replaces what the stream already delivered.
     pub fn insert_sent(&mut self, item: Item, turn: Turn) {
-        self.upsert_item(item);
-        self.turns.insert(turn.id, turn);
+        if !self.seq_of.contains_key(&item.id) {
+            self.upsert_item(item);
+        }
+        self.turns.entry(turn.id).or_insert(turn);
     }
 
     /// Merges an older page; it never replaces newer loaded text.
@@ -293,7 +296,10 @@ impl Conversation {
                 }
                 _ => continue,
             };
-            rows.push(Row::Note { id: question.id, text });
+            rows.push(Row::Note {
+                id: question.id,
+                text,
+            });
         }
         for draft in &turn.outgoing_drafts {
             if !draft.is_open() && draft.status != DraftStatus::Superseded {
@@ -437,18 +443,41 @@ mod tests {
     }
 
     #[test]
+    fn a_late_send_response_keeps_the_streamed_turn() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let stale: Turn = serde_json::from_value(json!({
+            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+            "status": "queued", "error": null, "effect_uncertain": false,
+        }))
+        .unwrap();
+        let item = conversation.items.values().next().unwrap().clone();
+        conversation.insert_sent(item, stale);
+        assert!(conversation.rows().iter().any(|row| matches!(
+            row,
+            Row::Bot {
+                streaming: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn a_pending_question_is_an_ask_until_answered() {
         let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        let question = |status: &str| json!({ "event": "turn.updated", "data": { "turn": {
-            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
-            "status": "waiting", "error": null, "effect_uncertain": false,
-            "questions": [{
-                "id": "00000000-0000-0000-0000-00000000000a", "kind": "choice",
-                "title": "Which plan?", "choices": [{ "id": "a", "label": "A" }],
-                "status": status,
-            }],
-        }}});
-        conversation.apply("srv:bot:5", &question("pending")).unwrap();
+        let question = |status: &str| {
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "waiting", "error": null, "effect_uncertain": false,
+                "questions": [{
+                    "id": "00000000-0000-0000-0000-00000000000a", "kind": "choice",
+                    "title": "Which plan?", "choices": [{ "id": "a", "label": "A" }],
+                    "status": status,
+                }],
+            }}})
+        };
+        conversation
+            .apply("srv:bot:5", &question("pending"))
+            .unwrap();
         assert!(matches!(&conversation.asks()[..], [Ask::Question(q)] if q.title == "Which plan?"));
         let answered = question("answered");
         let mut answered = answered;

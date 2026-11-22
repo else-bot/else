@@ -114,8 +114,10 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
-/// Whether this phone has a Tailscale address: the VPN is connected, so a
-/// Tailscale IP routes into the tailnet and not to a carrier's CGNAT.
+/// Whether this phone has a Tailscale address on a VPN tunnel (`utun*`):
+/// Tailscale is connected, so a Tailscale IP routes into the tailnet. A
+/// carrier can hand out `100.64.0.0/10` addresses too, but on its cellular
+/// interface (`pdp_ip*`), never on a tunnel.
 pub fn tailnet_connected() -> bool {
     let mut addresses: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills a list we free with freeifaddrs below.
@@ -127,7 +129,9 @@ pub fn tailnet_connected() -> bool {
     while !cursor.is_null() {
         // SAFETY: cursor walks the list getifaddrs returned.
         let entry = unsafe { &*cursor };
-        if !entry.ifa_addr.is_null() {
+        // SAFETY: ifa_name is a NUL-terminated interface name.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) };
+        if name.to_bytes().starts_with(b"utun") && !entry.ifa_addr.is_null() {
             // SAFETY: ifa_addr points to a sockaddr of the family it names.
             let ip = unsafe {
                 match i32::from((*entry.ifa_addr).sa_family) {
@@ -217,13 +221,27 @@ mod vault {
         const MISSING_ENTITLEMENT: i32 = -34018;
 
         pub fn read(origin: &str) -> Option<String> {
-            let bytes = security_framework::passwords::get_generic_password(SERVICE, origin).ok()?;
+            let bytes =
+                security_framework::passwords::get_generic_password(SERVICE, origin).ok()?;
             String::from_utf8(bytes).ok()
         }
 
-        /// `Ok(false)` when this build cannot use the Keychain at all.
+        /// `Ok(false)` when this build cannot use the Keychain at all. The
+        /// item stays on this device (never in backups or other devices) and
+        /// opens once the phone was unlocked after a restart.
         pub fn write(origin: &str, key: &str) -> Result<bool, String> {
-            match security_framework::passwords::set_generic_password(SERVICE, origin, key.as_bytes()) {
+            use security_framework::access_control::{ProtectionMode, SecAccessControl};
+            use security_framework::passwords::{PasswordOptions, set_generic_password_options};
+            let access = SecAccessControl::create_with_protection(
+                Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
+                0,
+            )
+            .map_err(|err| format!("Cannot protect the owner key: {err}"))?;
+            let mut options = PasswordOptions::new_generic_password(SERVICE, origin);
+            options.set_access_control(access);
+            // An item's protection cannot change in place: replace it.
+            remove(origin);
+            match set_generic_password_options(key.as_bytes(), options) {
                 Ok(()) => Ok(true),
                 Err(err) if err.code() == MISSING_ENTITLEMENT => Ok(false),
                 Err(err) => Err(format!("Cannot save the owner key in the Keychain: {err}")),
@@ -256,7 +274,8 @@ mod vault {
             return Ok(());
         }
         log::warn!("no Keychain group in this build; keeping the owner key in app storage");
-        Storage::set_item(slot(origin), key).map_err(|err| format!("Cannot save the owner key: {err}"))
+        Storage::set_item(slot(origin), key)
+            .map_err(|err| format!("Cannot save the owner key: {err}"))
     }
 
     pub fn remove(origin: &str) {
@@ -268,6 +287,8 @@ mod vault {
 impl Profile {
     /// The saved profile, if one is saved and still valid.
     pub fn load() -> Option<Self> {
+        // Builds before the Keychain kept the key in this JSON entry.
+        nsh_core::storage::Storage::remove_item("server-profile");
         let origin = nsh_core::storage::Storage::get_item(ORIGIN_KEY)?;
         let key = vault::read(&origin)?;
         Self::parse(&origin, &key).ok()

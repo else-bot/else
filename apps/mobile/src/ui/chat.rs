@@ -9,22 +9,34 @@ use uuid::Uuid;
 use super::parts::{ARROW_UP, STOP, colors};
 use super::session::{self, Chat};
 use crate::api::ClientError;
-use crate::conversation::{Ask, Outcome, Row};
+use crate::conversation::{Ask, Conversation, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
-/// is unknown keeps its request ID, so sending again cannot post it twice.
+/// is unknown keeps its request ID and text: sending the same text again
+/// reuses the ID, so the server cannot post it twice; edited text is a new
+/// message.
 #[derive(Clone, PartialEq)]
 enum Outbox {
     Idle,
-    Sending { request_id: Uuid },
-    Unknown { request_id: Uuid, message: String },
+    Sending {
+        request_id: Uuid,
+    },
+    Unknown {
+        request_id: Uuid,
+        text: String,
+        message: String,
+    },
     Refused(String),
 }
 
 impl Outbox {
-    fn request_id(&self) -> Uuid {
+    fn request_id(&self, text: &str) -> Uuid {
         match self {
-            Self::Unknown { request_id, .. } => *request_id,
+            Self::Unknown {
+                request_id,
+                text: sent,
+                ..
+            } if sent == text => *request_id,
             _ => Uuid::new_v4(),
         }
     }
@@ -33,20 +45,18 @@ impl Outbox {
 pub fn screen(bot: Uuid, name: String) -> Screen {
     let chat = session::open_chat(bot);
     let rows = computed(move || {
-        chat.with(|c| match c {
-            Chat::Ready(conversation) => conversation.rows(),
-            _ => Vec::new(),
-        })
+        chat.with(|c| c.conversation().map(Conversation::rows).unwrap_or_default())
     });
-    let thinking = computed(move || chat.with(|c| matches!(c, Chat::Ready(c) if c.thinking())));
-    let busy = computed(move || chat.with(|c| matches!(c, Chat::Ready(c) if c.busy())));
-    keep_read(bot);
+    let thinking =
+        computed(move || chat.with(|c| c.conversation().is_some_and(Conversation::thinking)));
+    let busy = computed(move || chat.with(|c| c.conversation().is_some_and(Conversation::busy)));
+    keep_read(bot, chat);
 
     let transcript = dynamic(move || {
         match chat.with(|c| match c {
             Chat::Loading => Some(None),
             Chat::Failed(message) => Some(Some(message.clone())),
-            Chat::Ready(_) => None,
+            Chat::Ready(_) | Chat::Recovering(_) => None,
         }) {
             Some(None) => centered("Loading…".into()).into_element(),
             Some(Some(message)) => centered(message).into_element(),
@@ -70,7 +80,11 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
 
 /// Marks the bot read on the server whenever its list row turns unread
 /// while this chat is open.
-fn keep_read(bot: Uuid) {
+/// Marks the bot read through its newest reply while its loaded chat is
+/// on screen. Repeating a read is harmless, so a newer position simply
+/// sends again; an effect re-run cancels the older request.
+fn keep_read(bot: Uuid, chat: Signal<Chat>) {
+    let loaded = computed(move || chat.with(|c| c.conversation().is_some()));
     let unread_through = computed(move || {
         session::bots().with(|b| {
             b.list
@@ -81,20 +95,15 @@ fn keep_read(bot: Uuid) {
                 .and_then(|read| read.latest.as_ref().map(|latest| latest.position))
         })
     });
-    let marking = stored(false);
     effect(move || {
-        let Some(position) = unread_through.get() else {
+        let Some(position) = unread_through.get().filter(|_| loaded.get()) else {
             return;
         };
-        if marking.replace(true) {
-            return;
-        }
         let client = session::server().client.clone();
         spawn(async move {
             if let Ok(updated) = client.read_through(bot, position).await {
                 session::update_bot(updated);
             }
-            marking.replace(false);
         });
     });
 }
@@ -128,10 +137,7 @@ fn transcript(
     thinking: Memo<bool>,
 ) -> impl IntoElement {
     let asks = computed(move || {
-        chat.with(|c| match c {
-            Chat::Ready(conversation) => conversation.asks(),
-            _ => Vec::new(),
-        })
+        chat.with(|c| c.conversation().map(Conversation::asks).unwrap_or_default())
     });
     let lines = computed(move || {
         let mut lines: Vec<Line> = rows.get().into_iter().map(Line::Row).collect();
@@ -355,17 +361,17 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
             return;
         }
         let text = draft.get_untracked().trim().to_owned();
-        let request_id = outbox.with_untracked(Outbox::request_id);
+        let request_id = outbox.with_untracked(|o| o.request_id(&text));
         outbox.set(Outbox::Sending { request_id });
         let client = session::server().client.clone();
         spawn(async move {
-            match client.send(bot, request_id, text).await {
+            match client.send(bot, request_id, text.clone()).await {
                 Ok(sent) => {
                     batch(|| {
                         draft.set(String::new());
                         outbox.set(Outbox::Idle);
                         chat.update(|c| {
-                            if let Chat::Ready(conversation) = c {
+                            if let Some(conversation) = c.conversation_mut() {
                                 conversation.insert_sent(sent.item, sent.turn);
                             }
                         });
@@ -373,7 +379,10 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                 }
                 Err(err) if err.outcome_unknown() => outbox.set(Outbox::Unknown {
                     request_id,
-                    message: format!("{err} It may have been sent. Send again to retry safely."),
+                    text,
+                    message: format!(
+                        "{err} It may have been sent. Sending the same text again cannot post it twice."
+                    ),
                 }),
                 Err(ClientError::Api { message, .. }) => outbox.set(Outbox::Refused(message)),
                 Err(err) => outbox.set(Outbox::Refused(err.to_string())),
@@ -383,7 +392,9 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
 
     let stop = move || {
         let Some(request) = chat.with_untracked(|c| match c {
-            Chat::Ready(conversation) => conversation.active_request(),
+            Chat::Ready(conversation) | Chat::Recovering(conversation) => {
+                conversation.active_request()
+            }
             _ => None,
         }) else {
             return;
@@ -431,7 +442,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
             .bg(colors::tint())
             .opacity(move || if can_send.get() { 1.0_f32 } else { 0.35 })
             .role(AccessibilityRole::Button)
-            .label("Send")
+            .label("Send message")
             .on_press(send)
     });
 

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use else_wire::bots::Bot;
 use nsh_core::platform::Lifecycle;
@@ -99,6 +100,41 @@ pub enum Chat {
     Loading,
     Failed(String),
     Ready(Box<Conversation>),
+    /// The stream moved past what is loaded; the stale page stays shown,
+    /// live events wait, and a fresh page is being fetched.
+    Recovering(Box<Conversation>),
+}
+
+impl Chat {
+    /// The conversation on screen, current or being recovered.
+    pub fn conversation(&self) -> Option<&Conversation> {
+        match self {
+            Self::Ready(conversation) | Self::Recovering(conversation) => Some(conversation),
+            Self::Loading | Self::Failed(_) => None,
+        }
+    }
+
+    pub fn conversation_mut(&mut self) -> Option<&mut Conversation> {
+        match self {
+            Self::Ready(conversation) | Self::Recovering(conversation) => Some(conversation),
+            Self::Loading | Self::Failed(_) => None,
+        }
+    }
+
+    /// Starts recovering; `false` when a load is already under way.
+    fn start_recovery(&mut self) -> bool {
+        match std::mem::replace(self, Chat::Loading) {
+            Chat::Ready(conversation) => {
+                *self = Chat::Recovering(conversation);
+                true
+            }
+            Chat::Failed(_) => true,
+            other @ (Chat::Loading | Chat::Recovering(_)) => {
+                *self = other;
+                false
+            }
+        }
+    }
 }
 
 /// The chats on screen, so live events reach them.
@@ -194,12 +230,12 @@ fn handle(event: LiveEvent) {
                 }
             });
             if reset {
-                load(bot, chat);
+                recover(bot, chat);
             }
         }
         LiveEvent::BotReset { bot } => {
             if let Some(chat) = chats().with_untracked(|c| c.0.get(&bot).copied()) {
-                load(bot, chat);
+                recover(bot, chat);
             }
         }
     }
@@ -247,26 +283,45 @@ pub fn open_chat(bot: Uuid) -> Signal<Chat> {
     chat
 }
 
+/// Fetches a fresh page for a chat the stream moved past.
+fn recover(bot: Uuid, chat: Signal<Chat>) {
+    let mut start = false;
+    chat.update(|c| start = c.start_recovery());
+    if start {
+        load(bot, chat);
+    }
+}
+
 /// Loads the newest page of `bot` into `chat` and follows it from there.
+/// While the chat is open a failed load retries with backoff; a first load
+/// shows its error meanwhile, a recovery keeps the stale page shown.
 pub fn load(bot: Uuid, chat: Signal<Chat>) {
     let client = server().client.clone();
     spawn(async move {
-        match client.clone().latest(bot).await {
-            Ok(snapshot) => match Conversation::from_snapshot(snapshot) {
-                Ok(conversation) => {
-                    follow(bot, Some(conversation.cursor()));
-                    chat.set(Chat::Ready(Box::new(conversation)));
+        let mut delay = Duration::from_secs(1);
+        let open = move || chats().with_untracked(|c| c.0.get(&bot) == Some(&chat));
+        while open() {
+            match client.clone().latest(bot).await {
+                Ok(snapshot) => {
+                    match Conversation::from_snapshot(snapshot) {
+                        Ok(conversation) => {
+                            follow(bot, Some(conversation.cursor()));
+                            chat.set(Chat::Ready(Box::new(conversation)));
+                        }
+                        Err(_) => chat.set(Chat::Failed(
+                            "The server sent a page this app cannot read.".into(),
+                        )),
+                    }
+                    return;
                 }
-                Err(_) => chat.set(Chat::Failed(
-                    "The server sent a page this app cannot read.".into(),
-                )),
-            },
-            Err(err) => {
-                let keep = chat.with_untracked(|c| matches!(c, Chat::Ready(_)));
-                if !keep {
-                    chat.set(Chat::Failed(err.to_string()));
+                Err(err) => {
+                    if chat.with_untracked(|c| matches!(c, Chat::Loading | Chat::Failed(_))) {
+                        chat.set(Chat::Failed(err.to_string()));
+                    }
                 }
             }
+            timer(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(15));
         }
     });
 }

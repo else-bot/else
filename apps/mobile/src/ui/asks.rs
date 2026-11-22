@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use else_wire::outgoing::OutgoingDraft;
+use else_wire::outgoing::{DraftContent, OutgoingDraft};
 use else_wire::questions::{Question, QuestionKind};
 use nsh_base::alert_dialog;
 use nsh_core::prelude::*;
@@ -21,6 +21,9 @@ enum Action {
     Idle,
     Sending,
     Failed(String),
+    /// The response was lost: the server may have acted. The card stays
+    /// locked until the server's own update settles it.
+    Unknown,
 }
 
 pub fn card(bot: Uuid, ask: Ask) -> AnyElement {
@@ -51,22 +54,31 @@ fn eyebrow(label: &'static str) -> impl IntoElement {
 }
 
 fn failure(action: Signal<Action>) -> impl IntoElement {
-    dynamic(move || match action.get() {
-        Action::Failed(message) => Some(
+    dynamic(move || {
+        let message = match action.get() {
+            Action::Failed(message) => message,
+            Action::Unknown => {
+                "The connection dropped before the server answered. It may have gone through; this card updates once the server says.".into()
+            }
+            Action::Idle | Action::Sending => return None,
+        };
+        Some(
             text(message)
                 .text_size(px(13.0))
                 .line_height(px(18.0))
                 .text_color(colors::destructive()),
-        ),
-        _ => None,
+        )
     })
 }
 
+/// The server's own words for a refusal (a settled question, a draft that
+/// changed since it was shown); a lost response is an unknown outcome.
 fn failed(err: ClientError) -> Action {
+    if err.outcome_unknown() {
+        return Action::Unknown;
+    }
     match err {
-        ClientError::Api { status: 409, .. } => {
-            Action::Failed("This was already settled elsewhere.".into())
-        }
+        ClientError::Api { message, .. } => Action::Failed(message),
         err => Action::Failed(err.to_string()),
     }
 }
@@ -115,7 +127,7 @@ fn button(
 fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
     let action = signal(Action::Idle);
     let picked = signal(BTreeSet::<String>::new());
-    let idle = move || action.get() != Action::Sending;
+    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
     let id = question.id;
     let multiple = question.multiple;
     let send = move |choices: Vec<String>| {
@@ -140,7 +152,11 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
                 let label = choice.label.clone();
                 return button(
                     move || {
-                        let mark = if picked.with(|p| p.contains(&shown)) { "✓ " } else { "" };
+                        let mark = if picked.with(|p| p.contains(&shown)) {
+                            "✓ "
+                        } else {
+                            ""
+                        };
                         SharedString::from(format!("{mark}{label}"))
                     },
                     false,
@@ -167,7 +183,11 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
         })
         .collect();
     frame()
-        .child(eyebrow(if approval { "NEEDS YOUR APPROVAL" } else { "QUESTION" }))
+        .child(eyebrow(if approval {
+            "NEEDS YOUR APPROVAL"
+        } else {
+            "QUESTION"
+        }))
         .child(
             text(question.title.clone())
                 .text_size(px(17.0))
@@ -175,12 +195,18 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::label()),
         )
-        .child(question.context.clone().filter(|c| !c.trim().is_empty()).map(|context| {
-            text(context)
-                .text_size(px(15.0))
-                .line_height(px(20.0))
-                .text_color(colors::secondary())
-        }))
+        .child(
+            question
+                .context
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .map(|context| {
+                    text(context)
+                        .text_size(px(15.0))
+                        .line_height(px(20.0))
+                        .text_color(colors::secondary())
+                }),
+        )
         .child(view().gap_2().children(choices))
         .child(multiple.then(|| {
             button(
@@ -196,7 +222,19 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
 
 fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
     let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending;
+    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    // Everything Send would deliver is on the card: hidden copies and files
+    // included.
+    let (cc, bcc) = match &draft.content {
+        DraftContent::Email { cc, bcc, .. } => (cc.join(", "), bcc.join(", ")),
+        _ => (String::new(), String::new()),
+    };
+    let files: Vec<String> = draft
+        .content
+        .attachments()
+        .iter()
+        .map(|file| file.name.clone())
+        .collect();
     let recipient = draft.content.recipient();
     let title = draft.content.title();
     // An email's title is its subject, so it is not repeated below.
@@ -256,6 +294,16 @@ fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
                 .text_size(px(15.0))
                 .text_color(colors::secondary())
         }))
+        .child((!cc.is_empty()).then(|| {
+            text(format!("Cc {cc}"))
+                .text_size(px(15.0))
+                .text_color(colors::secondary())
+        }))
+        .child((!bcc.is_empty()).then(|| {
+            text(format!("Bcc {bcc}"))
+                .text_size(px(15.0))
+                .text_color(colors::secondary())
+        }))
         .child(subject.map(|subject| {
             text(subject)
                 .text_size(px(15.0))
@@ -271,6 +319,11 @@ fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
                     .text_color(colors::label()),
             ),
         )
+        .child((!files.is_empty()).then(|| {
+            text(format!("Attached: {}", files.join(", ")))
+                .text_size(px(15.0))
+                .text_color(colors::label())
+        }))
         .child(
             view()
                 .flex_row()
