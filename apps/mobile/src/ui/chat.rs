@@ -168,6 +168,7 @@ fn transcript(
     .content_padding_top(px(12.0))
     .content_padding_bottom(px(12.0))
     .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
+    .keyboard_taps(KeyboardTaps::Handled)
     .follow_end(px(80.0))
     .on_load_more_at_start(move || session::load_older(bot, chat))
 }

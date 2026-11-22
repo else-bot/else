@@ -5,6 +5,7 @@
   "build": 1,
   "rust": ".",
   "root": "App",
+  "icon": "icon.png",
   "appearance": "system",
   "theme": "theme.json"
 }

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use else_wire::bots::Bot;
+use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
@@ -149,10 +150,17 @@ pub fn start() {
     let client = server().client.clone();
     let live = client.clone().live();
     wanted().set(Wanted(Some(live.wanted.clone())));
+    cleanup(move || wanted().set(Wanted(None)));
+    // Back from the background, iOS has usually closed the socket: retry
+    // now instead of after the backoff, and catch up on the list.
     let wake = live.wake.clone();
-    cleanup(move || {
-        wanted().set(Wanted(None));
-        drop(wake);
+    let was = stored(lifecycle());
+    effect(move || {
+        let now = lifecycle();
+        if was.replace(now) == Lifecycle::Background && now == Lifecycle::Active {
+            wake.notify_one();
+            refresh_bots();
+        }
     });
     refresh_bots();
     let mut events = live.events;
