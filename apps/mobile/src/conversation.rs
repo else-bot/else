@@ -1,0 +1,361 @@
+//! One bot's loaded conversation: its newest pages and the live events
+//! applied on top, in cursor order, as the desktop applies them.
+
+use std::collections::{BTreeMap, HashMap};
+
+use else_wire::bots::{Activity, Phase};
+use else_wire::conversation::{BotUpdated, Event, Snapshot};
+use else_wire::items::{Item, ItemKind};
+use else_wire::turns::{Turn, TurnStatus};
+use uuid::Uuid;
+
+/// Why the loaded conversation no longer follows the stream; the fix is
+/// always a fresh snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reset {
+    Gap,
+    BadCursor,
+    UnknownItem,
+    OffsetMismatch,
+    Undecodable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// Already applied (a replay); nothing changed.
+    Duplicate,
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conversation {
+    /// `<server_instance_id>:<bot_id>`; events must carry the same prefix.
+    cursor_prefix: String,
+    applied: i64,
+    items: BTreeMap<i64, Item>,
+    seq_of: HashMap<Uuid, i64>,
+    turns: HashMap<Uuid, Turn>,
+    pub older_before_seq: Option<i64>,
+    pub activity: Activity,
+}
+
+fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
+    let (prefix, seq) = cursor.rsplit_once(':')?;
+    Some((prefix, seq.parse().ok()?))
+}
+
+/// One row of the transcript, as the phone shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Row {
+    Owner {
+        id: Uuid,
+        text: String,
+        /// The reply to it failed or its outcome is unknown.
+        problem: Option<String>,
+    },
+    Bot {
+        id: Uuid,
+        text: String,
+        streaming: bool,
+    },
+    /// A receipt or notice, centered and quiet.
+    Note { id: Uuid, text: String },
+}
+
+impl Row {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Owner { id, .. } | Self::Bot { id, .. } | Self::Note { id, .. } => id.to_string(),
+        }
+    }
+}
+
+impl Conversation {
+    pub fn from_snapshot(snapshot: Snapshot) -> Result<Self, Reset> {
+        let (prefix, applied) = split_cursor(&snapshot.event_cursor).ok_or(Reset::BadCursor)?;
+        let mut conversation = Self {
+            cursor_prefix: prefix.to_owned(),
+            applied,
+            items: BTreeMap::new(),
+            seq_of: HashMap::new(),
+            turns: HashMap::new(),
+            older_before_seq: snapshot.older_before_seq,
+            activity: snapshot.activity,
+        };
+        for item in snapshot.items {
+            conversation.upsert_item(item);
+        }
+        for turn in snapshot.turns {
+            conversation.turns.insert(turn.id, turn);
+        }
+        Ok(conversation)
+    }
+
+    /// The cursor of the last applied event.
+    pub fn cursor(&self) -> String {
+        format!("{}:{}", self.cursor_prefix, self.applied)
+    }
+
+    fn upsert_item(&mut self, item: Item) {
+        if let Some(old_seq) = self.seq_of.insert(item.id, item.seq)
+            && old_seq != item.seq
+        {
+            self.items.remove(&old_seq);
+        }
+        self.items.insert(item.seq, item);
+    }
+
+    /// Applies the next channel message. Replays at or below the applied
+    /// cursor are ignored; anything else out of order needs a snapshot.
+    pub fn apply(&mut self, id: &str, message: &serde_json::Value) -> Result<Applied, Reset> {
+        let (prefix, seq) = split_cursor(id).ok_or(Reset::BadCursor)?;
+        if prefix != self.cursor_prefix {
+            return Err(Reset::BadCursor);
+        }
+        if seq <= self.applied {
+            return Ok(Applied::Duplicate);
+        }
+        if seq != self.applied + 1 {
+            return Err(Reset::Gap);
+        }
+        let event =
+            serde_json::from_value::<Event>(message.clone()).map_err(|_| Reset::Undecodable)?;
+        match event {
+            Event::ItemUpsert(upsert) => self.upsert_item(upsert.item),
+            Event::ItemDelta(delta) => {
+                let at = *self.seq_of.get(&delta.item_id).ok_or(Reset::UnknownItem)?;
+                let item = self.items.get_mut(&at).ok_or(Reset::UnknownItem)?;
+                if item.text.len() as u64 != delta.offset_utf8 {
+                    return Err(Reset::OffsetMismatch);
+                }
+                item.text.push_str(&delta.text);
+            }
+            Event::TurnUpdated(update) => {
+                self.turns.insert(update.turn.id, update.turn);
+            }
+            Event::BotUpdated(update) => {
+                let BotUpdated { bot, .. } = *update;
+                if let Some(activity) = bot.activity {
+                    self.activity = activity;
+                }
+            }
+        }
+        self.applied = seq;
+        Ok(Applied::Changed)
+    }
+
+    /// Records the owner message the server accepted, before its event
+    /// arrives; the event replaces it with the same item.
+    pub fn insert_sent(&mut self, item: Item, turn: Turn) {
+        self.upsert_item(item);
+        self.turns.insert(turn.id, turn);
+    }
+
+    /// Merges an older page; it never replaces newer loaded text.
+    pub fn merge_older(&mut self, page: Snapshot) {
+        for item in page.items {
+            if !self.seq_of.contains_key(&item.id) {
+                self.upsert_item(item);
+            }
+        }
+        for turn in page.turns {
+            self.turns.entry(turn.id).or_insert(turn);
+        }
+        self.older_before_seq = page.older_before_seq;
+    }
+
+    /// Whether the bot is replying or has replies queued.
+    pub fn busy(&self) -> bool {
+        !matches!(self.activity.phase, Phase::Idle | Phase::Unknown)
+    }
+
+    /// The request of the turn the bot works on now, to stop it.
+    pub fn active_request(&self) -> Option<Uuid> {
+        let turn = self.activity.active_turn_id?;
+        self.turns.get(&turn).map(|turn| turn.request_id)
+    }
+
+    /// The transcript, oldest first.
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::with_capacity(self.items.len());
+        for item in self.items.values() {
+            let turn = self.turns.get(&item.turn_id);
+            match item.kind {
+                ItemKind::User => {
+                    if let Some(task) = &item.bot_task {
+                        let title = task.title.as_deref().unwrap_or("a task");
+                        rows.push(Row::Note {
+                            id: item.id,
+                            text: format!("{} sent {title}", task.sender_name),
+                        });
+                        continue;
+                    }
+                    rows.push(Row::Owner {
+                        id: item.id,
+                        text: item.text.clone(),
+                        problem: turn.and_then(problem),
+                    });
+                }
+                ItemKind::Assistant => {
+                    if item.text.trim().is_empty() {
+                        continue;
+                    }
+                    let streaming = turn.is_some_and(|turn| turn.status.is_working())
+                        && self.activity.active_turn_id == Some(item.turn_id);
+                    rows.push(Row::Bot {
+                        id: item.id,
+                        text: item.text.clone(),
+                        streaming,
+                    });
+                }
+                ItemKind::Status | ItemKind::Routine => {
+                    if let Some(reply) = &item.bot_reply {
+                        let title = reply.title.as_deref().unwrap_or("its task");
+                        rows.push(Row::Note {
+                            id: item.id,
+                            text: format!("{} finished {title}", reply.sender_name),
+                        });
+                    } else if !item.text.trim().is_empty() {
+                        rows.push(Row::Note {
+                            id: item.id,
+                            text: item.text.clone(),
+                        });
+                    }
+                }
+                ItemKind::Connector | ItemKind::Unknown => {}
+            }
+        }
+        rows
+    }
+
+    /// Whether the newest item is the owner's and the bot has not started
+    /// writing: shown as a typing indicator.
+    pub fn thinking(&self) -> bool {
+        if !self.busy() {
+            return false;
+        }
+        self.items
+            .values()
+            .next_back()
+            .is_none_or(|item| item.kind != ItemKind::Assistant)
+    }
+}
+
+fn problem(turn: &Turn) -> Option<String> {
+    match turn.status {
+        TurnStatus::Failed => Some(
+            turn.error
+                .as_ref()
+                .and_then(|error| error.message.clone())
+                .unwrap_or_else(|| "The reply failed.".into()),
+        ),
+        TurnStatus::Uncertain => Some("The outcome of this reply is unknown.".into()),
+        TurnStatus::Interrupted => Some("Stopped.".into()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const TURN: &str = "00000000-0000-0000-0000-000000000001";
+    const ITEM: &str = "00000000-0000-0000-0000-000000000002";
+    const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+
+    fn snapshot(cursor: &str) -> Snapshot {
+        serde_json::from_value(json!({
+            "selected_provider_id": null,
+            "event_cursor": cursor,
+            "items": [{
+                "id": ITEM, "seq": 1, "turn_id": TURN, "request_id": null,
+                "kind": "assistant", "text": "Hel", "provider_id": "codex",
+            }],
+            "turns": [{
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "running", "error": null, "effect_uncertain": false,
+            }],
+            "activity": { "phase": "working", "active_turn_id": TURN, "queued_count": 0 },
+            "older_before_seq": null,
+        }))
+        .unwrap()
+    }
+
+    fn delta(offset: u64, text: &str) -> serde_json::Value {
+        json!({ "event": "item.delta", "data": { "item_id": ITEM, "offset_utf8": offset, "text": text } })
+    }
+
+    #[test]
+    fn deltas_in_cursor_order_extend_the_streaming_reply() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        assert_eq!(
+            conversation.apply("srv:bot:5", &delta(3, "lo")),
+            Ok(Applied::Changed)
+        );
+        assert_eq!(
+            conversation.rows(),
+            vec![Row::Bot {
+                id: ITEM.parse().unwrap(),
+                text: "Hello".into(),
+                streaming: true,
+            }]
+        );
+        assert_eq!(conversation.cursor(), "srv:bot:5");
+        assert_eq!(
+            conversation.active_request(),
+            Some(REQUEST.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_replayed_event_changes_nothing() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        assert_eq!(
+            conversation.apply("srv:bot:4", &delta(3, "lo")),
+            Ok(Applied::Duplicate)
+        );
+        assert_eq!(conversation.cursor(), "srv:bot:4");
+    }
+
+    #[test]
+    fn a_skipped_event_or_a_wrong_offset_needs_a_snapshot() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        assert_eq!(
+            conversation.apply("srv:bot:6", &delta(3, "lo")),
+            Err(Reset::Gap)
+        );
+        assert_eq!(
+            conversation.apply("srv:bot:5", &delta(1, "lo")),
+            Err(Reset::OffsetMismatch)
+        );
+        assert_eq!(
+            conversation.apply("other:bot:5", &delta(3, "lo")),
+            Err(Reset::BadCursor)
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_marks_the_owner_message() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let owner = json!({ "event": "item.upsert", "data": { "item": {
+            "id": "00000000-0000-0000-0000-000000000009", "seq": 2, "turn_id": TURN,
+            "request_id": REQUEST, "kind": "user", "text": "hi", "provider_id": null,
+        }}});
+        let failed = json!({ "event": "turn.updated", "data": { "turn": {
+            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+            "status": "failed", "error": { "code": "provider_failed", "message": "Codex is signed out." },
+            "effect_uncertain": false,
+        }}});
+        conversation.apply("srv:bot:5", &owner).unwrap();
+        conversation.apply("srv:bot:6", &failed).unwrap();
+        assert_eq!(
+            conversation.rows().last(),
+            Some(&Row::Owner {
+                id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
+                text: "hi".into(),
+                problem: Some("Codex is signed out.".into()),
+            })
+        );
+    }
+}

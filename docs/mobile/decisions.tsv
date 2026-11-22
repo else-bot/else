@@ -1,0 +1,8 @@
+ts	phase	decision	why	evidence	result
+2026-11-22T19:06:33Z	frame	goal: iOS alpha of else.bot that only connects to remote servers, built on NSH	user asked for a mobile version for the morning; remote only, iOS first	user request	open
+2026-11-22T19:06:33Z	risk	proved NSH Rust app builds and runs on the iOS simulator before writing app code	biggest unknown was the toolchain; hello app packaged in 3 min	nsh 0.6.1, iPhone 18 Pro sim screenshot	VERIFIED
+2026-11-22T19:06:33Z	design	Rust NSH app (not TSX) in apps/mobile, own cargo workspace, reusing crates/wire	reuses the server's wire types and the desktop's client rules; NSH builds its own runners so it stays out of the root workspace	Cargo.toml exclude, apps/mobile/Cargo.toml	done
+2026-11-22T19:06:33Z	design	own tokio+reqwest+tungstenite client instead of NSH fetch/websocket	NSH fetch follows redirects; the desktop refuses them so the owner key never leaves the saved origin; same TLS verification	apps/mobile/src/api.rs	done
+2026-11-22T19:06:33Z	risk	cross-compiled aws-lc rustls reqwest tungstenite for aarch64-apple-ios-sim	TLS C code was the second biggest unknown	cargo build --target aarch64-apple-ios-sim	VERIFIED
+2026-11-22T19:06:33Z	security	http:// only to loopback or Tailscale IPs, and only when the phone has a Tailscale interface address	iOS cannot run tailscale status like the desktop; a 100.x address with Tailscale off could route to carrier CGNAT	apps/mobile/src/server.rs tailnet_connected	done
+2026-11-22T19:06:33Z	test-env	dev server via scripts/dev.py with every real provider CLI pointed at /nonexistent	host_providers would let codex run real turns on the owner's account; only synthetic may run	capabilities: codex/claude/grok/cursor unavailable	VERIFIED

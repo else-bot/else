@@ -1,0 +1,289 @@
+//! The server the phone connects to: its validated origin and owner key,
+//! and the one saved profile.
+//!
+//! The key never appears in URLs, logs or error messages, and it is only
+//! ever sent to the one saved origin.
+
+use std::fmt;
+use std::net::IpAddr;
+
+use serde::{Deserialize, Serialize};
+use url::{Host, Url};
+
+/// A validated API origin: `https://` for any host, `http://` only for
+/// loopback or a Tailscale IP, without credentials, path, query or fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    serialized: String,
+    secure: bool,
+}
+
+impl Origin {
+    /// A bare address (`100.101.102.103:7878`, `else.example.com`) gets
+    /// `http://` for loopback and Tailscale IPs and `https://` otherwise.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim().trim_end_matches('/');
+        if raw.is_empty() {
+            return Err("Enter the server's address.".into());
+        }
+        let invalid = |err: url::ParseError| format!("The address is invalid: {err}.");
+        let url = if raw.contains("://") {
+            Url::parse(raw).map_err(invalid)?
+        } else {
+            let plain = Url::parse(&format!("http://{raw}")).map_err(invalid)?;
+            if is_loopback(&plain) || tailscale_ip(&plain).is_some() {
+                plain
+            } else {
+                Url::parse(&format!("https://{raw}")).map_err(invalid)?
+            }
+        };
+        let secure = match url.scheme() {
+            "https" => true,
+            "http" => false,
+            _ => return Err("The address must start with https:// or http://.".into()),
+        };
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("The address must not contain credentials.".into());
+        }
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err("Enter only the server's origin, without a path.".into());
+        }
+        if url.host().is_none() {
+            return Err("The address has no host.".into());
+        }
+        if !secure && !is_loopback(&url) && tailscale_ip(&url).is_none() {
+            return Err(
+                "Plain http:// only works with a Tailscale IP. Use https:// for any other address."
+                    .into(),
+            );
+        }
+        Ok(Self {
+            serialized: url.origin().ascii_serialization(),
+            secure,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.serialized
+    }
+
+    /// The host as the owner reads it, without the scheme.
+    pub fn display(&self) -> &str {
+        self.serialized
+            .split_once("://")
+            .map_or(self.serialized.as_str(), |(_, rest)| rest)
+    }
+
+    /// The Tailscale IP an `http://` origin names; the transport checks the
+    /// phone is on a tailnet before it sends the key there.
+    pub fn tailscale_ip(&self) -> Option<IpAddr> {
+        if self.secure {
+            return None;
+        }
+        tailscale_ip(&Url::parse(&self.serialized).expect("validated origin"))
+    }
+
+    /// The WebSocket endpoint: `wss://` for an `https://` origin.
+    pub fn ws_url(&self) -> String {
+        let scheme = if self.secure { "wss" } else { "ws" };
+        format!("{scheme}://{}/v1/ws", self.display())
+    }
+}
+
+fn is_tailscale_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]),
+        IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
+fn tailscale_ip(url: &Url) -> Option<IpAddr> {
+    let ip = match url.host()? {
+        Host::Ipv4(ip) => IpAddr::V4(ip),
+        Host::Ipv6(ip) => IpAddr::V6(ip),
+        Host::Domain(_) => return None,
+    };
+    is_tailscale_ip(ip).then_some(ip)
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Whether this phone has a Tailscale address: the VPN is connected, so a
+/// Tailscale IP routes into the tailnet and not to a carrier's CGNAT.
+pub fn tailnet_connected() -> bool {
+    let mut addresses: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills a list we free with freeifaddrs below.
+    if unsafe { libc::getifaddrs(&mut addresses) } != 0 {
+        return false;
+    }
+    let mut found = false;
+    let mut cursor = addresses;
+    while !cursor.is_null() {
+        // SAFETY: cursor walks the list getifaddrs returned.
+        let entry = unsafe { &*cursor };
+        if !entry.ifa_addr.is_null() {
+            // SAFETY: ifa_addr points to a sockaddr of the family it names.
+            let ip = unsafe {
+                match i32::from((*entry.ifa_addr).sa_family) {
+                    libc::AF_INET => {
+                        let addr = &*(entry.ifa_addr as *const libc::sockaddr_in);
+                        Some(IpAddr::from(
+                            u32::from_be(addr.sin_addr.s_addr).to_be_bytes(),
+                        ))
+                    }
+                    libc::AF_INET6 => {
+                        let addr = &*(entry.ifa_addr as *const libc::sockaddr_in6);
+                        Some(IpAddr::from(addr.sin6_addr.s6_addr))
+                    }
+                    _ => None,
+                }
+            };
+            found |= ip.is_some_and(is_tailscale_ip);
+        }
+        cursor = entry.ifa_next;
+    }
+    // SAFETY: addresses came from getifaddrs.
+    unsafe { libc::freeifaddrs(addresses) };
+    found
+}
+
+/// The owner key. Its `Debug` output is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnerToken(String);
+
+impl fmt::Debug for OwnerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OwnerToken(<redacted>)")
+    }
+}
+
+impl OwnerToken {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let token = text.trim();
+        let valid = token.len() == 43
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if valid {
+            Ok(Self(token.to_owned()))
+        } else {
+            Err("Paste the 43-character owner key from ~/.else/data/owner-token.".into())
+        }
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The server this phone uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Profile {
+    pub origin: Origin,
+    pub token: OwnerToken,
+}
+
+impl Profile {
+    pub fn parse(origin: &str, token: &str) -> Result<Self, String> {
+        Ok(Self {
+            origin: Origin::parse(origin)?,
+            token: OwnerToken::parse(token)?,
+        })
+    }
+}
+
+/// The saved form of a [`Profile`], parsed again when read back.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    origin: String,
+    token: String,
+}
+
+const PROFILE_KEY: &str = "server-profile";
+
+impl Profile {
+    /// The saved profile, if one is saved and still valid.
+    pub fn load() -> Option<Self> {
+        let raw = nsh_core::storage::Storage::get_item(PROFILE_KEY)?;
+        let saved: Saved = serde_json::from_str(&raw).ok()?;
+        Self::parse(&saved.origin, &saved.token).ok()
+    }
+
+    pub fn save(&self) {
+        let saved = Saved {
+            origin: self.origin.as_str().to_owned(),
+            token: self.token.expose().to_owned(),
+        };
+        let raw = serde_json::to_string(&saved).expect("profile serializes");
+        if let Err(err) = nsh_core::storage::Storage::set_item(PROFILE_KEY, &raw) {
+            log::warn!("cannot save the server profile: {err:?}");
+        }
+    }
+
+    pub fn forget() {
+        nsh_core::storage::Storage::remove_item(PROFILE_KEY);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_tailscale_and_loopback_addresses_use_http_and_others_https() {
+        assert_eq!(
+            Origin::parse("100.93.170.39:7878").unwrap().as_str(),
+            "http://100.93.170.39:7878"
+        );
+        assert_eq!(
+            Origin::parse("127.0.0.1:7878").unwrap().as_str(),
+            "http://127.0.0.1:7878"
+        );
+        assert_eq!(
+            Origin::parse("else.example.com/").unwrap().as_str(),
+            "https://else.example.com"
+        );
+    }
+
+    #[test]
+    fn plain_http_to_a_public_host_is_refused() {
+        assert!(Origin::parse("http://192.168.1.4:7878").is_err());
+        assert!(Origin::parse("http://else.example.com").is_err());
+    }
+
+    #[test]
+    fn paths_and_credentials_are_refused() {
+        assert!(Origin::parse("https://else.example.com/api").is_err());
+        assert!(Origin::parse("https://me:pw@else.example.com").is_err());
+    }
+
+    #[test]
+    fn ws_url_follows_the_scheme() {
+        assert_eq!(
+            Origin::parse("https://else.example.com").unwrap().ws_url(),
+            "wss://else.example.com/v1/ws"
+        );
+        assert_eq!(
+            Origin::parse("100.93.170.39:7878").unwrap().ws_url(),
+            "ws://100.93.170.39:7878/v1/ws"
+        );
+    }
+
+    #[test]
+    fn the_key_must_be_43_url_safe_characters() {
+        assert!(OwnerToken::parse(&"a".repeat(43)).is_ok());
+        assert!(OwnerToken::parse(&"a".repeat(42)).is_err());
+        assert!(OwnerToken::parse(&format!("{}+", "a".repeat(42))).is_err());
+        assert_eq!(
+            format!("{:?}", OwnerToken::parse(&"a".repeat(43)).unwrap()),
+            "OwnerToken(<redacted>)"
+        );
+    }
+}
