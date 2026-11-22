@@ -149,6 +149,10 @@ pub struct Turn {
     pub computer_handoffs: Vec<ComputerHandoff>,
     #[serde(default)]
     pub owner_notices: Vec<OwnerNotice>,
+    /// The owner may run this failed message again. Absent from older
+    /// servers.
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 impl Turn {

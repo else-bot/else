@@ -12,7 +12,7 @@
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use super::{ACTIVE_STATUSES, TurnStatus};
+use super::{ACTIVE_STATUSES, TurnRecord, TurnStatus};
 use crate::app::providers::{FailureCode, TurnOutcome};
 use crate::db::events;
 
@@ -117,6 +117,48 @@ pub async fn claim(
         events::turn_changed(conn, bot, turn).await?;
     }
     Ok(updated == 1)
+}
+
+/// How [`retry`] left a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// It is queued for its next attempt.
+    Queued,
+    /// This attempt was already retried; the turn is as that retry left it.
+    Repeated,
+    /// It cannot be retried ([`TurnRecord::retryable`]).
+    Refused,
+}
+
+/// Queue failed `turn` again as the owner's retry of its attempt
+/// `attempt`, inside the caller's immediate transaction that loaded it. Its
+/// owner message stays, and the scheduler's claim starts the next attempt.
+pub async fn retry(
+    conn: &mut SqliteConnection,
+    turn: &TurnRecord,
+    attempt: i32,
+) -> Result<Retry, sqlx::Error> {
+    if turn.attempt > attempt || (turn.attempt == attempt && turn.status == TurnStatus::Queued) {
+        return Ok(Retry::Repeated);
+    }
+    if turn.attempt != attempt || !turn.retryable() {
+        return Ok(Retry::Refused);
+    }
+    let updated = sqlx::query(
+        "UPDATE turns SET status = 'queued', error_code = NULL, error_message = NULL,
+             finished_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'failed' AND attempt = ?2 AND NOT effect_uncertain",
+    )
+    .bind(turn.id)
+    .bind(attempt)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Ok(Retry::Refused);
+    }
+    events::turn_changed(conn, turn.bot_id, turn.id).await?;
+    Ok(Retry::Queued)
 }
 
 /// The next step of an attempt toward its provider.

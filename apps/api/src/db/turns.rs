@@ -264,6 +264,30 @@ pub struct TurnRecord {
     /// The bot's notes that this delegated task ends needing the owner.
     #[sqlx(skip)]
     pub owner_notices: Vec<crate::db::owner_notices::Notice>,
+    /// It answers a visible owner message in the bot's chat, joined no
+    /// other reply, and no owner message came after it. Only such a turn
+    /// can be retried, so a retry never reorders the chat.
+    pub retry_shape: bool,
+}
+
+impl TurnRecord {
+    /// Whether the owner may retry it ([`lifecycle::retry`]): it has the
+    /// [`Self::retry_shape`], failed for a reason that may pass, and nothing it
+    /// did is in doubt.
+    pub fn retryable(&self) -> bool {
+        use crate::app::providers::FailureCode;
+        use crate::app::routine_failures::Cause;
+        self.status == TurnStatus::Failed
+            && self.retry_shape
+            && !self.effect_uncertain
+            && self
+                .error_code
+                .as_deref()
+                .map(FailureCode::decode)
+                .is_some_and(|code| {
+                    !matches!(code, FailureCode::Other(_)) && code.cause() == Cause::Transient
+                })
+    }
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -293,7 +317,13 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
                   iif(e.located_turn_id IS NULL, NULL, lower(hex(e.located_turn_id))) AS by_turn_id,
                   (SELECT lower(hex(l.bot_id)) FROM turns l WHERE l.id = e.located_turn_id) AS by_bot_id
            FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
-           WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
+           WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail,
+    (EXISTS (SELECT 1 FROM conversations k JOIN items i ON i.id = t.owner_item_id
+             WHERE k.id = t.conversation_id AND k.kind = 'owner' AND i.kind = 'user' AND NOT i.hidden)
+     AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = t.id)
+     AND NOT EXISTS (SELECT 1 FROM turns l JOIN items li ON li.id = l.owner_item_id
+                     WHERE l.conversation_id = t.conversation_id AND l.turn_no > t.turn_no
+                       AND li.kind = 'user' AND NOT li.hidden)) AS retry_shape";
 
 /// Whose conversation it is, as stored in `conversations.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
@@ -710,6 +740,85 @@ pub async fn accept(
         item,
         placement,
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RetryError {
+    #[error("turn not found")]
+    NotFound,
+    #[error("bot deleted")]
+    Deleted,
+    #[error("work is still stopping")]
+    CancellationPending,
+    #[error("the turn cannot be retried")]
+    NotRetryable,
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+pub struct Retried {
+    /// False when this attempt was already retried.
+    pub created: bool,
+    pub turn: TurnRecord,
+}
+
+/// The provider of failed turn `turn_id` of `bot_id`, which a retry checks
+/// before it queues the turn.
+pub async fn failed_provider(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    turn_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT provider_id FROM turns WHERE id = ?1 AND bot_id = ?2 AND status = 'failed'",
+    )
+    .bind(turn_id)
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The owner's retry of failed turn `turn_id` of `bot_id`, whose attempt
+/// `attempt` they saw fail ([`lifecycle::retry`]).
+pub async fn retry(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    turn_id: Uuid,
+    attempt: i32,
+) -> Result<Retried, RetryError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let bot: Option<(BotStatus, bool)> =
+        sqlx::query_as("SELECT status, cancel_pending FROM bots WHERE id = ?1")
+            .bind(bot_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((status, cancel_pending)) = bot else {
+        return Err(RetryError::NotFound);
+    };
+    if !status.is_active() {
+        return Err(RetryError::Deleted);
+    }
+    if cancel_pending {
+        return Err(RetryError::CancellationPending);
+    }
+    let owned: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND bot_id = ?2)")
+            .bind(turn_id)
+            .bind(bot_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !owned {
+        return Err(RetryError::NotFound);
+    }
+    let turn = load_turn(&mut tx, turn_id).await?;
+    let created = match lifecycle::retry(&mut tx, &turn, attempt).await? {
+        lifecycle::Retry::Repeated => false,
+        lifecycle::Retry::Refused => return Err(RetryError::NotRetryable),
+        lifecycle::Retry::Queued => true,
+    };
+    let turn = load_turn(&mut tx, turn_id).await?;
+    tx.commit().await?;
+    Ok(Retried { created, turn })
 }
 
 /// Place the messages sent during a pause ([`crate::db::steers::place`]),

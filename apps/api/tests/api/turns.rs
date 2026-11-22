@@ -13,6 +13,7 @@ use uuid::Uuid;
 mod outcomes;
 mod profiles;
 mod reactions;
+mod retries;
 mod scheduling;
 mod sends;
 

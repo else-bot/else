@@ -137,6 +137,7 @@ impl From<&TurnRecord> for wire::turns::Turn {
             computer_job_waits: turn.computer_job_waits.iter().map(Into::into).collect(),
             computer_handoffs: turn.computer_handoffs.iter().map(Into::into).collect(),
             owner_notices: turn.owner_notices.iter().map(Into::into).collect(),
+            retryable: turn.retryable(),
         }
     }
 }

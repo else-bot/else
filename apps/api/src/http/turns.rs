@@ -14,21 +14,22 @@ use super::{AppState, Routes};
 use crate::app::messages::{InvalidMessage, MessagePart, Reaction, canonical_parts, validate_text};
 use crate::app::providers::Availability;
 use crate::db::bots::{self, BotStatus};
-use crate::db::turns::{self, AcceptError, SendRequest};
+use crate::db::turns::{self, AcceptError, RetryError, SendRequest};
 use else_wire as wire;
 
 pub fn routes() -> Routes {
     // Sending stays open so its handler can queue the message for after
     // the pause; Stop stays open so the owner can always stop a bot.
-    Routes::open(
-        Router::new()
+    Routes {
+        open: Router::new()
             .route("/bots/{bot_id}/turns", post(send))
             .route(
                 "/bots/{bot_id}/turns/by-request/{request_id}",
                 get(by_request),
             )
             .route("/bots/{bot_id}/cancel", post(cancel)),
-    )
+        gated: Router::new().route("/bots/{bot_id}/turns/{turn_id}/retry", post(retry)),
+    }
 }
 
 pub fn bot_deleted() -> ApiError {
@@ -274,6 +275,51 @@ async fn by_request(
         item: (&item).into(),
         turn: (&turn).into(),
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryBody {
+    /// The attempt the owner saw fail; a repeat of the same retry returns
+    /// the turn as that retry left it.
+    attempt: i32,
+}
+
+/// Run a failed owner message again as a new attempt of its turn: `202`
+/// when queued, `200` when this attempt was already retried, `409
+/// not_retryable` when [`turns::TurnRecord::retryable`] refuses it.
+async fn retry(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, turn_id)): ApiPath<(Uuid, Uuid)>,
+    ApiJson(body): ApiJson<RetryBody>,
+) -> Result<Response, ApiError> {
+    let failed = turns::failed_provider(&state.db, bot_id, turn_id).await?;
+    if let Some(provider) = failed.and_then(|id| state.registry.get(&id))
+        && let Availability::Unavailable(reason) =
+            crate::providers::availability_now(provider.as_ref()).await
+    {
+        return Err(ApiError::unavailable("provider_unavailable", reason));
+    }
+    let retried = turns::retry(&state.db, bot_id, turn_id, body.attempt)
+        .await
+        .map_err(|err| match err {
+            RetryError::NotFound => ApiError::not_found(),
+            RetryError::Deleted => bot_deleted(),
+            RetryError::CancellationPending => AcceptError::CancellationPending.into(),
+            RetryError::NotRetryable => ApiError::new(
+                StatusCode::CONFLICT,
+                "not_retryable",
+                "Only the latest message can be retried, after a failure that may pass.",
+            ),
+            RetryError::Db(err) => err.into(),
+        })?;
+    let status = if retried.created {
+        state.scheduler.wake();
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(wire::turns::Turn::from(&retried.turn))).into_response())
 }
 
 #[derive(Deserialize)]
