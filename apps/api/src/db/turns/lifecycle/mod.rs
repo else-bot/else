@@ -124,7 +124,7 @@ pub async fn claim(
 pub enum Retry {
     /// It is queued for its next attempt.
     Queued,
-    /// This attempt was already retried; the turn is as that retry left it.
+    /// The owner already retried this attempt; nothing new starts.
     Repeated,
     /// It cannot be retried ([`TurnRecord::retryable`]).
     Refused,
@@ -138,7 +138,10 @@ pub async fn retry(
     turn: &TurnRecord,
     attempt: i32,
 ) -> Result<Retry, sqlx::Error> {
-    if turn.attempt > attempt || (turn.attempt == attempt && turn.status == TurnStatus::Queued) {
+    if turn
+        .retried_attempt
+        .is_some_and(|retried| retried >= attempt)
+    {
         return Ok(Retry::Repeated);
     }
     if turn.attempt != attempt || !turn.retryable() {
@@ -146,7 +149,8 @@ pub async fn retry(
     }
     let updated = sqlx::query(
         "UPDATE turns SET status = 'queued', error_code = NULL, error_message = NULL,
-             finished_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             finished_at = NULL, retried_attempt = ?2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'failed' AND attempt = ?2 AND NOT effect_uncertain",
     )
     .bind(turn.id)

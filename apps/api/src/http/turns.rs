@@ -286,19 +286,25 @@ struct RetryBody {
 }
 
 /// Run a failed owner message again as a new attempt of its turn: `202`
-/// when queued, `200` when this attempt was already retried, `409
+/// when queued, `200` when the owner already retried this attempt, `409
 /// not_retryable` when [`turns::TurnRecord::retryable`] refuses it.
 async fn retry(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, turn_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<RetryBody>,
 ) -> Result<Response, ApiError> {
-    let failed = turns::failed_provider(&state.db, bot_id, turn_id).await?;
-    if let Some(provider) = failed.and_then(|id| state.registry.get(&id))
-        && let Availability::Unavailable(reason) =
+    if let Some(id) = turns::failed_provider(&state.db, bot_id, turn_id, body.attempt).await? {
+        let Some(provider) = state.registry.get(&id) else {
+            return Err(ApiError::unavailable(
+                "provider_unavailable",
+                format!("Provider {id} is no longer set up."),
+            ));
+        };
+        if let Availability::Unavailable(reason) =
             crate::providers::availability_now(provider.as_ref()).await
-    {
-        return Err(ApiError::unavailable("provider_unavailable", reason));
+        {
+            return Err(ApiError::unavailable("provider_unavailable", reason));
+        }
     }
     let retried = turns::retry(&state.db, bot_id, turn_id, body.attempt)
         .await

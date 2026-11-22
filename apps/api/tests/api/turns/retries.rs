@@ -126,6 +126,19 @@ async fn only_the_latest_message_after_a_failure_that_may_pass_retries() {
         .send(&bot, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
     let later = later.body["turn"]["id"].as_str().unwrap().to_owned();
+    let published: String = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE kind = 'turn.updated'
+           AND json_extract(data, '$.turn.id') = ?1 ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(&older)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    let published: serde_json::Value = serde_json::from_str(&published).unwrap();
+    assert_eq!(
+        published["turn"]["retryable"], false,
+        "a newer message republishes the older failure without Retry"
+    );
     assert_eq!(app.wait_turn(&later, &["completed"]).await, "completed");
     assert_eq!(
         turn_view(&app, &bot, &older_request).await["retryable"],
@@ -143,4 +156,49 @@ async fn only_the_latest_message_after_a_failure_that_may_pass_retries() {
 
     let missing = retry(&app, &bot, &Uuid::new_v4().to_string(), 1).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_after_an_approved_action_ran_does_not_retry() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let (turn, request) = failed(&app, &bot, "[synthetic:fail]").await;
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices,
+             action, action_hash, status, answer, used_at)
+         VALUES (?1, ?2, ?3, 1, 'destructive', 'Delete merged branches', '[]',
+                 '{\"host\":\"Delete merged branches\"}', zeroblob(32), 'answered', 'approve',
+                 strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot.parse::<Uuid>().unwrap())
+    .bind(turn.parse::<Uuid>().unwrap())
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(turn_view(&app, &bot, &request).await["retryable"], false);
+    let refused = retry(&app, &bot, &turn, 1).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_asks_again_what_the_failed_attempt_left_cancelled() {
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let ask = json!({ "question": "Which template?", "choices": ["Plain", "HTML"] });
+    let text = format!("{} [synthetic:fail]", recorder::GATE_EVERY_ATTEMPT);
+    let (turn, token) = h.running(&bot, &text).await;
+    let first = recorder::tool(app, &token, "ask_owner", ask.clone()).await;
+    assert_eq!(first.result["status"], "pending", "{}", first.body);
+    h.release(turn).await;
+    assert_eq!(app.wait_turn(turn, &["failed"]).await, "failed");
+
+    let retried = retry(app, &bot, &turn.to_string(), 1).await;
+    assert_eq!(retried.status, StatusCode::ACCEPTED, "{}", retried.body);
+    let token = h.continued(turn, &token).await;
+    let again = recorder::tool(app, &token, "ask_owner", ask).await;
+    assert_eq!(again.result["status"], "pending", "{}", again.body);
+    assert_ne!(again.result["question_id"], first.result["question_id"]);
+    h.release(turn).await;
 }

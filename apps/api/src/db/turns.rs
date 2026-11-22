@@ -225,6 +225,8 @@ pub struct TurnRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub reaction: Option<Json<Reaction>>,
     pub attempt: i32,
+    /// The latest attempt the owner retried.
+    pub retried_attempt: Option<i32>,
     /// Attempts the attempt limit cut that the turn continued after.
     pub limit_continuations: i64,
     /// The running reply this queued message joined
@@ -265,8 +267,9 @@ pub struct TurnRecord {
     #[sqlx(skip)]
     pub owner_notices: Vec<crate::db::owner_notices::Notice>,
     /// It answers a visible owner message in the bot's chat, joined no
-    /// other reply, and no owner message came after it. Only such a turn
-    /// can be retried, so a retry never reorders the chat.
+    /// other reply, ran no approved action, and no owner message came after
+    /// it. Only such a turn can be retried, so a retry never reorders the
+    /// chat or repeats an action that may have run.
     pub retry_shape: bool,
 }
 
@@ -293,6 +296,7 @@ impl TurnRecord {
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
     t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
     t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.started_at, t.finished_at, t.attempt,
+    t.retried_attempt,
     (SELECT i.reaction FROM items i WHERE i.id = t.owner_item_id) AS reaction,
     (SELECT count(*) FROM turn_limit_cuts l WHERE l.turn_id = t.id) AS limit_continuations,
     (SELECT s.into_turn_id FROM turn_steers s WHERE s.turn_id = t.id) AS steered_into,
@@ -321,6 +325,7 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     (EXISTS (SELECT 1 FROM conversations k JOIN items i ON i.id = t.owner_item_id
              WHERE k.id = t.conversation_id AND k.kind = 'owner' AND i.kind = 'user' AND NOT i.hidden)
      AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = t.id)
+     AND NOT EXISTS (SELECT 1 FROM owner_questions q WHERE q.turn_id = t.id AND q.used_at IS NOT NULL)
      AND NOT EXISTS (SELECT 1 FROM turns l JOIN items li ON li.id = l.owner_item_id
                      WHERE l.conversation_id = t.conversation_id AND l.turn_no > t.turn_no
                        AND li.kind = 'user' AND NOT li.hidden)) AS retry_shape";
@@ -700,6 +705,19 @@ pub async fn accept(
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     if !req.hidden {
+        // The message before it can no longer be retried.
+        let previous: Option<(Uuid, TurnStatus)> = sqlx::query_as(
+            "SELECT t.id, t.status FROM turns t JOIN items i ON i.id = t.owner_item_id
+             WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind = 'user' AND NOT i.hidden
+             ORDER BY t.turn_no DESC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .bind(turn_no)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((previous, TurnStatus::Failed)) = previous {
+            crate::db::events::turn_changed(&mut tx, req.bot_id, previous).await?;
+        }
         use crate::db::owner_notices::{Answer, AnswerError, answer};
         let target = req
             .answers_notice
@@ -762,18 +780,21 @@ pub struct Retried {
     pub turn: TurnRecord,
 }
 
-/// The provider of failed turn `turn_id` of `bot_id`, which a retry checks
-/// before it queues the turn.
+/// The provider of turn `turn_id` of `bot_id` when its attempt `attempt`
+/// failed, which a retry checks before it queues the turn.
 pub async fn failed_provider(
     pool: &SqlitePool,
     bot_id: Uuid,
     turn_id: Uuid,
+    attempt: i32,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT provider_id FROM turns WHERE id = ?1 AND bot_id = ?2 AND status = 'failed'",
+        "SELECT provider_id FROM turns
+         WHERE id = ?1 AND bot_id = ?2 AND status = 'failed' AND attempt = ?3",
     )
     .bind(turn_id)
     .bind(bot_id)
+    .bind(attempt)
     .fetch_optional(pool)
     .await
 }
