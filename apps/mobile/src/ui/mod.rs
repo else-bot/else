@@ -1,6 +1,7 @@
 //! The app's screens: connect to a server, then a navigation stack of the
 //! bot list and the chats pushed over it.
 
+mod asks;
 mod bot_list;
 mod chat;
 mod connect;

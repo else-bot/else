@@ -232,7 +232,7 @@ impl DraftContent {
     }
 
     /// Who it goes to, when it names someone.
-    fn recipient(&self) -> Option<String> {
+    pub fn recipient(&self) -> Option<String> {
         match self {
             Self::Email { to, .. } => Some(to.join(", ")),
             Self::Message { destination, .. } => destination.clone(),

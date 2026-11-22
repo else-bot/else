@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::parts::{ARROW_UP, STOP, colors};
 use super::session::{self, Chat};
 use crate::api::ClientError;
-use crate::conversation::Row;
+use crate::conversation::{Ask, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
 /// is unknown keeps its request ID, so sending again cannot post it twice.
@@ -109,6 +109,7 @@ fn centered(message: String) -> impl IntoElement {
 #[derive(Clone, PartialEq)]
 enum Line {
     Row(Row),
+    Ask(Ask),
     Typing,
 }
 
@@ -118,9 +119,16 @@ fn transcript(
     rows: Memo<Vec<Row>>,
     thinking: Memo<bool>,
 ) -> impl IntoElement {
+    let asks = computed(move || {
+        chat.with(|c| match c {
+            Chat::Ready(conversation) => conversation.asks(),
+            _ => Vec::new(),
+        })
+    });
     let lines = computed(move || {
         let mut lines: Vec<Line> = rows.get().into_iter().map(Line::Row).collect();
-        if thinking.get() {
+        lines.extend(asks.get().into_iter().map(Line::Ask));
+        if thinking.get() && asks.with(Vec::is_empty) {
             lines.push(Line::Typing);
         }
         lines
@@ -137,6 +145,7 @@ fn transcript(
                     Some(Line::Row(Row::Bot { .. })) => 2,
                     Some(Line::Row(Row::Note { .. })) => 3,
                     Some(Line::Typing) => 4,
+                    Some(Line::Ask(_)) => 5,
                     None => 0,
                 })
             });
@@ -147,6 +156,16 @@ fn transcript(
                     2 => Some(bot_bubble(line).into_element()),
                     3 => Some(note(line).into_element()),
                     4 => Some(typing().into_element()),
+                    5 => Some(
+                        dynamic(move || {
+                            line.with(|l| match l {
+                                Some(Line::Ask(ask)) => Some(ask.clone()),
+                                _ => None,
+                            })
+                            .map(|ask| untracked(|| super::asks::card(bot, ask)))
+                        })
+                        .into_element(),
+                    ),
                     _ => None,
                 })
             }))
@@ -157,6 +176,7 @@ fn transcript(
             l.iter()
                 .map(|line| match line {
                     Line::Row(row) => row.key(),
+                    Line::Ask(ask) => ask.key(),
                     Line::Typing => "typing".to_owned(),
                 })
                 .collect::<Vec<_>>()

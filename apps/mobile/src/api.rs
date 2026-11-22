@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use else_wire::bots::BotList;
 use else_wire::conversation::{Sent, Snapshot};
+use else_wire::outgoing::OutgoingDraft;
 use else_wire::settings::ErrorBody;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -224,6 +225,62 @@ impl Client {
         let path = format!("/v1/bots/{bot}/cancel");
         run(async move {
             self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
+                .await
+                .map(drop)
+        })
+        .await
+    }
+
+    /// Answers a question with its chosen option ids. A settled question
+    /// answers 409 `question_settled` and nothing changes.
+    pub async fn answer_question(
+        self: Arc<Self>,
+        bot: Uuid,
+        question: Uuid,
+        choices: Vec<String>,
+        multiple: bool,
+    ) -> Result<(), ClientError> {
+        let body = if multiple {
+            json!({ "choices": choices })
+        } else {
+            json!({ "choice": choices.into_iter().next().unwrap_or_default() })
+        };
+        let path = format!("/v1/bots/{bot}/questions/{question}/answer");
+        run(async move {
+            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
+                .await
+                .map(drop)
+        })
+        .await
+    }
+
+    /// Approves a draft exactly as the bot wrote it, at the version shown.
+    /// The server sends it; a newer version answers a conflict instead.
+    pub async fn approve_draft(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: &OutgoingDraft,
+    ) -> Result<(), ClientError> {
+        let mut body = json!({ "version": draft.version, "body": draft.content.body() });
+        if let Some(subject) = draft.content.subject() {
+            body["subject"] = json!(subject);
+        }
+        if let Some(attachments) = draft.content.attachment_ids() {
+            body["attachments"] = json!(attachments);
+        }
+        let path = format!("/v1/bots/{bot}/outgoing-drafts/{}/approve", draft.id);
+        run(async move {
+            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
+                .await
+                .map(drop)
+        })
+        .await
+    }
+
+    pub async fn discard_draft(self: Arc<Self>, bot: Uuid, draft: Uuid) -> Result<(), ClientError> {
+        let path = format!("/v1/bots/{bot}/outgoing-drafts/{draft}/discard");
+        run(async move {
+            self.call::<serde::de::IgnoredAny>(Method::POST, &path, None)
                 .await
                 .map(drop)
         })

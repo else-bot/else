@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 use else_wire::bots::{Activity, Phase};
 use else_wire::conversation::{BotUpdated, Event, Snapshot};
 use else_wire::items::{Item, ItemKind};
+use else_wire::outgoing::{DraftStatus, OutgoingDraft};
+use else_wire::questions::{Question, QuestionStatus};
 use else_wire::turns::{Turn, TurnStatus};
 use uuid::Uuid;
 
@@ -60,6 +62,22 @@ pub enum Row {
     },
     /// A receipt or notice, centered and quiet.
     Note { id: Uuid, text: String },
+}
+
+/// Something the bot waits on the owner to settle, shown as a card.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ask {
+    Question(Box<Question>),
+    Draft(Box<OutgoingDraft>),
+}
+
+impl Ask {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Question(question) => format!("q-{}", question.id),
+            Self::Draft(draft) => format!("d-{}", draft.id),
+        }
+    }
 }
 
 impl Row {
@@ -178,7 +196,12 @@ impl Conversation {
     /// The transcript, oldest first.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::with_capacity(self.items.len());
+        let mut previous: Option<Uuid> = None;
         for item in self.items.values() {
+            if previous.is_some_and(|turn| turn != item.turn_id) {
+                self.receipts(previous, &mut rows);
+            }
+            previous = Some(item.turn_id);
             let turn = self.turns.get(&item.turn_id);
             match item.kind {
                 ItemKind::User => {
@@ -225,7 +248,65 @@ impl Conversation {
                 ItemKind::Connector | ItemKind::Unknown => {}
             }
         }
+        self.receipts(previous, &mut rows);
         rows
+    }
+
+    /// The settled questions and drafts of `turn`, after its messages.
+    fn receipts(&self, turn: Option<Uuid>, rows: &mut Vec<Row>) {
+        let Some(turn) = turn.and_then(|turn| self.turns.get(&turn)) else {
+            return;
+        };
+        for question in &turn.questions {
+            let text = match (&question.status, &question.answer) {
+                (QuestionStatus::Answered, Some(answer)) => {
+                    let labels: Vec<&str> = question
+                        .choices
+                        .iter()
+                        .filter(|choice| answer.contains(&choice.id))
+                        .map(|choice| choice.label.as_str())
+                        .collect();
+                    format!("You answered “{}”: {}", question.title, labels.join(", "))
+                }
+                (QuestionStatus::Skipped | QuestionStatus::Cancelled, _) => {
+                    format!("“{}” was closed without an answer", question.title)
+                }
+                _ => continue,
+            };
+            rows.push(Row::Note { id: question.id, text });
+        }
+        for draft in &turn.outgoing_drafts {
+            if !draft.is_open() && draft.status != DraftStatus::Superseded {
+                rows.push(Row::Note {
+                    id: draft.id,
+                    text: format!("{}: {}", draft.content.title(), draft.label()),
+                });
+            }
+        }
+    }
+
+    /// The open questions and drafts, oldest turn first.
+    pub fn asks(&self) -> Vec<Ask> {
+        let mut turns: Vec<&Turn> = self.turns.values().collect();
+        turns.sort_by_key(|turn| turn.turn_no);
+        let mut asks = Vec::new();
+        for turn in turns {
+            asks.extend(
+                turn.questions
+                    .iter()
+                    .filter(|q| q.is_pending())
+                    .cloned()
+                    .map(|q| Ask::Question(Box::new(q))),
+            );
+            asks.extend(
+                turn.outgoing_drafts
+                    .iter()
+                    .filter(|d| d.is_open())
+                    .cloned()
+                    .map(|d| Ask::Draft(Box::new(d))),
+            );
+        }
+        asks
     }
 
     /// Whether the newest item is the owner's and the bot has not started
@@ -332,6 +413,34 @@ mod tests {
         assert_eq!(
             conversation.apply("other:bot:5", &delta(3, "lo")),
             Err(Reset::BadCursor)
+        );
+    }
+
+    #[test]
+    fn a_pending_question_is_an_ask_until_answered() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let question = |status: &str| json!({ "event": "turn.updated", "data": { "turn": {
+            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+            "status": "waiting", "error": null, "effect_uncertain": false,
+            "questions": [{
+                "id": "00000000-0000-0000-0000-00000000000a", "kind": "choice",
+                "title": "Which plan?", "choices": [{ "id": "a", "label": "A" }],
+                "status": status,
+            }],
+        }}});
+        conversation.apply("srv:bot:5", &question("pending")).unwrap();
+        assert!(matches!(&conversation.asks()[..], [Ask::Question(q)] if q.title == "Which plan?"));
+        let answered = question("answered");
+        let mut answered = answered;
+        answered["data"]["turn"]["questions"][0]["answer"] = json!("a");
+        conversation.apply("srv:bot:6", &answered).unwrap();
+        assert_eq!(conversation.asks(), vec![]);
+        assert_eq!(
+            conversation.rows().last(),
+            Some(&Row::Note {
+                id: "00000000-0000-0000-0000-00000000000a".parse().unwrap(),
+                text: "You answered “Which plan?”: A".into(),
+            })
         );
     }
 
