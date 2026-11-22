@@ -189,7 +189,23 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
             Some("synthetic"),
         )
         .await;
-    app.wait_turn(&turn_id(&stuck), &["running"]).await;
+    // `running` lands before the provider updates its session, so a deletion
+    // in between fences the turn into `interrupted`. The reported profile is
+    // the provider's last write before it starts ignoring the stop.
+    common::until(
+        "the provider to accept the stuck turn",
+        common::poll(|| async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT reported_profile IS NOT NULL FROM turns WHERE id = ?1",
+            )
+            .bind(turn_id(&stuck).parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap()
+            .then_some(())
+        }),
+    )
+    .await;
     let queued = app
         .send(&bot, Uuid::new_v4(), "never runs", Some("synthetic"))
         .await;

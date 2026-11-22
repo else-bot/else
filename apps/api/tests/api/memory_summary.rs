@@ -457,11 +457,12 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     add(&app, bot, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
+    // `max_active(4)` leaves three background slots. The claim loop holds one
+    // for a moment each time it looks for turns, so wait for each slot.
     let mut held = Vec::new();
-    while let Some(permit) = app.scheduler.try_begin_summary() {
-        held.push(permit);
+    for _ in 0..3 {
+        held.push(summary_slot(&app).await);
     }
-    assert!(!held.is_empty());
     for _ in 0..10 {
         sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot)
