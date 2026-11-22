@@ -52,7 +52,7 @@ pub fn server() -> Rc<Server> {
 
 pub fn connect(profile: Profile) -> Result<(), String> {
     let client = Client::new(&profile)?;
-    profile.save();
+    profile.save()?;
     link().set(Link::Connected(Rc::new(Server { profile, client })));
     Ok(())
 }

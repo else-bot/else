@@ -17,10 +17,14 @@ with the server and the desktop app.
 - A chat per bot. Replies render as Markdown and stream in live over the
   WebSocket. Older pages load as you scroll up. Send a message, or stop a
   reply that is running.
+- Answer a bot's question with one tap. Review a draft, then Discard it
+  or Send it after a confirmation. Settled ones leave a receipt in the chat.
+- Chats are marked read on the server, so the desktop's unread dots agree.
+- Light and dark mode. Reconnects when the app returns to the foreground.
 - Disconnect from the More menu, which removes the key from the phone.
 
-Not yet: answering question cards, approving drafts, secrets, attachments,
-creating bots, several servers, push notifications.
+Not yet: editing drafts, secrets, computer takeovers, attachments, creating
+bots, several servers, push notifications, iPad layout.
 
 ## Addresses and the owner key
 
@@ -34,6 +38,10 @@ never follows redirects.
 - `http://127.0.0.1` also works, which is only useful in the simulator.
 
 Read the key on the server with `cat ~/.else/data/owner-token`.
+
+The key is kept in the iOS Keychain. A build signed without a Keychain
+group, such as a simulator package, keeps it in the app's own storage instead.
+Device builds get the group from their provisioning profile.
 
 ## Build and run
 

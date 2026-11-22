@@ -7,7 +7,6 @@
 use std::fmt;
 use std::net::IpAddr;
 
-use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
 /// A validated API origin: `https://` for any host, `http://` only for
@@ -199,36 +198,93 @@ impl Profile {
     }
 }
 
-/// The saved form of a [`Profile`], parsed again when read back.
-#[derive(Serialize, Deserialize)]
-struct Saved {
-    origin: String,
-    token: String,
-}
+const ORIGIN_KEY: &str = "server-origin";
 
-const PROFILE_KEY: &str = "server-profile";
+/// Where the owner key is kept: the iOS Keychain, so it stays out of the
+/// app's files and backups. A build signed without a Keychain group (the
+/// simulator, the Mac dev runner) keeps it in the app's storage instead.
+mod vault {
+    use nsh_core::storage::Storage;
+
+    fn slot(origin: &str) -> String {
+        format!("owner-key:{origin}")
+    }
+
+    #[cfg(target_os = "ios")]
+    mod keychain {
+        const SERVICE: &str = "bot.else.mobile.owner-key";
+        /// `errSecMissingEntitlement`: the build has no Keychain group.
+        const MISSING_ENTITLEMENT: i32 = -34018;
+
+        pub fn read(origin: &str) -> Option<String> {
+            let bytes = security_framework::passwords::get_generic_password(SERVICE, origin).ok()?;
+            String::from_utf8(bytes).ok()
+        }
+
+        /// `Ok(false)` when this build cannot use the Keychain at all.
+        pub fn write(origin: &str, key: &str) -> Result<bool, String> {
+            match security_framework::passwords::set_generic_password(SERVICE, origin, key.as_bytes()) {
+                Ok(()) => Ok(true),
+                Err(err) if err.code() == MISSING_ENTITLEMENT => Ok(false),
+                Err(err) => Err(format!("Cannot save the owner key in the Keychain: {err}")),
+            }
+        }
+
+        pub fn remove(origin: &str) {
+            let _ = security_framework::passwords::delete_generic_password(SERVICE, origin);
+        }
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    mod keychain {
+        pub fn read(_: &str) -> Option<String> {
+            None
+        }
+        pub fn write(_: &str, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        pub fn remove(_: &str) {}
+    }
+
+    pub fn read(origin: &str) -> Option<String> {
+        keychain::read(origin).or_else(|| Storage::get_item(&slot(origin)))
+    }
+
+    pub fn write(origin: &str, key: &str) -> Result<(), String> {
+        if keychain::write(origin, key)? {
+            Storage::remove_item(&slot(origin));
+            return Ok(());
+        }
+        log::warn!("no Keychain group in this build; keeping the owner key in app storage");
+        Storage::set_item(slot(origin), key).map_err(|err| format!("Cannot save the owner key: {err}"))
+    }
+
+    pub fn remove(origin: &str) {
+        keychain::remove(origin);
+        Storage::remove_item(&slot(origin));
+    }
+}
 
 impl Profile {
     /// The saved profile, if one is saved and still valid.
     pub fn load() -> Option<Self> {
-        let raw = nsh_core::storage::Storage::get_item(PROFILE_KEY)?;
-        let saved: Saved = serde_json::from_str(&raw).ok()?;
-        Self::parse(&saved.origin, &saved.token).ok()
+        let origin = nsh_core::storage::Storage::get_item(ORIGIN_KEY)?;
+        let key = vault::read(&origin)?;
+        Self::parse(&origin, &key).ok()
     }
 
-    pub fn save(&self) {
-        let saved = Saved {
-            origin: self.origin.as_str().to_owned(),
-            token: self.token.expose().to_owned(),
-        };
-        let raw = serde_json::to_string(&saved).expect("profile serializes");
-        if let Err(err) = nsh_core::storage::Storage::set_item(PROFILE_KEY, &raw) {
-            log::warn!("cannot save the server profile: {err:?}");
-        }
+    pub fn save(&self) -> Result<(), String> {
+        let origin = self.origin.as_str();
+        vault::write(origin, self.token.expose())?;
+        nsh_core::storage::Storage::set_item(ORIGIN_KEY, origin)
+            .map_err(|err| format!("Cannot save the server address: {err}"))
     }
 
     pub fn forget() {
-        nsh_core::storage::Storage::remove_item(PROFILE_KEY);
+        if let Some(origin) = nsh_core::storage::Storage::get_item(ORIGIN_KEY) {
+            vault::remove(&origin);
+        }
+        nsh_core::storage::Storage::remove_item(ORIGIN_KEY);
     }
 }
 
