@@ -1635,4 +1635,8 @@ fn a_revised_document_folds_the_replies_carrying_its_earlier_revisions() {
         [Earlier::Reply(id(7))],
         "only the newest revision stays beside the final reply"
     );
+    assert!(
+        task.repeated_files.is_empty(),
+        "each folded revision keeps its own link"
+    );
 }
