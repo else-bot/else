@@ -68,18 +68,24 @@ impl Tracker {
             .filter(|tool| self.mcp && TOOL_NAMES.contains(tool))
     }
 
-    /// An else.bot tool under a name Grok's catalog lacks: Claude's
-    /// mcp__elsebot__<tool> from memory, a bare tool name, or a deferred tool
-    /// named directly instead of through elsebot__use_tool. Grok rejects each
-    /// without running it and the model can retry, so none is a policy
-    /// breach.
-    fn misnamed(&self, target: &str) -> bool {
-        let tool = target.trim_prefix("mcp__");
-        let tool = tool
+    /// A use_tool target Grok refuses without running it, so the model can
+    /// retry and none is a policy breach. Grok's use_tool runs only
+    /// server__tool MCP names: it refuses an unqualified name, such as its
+    /// own search_tool or a bare else.bot tool name. It also refuses an
+    /// else.bot tool under a name its catalog lacks: Claude's
+    /// mcp__elsebot__<tool> from memory, or a deferred tool named directly
+    /// instead of through elsebot__use_tool.
+    fn refused(&self, target: &str) -> bool {
+        if !target.contains("__") {
+            return true;
+        }
+        let tool = target
+            .trim_prefix("mcp__")
             .strip_prefix(SERVER_NAME)
-            .and_then(|rest| rest.strip_prefix("__"))
-            .unwrap_or(tool);
-        self.mcp && (TOOL_NAMES.contains(&tool) || DEFERRED_TOOLS.contains(&tool))
+            .and_then(|rest| rest.strip_prefix("__"));
+        tool.is_some_and(|tool| {
+            self.mcp && (TOOL_NAMES.contains(&tool) || DEFERRED_TOOLS.contains(&tool))
+        })
     }
 
     fn check_model(&self, model: &Value) -> Result<(), Violation> {
@@ -174,7 +180,7 @@ impl Tracker {
                 };
                 match self.mcp_tool(target) {
                     Some(tool) => Some(tool),
-                    None if self.misnamed(target) => None,
+                    None if self.refused(target) => None,
                     None => {
                         return Err(Violation::policy(format!(
                             "Grok called an MCP tool outside else.bot: {target}"
