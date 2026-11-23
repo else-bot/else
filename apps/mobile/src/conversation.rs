@@ -151,10 +151,18 @@ pub fn busy(conversation: &Conversation) -> bool {
         .is_some_and(|activity| !matches!(activity.phase, Phase::Idle | Phase::Unknown))
 }
 
-/// The request of the turn the bot works on now, to stop it.
-pub fn active_request(conversation: &Conversation) -> Option<Uuid> {
+/// The bot's current turn, while it works or waits (on the owner, a job or
+/// another bot): what Stop stops. None while a turn only waits in the queue.
+fn active_turn(conversation: &Conversation) -> Option<&Turn> {
     let turn = conversation.activity.as_ref()?.active_turn_id?;
-    conversation.turn(turn).map(|turn| turn.request_id)
+    conversation
+        .turn(turn)
+        .filter(|turn| turn.status.is_working() || turn.status == TurnStatus::Waiting)
+}
+
+/// The request of the turn Stop stops.
+pub fn active_request(conversation: &Conversation) -> Option<Uuid> {
+    active_turn(conversation).map(|turn| turn.request_id)
 }
 
 /// The transcript, oldest first.
@@ -443,7 +451,9 @@ pub fn asks(conversation: &Conversation) -> Vec<Ask> {
 /// Whether the newest item is the owner's and the bot has not started
 /// writing: shown as a typing indicator.
 pub fn thinking(conversation: &Conversation) -> bool {
-    if !busy(conversation) {
+    // Only a turn at work types: a queued one says Queued, a waiting one
+    // what it waits for.
+    if !active_turn(conversation).is_some_and(|turn| turn.status.is_working()) {
         return false;
     }
     conversation

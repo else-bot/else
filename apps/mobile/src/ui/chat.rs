@@ -27,7 +27,13 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
     });
     let thinking =
         computed(move || chat.with(|c| c.conversation().is_some_and(conversation::thinking)));
-    let busy = computed(move || chat.with(|c| c.conversation().is_some_and(conversation::busy)));
+    // Stop shows only with a turn at work to stop.
+    let busy = computed(move || {
+        chat.with(|c| {
+            c.conversation()
+                .is_some_and(|c| conversation::active_request(c).is_some())
+        })
+    });
     keep_read(bot, chat);
     // The message the next one replies to, picked from a message's menu.
     let quote = signal(None::<Quote>);
