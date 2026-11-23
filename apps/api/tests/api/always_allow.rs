@@ -288,23 +288,3 @@ async fn typing_always_approve_answers_a_waiting_routine_card() {
     assert_eq!(routine_grant_kinds(app, report).await, ["external"]);
     app.wait_turn(run, &["completed"]).await;
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_typed_reply_after_another_owner_message_answers_no_older_card() {
-    let h = recorder::harness(common::TestApp::builder()).await;
-    let app = &h.app;
-    let main = app.main_bot().await;
-    let (report, due) = routine(&h, &main, "Send the build report.", false).await;
-    let run = run_of(&fire(app, due).await, report);
-    let (_, token) = h.started(run).await;
-    let (card, _) = asks(app, &token, send_args()).await;
-    h.release(run).await;
-    app.wait_turn(run, &["waiting"]).await;
-    let chat = h.send(&main, "What is on my calendar today?").await;
-    app.wait_turn(chat, &["completed"]).await;
-    h.send(&main, "Always approve.").await;
-    assert_eq!(question(app, card).await, ("pending".to_owned(), None));
-    assert!(routine_grant_kinds(app, report).await.is_empty());
-    answer(app, &main, card, "deny").await;
-    app.wait_turn(run, &["completed"]).await;
-}

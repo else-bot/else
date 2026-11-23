@@ -204,7 +204,7 @@ pub async fn skip_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(
 }
 
 /// Withdraw the pending request of turn `turn_id`, when an owner message
-/// joins that turn.
+/// types over it.
 pub async fn skip_pending_of(
     conn: &mut SqliteConnection,
     turn_id: Uuid,

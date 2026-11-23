@@ -129,11 +129,12 @@ impl Placement {
 /// A message that may answer a card (`typed`: it targets no notice, draft
 /// or reaction) and says only to always allow first answers the card it
 /// replies to with its Always choice
-/// ([`super::owner_questions::answer_typed`]). Joining skips
-/// the target's other pending questions and computer handoff, as an owner
-/// who types instead of clicking does, and continues a waiting target at
-/// once with every other hold kept. Runs in the accepting immediate
-/// transaction.
+/// ([`super::owner_questions::answer_typed`]). Whether it joins or queues,
+/// it then skips every other card the bot's chat shows ([`typed_over`]),
+/// as an owner who types instead of clicking does; any other message skips
+/// only the target's cards. Each turn that asked continues once nothing
+/// else holds it. Joining continues a waiting target at once with every
+/// other hold kept. Runs in the accepting immediate transaction.
 pub async fn place(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -156,23 +157,26 @@ pub async fn place(
         let joined = target.as_ref().map(|t| t.id);
         super::owner_questions::answer_typed(conn, bot_id, turn_id, joined, &text).await?;
     }
+    if let Some(target) = &target {
+        sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
+            .bind(turn_id)
+            .bind(target.id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    let mut asked = if typed {
+        typed_over(conn, bot_id, turn_id).await?
+    } else {
+        Vec::new()
+    };
+    asked.extend(target.as_ref().map(|t| t.id));
+    for asked in asked {
+        super::owner_questions::skip_pending_of(&mut *conn, asked).await?;
+        super::computer_handoffs::skip_pending_of(&mut *conn, asked).await?;
+    }
     let Some(target) = target else {
         return Ok(Placement::Queued);
     };
-    sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
-        .bind(turn_id)
-        .bind(target.id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(
-        "UPDATE owner_questions SET status = 'skipped',
-             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE turn_id = ?1 AND status = 'pending'",
-    )
-    .bind(target.id)
-    .execute(&mut *conn)
-    .await?;
-    super::computer_handoffs::skip_pending_of(&mut *conn, target.id).await?;
     if target.status == TurnStatus::Waiting {
         super::turns::lifecycle::continue_waiting(&mut *conn, target.id).await?;
     }
@@ -181,6 +185,29 @@ pub async fn place(
         into: target.id,
         status: target.status,
     })
+}
+
+/// The turns whose cards owner message `message` types over: every pending
+/// question and computer handoff of `bot_id`, which its chat shows, asked
+/// before the message. A message placed late (deferred) leaves newer cards.
+async fn typed_over(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    message: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT turn_id FROM owner_questions
+         WHERE bot_id = ?1 AND status = 'pending'
+           AND created_at < (SELECT created_at FROM turns WHERE id = ?2)
+         UNION
+         SELECT turn_id FROM computer_handoffs
+         WHERE bot_id = ?1 AND status = 'pending'
+           AND created_at < (SELECT created_at FROM turns WHERE id = ?2)",
+    )
+    .bind(bot_id)
+    .bind(message)
+    .fetch_all(&mut *conn)
+    .await
 }
 
 /// The unfinished turn a new owner message joins, as [`place`] orders them.
