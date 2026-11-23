@@ -11,7 +11,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use else_wire::bots::{Bot, BotEnvelope, BotList, ReplyPosition};
+use else_wire::bots::{Avatar, Bot, BotEnvelope, BotList, ReplyPosition};
 use else_wire::conversation::{Sent, Snapshot};
 use else_wire::items::{Attachment, MessagePart};
 use else_wire::outgoing::OutgoingDraft;
@@ -292,6 +292,23 @@ impl Client {
                 .await
                 .map(|bytes| bytes.to_vec())
                 .map_err(|err| ClientError::Protocol(err.without_url().to_string()))
+        })
+        .await
+    }
+
+    /// Creates a bot. A retry with the same `request_id` answers the bot
+    /// it already created, so an unknown outcome is safe to repeat.
+    pub async fn create_bot(
+        self: Arc<Self>,
+        request_id: Uuid,
+        name: String,
+        avatar: Avatar,
+    ) -> Result<Bot, ClientError> {
+        let body = json!({ "request_id": request_id, "name": name, "avatar": avatar });
+        run(async move {
+            self.call::<BotEnvelope>(Method::POST, "/v1/bots", Some(body))
+                .await
+                .map(|envelope| envelope.bot)
         })
         .await
     }

@@ -2,6 +2,7 @@
 //! first, as Messages lists its conversations.
 
 use nsh_base::{alert_dialog, nav_page};
+use nsh_core::HeaderSystemItem;
 use nsh_core::element::desktop::MenuItem;
 use nsh_core::element::header::HeaderItem;
 use nsh_core::prelude::*;
@@ -46,7 +47,7 @@ pub fn screen() -> Screen {
                 return placeholder("Loading bots…").into_element();
             }
             if rows.with(Vec::is_empty) {
-                return placeholder("No bots yet. Create one in the desktop app.").into_element();
+                return placeholder("No bots yet. Tap Compose to create one.").into_element();
             }
             view()
                 .pb_safe_area()
@@ -58,11 +59,16 @@ pub fn screen() -> Screen {
                 .into_element()
         }));
 
+    let compose = HeaderItem::system(HeaderSystemItem::Compose)
+        .key("new-bot")
+        .label("New Bot")
+        .on_press(super::new_bot::open);
+
     nav_page()
         .key("bots")
         .title("Bots")
         .header_large_title(true)
-        .header_right_items(vec![menu])
+        .header_right_items(vec![compose, menu])
         .child(list)
 }
 

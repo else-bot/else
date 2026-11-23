@@ -457,52 +457,48 @@ fn pending_strip(pending: Signal<Vec<Pending>>) -> impl IntoElement {
     dynamic(move || {
         let items = pending.get();
         (!items.is_empty()).then(|| {
-            scroll()
-                .horizontal()
-                .scrollbar(false)
-                .pb_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .px_3()
-                        .children(items.into_iter().map(move |item| {
-                            let id = item.file.id;
-                            let detail = match &item.upload {
-                                Upload::Uploading => "Uploading…".to_owned(),
-                                Upload::Done => super::files::size_label(item.file.size),
-                                Upload::Failed(message) => message.clone(),
-                            };
-                            let failed = matches!(item.upload, Upload::Failed(_));
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .child(
-                                    super::files::chip(item.file.name.clone(), detail)
-                                        .border_1()
-                                        .border_color(move || {
-                                            if failed {
-                                                colors::destructive()
-                                            } else {
-                                                colors::separator()
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    text("✕")
-                                        .px_2()
-                                        .py_2()
-                                        .text_size(px(15.0))
-                                        .text_color(colors::secondary())
-                                        .role(AccessibilityRole::Button)
-                                        .label(format!("Remove {}", item.file.name))
-                                        .on_press(move || {
-                                            pending.update(|p| p.retain(|item| item.file.id != id))
-                                        }),
-                                )
-                                .into_element()
-                        })),
-                )
+            scroll().horizontal().scrollbar(false).pb_2().child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .px_3()
+                    .children(items.into_iter().map(move |item| {
+                        let id = item.file.id;
+                        let detail = match &item.upload {
+                            Upload::Uploading => "Uploading…".to_owned(),
+                            Upload::Done => super::files::size_label(item.file.size),
+                            Upload::Failed(message) => message.clone(),
+                        };
+                        let failed = matches!(item.upload, Upload::Failed(_));
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .child(
+                                super::files::chip(item.file.name.clone(), detail)
+                                    .border_1()
+                                    .border_color(move || {
+                                        if failed {
+                                            colors::destructive()
+                                        } else {
+                                            colors::separator()
+                                        }
+                                    }),
+                            )
+                            .child(
+                                text("✕")
+                                    .px_2()
+                                    .py_2()
+                                    .text_size(px(15.0))
+                                    .text_color(colors::secondary())
+                                    .role(AccessibilityRole::Button)
+                                    .label(format!("Remove {}", item.file.name))
+                                    .on_press(move || {
+                                        pending.update(|p| p.retain(|item| item.file.id != id))
+                                    }),
+                            )
+                            .into_element()
+                    })),
+            )
         })
     })
 }
