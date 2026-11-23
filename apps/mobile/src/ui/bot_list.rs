@@ -81,6 +81,8 @@ pub fn screen() -> Screen {
             });
         })
         .keyboard_dismiss_mode(KeyboardDismissMode::OnDrag)
+        // A tap on a result or Clear works while the keyboard is up.
+        .keyboard_taps(KeyboardTaps::Handled)
         .child(banner())
         .child(search_field(query))
         .child(dynamic(move || {
