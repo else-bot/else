@@ -22,6 +22,7 @@ mod rules;
 mod search;
 pub mod session;
 mod swipe;
+mod sheet;
 mod waits;
 
 use std::rc::Rc;
@@ -97,5 +98,8 @@ fn connected_stack() -> impl IntoElement {
             })
         },
     );
-    nav_stack().flex_1().child(bot_list::screen()).child(pushed)
+    view()
+        .flex_1()
+        .child(nav_stack().flex_1().child(bot_list::screen()).child(pushed))
+        .child(sheet::layer())
 }

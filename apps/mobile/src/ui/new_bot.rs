@@ -46,7 +46,7 @@ fn create_request(
 }
 
 pub fn open() {
-    super::push(KEY, screen);
+    super::sheet::present(KEY, || super::sheet::page(screen()));
 }
 
 fn screen() -> Screen {
@@ -90,6 +90,7 @@ fn screen() -> Screen {
             .filter(|m| Some(m) != defaults.as_ref())
     };
     let ready = computed(move || !name.with(|n| n.trim().is_empty()) && !step.with(Request::busy));
+    super::sheet::guard(move || !name.with(|n| n.trim().is_empty()));
 
     let create = move || {
         if !ready.get_untracked() {
@@ -114,7 +115,7 @@ fn screen() -> Screen {
                 let (id, title) = (bot.id, bot.name.clone());
                 session::update_bot(bot);
                 if step.try_set(Request::Idle) {
-                    super::routes().update(|r| r.0.retain(|route| route.key != KEY));
+                    super::sheet::close();
                     super::push(format!("chat-{id}"), move || {
                         super::chat::screen(id, title.clone())
                     });
@@ -289,7 +290,7 @@ fn model_row(
         let open = providers.map(|providers| {
             move || {
                 let providers = providers.clone();
-                super::push(format!("{KEY}-model"), move || {
+                super::sheet::push(format!("{KEY}-model"), move || {
                     picker_screen(providers.clone(), model)
                 });
             }

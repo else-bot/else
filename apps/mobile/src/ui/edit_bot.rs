@@ -17,7 +17,7 @@ fn key(bot: Uuid) -> String {
 
 pub fn open(bot: Bot) {
     let id = bot.id;
-    super::push(key(id), move || screen(bot.clone()));
+    super::sheet::present(key(id), move || super::sheet::page(screen(bot.clone())));
 }
 
 fn screen(bot: Bot) -> Screen {
@@ -36,6 +36,7 @@ fn screen(bot: Bot) -> Screen {
         !now.0.is_empty() && now != saved.get()
     });
     let ready = computed(move || changed.get() && !save.with(Request::busy));
+    super::sheet::guard(move || changed.get());
     let submit = move || {
         if !ready.get_untracked() {
             return;
@@ -57,7 +58,7 @@ fn screen(bot: Bot) -> Screen {
             move |bot| {
                 session::update_bot(bot);
                 if save.try_set(Request::Idle) {
-                    super::routes().update(|r| r.0.retain(|route| *route.key != *key(id)));
+                    super::sheet::close();
                 }
             },
         );

@@ -427,6 +427,7 @@ pub fn open_chat(bot: Uuid) -> Signal<Chat> {
 pub fn close_bot_screens(bot: Uuid) {
     let id = bot.to_string();
     super::routes().update(|r| r.0.retain(|route| !route.key.contains(&id)));
+    super::sheet::close_if(|key| key.contains(&id));
 }
 
 /// Reads an open chat again over HTTP, for a change the live connection
