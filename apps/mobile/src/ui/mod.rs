@@ -6,6 +6,7 @@ mod bot_list;
 mod chat;
 mod connect;
 mod files;
+mod model;
 mod new_bot;
 mod parts;
 pub mod session;

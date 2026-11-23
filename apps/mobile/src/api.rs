@@ -15,7 +15,7 @@ use else_wire::bots::{Avatar, Bot, BotEnvelope, BotList, ReplyPosition};
 use else_wire::conversation::{Sent, Snapshot};
 use else_wire::items::{Attachment, MessagePart};
 use else_wire::outgoing::OutgoingDraft;
-use else_wire::settings::ErrorBody;
+use else_wire::settings::{BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, ProfileChoice};
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
@@ -294,17 +294,58 @@ impl Client {
 
     /// Creates a bot. A retry with the same `request_id` answers the bot
     /// it already created, so an unknown outcome is safe to repeat.
+    /// Without a profile, the bot uses the server's defaults.
     pub async fn create_bot(
         self: Arc<Self>,
         request_id: Uuid,
         name: String,
         avatar: Avatar,
+        profile: Option<ProfileChoice>,
     ) -> Result<Bot, ClientError> {
-        let body = json!({ "request_id": request_id, "name": name, "avatar": avatar });
+        let mut body = json!({ "request_id": request_id, "name": name, "avatar": avatar });
+        if let Some(profile) = profile {
+            body["profile"] = json!(profile);
+        }
         run(async move {
             self.call::<BotEnvelope>(Method::POST, "/v1/bots", Some(body))
                 .await
                 .map(|envelope| envelope.bot)
+        })
+        .await
+    }
+
+    /// The providers, their models, and the defaults new bots start with.
+    pub async fn capabilities(self: Arc<Self>) -> Result<Capabilities, ClientError> {
+        run(async move { self.call(Method::GET, "/v1/capabilities", None).await }).await
+    }
+
+    /// The profile the bot's next messages use; `None` before the server
+    /// has any provider to default to.
+    pub async fn bot_profile(
+        self: Arc<Self>,
+        bot: Uuid,
+    ) -> Result<Option<BotProfile>, ClientError> {
+        let path = format!("/v1/bots/{bot}/profile");
+        run(async move {
+            self.call::<BotProfileEnvelope<Option<BotProfile>>>(Method::GET, &path, None)
+                .await
+                .map(|envelope| envelope.profile)
+        })
+        .await
+    }
+
+    /// Gives the bot its own profile, used from its next message. Saving
+    /// the same profile again changes nothing, so a retry is safe.
+    pub async fn set_bot_profile(
+        self: Arc<Self>,
+        bot: Uuid,
+        choice: ProfileChoice,
+    ) -> Result<BotProfile, ClientError> {
+        let path = format!("/v1/bots/{bot}/profile");
+        run(async move {
+            self.call::<BotProfileEnvelope<BotProfile>>(Method::PUT, &path, Some(json!(choice)))
+                .await
+                .map(|envelope| envelope.profile)
         })
         .await
     }

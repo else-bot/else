@@ -6,6 +6,7 @@ use nsh_base::{
     MarkdownOptions, TextViewPart, TextViewParts, alert_dialog, input, nav_page, text_view,
 };
 use nsh_core::element::AdaptiveColor;
+use nsh_core::element::header::HeaderItem;
 use nsh_core::picker::{FilePickRequest, PickRequest, PickedFile, PickedStatus};
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -70,6 +71,14 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
         .key(format!("chat-{bot}"))
         .title(name)
         .header_large_title(false)
+        .header_right_items(move || {
+            vec![
+                HeaderItem::symbol("cpu")
+                    .key("model")
+                    .label("Model")
+                    .on_press(move || super::model::open(bot)),
+            ]
+        })
         .child(
             view()
                 .flex_1()

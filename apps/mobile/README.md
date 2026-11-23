@@ -14,9 +14,11 @@ with the server and the desktop app.
 - The bot list, ordered like Messages. Bots waiting on you come first,
   then newest first. Shows unread dots, "Working…", and previews.
   Pull to refresh.
-- Create a bot with Compose: a name, and its avatar's shape and color.
-  Avatars are drawn from the same shapes as the desktop's. It starts with
-  the server's default provider and model.
+- Create a bot with Compose: a name, its avatar's shape and color, and
+  its provider and model. Avatars are drawn from the same shapes as the
+  desktop's. Left at the server's defaults, the bot keeps following them.
+- Change a bot's provider, model, reasoning and speed from Model in its
+  chat. A provider the server cannot run shows why instead of its models.
 - A chat per bot. Replies render as Markdown and stream in live over the
   WebSocket. Older pages load as you scroll up. Send a message, or stop a
   reply that is running.
