@@ -229,6 +229,7 @@ fn skill_installs_block(input: &TurnInput) -> String {
 }
 
 fn secrets_block(input: &TurnInput) -> String {
+    use crate::db::secret_requests::Status;
     if input.secrets.is_empty() {
         return String::new();
     }
@@ -236,14 +237,19 @@ fn secrets_block(input: &TurnInput) -> String {
         "[else.bot secret requests] The owner answered your requests for credentials. You \
          never see the values: a stored secret is used by naming it in the secrets argument \
          of computer_run or computer_job_start. Do not ask again for a declined one unless \
-         the owner says so.\n",
+         the owner says so. A skipped one was closed because the owner sent a new message \
+         instead of answering; treat it like a declined one.\n",
     );
     for secret in &input.secrets {
         text.push_str(&format!(
             "<secret name=\"{}\" env=\"{}\" status=\"{}\"/>\n",
             escape(&secret.name),
             escape(&secret.env.join(",")),
-            if secret.stored { "stored" } else { "declined" },
+            match secret.status {
+                Status::Stored => "stored",
+                Status::Skipped => "skipped",
+                Status::Pending | Status::Cancelled => "declined",
+            },
         ));
     }
     text.push('\n');

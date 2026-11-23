@@ -9,6 +9,7 @@ wire_state! {
         Pending = "pending",
         Stored = "stored",
         Cancelled = "cancelled",
+        Skipped = "skipped",
     }
     _ => Unknown
 }

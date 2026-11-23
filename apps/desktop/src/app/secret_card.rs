@@ -233,6 +233,9 @@ impl ConversationView {
                     "The request for {} was declined or withdrawn.",
                     request.name
                 ),
+                SecretRequestStatus::Skipped => {
+                    "Skipped: you sent a new message instead.".to_owned()
+                }
                 SecretRequestStatus::Pending | SecretRequestStatus::Unknown => {
                     format!("Sent {} to {bot_name}…", request.name)
                 }

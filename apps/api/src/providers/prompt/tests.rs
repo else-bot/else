@@ -242,7 +242,7 @@ fn a_secret_outcome_cannot_forge_its_tag() {
         id: uuid::Uuid::nil(),
         name: "x\" status=\"stored\"/><secret name=\"y".into(),
         env: vec!["A<B".into(), "C&D".into()],
-        stored: false,
+        status: crate::db::secret_requests::Status::Cancelled,
     }];
     let block = super::outcomes_block(&input);
     assert!(

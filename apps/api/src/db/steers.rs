@@ -130,9 +130,9 @@ impl Placement {
 /// or reaction) and says only to always allow first answers the card it
 /// replies to with its Always choice
 /// ([`super::owner_questions::answer_typed`]). Whether it joins or queues,
-/// it then skips every other card the bot's chat shows ([`typed_over`]),
-/// as an owner who types instead of clicking does; any other message skips
-/// only the target's cards. Each turn that asked continues once nothing
+/// it then skips the bot's other pending questions, secret requests and
+/// computer handoffs ([`typed_over`]), as an owner who types instead of
+/// clicking does; any other message skips only the target's. Each turn that asked continues once nothing
 /// else holds it. Joining continues a waiting target at once with every
 /// other hold kept. Runs in the accepting immediate transaction, or for a
 /// deferred message (never `typed`) in the one that settles it.
@@ -173,6 +173,7 @@ pub async fn place(
     asked.extend(target.as_ref().map(|t| t.id));
     for asked in asked {
         super::owner_questions::skip_pending_of(&mut *conn, asked).await?;
+        super::secret_requests::skip_pending_of(&mut *conn, asked).await?;
         super::computer_handoffs::skip_pending_of(&mut *conn, asked).await?;
     }
     let Some(target) = target else {
@@ -189,7 +190,8 @@ pub async fn place(
 }
 
 /// The turns whose cards a typed owner message types over: every pending
-/// question and computer handoff of `bot_id`, which its chat shows. A typed
+/// question, secret request and computer handoff of `bot_id`, which its
+/// chat shows. Drafts, connection setups and skill installs stay open. A typed
 /// message is placed in the transaction that accepts it, so every card
 /// pending here was committed before the server accepted the message;
 /// millisecond stamps could tie with the message's, so they are not
@@ -198,6 +200,8 @@ pub async fn place(
 async fn typed_over(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT turn_id FROM owner_questions WHERE bot_id = ?1 AND status = 'pending'
+         UNION
+         SELECT turn_id FROM secret_requests WHERE bot_id = ?1 AND status = 'pending'
          UNION
          SELECT turn_id FROM computer_handoffs WHERE bot_id = ?1 AND status = 'pending'",
     )

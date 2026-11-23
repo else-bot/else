@@ -9,7 +9,8 @@
 //! secret's name, variable names, and whether it was stored or declined.
 //! A request may carry a description and the website a login is for; the
 //! owner may edit both and add variables (such as a TOTP seed) when saving.
-//! Ending the turn for any reason withdraws a pending request (a trigger).
+//! A typed owner message skips a pending request ([`skip_pending_of`]), and
+//! ending the turn for any reason withdraws one (a trigger).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -121,6 +122,8 @@ pub enum Status {
     Pending,
     Stored,
     Cancelled,
+    /// The owner sent a new message instead of answering.
+    Skipped,
 }
 
 /// Public metadata of a request. It never holds a value.
@@ -158,6 +161,7 @@ impl From<&RequestInfo> for else_wire::secrets::SecretRequest {
                 Status::Pending => SecretRequestStatus::Pending,
                 Status::Stored => SecretRequestStatus::Stored,
                 Status::Cancelled => SecretRequestStatus::Cancelled,
+                Status::Skipped => SecretRequestStatus::Skipped,
             },
             created_at: Some(request.created_at),
             settled_at: request.settled_at,
@@ -444,6 +448,28 @@ pub async fn cancel(
     Ok(settled)
 }
 
+/// The owner sent a new message instead of answering: skip the pending
+/// request of turn `turn_id`, which continues once nothing else holds it.
+/// A later answer to it is refused.
+pub(crate) async fn skip_pending_of(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let skipped: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE secret_requests SET status = 'skipped',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND status = 'pending' RETURNING bot_id",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(bot_id) = skipped {
+        super::turns::lifecycle::continue_waiting(&mut *conn, turn_id).await?;
+        events::turn_changed(&mut *conn, bot_id, turn_id).await?;
+    }
+    Ok(())
+}
+
 /// Answers of a turn's requests not yet given to an attempt.
 pub async fn undelivered(
     conn: &mut SqliteConnection,
@@ -463,7 +489,7 @@ pub async fn undelivered(
             id,
             name,
             env: env.0,
-            stored: status == Status::Stored,
+            status,
         })
         .collect())
 }
