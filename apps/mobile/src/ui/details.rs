@@ -15,6 +15,7 @@ use nsh_base::nav_page;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
+use super::list;
 use super::parts::{self, colors};
 use super::session::{self, Chat};
 
@@ -121,7 +122,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             (None, Some(_)) => "Couldn't load".to_owned(),
             (None, None) => "Loading…".to_owned(),
         };
-        Some(link_row(
+        Some(list::link_row(
             "Model",
             detail,
             Some(move || super::model::open(bot)),
@@ -138,7 +139,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             (None, Some(_)) => ("Couldn't load".to_owned(), false),
             (None, None) => ("Loading…".to_owned(), false),
         };
-        Some(link_row(
+        Some(list::link_row(
             "Rules",
             detail,
             any.then_some(move || open_rules(bot, rules)),
@@ -175,11 +176,10 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                     .child(header)
                     .child(
                         view()
-                            .child(
-                                parts::group().child(
-                                    view().mb(px(-0.5)).child(model_row).child(rules_row),
-                                ),
-                            )
+                            .child(list::card([
+                                model_row.into_element(),
+                                rules_row.into_element(),
+                            ]))
                             .child(parts::footnote(
                                 "Rules are what the bot does whenever something happens. Ask it in the chat to add or change one.",
                             )),
@@ -189,85 +189,29 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
         )
 }
 
-/// A row that opens another screen: its title, its value, and a chevron
-/// when there is something to open.
-fn link_row(title: &'static str, detail: String, open: Option<impl Fn() + 'static>) -> View {
-    let enabled = open.is_some();
-    view()
-        .flex_row()
-        .items_center()
-        .min_h(px(44.0))
-        .pl_4()
-        .active(move |s| if enabled { s.bg(colors::fill()) } else { s })
-        .role(AccessibilityRole::Button)
-        .label(format!("{title}, {detail}"))
-        .on_press(move || {
-            if let Some(open) = &open {
-                open();
-            }
-        })
-        .child(
-            view()
-                .flex_1()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .pr_4()
-                .py(px(11.0))
-                .border_b(px(0.5))
-                .border_color(colors::separator())
-                .child(text(title).text_size(px(17.0)).text_color(colors::label()))
-                .child(
-                    text(detail)
-                        .flex_1()
-                        .number_of_lines(1)
-                        .text_right()
-                        .text_size(px(17.0))
-                        .text_color(colors::secondary()),
-                )
-                .child(enabled.then(|| {
-                    text("›")
-                        .text_size(px(22.0))
-                        .text_color(colors::secondary())
-                })),
-        )
-}
-
 /// One list of the screen: its title, then its rows or what to ask the
 /// bot when it is empty.
 fn list(title: &'static str, empty: &'static str, rows: Vec<View>) -> View {
-    let heading = text(title.to_uppercase())
-        .mx_4()
-        .px_4()
-        .pb(px(6.0))
-        .text_size(px(13.0))
-        .text_color(colors::secondary());
-    if rows.is_empty() {
-        return view().child(heading).child(
-            parts::group().child(
-                text(empty)
-                    .p_4()
-                    .text_size(px(15.0))
-                    .line_height(px(20.0))
-                    .text_color(colors::secondary()),
-            ),
-        );
-    }
-    view()
-        .child(heading)
-        // The group clips the last row's separator, as iOS lists end.
-        .child(parts::group().child(view().mb(px(-0.5)).children(rows)))
+    let rows: Vec<AnyElement> = if rows.is_empty() {
+        vec![
+            text(empty)
+                .p_4()
+                .text_size(px(15.0))
+                .line_height(px(20.0))
+                .text_color(colors::secondary())
+                .into_element(),
+        ]
+    } else {
+        rows.into_iter().map(IntoElement::into_element).collect()
+    };
+    list::section(Some(title), rows, None)
 }
 
 /// An item of a list: a title, then detail lines, a warning one in orange.
 fn item(title: String, lines: Vec<String>, warning: Option<String>, body: Option<String>) -> View {
-    view().pl_4().child(
+    view().px_4().py(px(11.0)).gap(px(2.0)).child(
         view()
-            .py(px(11.0))
-            .pr_4()
             .gap(px(2.0))
-            .border_b(px(0.5))
-            .border_color(colors::separator())
             .child(text(title).text_size(px(17.0)).text_color(colors::label()))
             .children(lines.into_iter().map(|line| {
                 text(line)
@@ -451,13 +395,9 @@ fn rules_screen(bot: Uuid, rules: Resource<RulesFile, String>) -> Screen {
             .sections
             .into_iter()
             .map(|section| {
-                view().pl_4().child(
+                view().px_4().py(px(11.0)).gap(px(4.0)).child(
                     view()
-                        .py(px(11.0))
-                        .pr_4()
                         .gap(px(4.0))
-                        .border_b(px(0.5))
-                        .border_color(colors::separator())
                         .child(
                             text(section.title)
                                 .text_size(px(17.0))

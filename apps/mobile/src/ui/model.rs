@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use uuid::Uuid;
 
+use super::list;
 use super::parts::{self, colors};
 use super::session;
 use else_client::request::Request;
@@ -64,7 +65,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                     move || choice.with(|c| c.as_ref().is_some_and(|c| c.provider_id == id))
                 };
                 let info = provider.clone();
-                row(
+                list::option_row(
                     provider.state.label.clone(),
                     detail,
                     picked,
@@ -82,7 +83,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
     };
     view()
         .gap_6()
-        .child(section("Provider", view().children(provider_rows)))
+        .child(list::section(Some("Provider"), provider_rows, None))
         .child(dynamic(move || {
             let (provider, picked) = current()?;
             let model = provider.catalog.model(&picked.model)?.clone();
@@ -96,7 +97,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                     let id = id.clone();
                     move || choice.with(|c| c.as_ref().is_some_and(|c| c.model == id))
                 };
-                row(model.label.clone(), None, on, usable, move || {
+                list::option_row(model.label.clone(), None, on, usable, move || {
                     let Some(mut next) = choice.get_untracked() else {
                         return;
                     };
@@ -111,7 +112,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                     let value = value.clone();
                     move || choice.with(|c| c.as_ref().is_some_and(|c| c.reasoning_effort == value))
                 };
-                row(
+                list::option_row(
                     effort_label(effort).to_owned(),
                     None,
                     on,
@@ -130,7 +131,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                 let speed = |label: &str, tier: &'static str| {
                     let on =
                         move || choice.with(|c| c.as_ref().is_some_and(|c| c.service_tier == tier));
-                    row(label.to_owned(), None, on, usable, move || {
+                    list::option_row(label.to_owned(), None, on, usable, move || {
                         choice.update(|c| {
                             if let Some(c) = c {
                                 c.service_tier = tier.to_owned();
@@ -138,103 +139,20 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                         });
                     })
                 };
-                section(
-                    "Speed",
-                    view()
-                        .child(speed("Standard", "default"))
-                        .child(speed("Fast", FAST_TIER)),
+                list::section(
+                    Some("Speed"),
+                    [speed("Standard", "default"), speed("Fast", FAST_TIER)],
+                    None,
                 )
             });
             Some(
                 view()
                     .gap_6()
-                    .child(section("Model", view().children(models)))
-                    .child(section("Reasoning", view().children(efforts)))
+                    .child(list::section(Some("Model"), models, None))
+                    .child(list::section(Some("Reasoning"), efforts, None))
                     .child(speeds),
             )
         }))
-}
-
-fn section(title: &'static str, rows: View) -> View {
-    view()
-        .child(
-            text(title.to_uppercase())
-                .mx_4()
-                .px_4()
-                .pb(px(6.0))
-                .text_size(px(13.0))
-                .text_color(colors::secondary()),
-        )
-        // The group clips the last row's separator, as iOS lists end.
-        .child(parts::group().child(rows.mb(px(-0.5))))
-}
-
-/// One option: its label, a detail line when it has one, and a checkmark
-/// when picked. A row that cannot be picked is dimmed.
-fn row(
-    label: String,
-    detail: Option<String>,
-    picked: impl Fn() -> bool + Clone + 'static,
-    enabled: bool,
-    on_press: impl Fn() + 'static,
-) -> View {
-    let mark = picked.clone();
-    view()
-        .flex_row()
-        .items_center()
-        .min_h(px(44.0))
-        .pl_4()
-        .active(move |s| if enabled { s.bg(colors::fill()) } else { s })
-        .role(AccessibilityRole::Button)
-        .label({
-            let label = label.clone();
-            let picked = picked.clone();
-            move || {
-                let mark = if picked() { ", selected" } else { "" };
-                format!("{label}{mark}")
-            }
-        })
-        .on_press(move || {
-            if enabled {
-                on_press();
-            }
-        })
-        .child(
-            view()
-                .flex_1()
-                .flex_row()
-                .items_center()
-                .py(px(11.0))
-                .pr_4()
-                .border_b(px(0.5))
-                .border_color(colors::separator())
-                .child(
-                    view()
-                        .flex_1()
-                        .gap(px(2.0))
-                        .child(text(label).text_size(px(17.0)).text_color(if enabled {
-                            colors::label()
-                        } else {
-                            colors::secondary()
-                        }))
-                        .child(detail.map(|detail| {
-                            text(detail)
-                                .text_size(px(13.0))
-                                .line_height(px(18.0))
-                                .text_color(colors::secondary())
-                        })),
-                )
-                // Only the picked row has a mark: VoiceOver reads the
-                // row's label with ", selected" instead.
-                .child(dynamic(move || {
-                    mark().then(|| {
-                        text("✓")
-                            .text_size(px(17.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors::tint())
-                    })
-                })),
-        )
 }
 
 /// The providers a bot can pick from and its profile as the server reports

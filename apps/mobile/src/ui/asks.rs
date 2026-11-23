@@ -79,21 +79,29 @@ fn failure<Op: Clone + 'static>(request: Signal<Request<Op>>) -> impl IntoElemen
     })
 }
 
-/// A full-width button: filled for the main action, tinted otherwise.
+/// How a card's button looks: filled for the main action, plain for the
+/// others, in red for one that cannot be undone.
+#[derive(Clone, Copy, PartialEq)]
+enum Fill {
+    Prominent,
+    ProminentDestructive,
+    Plain,
+    PlainDestructive,
+}
+
+/// A full-width button. Disabled, it takes no presses and screen readers
+/// say it is dimmed.
 fn button(
     label: impl IntoReactive<SharedString>,
-    filled: bool,
-    destructive: bool,
+    fill: Fill,
     enabled: impl Fn() -> bool + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> View {
-    let accent = move || {
-        if destructive {
-            colors::destructive()
-        } else {
-            colors::tint()
-        }
+    let accent = match fill {
+        Fill::Prominent | Fill::Plain => colors::tint(),
+        Fill::ProminentDestructive | Fill::PlainDestructive => colors::destructive(),
     };
+    let filled = matches!(fill, Fill::Prominent | Fill::ProminentDestructive);
     view()
         .flex_1()
         .min_h(px(44.0))
@@ -102,21 +110,18 @@ fn button(
         .border_curve(BorderCurve::Continuous)
         .items_center()
         .justify_center()
-        .bg(move || if filled { accent() } else { colors::fill() })
-        .opacity(move || if enabled() { 1.0_f32 } else { 0.45 })
+        .bg(if filled { accent } else { colors::fill() })
+        .disabled(move || !enabled())
+        .disabled_style(|s| s.opacity(0.45))
         .active(|s| s.opacity(0.7))
         .role(AccessibilityRole::Button)
-        .on_press(move || {
-            if enabled() {
-                on_press();
-            }
-        })
+        .on_press(on_press)
         .child(
             text(label)
                 .text_size(px(17.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_center()
-                .text_color(move || if filled { colors::on_tint() } else { accent() }),
+                .text_color(if filled { colors::on_tint() } else { accent }),
         )
 }
 
@@ -162,8 +167,7 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
                         };
                         SharedString::from(format!("{mark}{label}"))
                     },
-                    false,
-                    false,
+                    Fill::Plain,
                     idle,
                     move || {
                         picked.update(|p| {
@@ -177,8 +181,14 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
             }
             button(
                 SharedString::from(choice.label.clone()),
-                approval && index == 0,
-                approval && index == 0 && question.kind == QuestionKind::Destructive,
+                match (
+                    approval && index == 0,
+                    question.kind == QuestionKind::Destructive,
+                ) {
+                    (true, true) => Fill::ProminentDestructive,
+                    (true, false) => Fill::Prominent,
+                    (false, _) => Fill::Plain,
+                },
                 idle,
                 move || send(vec![choice_id.clone()]),
             )
@@ -214,8 +224,7 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
         .child(multiple.then(|| {
             button(
                 "Submit",
-                true,
-                false,
+                Fill::Prominent,
                 move || idle() && picked.with(|p| !p.is_empty()),
                 move || send(picked.get_untracked().into_iter().collect()),
             )
@@ -346,7 +355,7 @@ fn draft_editor(
             view()
                 .flex_row()
                 .gap_2()
-                .child(button("Cancel", false, false, idle, cancel))
+                .child(button("Cancel", Fill::Plain, idle, cancel))
                 .child(button(
                     move || {
                         SharedString::from(if request.with(Request::busy) {
@@ -355,8 +364,7 @@ fn draft_editor(
                             "Save"
                         })
                     },
-                    true,
-                    false,
+                    Fill::Prominent,
                     move || idle() && !body.with(|b| b.trim().is_empty()),
                     save,
                 )),
@@ -500,8 +508,8 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
             view()
                 .flex_row()
                 .gap_2()
-                .child(button("Discard", false, true, idle, discard))
-                .child(button("Send", true, false, idle, approve)),
+                .child(button("Discard", Fill::PlainDestructive, idle, discard))
+                .child(button("Send", Fill::Prominent, idle, approve)),
         )
         .child((!can_approve).then(|| {
             text("The bot has finished its turn, so Send asks it in the chat to send this draft as it is.")
@@ -659,11 +667,12 @@ fn secret_card(bot: Uuid, asked: SecretRequest) -> impl IntoElement {
             view()
                 .flex_row()
                 .gap_2()
-                .child(button("Decline", false, true, idle, move || answer(None)))
+                .child(button("Decline", Fill::PlainDestructive, idle, move || {
+                    answer(None)
+                }))
                 .child(button(
                     "Save",
-                    true,
-                    false,
+                    Fill::Prominent,
                     move || idle() && complete.get(),
                     move || answer(Some(values.get_untracked())),
                 )),

@@ -8,6 +8,7 @@ use nsh_core::element::header::HeaderItem;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
+use super::list;
 use super::model;
 use super::parts::{self, colors};
 use super::session;
@@ -248,9 +249,10 @@ fn picker<T: Copy + PartialEq + 'static, E: IntoElement>(
                     }
                 })
                 .role(AccessibilityRole::Button)
-                .label(move || {
-                    let mark = if chosen() { ", selected" } else { "" };
-                    format!("{}{mark}", label(choice))
+                .label(label(choice))
+                .accessibility_state(move || AccessibilityState {
+                    selected: chosen(),
+                    ..AccessibilityState::default()
                 })
                 .on_press(move || selected.set(choice))
                 .child(draw(choice))
@@ -275,51 +277,22 @@ fn model_row(
                 (providers, None) => ("Choose".to_owned(), Some(providers)),
             },
         };
-        let open = providers.clone();
-        Some(
-            view()
-                .child(
-                    parts::group().child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .min_h(px(44.0))
-                            .px_4()
-                            .gap_3()
-                            .active(|s| s.bg(colors::fill()))
-                            .role(AccessibilityRole::Button)
-                            .label(format!("Model, {detail}"))
-                            .on_press(move || {
-                                if let Some(providers) = open.clone() {
-                                    super::push(format!("{KEY}-model"), move || {
-                                        picker_screen(providers.clone(), model)
-                                    });
-                                }
-                            })
-                            .child(
-                                text("Model")
-                                    .text_size(px(17.0))
-                                    .text_color(colors::label()),
-                            )
-                            .child(
-                                text(detail)
-                                    .flex_1()
-                                    .number_of_lines(1)
-                                    .text_right()
-                                    .text_size(px(17.0))
-                                    .text_color(colors::secondary()),
-                            )
-                            .child(providers.is_some().then(|| {
-                                text("›")
-                                    .text_size(px(22.0))
-                                    .text_color(colors::secondary())
-                            })),
-                    ),
-                )
-                .child(parts::footnote(
-                    "Starts at the server's default provider and model. Change it later from the bot's chat.",
-                )),
-        )
+        let open = providers.map(|providers| {
+            move || {
+                let providers = providers.clone();
+                super::push(format!("{KEY}-model"), move || {
+                    picker_screen(providers.clone(), model)
+                });
+            }
+        });
+        Some(list::section(
+            None,
+            [list::link_row("Model", detail, open)],
+            Some(
+                "Starts at the server's default provider and model. Change it later from the bot's chat."
+                    .to_owned(),
+            ),
+        ))
     })
 }
 
