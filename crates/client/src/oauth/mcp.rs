@@ -31,6 +31,7 @@ impl SignIn {
         client: Arc<Client>,
         bot: Uuid,
         expected: McpConsent,
+        finish: callback::Finish,
     ) -> Result<Self, ClientError> {
         let this = client.clone();
         let id = expected.id.clone();
@@ -45,7 +46,7 @@ impl SignIn {
             }
             let state = authorization_state(&signin.authorization.authorization_url, &redirect)
                 .ok_or_else(|| ClientError::Protocol("The API returned an invalid MCP sign-in URL.".into()))?;
-            listener.start(&Url::parse(&redirect).expect("local callback URL"), state, Duration::from_secs(signin.authorization.expires_in));
+            listener.start(&Url::parse(&redirect).expect("local callback URL"), state, Duration::from_secs(signin.authorization.expires_in), finish);
             Ok(signin)
         }).await
     }
@@ -199,9 +200,14 @@ mod tests {
             provider: Some("https://issuer.test".into()),
             scopes: vec!["read".into()],
         };
-        let mut signin = SignIn::start(client.clone(), bot, expected.clone())
-            .await
-            .unwrap();
+        let mut signin = SignIn::start(
+            client.clone(),
+            bot,
+            expected.clone(),
+            callback::Finish::Page,
+        )
+        .await
+        .unwrap();
         let callback_url = received.recv().await.unwrap();
         assert_eq!(Url::parse(&callback_url).unwrap().path(), "/mcp/callback");
         let response = reqwest::get(format!(
@@ -221,7 +227,11 @@ mod tests {
             .unwrap()
             .unwrap();
         changed.store(true, Ordering::SeqCst);
-        assert!(SignIn::start(client, bot, expected).await.is_err());
+        assert!(
+            SignIn::start(client, bot, expected, callback::Finish::Page)
+                .await
+                .is_err()
+        );
         tokio::time::timeout(Duration::from_secs(2), cancellations.recv())
             .await
             .unwrap()

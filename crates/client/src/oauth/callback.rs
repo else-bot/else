@@ -30,6 +30,17 @@ pub enum Outcome {
     Error(String),
 }
 
+/// What the browser shows once the callback arrived.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Finish {
+    /// A page saying to return to else.bot, for a desktop browser tab.
+    #[default]
+    Page,
+    /// A redirect to this URL of the app's own scheme, which ends an in-app
+    /// sign-in sheet. It gets `?result=connected` or `?result=not-connected`.
+    Redirect(String),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum WaitError {
     Stopped,
@@ -77,13 +88,21 @@ impl Listener {
         redirect_uri: &Url,
         state: String,
         expires: Duration,
+        finish: Finish,
     ) -> tokio::task::JoinHandle<()> {
         let host = redirect_uri.authority().to_owned();
         let path = redirect_uri.path().to_owned();
-        tokio::spawn(self.serve(path, host, state, expires))
+        tokio::spawn(self.serve(path, host, state, expires, finish))
     }
 
-    async fn serve(self, path: String, host: String, state: String, expires: Duration) {
+    async fn serve(
+        self,
+        path: String,
+        host: String,
+        state: String,
+        expires: Duration,
+        finish: Finish,
+    ) {
         let (requests, mut receiver) = mpsc::channel::<Delivery>(1);
         let router = Router::new()
             .route(&path, get(receive))
@@ -91,6 +110,7 @@ impl Listener {
                 state,
                 host,
                 requests,
+                finish,
             });
         let (shutdown, stopped) = oneshot::channel::<()>();
         let server = axum::serve(self.socket, router).with_graceful_shutdown(async {
@@ -189,6 +209,7 @@ struct BrowserCallback {
     state: String,
     host: String,
     requests: mpsc::Sender<Delivery>,
+    finish: Finish,
 }
 
 async fn receive(
@@ -202,9 +223,9 @@ async fn receive(
     let Some(callback_value) = parse(query.as_deref().unwrap_or_default(), &callback.state) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let page = match callback_value.outcome {
-        Outcome::Code(_) => CONNECTED,
-        Outcome::Error(_) => NOT_CONNECTED,
+    let (page, result) = match callback_value.outcome {
+        Outcome::Code(_) => (CONNECTED, "connected"),
+        Outcome::Error(_) => (NOT_CONNECTED, "not-connected"),
     };
     let (accepted, acceptance) = oneshot::channel();
     if callback
@@ -217,6 +238,17 @@ async fn receive(
         || acceptance.await.is_err()
     {
         return StatusCode::GONE.into_response();
+    }
+    if let Finish::Redirect(app) = &callback.finish {
+        return (
+            StatusCode::SEE_OTHER,
+            [
+                ("location", format!("{app}?result={result}")),
+                ("cache-control", "no-store".to_owned()),
+                ("referrer-policy", "no-referrer".to_owned()),
+            ],
+        )
+            .into_response();
     }
     (
         [
@@ -277,7 +309,12 @@ mod tests {
     async fn listener() -> (String, Pending, tokio::task::JoinHandle<()>) {
         let (listener, pending) = Listener::bind().await.unwrap();
         let uri = Url::parse(&format!("http://127.0.0.1:{}/callback", listener.port())).unwrap();
-        let task = listener.start(&uri, "expected-state".into(), Duration::from_secs(10));
+        let task = listener.start(
+            &uri,
+            "expected-state".into(),
+            Duration::from_secs(10),
+            Finish::Page,
+        );
         (uri.to_string(), pending, task)
     }
 
@@ -372,6 +409,39 @@ mod tests {
         assert!(client.get(url).send().await.is_err());
     }
 
+    #[tokio::test]
+    async fn an_app_callback_redirects_to_the_app_with_the_result() {
+        let (listener, mut pending) = Listener::bind().await.unwrap();
+        let uri = Url::parse(&format!("http://127.0.0.1:{}/callback", listener.port())).unwrap();
+        let task = listener.start(
+            &uri,
+            "s".into(),
+            Duration::from_secs(10),
+            Finish::Redirect("elsebot-signin://done".into()),
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("{uri}?state=s&code=c"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()["location"],
+            "elsebot-signin://done?result=connected"
+        );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            pending.wait().await.unwrap().outcome,
+            Outcome::Code("c".into())
+        );
+        task.await.unwrap();
+    }
+
     #[test]
     fn content_security_policy_allows_only_the_page_stylesheet() {
         use base64::Engine;
@@ -415,7 +485,7 @@ mod tests {
         assert!(client.get(url).send().await.is_err());
         let (listener, mut pending) = Listener::bind().await.unwrap();
         let uri = Url::parse(&format!("http://127.0.0.1:{}/callback", listener.port())).unwrap();
-        let task = listener.start(&uri, "state".into(), Duration::ZERO);
+        let task = listener.start(&uri, "state".into(), Duration::ZERO, Finish::Page);
         assert_eq!(pending.wait().await, Err(WaitError::Expired));
         task.await.unwrap();
     }

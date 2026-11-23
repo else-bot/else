@@ -56,6 +56,7 @@ impl ConversationView {
                 bot: self.bot_id,
                 question,
                 consent,
+                finish: Default::default(),
             };
             let password = flow.takes_password().then(|| {
                 cx.new(|cx| {

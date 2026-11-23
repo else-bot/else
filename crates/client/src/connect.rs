@@ -22,6 +22,8 @@ pub struct Flow {
     pub bot: Uuid,
     pub question: Uuid,
     pub consent: Consent,
+    /// What the browser shows once the provider redirected back.
+    pub finish: crate::oauth::callback::Finish,
 }
 
 /// The account a connection card signs in to.
@@ -118,11 +120,14 @@ enum Account {
 impl Flow {
     pub async fn sign_in(&self) -> Result<SignIn, ClientError> {
         match &self.consent {
-            Consent::Mcp(consent) => {
-                crate::oauth::mcp::SignIn::start(self.client.clone(), self.bot, consent.clone())
-                    .await
-                    .map(SignIn::Mcp)
-            }
+            Consent::Mcp(consent) => crate::oauth::mcp::SignIn::start(
+                self.client.clone(),
+                self.bot,
+                consent.clone(),
+                self.finish.clone(),
+            )
+            .await
+            .map(SignIn::Mcp),
             Consent::Email(consent) => {
                 let provider = oauth::Provider::for_email(consent.provider).ok_or_else(|| {
                     ClientError::Protocol(format!(
@@ -130,9 +135,14 @@ impl Flow {
                         consent.provider.label()
                     ))
                 })?;
-                oauth::SignIn::start(self.client.clone(), provider, consent.address.clone())
-                    .await
-                    .map(SignIn::Email)
+                oauth::SignIn::start(
+                    self.client.clone(),
+                    provider,
+                    consent.address.clone(),
+                    self.finish.clone(),
+                )
+                .await
+                .map(SignIn::Email)
             }
         }
     }

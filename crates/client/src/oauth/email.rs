@@ -94,6 +94,7 @@ impl SignIn {
         client: Arc<Client>,
         provider: Provider,
         address: String,
+        finish: callback::Finish,
     ) -> Result<Self, ClientError> {
         let registration = provider.registration().ok_or_else(|| {
             ClientError::Protocol(format!(
@@ -101,7 +102,7 @@ impl SignIn {
                 provider.label()
             ))
         })?;
-        Self::start_registered(client, provider, address, registration).await
+        Self::start_registered(client, provider, address, registration, finish).await
     }
 
     async fn start_registered(
@@ -109,10 +110,13 @@ impl SignIn {
         provider: Provider,
         address: String,
         registration: (&'static str, Option<&'static str>),
+        finish: callback::Finish,
     ) -> Result<Self, ClientError> {
         let this = client.clone();
         client
-            .run(async move { Self::start_on_runtime(this, provider, address, registration).await })
+            .run(async move {
+                Self::start_on_runtime(this, provider, address, registration, finish).await
+            })
             .await
     }
 
@@ -121,6 +125,7 @@ impl SignIn {
         provider: Provider,
         address: String,
         (client_id, client_secret): (&str, Option<&str>),
+        finish: callback::Finish,
     ) -> Result<Self, ClientError> {
         let (listener, callback) = callback::Listener::bind().await.map_err(|_| {
             ClientError::Protocol("Cannot open the local email sign-in callback.".into())
@@ -154,6 +159,7 @@ impl SignIn {
             &Url::parse(&redirect_uri).expect("local callback URL"),
             state,
             Duration::from_secs(600),
+            finish,
         );
         Ok(signin)
     }
@@ -307,6 +313,7 @@ mod tests {
                 Provider::Google,
                 String::new(),
                 FIXTURE_REGISTRATION,
+                callback::Finish::Page,
             ));
             starts.recv().await.unwrap();
             if abandon {
@@ -383,10 +390,15 @@ mod tests {
             let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
             let client =
                 Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
-            let mut signin =
-                SignIn::start_registered(client.clone(), provider, address.into(), registration)
-                    .await
-                    .unwrap();
+            let mut signin = SignIn::start_registered(
+                client.clone(),
+                provider,
+                address.into(),
+                registration,
+                callback::Finish::Page,
+            )
+            .await
+            .unwrap();
             let callback = starts.recv().await.unwrap();
             if provider == Provider::Microsoft {
                 let redirect = Url::parse(&callback).unwrap();
@@ -414,10 +426,15 @@ mod tests {
                     .to_string(),
                 "11111111-1111-4111-8111-111111111111"
             );
-            let mut denied =
-                SignIn::start_registered(client.clone(), provider, address.into(), registration)
-                    .await
-                    .unwrap();
+            let mut denied = SignIn::start_registered(
+                client.clone(),
+                provider,
+                address.into(),
+                registration,
+                callback::Finish::Page,
+            )
+            .await
+            .unwrap();
             let callback = starts.recv().await.unwrap();
             let response = reqwest::Client::builder().no_proxy().build().unwrap()
                 .get(format!("{callback}?state=bound-state&error=access_denied&error_description=untrusted%20secret"))

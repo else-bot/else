@@ -100,6 +100,7 @@ async fn refusing(
                 provider: Some("https://issuer.test".into()),
                 scopes: vec!["read".into()],
             }),
+            finish: Default::default(),
         },
         answers,
         cancellations,
@@ -299,6 +300,7 @@ async fn mail_server(
             address: "owner@icloud.com".into(),
             replaces: None,
         }),
+        finish: Default::default(),
     };
     (flow, task)
 }
