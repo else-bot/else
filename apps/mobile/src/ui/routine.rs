@@ -3,6 +3,8 @@
 //! on or off, quiet runs, retrying a failure or clearing it, and deleting.
 //! It shows the routine from the open chat, so it follows live updates.
 
+use std::collections::HashMap;
+
 use else_wire::routines::{PausedReason, Routine};
 use nsh_base::{alert_dialog, nav_page};
 use nsh_core::prelude::*;
@@ -12,6 +14,15 @@ use super::list;
 use super::parts::{self, colors};
 use super::session::{self, Chat};
 use else_client::request::Request;
+
+/// Retries sent whose answer is not in yet, by routine: reopening the
+/// screen resends the same request instead of queueing another run.
+#[derive(Clone, Default, PartialEq)]
+struct PendingRetries(HashMap<Uuid, Uuid>);
+
+fn pending_retries() -> Signal<PendingRetries> {
+    global::<PendingRetries>()
+}
 
 fn key(routine: Uuid) -> String {
     format!("routine-{routine}")
@@ -100,12 +111,28 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
         );
     };
     let retry = move || {
-        // A resend after a lost answer keeps its request ID.
-        let request_id = request.with_untracked(|r| match r.unconfirmed_op() {
-            Some(Change::Retry(id)) => *id,
-            _ => Uuid::new_v4(),
+        // The same request ID until the server answered, even across a
+        // reopened screen.
+        let request_id = pending_retries().with_untracked(|p| p.0.get(&id).copied());
+        let request_id = request_id.unwrap_or_else(|| {
+            let fresh = Uuid::new_v4();
+            pending_retries().update(|p| {
+                p.0.insert(id, fresh);
+            });
+            fresh
         });
-        send(Change::Retry(request_id));
+        let client = session::server().client.clone();
+        session::submit(
+            request,
+            Change::Retry(request_id),
+            move |_| async move { client.retry_routine(bot, id, request_id).await.map(drop) },
+            move |()| {
+                pending_retries().update(|p| {
+                    p.0.remove(&id);
+                });
+                request.try_set(Request::Idle);
+            },
+        );
     };
     let delete = move || {
         let Some((name, reminder)) =
@@ -141,7 +168,9 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
         let last = current.last_run_line();
         let enabled = current.enabled;
         let quiet = current.quiet;
+        // A retry the server is running already disables another.
         let can_retry = retryable(&current);
+        let retrying = current.retrying;
         let failed = current.failed_runs > 0;
         Some(untracked(|| {
             view()
@@ -202,7 +231,14 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
                 .child((can_retry || failed).then(|| {
                     list::card(
                         can_retry
-                            .then(|| list::action_row("Retry Now", false, idle, retry))
+                            .then(|| {
+                                list::action_row(
+                                    if retrying { "Retrying…" } else { "Retry Now" },
+                                    false,
+                                    move || idle() && !retrying,
+                                    retry,
+                                )
+                            })
                             .into_iter()
                             .chain(failed.then(|| {
                                 list::action_row("Clear Failures", false, idle, move || {
