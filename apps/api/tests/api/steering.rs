@@ -530,7 +530,8 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
 }
 
 /// A message to a reply that waits on the owner continues it at once. The
-/// question it types over is skipped; every other hold stays pending. The
+/// question and secret request it types over are skipped; a connection
+/// setup stays pending, as every other hold does. The
 /// next request carries the message, which counts as delivered once that
 /// request is sent, and only once.
 #[tokio::test]
@@ -559,6 +560,16 @@ async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
     .execute(pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO social_setups (id, bot_id, turn_id, attempt, provider, reason)
+         VALUES (?1, ?2, ?3, 1, 'telegram', 'To post updates.')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
 
     let (later, into) = accept(pool, bot, "Use the staging key.").await;
 
@@ -568,15 +579,19 @@ async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
         "queued",
         "it continues at once"
     );
-    let holds: (String, String) = sqlx::query_as(
-        "SELECT q.status, s.status FROM owner_questions q, secret_requests s
-         WHERE q.turn_id = ?1 AND s.turn_id = ?1",
+    let holds: (String, String, String) = sqlx::query_as(
+        "SELECT q.status, s.status, c.status FROM owner_questions q, secret_requests s,
+             social_setups c
+         WHERE q.turn_id = ?1 AND s.turn_id = ?1 AND c.turn_id = ?1",
     )
     .bind(first)
     .fetch_one(pool)
     .await
     .unwrap();
-    assert_eq!(holds, ("skipped".into(), "pending".into()));
+    assert_eq!(
+        holds,
+        ("skipped".into(), "skipped".into(), "pending".into())
+    );
 
     let claimed = else_api::db::turns::claim_next(pool, &[], true)
         .await

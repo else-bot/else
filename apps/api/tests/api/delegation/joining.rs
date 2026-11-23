@@ -51,8 +51,8 @@ async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
-         VALUES (?1, ?2, ?3, 1, 'api_key', 'To post.', '[\"API_KEY\"]')",
+        "INSERT INTO social_setups (id, bot_id, turn_id, attempt, provider, reason)
+         VALUES (?1, ?2, ?3, 1, 'telegram', 'To post.')",
     )
     .bind(Uuid::new_v4())
     .bind(target)

@@ -70,8 +70,23 @@ async fn parks_after(app: &TestApp, turn: Uuid, attempt: i32) {
     }
 }
 
+async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
+    let list = app.owner("GET", "/v1/bots", None).await;
+    list.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap()["sidebar_status"]
+        .clone()
+}
+
+/// The owner typed instead of filling the card: the request closes as
+/// skipped and the bot leaves Needs you at once, the reply continues with
+/// the message and learns the request was skipped, and a late save is
+/// refused without storing anything.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_follow_up_continues_the_reply_and_keeps_the_secret_request() {
+async fn an_owner_message_skips_a_waiting_secret_request() {
     let h = harness(TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
@@ -79,28 +94,48 @@ async fn an_owner_follow_up_continues_the_reply_and_keeps_the_secret_request() {
     let request = request_id(app, &token).await;
     h.release(turn).await;
     app.wait_turn(turn, &["waiting"]).await;
+    assert_ne!(sidebar_status(app, &main).await, Value::Null);
 
-    let correction = "Use the logged-in gh host CLI instead of a GH_TOKEN.";
+    let correction = "I don't know the password, check for a password reset instead.";
     let sent = app
         .send(&main, Uuid::new_v4(), correction, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    let next: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    parks_after(app, turn, 2).await;
-    assert_eq!(request_status(app, request).await.0, "pending");
-    assert!(h.packets().await.last().unwrap().contains(correction));
-    assert_eq!(status(app, next).await, "queued");
+    assert_eq!(request_status(app, request).await.0, "skipped");
+    assert_eq!(
+        shown_turn(app, &main, turn).await["secret_requests"][0]["status"],
+        "skipped"
+    );
+    assert_eq!(sidebar_status(app, &main).await, Value::Null);
 
-    let answered = fulfill(app, &main, request, values()).await;
-    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    let late = fulfill(app, &main, request, values()).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    assert_eq!(late.body["error"]["code"], "secret_request_settled");
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM task_secrets")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+    assert_canary_absent_from_database(app).await;
+
     app.wait_turn(turn, &["completed"]).await;
-    app.wait_turn(next, &["completed"]).await;
-    assert_eq!(attempts(app, turn).await, 3);
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert_eq!(attempts(app, turn).await, 2);
+    let packet = h.packets().await.last().unwrap().clone();
+    assert!(packet.contains(correction), "{packet}");
+    assert!(
+        packet.contains(r#"<secret name="deploy" env="DEPLOY_KEY,DEPLOY_USER" status="skipped"/>"#),
+        "{packet}"
+    );
 }
 
+/// The owner typed while the attempt that asked still streamed: the request
+/// closes at once, and the reply continues with the message when that
+/// attempt ends instead of waiting on the card.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_while_the_asking_attempt_still_runs_keeps_the_request() {
+async fn an_owner_message_skips_a_request_while_the_asking_attempt_runs() {
     let h = harness(TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
@@ -118,56 +153,15 @@ async fn a_follow_up_while_the_asking_attempt_still_runs_keeps_the_request() {
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    h.release(turn).await;
-    parks_after(app, turn, 2).await;
-    assert_eq!(request_status(app, request).await.0, "pending");
-    assert!(
-        h.packets().await.last().unwrap().contains(correction),
-        "the reply continues with the message instead of only parking"
-    );
+    assert_eq!(request_status(app, request).await.0, "skipped");
 
-    let declined = cancel(app, &main, request).await;
-    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
+    h.release(turn).await;
     app.wait_turn(turn, &["completed"]).await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_answer_to_a_request_declined_after_a_follow_up_stores_nothing() {
-    let h = harness(TestApp::builder()).await;
-    let app = &h.app;
-    let main = app.main_bot().await;
-    let (turn, token) = h.running(&main, GATE).await;
-    let request = request_id(app, &token).await;
-    h.release(turn).await;
-    app.wait_turn(turn, &["waiting"]).await;
-    let sent = app
-        .send(
-            &main,
-            Uuid::new_v4(),
-            "Never mind the login.",
-            Some("synthetic"),
-        )
-        .await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    parks_after(app, turn, 2).await;
-    let declined = cancel(app, &main, request).await;
-    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
-
-    let late = fulfill(app, &main, request, values()).await;
-    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
-    assert_eq!(late.body["error"]["code"], "secret_request_settled");
-    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM task_secrets")
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(stored, 0);
-    app.wait_turn(turn, &["completed"]).await;
-    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
-        .await;
-    assert_canary_absent_from_database(app).await;
+    let packet = h.packets().await.last().unwrap().clone();
+    assert!(packet.contains(correction), "{packet}");
+    assert!(packet.contains(r#"status="skipped""#), "{packet}");
 }
 
 async fn status(app: &TestApp, turn: Uuid) -> String {

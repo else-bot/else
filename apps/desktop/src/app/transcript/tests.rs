@@ -1443,3 +1443,55 @@ fn the_first_row_of_each_viewer_day_names_that_day() {
         [Some(at("21:00:00")), None, None, Some(at("22:30:00")), None]
     );
 }
+
+#[test]
+fn a_skipped_secret_card_stays_with_the_reply_that_asked_for_it() {
+    let message = |seq: i64, turn: u128, kind: &str, at: &str| {
+        json!({
+            "id": Uuid::from_u128(seq as u128), "seq": seq, "turn_id": Uuid::from_u128(turn),
+            "kind": kind, "text": format!("Message {seq}"), "created_at": at
+        })
+    };
+    let c = Conversation::from_snapshot(serde_json::from_value(json!({
+        "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+        "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+        "items": [
+            message(1, 10, "user", "2026-11-23T16:50:00Z"),
+            message(2, 10, "assistant", "2026-11-23T16:51:00Z"),
+            message(3, 11, "user", "2026-11-23T16:52:00Z"),
+            message(4, 10, "assistant", "2026-11-23T16:52:10Z"),
+        ],
+        "turns": [
+            {"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 10,
+             "provider_id": "codex", "status": "running", "effect_uncertain": false,
+             "secret_requests": [{"id": Uuid::from_u128(310), "name": "site_login",
+                "reason": "The page requires a login.", "env": ["USERNAME", "PASSWORD"],
+                "status": "skipped", "created_at": "2026-11-23T16:50:30Z",
+                "settled_at": "2026-11-23T16:52:00.001Z"}]},
+            {"id": Uuid::from_u128(11), "request_id": Uuid::from_u128(111), "turn_no": 11,
+             "provider_id": "codex", "status": "queued", "effect_uncertain": false,
+             "steered_into": Uuid::from_u128(10)},
+        ],
+        "activity": { "phase": "running", "active_turn_id": Uuid::from_u128(10), "queued_count": 0 }
+    })).unwrap()).unwrap();
+
+    let card = RowKey::Card(CardKey::SecretRequest(Uuid::from_u128(310)));
+    let rows: Vec<_> = built(&c, &[], &[])
+        .rows
+        .into_iter()
+        .map(|row| (row.key, row.state))
+        .collect();
+
+    let keys: Vec<_> = rows.iter().map(|(key, _)| *key).collect();
+    assert_eq!(
+        keys,
+        [item(1), item(2), card, item(3), task(11), task(10)],
+        "the card stays above the owner's message and the reply it joined"
+    );
+    assert_eq!(
+        rows[2].1,
+        Some(RowState::Card(CardState::SecretRequest(
+            SecretRequestStatus::Skipped
+        )))
+    );
+}
