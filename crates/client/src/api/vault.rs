@@ -5,12 +5,22 @@ use reqwest::Method;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 
-// Value-bearing payloads deliberately do not implement Debug.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Value-bearing payloads never print their values.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct SaveSecret {
     pub env: BTreeMap<String, String>,
     pub description: String,
     pub website: Option<String>,
+}
+
+impl std::fmt::Debug for SaveSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveSecret")
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("description", &self.description)
+            .field("website", &self.website)
+            .finish()
+    }
 }
 
 #[derive(Serialize)]

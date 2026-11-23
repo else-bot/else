@@ -270,7 +270,15 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
                     }
                     pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
                     chat.update(|c| {
-                        if let Some(conversation) = c.conversation_mut() {
+                        // A late answer to a retry can name a message older
+                        // than the loaded page, which the phone pages back
+                        // to on its own; inserting it would open a gap below.
+                        if let Some(conversation) = c.conversation_mut()
+                            && conversation
+                                .items()
+                                .next()
+                                .is_none_or(|oldest| sent.item.seq >= oldest.seq)
+                        {
                             conversation.insert_item(sent.item);
                             conversation.insert_turn(sent.turn);
                         }

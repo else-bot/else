@@ -182,6 +182,8 @@ enum Reconciled {
     Changed(Option<BotProfile>),
     /// Nothing changed: saving again is safe.
     Unchanged,
+    /// The profile could not be read back, so the save stays unconfirmed.
+    Unread(String),
 }
 
 fn key(bot: Uuid) -> String {
@@ -230,14 +232,19 @@ fn screen(bot: Uuid) -> Screen {
         let retry = save.with_untracked(|r| r.unconfirmed_op() == Some(&picked));
         let loaded = untracked(|| load.get()).and_then(|info| info.saved);
         let client = session::server().client.clone();
+        let retried = picked.clone();
         session::submit(
             save,
             picked,
             move |picked| async move {
                 if retry {
-                    match reconcile(&client, bot, &picked, loaded.as_ref()).await? {
-                        Reconciled::Unchanged => {}
-                        found => return Ok(found),
+                    // A read that fails says nothing of the earlier save:
+                    // it stays unconfirmed, so the next Save reads again
+                    // instead of writing blind.
+                    match reconcile(&client, bot, &picked, loaded.as_ref()).await {
+                        Ok(Reconciled::Unchanged) => {}
+                        Ok(found) => return Ok(found),
+                        Err(err) => return Ok(Reconciled::Unread(err.to_string())),
                     }
                 }
                 client
@@ -267,6 +274,9 @@ fn screen(bot: Uuid) -> Screen {
                             ..info
                         });
                     }
+                }
+                Reconciled::Unread(error) => {
+                    save.try_set(Request::Unconfirmed { op: retried, error });
                 }
                 Reconciled::Unchanged => {}
             },

@@ -37,7 +37,7 @@ pub fn connect(profile: &Profile) -> Result<Arc<Client>, String> {
         runtime().handle().clone(),
         Arc::new(PhoneTailnet),
     )
-    .map(Arc::new)
+    .map(|client| Arc::new(client.abort_on_drop()))
 }
 
 /// A Tailscale IP is reachable once the Tailscale app has connected this

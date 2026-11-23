@@ -54,7 +54,8 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             },
         })
     });
-    // Offline, nothing is read; back online, it is read again.
+    // Reconnecting reads again. The first read does not wait for the
+    // socket: a proxy may serve HTTP while it blocks WebSockets.
     let reachable = computed(move || {
         !matches!(
             session::live_state().get(),
@@ -71,7 +72,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
     // changed its own model.
     let updates = computed(move || chat.with(|c| c.conversation().map_or(0, |c| c.bot_updates())));
     let model = resource(
-        move || (reachable.get() && on_top.get()).then(|| updates.get()),
+        move || on_top.get().then(|| (updates.get(), reachable.get())),
         move |_, _| super::model::load_profile(session::server().client.clone(), bot),
     );
     // The rules are read again whenever the bot saves a new version, also
@@ -81,7 +82,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
         Lists::Loading | Lists::Failed(_) => None,
     });
     let rules = resource(
-        move || reachable.get().then(|| (version.get(), on_top.get())),
+        move || Some((version.get(), on_top.get(), reachable.get())),
         move |_, _| {
             let client = session::server().client.clone();
             async move { client.rules(bot).await.map_err(|err| err.to_string()) }

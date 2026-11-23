@@ -196,6 +196,16 @@ pub struct Client {
     auth: HeaderValue,
     runtime: tokio::runtime::Handle,
     tailnet: Arc<dyn Tailnet>,
+    abort_on_drop: bool,
+}
+
+/// Aborts a request's task when the future awaiting it is dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Client {
@@ -238,15 +248,28 @@ impl Client {
             auth,
             runtime,
             tailnet,
+            abort_on_drop: false,
         })
     }
 
     /// Run a future on the client's runtime and await it from any executor.
+    /// Dropping the returned future aborts the request when the client was
+    /// made with [`Client::abort_on_drop`]; otherwise it finishes alone.
     pub async fn run<T: Send + 'static>(
         &self,
         fut: impl std::future::Future<Output = T> + Send + 'static,
     ) -> T {
-        self.runtime.spawn(fut).await.expect("API task panicked")
+        let task = self.runtime.spawn(fut);
+        let _abort = self.abort_on_drop.then(|| AbortOnDrop(task.abort_handle()));
+        task.await.expect("API task panicked")
+    }
+
+    /// Requests end with the future awaiting them: an app whose views own
+    /// their requests (the phone, where a server switch drops them) uses
+    /// this so none outlives its view.
+    pub fn abort_on_drop(mut self) -> Self {
+        self.abort_on_drop = true;
+        self
     }
 
     /// The runtime the client's requests run on.
@@ -1069,6 +1092,32 @@ pub(crate) mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_client_that_aborts_on_drop_ends_a_request_its_caller_dropped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
+        let origin = Origin::parse("http://127.0.0.1:1").unwrap();
+        let client = Client::new(origin, &token, tokio::runtime::Handle::current())
+            .unwrap()
+            .abort_on_drop();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let request = client.run(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), request)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "the dropped request ran on"
+        );
     }
 
     #[tokio::test]

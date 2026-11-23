@@ -588,11 +588,15 @@ fn secret_card(bot: Uuid, asked: SecretRequest) -> impl IntoElement {
         // never leaves them on screen.
         values.set(BTreeMap::new());
         let client = session::server().client.clone();
+        // Once accepted, the card keeps no copy of the values while it waits
+        // for the server's update to remove it.
         session::submit(
             request,
             secret,
             move |secret| client.answer_secret(bot, id, secret),
-            |()| {},
+            move |()| {
+                request.try_set(Request::Accepted(None));
+            },
         );
     };
     let fields: Vec<AnyElement> = names

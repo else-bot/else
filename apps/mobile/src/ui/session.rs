@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use else_client::api::{LiveCommand, LiveCommands};
 
-use else_client::request::Request;
+use else_client::request::{Request, Settle};
 
 use crate::api::{Client, ClientError, LiveEvent, StreamMessage};
 use crate::server::Profile;
@@ -180,8 +180,10 @@ pub fn submit<Op, T, F>(
     T: 'static,
     F: std::future::Future<Output = Result<T, ClientError>> + 'static,
 {
+    // The view that holds `request` may be gone, such as a card a live
+    // update replaced while its confirmation was open: then nothing is sent.
     let mut started = None;
-    request.update(|r| {
+    try_update(request, |r| {
         started = if r.unconfirmed_op() == Some(&op) {
             r.retry()
         } else {
@@ -193,9 +195,18 @@ pub fn submit<Op, T, F>(
     };
     spawn_held(async move {
         let result = send(op).await;
-        let mut settled = false;
-        try_update(request, |r| settled = r.settle(attempt, &result).settled());
-        if let (true, Ok(value)) = (settled, result) {
+        let mut settle = Settle::Stale;
+        try_update(request, |r| {
+            settle = r.settle(attempt, &result);
+            // A rejected key leaves the request idle; say why, unless an
+            // earlier unconfirmed op is kept for its resend.
+            if settle == Settle::Rejected && *r == Request::Idle {
+                r.reject(
+                    "The server rejected the owner key. Add the server again with its current key.",
+                );
+            }
+        });
+        if let (Settle::Settled, Ok(value)) = (settle, result) {
             done(value);
         }
     });
