@@ -2,6 +2,7 @@
 //! the live connection's state, and each open chat. One live connection
 //! feeds them all; it ends with the connected screen.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -41,6 +42,27 @@ impl PartialEq for Link {
 pub struct Server {
     pub profile: Profile,
     pub client: Arc<Client>,
+    /// The chats on screen, so live events reach them. They end with the
+    /// server: a switch or a disconnect leaves nothing to reset.
+    chats: RefCell<HashMap<Uuid, Signal<Chat>>>,
+    /// The live connection's subscriptions, once it has started.
+    live: RefCell<Option<LiveCommands>>,
+}
+
+impl Server {
+    fn chat(&self, bot: Uuid) -> Option<Signal<Chat>> {
+        self.chats.borrow().get(&bot).copied()
+    }
+
+    /// Follows `bot`'s channel from `cursor`, or stops following it.
+    fn follow(&self, bot: Uuid, cursor: Option<String>) {
+        if let Some(commands) = &*self.live.borrow() {
+            let _ = commands.send(match cursor {
+                Some(cursor) => LiveCommand::Subscribe { bot, cursor },
+                None => LiveCommand::Unsubscribe { bot },
+            });
+        }
+    }
 }
 
 pub fn link() -> Signal<Link> {
@@ -85,7 +107,12 @@ fn use_server(profile: Profile, client: Arc<Client>) {
     batch(|| {
         bots().set(Bots::default());
         live_state().set(LiveState::Connecting);
-        link().set(Link::Connected(Rc::new(Server { profile, client })));
+        link().set(Link::Connected(Rc::new(Server {
+            profile,
+            client,
+            chats: RefCell::default(),
+            live: RefCell::default(),
+        })));
     });
 }
 
@@ -256,54 +283,14 @@ impl Chat {
     }
 }
 
-/// The chats on screen, so live events reach them.
-#[derive(Clone, Default)]
-struct Chats(HashMap<Uuid, Signal<Chat>>);
-
-impl PartialEq for Chats {
-    fn eq(&self, _: &Self) -> bool {
-        false
-    }
-}
-
-fn chats() -> Signal<Chats> {
-    global::<Chats>()
-}
-
-/// The channels the live connection follows, each from its cursor.
-#[derive(Clone, Default)]
-struct Wanted(Option<LiveCommands>);
-
-impl PartialEq for Wanted {
-    fn eq(&self, _: &Self) -> bool {
-        false
-    }
-}
-
-fn wanted() -> Signal<Wanted> {
-    global::<Wanted>()
-}
-
-fn follow(bot: Uuid, cursor: Option<String>) {
-    wanted().with_untracked(|wanted| {
-        if let Some(commands) = &wanted.0 {
-            let _ = commands.send(match cursor {
-                Some(cursor) => LiveCommand::Subscribe { bot, cursor },
-                None => LiveCommand::Unsubscribe { bot },
-            });
-        }
-    });
-}
-
 /// Starts the live connection and the first bot list; both end with the
 /// caller's owner (the connected screen).
 pub fn start() {
     held().set(Held(Owner::current()));
     cleanup(|| held().set(Held::default()));
-    let client = server().client.clone();
-    let live = client.clone().live();
-    wanted().set(Wanted(Some(live.commands.clone())));
-    cleanup(move || wanted().set(Wanted(None)));
+    let server = server();
+    let live = server.client.clone().live();
+    server.live.replace(Some(live.commands.clone()));
     // Back from the background, iOS has usually closed the socket: retry
     // now instead of after the backoff, and catch up on the list.
     let commands = live.commands.clone();
@@ -319,12 +306,12 @@ pub fn start() {
     let mut events = live.events;
     spawn(async move {
         while let Some(event) = events.recv().await {
-            handle(event);
+            handle(&server, event);
         }
     });
 }
 
-fn handle(event: LiveEvent) {
+fn handle(server: &Rc<Server>, event: LiveEvent) {
     match event {
         LiveEvent::Connected => live_state().set(LiveState::Live),
         LiveEvent::Disconnected(reason) => live_state().set(LiveState::Offline(reason)),
@@ -337,7 +324,7 @@ fn handle(event: LiveEvent) {
         // The phone shows no maintenance banner yet.
         LiveEvent::ServerPause(_) => {}
         LiveEvent::Bot { bot, message } => {
-            let Some(chat) = chats().with_untracked(|c| c.0.get(&bot).copied()) else {
+            let Some(chat) = server.chat(bot) else {
                 return;
             };
             match message {
@@ -349,12 +336,12 @@ fn handle(event: LiveEvent) {
                         }
                     });
                     if reset {
-                        recover(bot, chat);
+                        recover(server, bot, chat);
                     }
                 }
-                StreamMessage::Reset => recover(bot, chat),
+                StreamMessage::Reset => recover(server, bot, chat),
                 StreamMessage::Deleted => {
-                    follow(bot, None);
+                    server.follow(bot, None);
                     chat.set(Chat::Failed("This bot was deleted.".into()));
                 }
             }
@@ -391,38 +378,38 @@ pub fn refresh_bots() -> Spawned<()> {
 /// the caller's owner (the chat page) goes.
 pub fn open_chat(bot: Uuid) -> Signal<Chat> {
     let chat = signal(Chat::Loading);
-    chats().update(|c| {
-        c.0.insert(bot, chat);
-    });
-    cleanup(move || {
-        chats().update(|c| {
-            c.0.remove(&bot);
+    let server = server();
+    server.chats.borrow_mut().insert(bot, chat);
+    {
+        let server = server.clone();
+        cleanup(move || {
+            server.chats.borrow_mut().remove(&bot);
+            server.follow(bot, None);
         });
-        follow(bot, None);
-    });
-    load(bot, chat);
+    }
+    load(server, bot, chat);
     chat
 }
 
 /// Fetches a fresh page for a chat the stream moved past.
-fn recover(bot: Uuid, chat: Signal<Chat>) {
+fn recover(server: &Rc<Server>, bot: Uuid, chat: Signal<Chat>) {
     let mut start = false;
     chat.update(|c| start = c.start_recovery());
     if start {
-        load(bot, chat);
+        load(server.clone(), bot, chat);
     }
 }
 
 /// Loads the newest page of `bot` into `chat` and follows it from there.
 /// While the chat is open a failed load retries with backoff; a first load
 /// shows its error meanwhile, a recovery keeps the stale page shown.
-pub fn load(bot: Uuid, chat: Signal<Chat>) {
-    let client = server().client.clone();
+fn load(server: Rc<Server>, bot: Uuid, chat: Signal<Chat>) {
     spawn(async move {
         let mut delay = Duration::from_secs(1);
-        let open = move || chats().with_untracked(|c| c.0.get(&bot) == Some(&chat));
+        let open = || server.chat(bot) == Some(chat);
         while open() {
-            let result = client
+            let result = server
+                .client
                 .clone()
                 .latest(bot)
                 .await
@@ -436,7 +423,7 @@ pub fn load(bot: Uuid, chat: Signal<Chat>) {
                 Ok(snapshot) => {
                     match Conversation::from_snapshot(snapshot) {
                         Ok(conversation) => {
-                            follow(bot, Some(conversation.cursor()));
+                            server.follow(bot, Some(conversation.cursor()));
                             chat.set(Chat::Ready(Box::new(conversation)));
                         }
                         Err(_) => chat.set(Chat::Failed(
