@@ -664,6 +664,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 name = "else-mobile"
 version = "0.0.30"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "else-wire",
  "env_logger",

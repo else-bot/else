@@ -1,14 +1,18 @@
 //! One bot's chat: the transcript as bubbles, the bot's replies as
 //! Markdown that streams in, and the composer.
 
-use nsh_base::{MarkdownOptions, TextViewPart, TextViewParts, input, nav_page, text_view};
+use else_wire::items::Attachment;
+use nsh_base::{
+    MarkdownOptions, TextViewPart, TextViewParts, alert_dialog, input, nav_page, text_view,
+};
 use nsh_core::element::AdaptiveColor;
+use nsh_core::picker::{FilePickRequest, PickRequest, PickedFile, PickedStatus};
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
-use super::parts::{ARROW_UP, STOP, colors};
+use super::parts::{ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
-use crate::api::ClientError;
+use crate::api::{ClientError, Message};
 use crate::conversation::{Ask, Conversation, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
@@ -166,7 +170,7 @@ fn transcript(
             view().child(dynamic(move || {
                 let kind = kind.get();
                 untracked(|| match kind {
-                    1 => Some(owner_bubble(line).into_element()),
+                    1 => Some(owner_bubble(bot, line).into_element()),
                     2 => Some(bot_bubble(line).into_element()),
                     3 => Some(note(line).into_element()),
                     4 => Some(typing().into_element()),
@@ -218,18 +222,30 @@ fn row_text(line: Memo<Option<Line>>) -> impl Fn() -> String + Copy {
     }
 }
 
-fn owner_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
+fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
     let outcome = computed(move || {
         line.with(|l| match l {
             Some(Line::Row(Row::Owner { outcome, .. })) => outcome.clone(),
             _ => None,
         })
     });
+    let files = computed(move || {
+        line.with(|l| match l {
+            Some(Line::Row(Row::Owner { files, .. })) => files.clone(),
+            _ => Vec::new(),
+        })
+    });
+    let has_text = computed(move || !row_text(line)().is_empty());
     view()
         .px_4()
         .py(px(3.0))
+        .gap_1()
         .items_end()
-        .child(
+        .child(dynamic(move || {
+            let files = files.get();
+            (!files.is_empty()).then(|| untracked(|| super::files::strip(bot, files, true)))
+        }))
+        .child(when(has_text, move || {
             view()
                 .max_w(relative(0.78))
                 .px(px(14.0))
@@ -243,8 +259,8 @@ fn owner_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
                         .text_size(px(17.0))
                         .line_height(px(22.0))
                         .text_color(rgb(0xffffff)),
-                ),
-        )
+                )
+        }))
         .child(dynamic(move || {
             outcome.get().map(|outcome| {
                 let color = match outcome {
@@ -348,27 +364,181 @@ fn typing() -> impl IntoElement {
     )
 }
 
+/// A file the composer holds for the next message: uploaded as soon as it
+/// is picked, so Send only names it.
+#[derive(Clone, PartialEq)]
+struct Pending {
+    file: Attachment,
+    upload: Upload,
+}
+
+#[derive(Clone, PartialEq)]
+enum Upload {
+    Uploading,
+    Done,
+    Failed(String),
+}
+
+/// The most files one message carries, and the largest one, as the server
+/// takes them.
+const MAX_FILES: usize = 8;
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Asks where to pick from, picks, and uploads what was picked.
+fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, outbox: Signal<Outbox>) {
+    let room = MAX_FILES.saturating_sub(pending.with_untracked(Vec::len)) as u32;
+    if room == 0 {
+        outbox.set(Outbox::Refused(format!(
+            "A message carries at most {MAX_FILES} files."
+        )));
+        return;
+    }
+    spawn(async move {
+        let choice = alert_dialog()
+            .action_sheet()
+            .action("photos", "Photo Library")
+            .action("files", "Choose File")
+            .cancel("cancel", "Cancel")
+            .show()
+            .await;
+        let picked: Vec<PickedFile> = match choice.ok().and_then(|r| r.action) {
+            Some(action) if action == "photos" => {
+                let mut request = PickRequest::new(true, room);
+                request.max_dimension = Some(DevicePixels(2048));
+                pick_images(request).await
+            }
+            Some(action) if action == "files" => {
+                pick_files(FilePickRequest::new(true, room).max_size(MAX_FILE_BYTES)).await
+            }
+            _ => return,
+        };
+        for picked in picked {
+            if picked.status == PickedStatus::TooLarge || picked.len > MAX_FILE_BYTES {
+                outbox.set(Outbox::Refused(format!(
+                    "{} is larger than 10 MB.",
+                    picked.name
+                )));
+                continue;
+            }
+            let data = picked.data.bytes().to_vec();
+            let file = Attachment {
+                id: Uuid::new_v4(),
+                name: picked.name,
+                media_type: picked.mime,
+                size: data.len() as u64,
+            };
+            pending.update(|p| {
+                p.push(Pending {
+                    file: file.clone(),
+                    upload: Upload::Uploading,
+                })
+            });
+            let client = session::server().client.clone();
+            let id = file.id;
+            spawn(async move {
+                let upload = match client.upload(bot, file, data).await {
+                    Ok(_) => Upload::Done,
+                    Err(ClientError::Api { message, .. }) => Upload::Failed(message),
+                    Err(err) => Upload::Failed(err.to_string()),
+                };
+                pending.update(|p| {
+                    if let Some(item) = p.iter_mut().find(|item| item.file.id == id) {
+                        item.upload = upload;
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// The picked files above the text field, each with its state and a way
+/// to take it out.
+fn pending_strip(pending: Signal<Vec<Pending>>) -> impl IntoElement {
+    dynamic(move || {
+        let items = pending.get();
+        (!items.is_empty()).then(|| {
+            scroll()
+                .horizontal()
+                .scrollbar(false)
+                .pb_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .px_3()
+                        .children(items.into_iter().map(move |item| {
+                            let id = item.file.id;
+                            let detail = match &item.upload {
+                                Upload::Uploading => "Uploading…".to_owned(),
+                                Upload::Done => super::files::size_label(item.file.size),
+                                Upload::Failed(message) => message.clone(),
+                            };
+                            let failed = matches!(item.upload, Upload::Failed(_));
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .child(
+                                    super::files::chip(item.file.name.clone(), detail)
+                                        .border_1()
+                                        .border_color(move || {
+                                            if failed {
+                                                colors::destructive()
+                                            } else {
+                                                colors::separator()
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    text("✕")
+                                        .px_2()
+                                        .py_2()
+                                        .text_size(px(15.0))
+                                        .text_color(colors::secondary())
+                                        .role(AccessibilityRole::Button)
+                                        .label(format!("Remove {}", item.file.name))
+                                        .on_press(move || {
+                                            pending.update(|p| p.retain(|item| item.file.id != id))
+                                        }),
+                                )
+                                .into_element()
+                        })),
+                )
+        })
+    })
+}
+
 fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement {
     let draft = signal(String::new());
+    let pending = signal(Vec::<Pending>::new());
     let outbox = signal(Outbox::Idle);
     let input_height = signal(22.0_f32);
     let sending = computed(move || matches!(outbox.get(), Outbox::Sending { .. }));
-    let can_send = computed(move || !draft.with(|d| d.trim().is_empty()) && !sending.get());
-    let show_stop = computed(move || busy.get() && draft.with(|d| d.trim().is_empty()));
+    let empty =
+        computed(move || draft.with(|d| d.trim().is_empty()) && pending.with(Vec::is_empty));
+    let uploaded =
+        computed(move || pending.with(|p| p.iter().all(|item| item.upload == Upload::Done)));
+    let can_send = computed(move || !empty.get() && uploaded.get() && !sending.get());
+    let show_stop = computed(move || busy.get() && empty.get());
 
     let send = move || {
         if !can_send.get_untracked() {
             return;
         }
-        let text = draft.get_untracked().trim().to_owned();
+        let message = Message {
+            text: draft.get_untracked().trim().to_owned(),
+            files: pending.with_untracked(|p| p.iter().map(|item| item.file.clone()).collect()),
+        };
+        // The key a retry is recognized by: the text with its files' markers.
+        let text = message.wire().0;
         let request_id = outbox.with_untracked(|o| o.request_id(&text));
         outbox.set(Outbox::Sending { request_id });
         let client = session::server().client.clone();
         spawn(async move {
-            match client.send(bot, request_id, text.clone()).await {
+            match client.send(bot, request_id, message).await {
                 Ok(sent) => {
                     batch(|| {
                         draft.set(String::new());
+                        pending.set(Vec::new());
                         outbox.set(Outbox::Idle);
                         chat.update(|c| {
                             if let Some(conversation) = c.conversation_mut() {
@@ -460,42 +630,63 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                 })
         })
         .child(notice)
+        .child(pending_strip(pending))
         .child(
             view()
                 .flex_row()
                 .items_end()
-                .mx_3()
-                .pl(px(14.0))
-                .pr(px(4.0))
-                .py(px(4.0))
                 .gap_2()
-                .rounded(px(20.0))
-                .border_1()
-                .border_color(colors::separator())
+                .px_3()
                 .child(
-                    input()
-                        .flex_1()
-                        .multiline(true)
-                        .value(draft)
-                        .on_change(move |t: &str| {
-                            draft.set(t.to_owned());
-                            if matches!(outbox.get_untracked(), Outbox::Refused(_)) {
-                                outbox.set(Outbox::Idle);
-                            }
-                        })
-                        .placeholder("Message")
-                        .on_content_size_change(move |size: &Size<Points>| {
-                            input_height.set(size.height.0.clamp(22.0, 120.0));
-                        })
-                        .h(move || px(input_height.get() + 8.0))
-                        .py(px(4.0))
-                        .text_size(px(17.0))
-                        .line_height(px(22.0))
-                        .text_color(colors::label())
-                        .placeholder_color(|| color(colors::secondary()))
-                        .caret_color(|| color(colors::tint()))
-                        .label("Message"),
+                    view()
+                        .size(px(40.0))
+                        .rounded(px(20.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(colors::fill())
+                        .active(|s| s.opacity(0.6))
+                        .role(AccessibilityRole::Button)
+                        .label("Attach")
+                        .on_press(move || attach(bot, pending, outbox))
+                        .child(image(PLUS).size(px(18.0)).tint_color(colors::secondary())),
                 )
-                .child(action),
+                .child(
+                    view()
+                        .flex_1()
+                        .flex_row()
+                        .items_end()
+                        .pl(px(14.0))
+                        .pr(px(4.0))
+                        .py(px(4.0))
+                        .gap_2()
+                        .rounded(px(20.0))
+                        .border_1()
+                        .border_color(colors::separator())
+                        .child(
+                            input()
+                                .flex_1()
+                                .multiline(true)
+                                .value(draft)
+                                .on_change(move |t: &str| {
+                                    draft.set(t.to_owned());
+                                    if matches!(outbox.get_untracked(), Outbox::Refused(_)) {
+                                        outbox.set(Outbox::Idle);
+                                    }
+                                })
+                                .placeholder("Message")
+                                .on_content_size_change(move |size: &Size<Points>| {
+                                    input_height.set(size.height.0.clamp(22.0, 120.0));
+                                })
+                                .h(move || px(input_height.get() + 8.0))
+                                .py(px(4.0))
+                                .text_size(px(17.0))
+                                .line_height(px(22.0))
+                                .text_color(colors::label())
+                                .placeholder_color(|| color(colors::secondary()))
+                                .caret_color(|| color(colors::tint()))
+                                .label("Message"),
+                        )
+                        .child(action),
+                ),
         )
 }

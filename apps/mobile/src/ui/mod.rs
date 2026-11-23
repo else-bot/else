@@ -5,6 +5,7 @@ mod asks;
 mod bot_list;
 mod chat;
 mod connect;
+mod files;
 mod parts;
 pub mod session;
 

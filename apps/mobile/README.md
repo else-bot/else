@@ -17,6 +17,8 @@ with the server and the desktop app.
 - A chat per bot. Replies render as Markdown and stream in live over the
   WebSocket. Older pages load as you scroll up. Send a message, or stop a
   reply that is running.
+- Send photos and files with a message, up to 8 of 10 MB each. Photos you
+  sent show in the chat; tap a file to open or save it.
 - Answer a bot’s question with one tap. Review a draft, edit its text, then Discard it
   or Send it after a confirmation. Settled ones leave a receipt in the chat.
 - Give a bot the secret it asks for, or decline. It is saved in the
@@ -25,7 +27,7 @@ with the server and the desktop app.
 - Light and dark mode. Reconnects when the app returns to the foreground.
 - Disconnect from the More menu, which removes the key from the phone.
 
-Not yet: the vault list, computer takeovers, attachments, creating
+Not yet: the vault list, computer takeovers, creating
 bots, several servers, push notifications, iPad layout.
 
 ## Addresses and the owner key

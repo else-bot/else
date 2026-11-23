@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use else_wire::bots::{Bot, BotEnvelope, BotList, ReplyPosition};
 use else_wire::conversation::{Sent, Snapshot};
+use else_wire::items::{Attachment, MessagePart};
 use else_wire::outgoing::OutgoingDraft;
 use else_wire::settings::ErrorBody;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -151,11 +152,43 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, ClientError> {
+        self.call_with(method, path, body, Duration::from_secs(20))
+            .await
+    }
+
+    async fn call_with<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<T, ClientError> {
+        let response = self.request(method, path, body, timeout).await?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
+        let body = if bytes.is_empty() {
+            b"null".as_slice()
+        } else {
+            bytes.as_ref()
+        };
+        serde_json::from_slice(body).map_err(|err| ClientError::Protocol(err.to_string()))
+    }
+
+    /// A successful response to the request, its body unread.
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, ClientError> {
         self.verify_transport()?;
         let mut request = self
             .http
             .request(method, format!("{}{path}", self.origin.as_str()))
-            .timeout(Duration::from_secs(20))
+            .timeout(timeout)
             .header(AUTHORIZATION, self.auth.clone());
         if let Some(body) = body {
             request = request.json(&body);
@@ -179,19 +212,11 @@ impl Client {
                 "redirect ({status}) refused; the key is never sent to another origin"
             )));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
         if !status.is_success() {
+            let bytes = response.bytes().await.unwrap_or_default();
             return Err(ClientError::from_http(status, &bytes));
         }
-        let body = if bytes.is_empty() {
-            b"null".as_slice()
-        } else {
-            bytes.as_ref()
-        };
-        serde_json::from_slice(body).map_err(|err| ClientError::Protocol(err.to_string()))
+        Ok(response)
     }
 
     pub async fn bots(self: Arc<Self>) -> Result<BotList, ClientError> {
@@ -208,15 +233,67 @@ impl Client {
         run(async move { self.call(Method::GET, &path, None).await }).await
     }
 
+    /// Sends a message: `text` alone, or with files uploaded before. The
+    /// server takes the text as the flattening of the parts, so the files'
+    /// markers follow the text.
     pub async fn send(
         self: Arc<Self>,
         bot: Uuid,
         request_id: Uuid,
-        text: String,
+        message: Message,
     ) -> Result<Sent, ClientError> {
-        let body = json!({ "request_id": request_id, "text": text, "provider_id": null });
+        let (text, parts) = message.wire();
+        let mut body = json!({ "request_id": request_id, "text": text, "provider_id": null });
+        if !parts.is_empty() {
+            body["parts"] = json!(parts);
+        }
         let path = format!("/v1/bots/{bot}/turns");
         run(async move { self.call(Method::POST, &path, Some(body)).await }).await
+    }
+
+    /// Stores a file for a message to carry. Repeating an upload with the
+    /// same id and bytes is harmless.
+    pub async fn upload(
+        self: Arc<Self>,
+        bot: Uuid,
+        file: Attachment,
+        data: Vec<u8>,
+    ) -> Result<Attachment, ClientError> {
+        use base64::Engine as _;
+        let path = format!("/v1/bots/{bot}/attachments");
+        run(async move {
+            let body = json!({
+                "id": file.id, "name": file.name, "media_type": file.media_type,
+                "data": base64::engine::general_purpose::STANDARD.encode(&data),
+            });
+            drop(data);
+            let stored: Attachment = self
+                .call_with(Method::POST, &path, Some(body), Duration::from_secs(120))
+                .await?;
+            if stored.id != file.id || stored.size != file.size {
+                return Err(ClientError::Protocol(
+                    "the server stored a different file".into(),
+                ));
+            }
+            Ok(stored)
+        })
+        .await
+    }
+
+    /// A stored file's bytes.
+    pub async fn attachment(self: Arc<Self>, bot: Uuid, id: Uuid) -> Result<Vec<u8>, ClientError> {
+        let path = format!("/v1/bots/{bot}/attachments/{id}");
+        run(async move {
+            let response = self
+                .request(Method::GET, &path, None, Duration::from_secs(60))
+                .await?;
+            response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|err| ClientError::Protocol(err.without_url().to_string()))
+        })
+        .await
     }
 
     /// Stops the bot's current reply.
@@ -341,6 +418,42 @@ impl Client {
                 .map(|envelope| envelope.bot)
         })
         .await
+    }
+}
+
+/// A message the owner sends: its text, then its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub text: String,
+    pub files: Vec<Attachment>,
+}
+
+impl Message {
+    /// The text and parts the server takes. A message without files is
+    /// plain text with no parts.
+    pub fn wire(&self) -> (String, Vec<MessagePart>) {
+        if self.files.is_empty() {
+            return (self.text.clone(), Vec::new());
+        }
+        let mut parts = Vec::new();
+        if !self.text.is_empty() {
+            parts.push(MessagePart::Text {
+                text: format!("{}\n", self.text),
+            });
+        }
+        parts.extend(
+            self.files
+                .iter()
+                .map(|file| MessagePart::File { file: file.clone() }),
+        );
+        let text = parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::Text { text } => text.clone(),
+                MessagePart::File { file } => file.fallback(),
+            })
+            .collect();
+        (text, parts)
     }
 }
 
@@ -628,5 +741,40 @@ impl Client {
             }
             pause!();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_message_with_files_spells_them_after_its_text() {
+        let file = Attachment {
+            id: Uuid::nil(),
+            name: "receipt.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: 3,
+        };
+        let message = Message {
+            text: "For March".into(),
+            files: vec![file.clone()],
+        };
+        let (text, parts) = message.wire();
+        assert_eq!(text, "For March\n[File: receipt.pdf]");
+        assert_eq!(
+            parts,
+            vec![
+                MessagePart::Text {
+                    text: "For March\n".into()
+                },
+                MessagePart::File { file }
+            ]
+        );
+        let plain = Message {
+            text: "hi".into(),
+            files: vec![],
+        };
+        assert_eq!(plain.wire(), ("hi".into(), vec![]));
     }
 }

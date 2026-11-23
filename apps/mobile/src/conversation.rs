@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use else_wire::bots::{Activity, Phase};
 use else_wire::conversation::{BotUpdated, Event, Snapshot};
-use else_wire::items::{Item, ItemKind};
+use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
@@ -42,6 +42,24 @@ pub struct Conversation {
     pub activity: Activity,
 }
 
+/// An owner message's text and its files. A message with files keeps its
+/// text parts; the markers its plain text spells the files with are left
+/// out, since the files show on their own.
+fn owner_parts(item: &Item) -> (String, Vec<Attachment>) {
+    if item.parts.is_empty() {
+        return (item.text.clone(), Vec::new());
+    }
+    let mut text = String::new();
+    let mut files = Vec::new();
+    for part in &item.parts {
+        match part {
+            MessagePart::Text { text: t } => text.push_str(t),
+            MessagePart::File { file } => files.push(file.clone()),
+        }
+    }
+    (text.trim().to_owned(), files)
+}
+
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
     let (prefix, seq) = cursor.rsplit_once(':')?;
     Some((prefix, seq.parse().ok()?))
@@ -52,7 +70,9 @@ fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
 pub enum Row {
     Owner {
         id: Uuid,
+        /// Its text without the files' markers.
         text: String,
+        files: Vec<Attachment>,
         /// What became of the reply to it, when it did not complete.
         outcome: Option<Outcome>,
     },
@@ -239,9 +259,11 @@ impl Conversation {
                         });
                         continue;
                     }
+                    let (text, files) = owner_parts(item);
                     rows.push(Row::Owner {
                         id: item.id,
-                        text: item.text.clone(),
+                        text,
+                        files,
                         outcome: turn.and_then(outcome),
                     });
                 }
@@ -564,6 +586,7 @@ mod tests {
             Some(&Row::Owner {
                 id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
                 text: "hi".into(),
+                files: vec![],
                 outcome: Some(Outcome::Failed("Codex is signed out.".into())),
             })
         );
