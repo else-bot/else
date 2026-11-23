@@ -370,3 +370,52 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
     h.release(turn).await;
     h.app.wait_turn(turn, &["completed"]).await;
 }
+
+/// A mail turn that failed before replying has no message the owner sees,
+/// yet its page still carries it, so the failure survives a reload (#772).
+#[tokio::test]
+async fn a_mail_turn_that_failed_before_replying_stays_on_its_page() {
+    let h = recorder::harness(common::TestApp::builder().mail(Arc::new(Transport {
+        sends: AtomicUsize::new(0),
+        uncertain: false,
+        recovers: None,
+    })))
+    .await;
+    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
+    let account = account(&h.app).await;
+    store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    let before = h.send(&bot.to_string(), "Earlier message").await;
+    h.app.wait_turn(before, &["completed"]).await;
+    let failed = mail_event(&h, &account, "INBOX", "[synthetic:refuse]").await;
+    h.app.wait_turn(failed, &["failed"]).await;
+    let later = h.send(&bot.to_string(), "Later message").await;
+    h.app.wait_turn(later, &["completed"]).await;
+    let connector_seq: i64 =
+        sqlx::query_scalar("SELECT seq FROM items WHERE turn_id = ?1 AND kind = 'connector'")
+            .bind(failed)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    let pool = &h.app.db.pool;
+    let page = |before_seq| async move {
+        else_api::db::conversation::snapshot(pool, bot, 100, before_seq)
+            .await
+            .unwrap()
+            .unwrap()
+            .turns
+            .iter()
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        page(None).await.contains(&failed),
+        "the failure is on the latest page"
+    );
+    assert!(
+        !page(Some(connector_seq)).await.contains(&failed),
+        "an older page leaves it to the page that holds it"
+    );
+}
