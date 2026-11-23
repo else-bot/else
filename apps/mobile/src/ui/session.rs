@@ -369,6 +369,18 @@ pub fn update_bot(bot: Bot) {
     });
 }
 
+/// Whether question `id` of `bot` still waits on the owner, as the open
+/// chat last saw it. `None` while the chat is closed or loading.
+pub fn question_pending(bot: Uuid, id: Uuid) -> Option<bool> {
+    let chat = match link().get_untracked() {
+        Link::Connected(server) => server.chat(bot)?,
+        Link::None => return None,
+    };
+    chat.try_get()?
+        .conversation()
+        .map(|c| c.question(id).is_some_and(|q| q.is_pending()))
+}
+
 /// Loads the bot list again.
 pub fn refresh_bots() -> Spawned<()> {
     let client = server().client.clone();

@@ -8,6 +8,8 @@ use else_client::api::ClientError;
 use else_client::connect::{Consent, Flow, Resolution, SignIn};
 use else_client::oauth::callback::Finish;
 use else_wire::questions::Question;
+use std::time::Duration;
+
 use futures_util::future::{Either, select};
 use nsh_base::input;
 use nsh_core::auth_session::{AuthSessionOutcome, AuthSessionRequest};
@@ -275,30 +277,48 @@ pub(super) fn card(bot: Uuid, question: Question) -> impl IntoElement {
 }
 
 /// Opens the provider's page in a sign-in sheet and waits for the
-/// redirect the loopback listener catches. Closing the sheet first stops
-/// the sign-in. The error is the hint the card shows next.
+/// provider to send the owner back. Until then, closing the sheet or the
+/// question settling elsewhere abandons the sign-in; once the callback is
+/// in, it is redeemed whatever the sheet does, so an exchange the server
+/// started is never dropped. The error is the hint the card shows next.
 async fn signed_in(flow: &Flow, phase: Signal<Phase>) -> Result<(), String> {
+    // The card's own view may be scrolled away; the question decides.
+    let withdrawn = || session::question_pending(flow.bot, flow.question) == Some(false);
     let mut signin: SignIn = flow.sign_in().await.map_err(|e| e.to_string())?;
-    let sheet = open_auth_session(AuthSessionRequest::new(signin.url(), SCHEME));
-    // The card may be gone (the question settled meanwhile): then nothing
-    // is redeemed.
-    let exchanging = move || phase.try_set(Phase::Exchanging);
-    let complete = signin.complete(exchanging);
-    futures_util::pin_mut!(complete);
-    match select(complete, sheet).await {
-        Either::Left((result, _)) => {
-            close_auth_session();
-            result.map_err(|e| e.to_string())
-        }
-        // The listener redirected to the app: its callback is in, or about
-        // to be.
-        Either::Right((Ok(AuthSessionOutcome::Completed(_)), complete)) => {
-            complete.await.map_err(|e| e.to_string())
-        }
-        // Closed by the owner, or replaced by another sheet.
-        Either::Right((Ok(_), _)) => Err("Sign-in was closed before it finished.".into()),
-        Either::Right((Err(error), _)) => Err(format!("The sign-in page could not open: {error}")),
+    if withdrawn() {
+        return Err("The connection request was withdrawn.".into());
     }
+    let sheet = open_auth_session(AuthSessionRequest::new(signin.url(), SCHEME));
+    let settled = async {
+        while !withdrawn() {
+            timer(Duration::from_secs(1)).await;
+        }
+    };
+    let received = {
+        let received = signin.received();
+        futures_util::pin_mut!(received, settled);
+        match select(received, select(sheet, settled)).await {
+            Either::Left((received, _)) => {
+                close_auth_session();
+                received
+            }
+            Either::Right((Either::Left((outcome, _)), received)) => match outcome {
+                // The listener redirected to the app: its callback is in,
+                // or about to be.
+                Ok(AuthSessionOutcome::Completed(_)) => received.await,
+                // Closed by the owner, or replaced by another sheet.
+                Ok(_) => return Err("Sign-in was closed before it finished.".into()),
+                Err(error) => return Err(format!("The sign-in page could not open: {error}")),
+            },
+            Either::Right((Either::Right(((), _)), _)) => {
+                close_auth_session();
+                return Err("The connection request was withdrawn.".into());
+            }
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    phase.try_set(Phase::Exchanging);
+    signin.redeem(received).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

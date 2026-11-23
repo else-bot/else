@@ -70,23 +70,44 @@ impl SignIn {
     /// Waits for the browser callback, then redeems it unless `exchanging`
     /// reports that the card is no longer pending.
     pub async fn complete(&mut self, exchanging: impl FnOnce() -> bool) -> Result<(), ClientError> {
+        let received = self.received().await?;
+        if !exchanging() {
+            return Err(withdrawn());
+        }
+        self.redeem(received).await
+    }
+
+    /// Waits for the provider to send the owner back. Until then the
+    /// sign-in can be abandoned; after it, redeem it or reconcile it.
+    pub async fn received(&mut self) -> Result<Received, ClientError> {
         match self {
-            Self::Mcp(signin) => {
-                let callback = signin.wait().await?;
-                if !exchanging() {
-                    return Err(withdrawn());
-                }
-                signin.finish(callback).await
-            }
-            Self::Email(signin) => {
-                let callback = signin.wait().await.map_err(ClientError::Protocol)?;
-                if !exchanging() {
-                    return Err(withdrawn());
-                }
-                signin.finish(callback).await.map(|_| ())
-            }
+            Self::Mcp(signin) => signin.wait().await.map(Received::Mcp),
+            Self::Email(signin) => signin
+                .wait()
+                .await
+                .map(Received::Email)
+                .map_err(ClientError::Protocol),
         }
     }
+
+    /// Has the API redeem the callback `received` returned.
+    pub async fn redeem(&mut self, received: Received) -> Result<(), ClientError> {
+        match (self, received) {
+            (Self::Mcp(signin), Received::Mcp(callback)) => signin.finish(callback).await,
+            (Self::Email(signin), Received::Email(callback)) => {
+                signin.finish(callback).await.map(|_| ())
+            }
+            _ => Err(ClientError::Protocol(
+                "The sign-in callback does not match its sign-in.".into(),
+            )),
+        }
+    }
+}
+
+/// A provider's redirect, caught and not yet redeemed.
+pub enum Received {
+    Mcp(crate::oauth::callback::Callback),
+    Email(oauth::Callback),
 }
 
 /// What a card waiting for the owner offers, by how it signs in.
