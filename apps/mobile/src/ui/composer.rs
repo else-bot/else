@@ -9,7 +9,7 @@ use nsh_core::prelude::*;
 use uuid::Uuid;
 
 use super::chat::Quote;
-use super::parts::{ARROW_UP, PLUS, STOP, colors};
+use super::parts::{self, ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
 
 use else_client::request::Request;
@@ -202,16 +202,9 @@ fn pending_strip(bot: Uuid, pending: Signal<Vec<Pending>>) -> impl IntoElement {
                                     }),
                             )
                             .child(
-                                text("✕")
-                                    .px_2()
-                                    .py_2()
-                                    .text_size(px(15.0))
-                                    .text_color(colors::secondary())
-                                    .role(AccessibilityRole::Button)
-                                    .label(format!("Remove {}", item.file.name))
-                                    .on_press(move || {
-                                        pending.update(|p| p.retain(|item| item.file.id != id))
-                                    }),
+                                parts::remove_button(format!("Remove {}", item.file.name), move || {
+                                    pending.update(|p| p.retain(|item| item.file.id != id))
+                                }),
                             )
                             .into_element()
                     })),
@@ -486,14 +479,7 @@ fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
                         ),
                 )
                 .child(
-                    text("✕")
-                        .px_2()
-                        .py_2()
-                        .text_size(px(15.0))
-                        .text_color(colors::secondary())
-                        .role(AccessibilityRole::Button)
-                        .label("Cancel reply")
-                        .on_press(move || quote.set(None)),
+                    parts::remove_button("Cancel reply", move || quote.set(None)),
                 ),
         )
     })

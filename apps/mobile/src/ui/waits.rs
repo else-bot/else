@@ -79,9 +79,10 @@ pub fn tray(bot: Uuid, name: String, chat: Signal<Chat>) -> impl IntoElement {
                                 .text_color(colors::label()),
                         )
                         .child(
-                            text(move || if open.get() { "Hide" } else { "Show" })
-                                .text_size(px(15.0))
-                                .text_color(colors::tint()),
+                            image(super::parts::CHEVRON_DOWN)
+                                .size(px(13.0))
+                                .tint_color(colors::tint())
+                                .rotate(move || if open.get() { 180.0 } else { 0.0 }),
                         ),
                 )
                 .child(when(open, move || {

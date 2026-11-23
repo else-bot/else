@@ -85,11 +85,7 @@ pub fn link_row(
                 .text_size(px(17.0))
                 .text_color(colors::secondary()),
         )
-        .child(enabled.then(|| {
-            text("›")
-                .text_size(px(22.0))
-                .text_color(colors::secondary())
-        }))
+        .child(enabled.then(super::parts::chevron))
         .into_element()
 }
 
@@ -138,10 +134,10 @@ pub fn option_row(
         )
         .child(dynamic(move || {
             picked().then(|| {
-                text("✓")
-                    .text_size(px(17.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors::tint())
+                image(super::parts::CHECKMARK)
+                    .size(px(16.0))
+                    .tint_color(colors::tint())
+                    .label("Selected")
             })
         }))
         .into_element()

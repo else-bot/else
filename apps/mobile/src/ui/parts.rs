@@ -10,6 +10,34 @@ pub const STOP: ImageAsset = asset!("stop.svg");
 pub const PLUS: ImageAsset = asset!("plus.svg");
 pub const SERVER: ImageAsset = asset!("server.svg");
 pub const BELL_SLASH: ImageAsset = asset!("bell-slash.svg");
+pub const CHEVRON_RIGHT: ImageAsset = asset!("chevron-right.svg");
+pub const CHEVRON_DOWN: ImageAsset = asset!("chevron-down.svg");
+pub const CHECKMARK: ImageAsset = asset!("checkmark.svg");
+pub const XMARK_CIRCLE: ImageAsset = asset!("xmark-circle-fill.svg");
+
+/// The disclosure chevron at the end of a row that opens another screen.
+pub fn chevron() -> impl IntoElement {
+    image(CHEVRON_RIGHT)
+        .size(px(13.0))
+        .tint_color(colors::secondary())
+        .opacity(0.6)
+}
+
+/// A small remove button (SF's xmark.circle.fill), named for screen
+/// readers by what it removes.
+pub fn remove_button(label: impl Into<SharedString>, run: impl Fn() + 'static) -> View {
+    view()
+        .p_2()
+        .role(AccessibilityRole::Button)
+        .label(label.into())
+        .active(|s| s.opacity(0.5))
+        .on_press(run)
+        .child(
+            image(XMARK_CIRCLE)
+                .size(px(18.0))
+                .tint_color(colors::secondary()),
+        )
+}
 
 /// The theme's colors (`theme.json`), light and dark.
 pub mod colors {

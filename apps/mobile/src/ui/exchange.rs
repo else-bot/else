@@ -89,7 +89,11 @@ pub fn card(exchange: Exchange) -> impl IntoElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors::tint()),
                 )
-                .child(text("›").text_size(px(17.0)).text_color(colors::tint())),
+                .child(
+                    image(super::parts::CHEVRON_RIGHT)
+                        .size(px(12.0))
+                        .tint_color(colors::tint()),
+                ),
         )
         .child(exchange.title.clone().map(|title| {
             text(title)
