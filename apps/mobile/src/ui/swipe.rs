@@ -61,9 +61,11 @@ fn rest(x: f32, leading: usize, trailing: usize) -> Rest {
 
 /// `content` with `leading` actions behind its left edge and `trailing`
 /// behind its right, the first of each the outermost. `open` is called for
-/// a tap on the row while it rests closed.
+/// a tap on the row while it rests closed; `label` is what screen readers
+/// say for the row.
 pub fn row(
     content: impl IntoElement,
+    label: impl Fn() -> SharedString + 'static,
     leading: Vec<Action>,
     trailing: Vec<Action>,
     open: impl Fn() + 'static,
@@ -78,8 +80,10 @@ pub fn row(
         }
     };
     let side = |actions: Vec<Action>, trailing: bool| {
+        let open = if trailing { Rest::Trailing } else { Rest::Leading };
         view()
-            .accessibility_elements_hidden(move || shown.get() == Rest::Closed)
+            // Screen readers reach a side's buttons only while it is open.
+            .accessibility_elements_hidden(move || shown.get() != open)
             .absolute()
             .top_0()
             .bottom_0()
@@ -128,6 +132,12 @@ pub fn row(
     let first_trail = trailing.first().map(|a| a.run.clone());
     let ended = {
         move |event: &PanEvent| {
+            // A drag the system cancelled does nothing.
+            if event.cancelled {
+                shown.set(Rest::Closed);
+                drop(x.spring(0.0, spring()));
+                return;
+            }
             let at = event.value_x.unwrap_or(event.translation.x.0);
             let to = rest(at, lead_n, trail_n);
             let target = match to {
@@ -171,6 +181,8 @@ pub fn row(
                 .bind_translate_x(&x)
                 .on_pan_end(ended)
                 .on_press(tap)
+                .role(AccessibilityRole::Button)
+                .label(label)
                 .accessibility_actions(offered)
                 .on_accessibility_action(move |name: &str| {
                     if let Some(action) = all.iter().find(|a| a.label == name) {
@@ -185,8 +197,8 @@ pub fn row(
 const REPLY_AT: f32 = 56.0;
 /// The strip at the screen's left edge a reply drag leaves to the
 /// stack's swipe back: a view over it, outside the dragged one, takes the
-/// touches there.
-const EDGE: f32 = 24.0;
+/// touches there. As wide as the chat's side margin, so it covers no text.
+const EDGE: f32 = 16.0;
 
 /// A message that a drag to the right quotes in a reply, as Messages
 /// does: it follows the finger, slower past the point where letting go
@@ -217,7 +229,9 @@ pub fn to_reply(content: impl IntoElement, reply: impl Fn() + 'static) -> impl I
                 .pan_values(Some(&x), None)
                 .bind_translate_x(&shown)
                 .on_pan_end(move |event: &PanEvent| {
-                    if event.value_x.unwrap_or(event.translation.x.0) >= REPLY_AT {
+                    if !event.cancelled
+                        && event.value_x.unwrap_or(event.translation.x.0) >= REPLY_AT
+                    {
                         haptic(Haptic::Impact(HapticImpact::Light));
                         reply();
                     }

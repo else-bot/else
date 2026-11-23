@@ -289,8 +289,6 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .pl_4()
-        .role(AccessibilityRole::Button)
-        .label(move || row.with(|r| format!("{}, {}", r.name, r.subtitle())))
         .child(view().w(px(14.0)).items_center().child(when(
             move || row.with(|r| r.unread),
             || view().size(px(10.0)).rounded(px(5.0)).bg(colors::tint()),
@@ -392,7 +390,13 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
             }
             context_menu()
                 .items(items)
-                .trigger(swipe::row(content, leading, trailing, open).into_element())
+                .trigger(swipe::row(
+                    content,
+                    move || row.with(|r| SharedString::from(format!("{}, {}", r.name, r.subtitle()))),
+                    leading,
+                    trailing,
+                    open,
+                ).into_element())
                 .on_select(move |action: &SharedString| match action.as_ref() {
                     "read" => mark_read(id, reading),
                     "mute" => set_muted(id, !muted),
