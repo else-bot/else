@@ -24,12 +24,13 @@ fn pending_retries() -> Signal<PendingRetries> {
     global::<PendingRetries>()
 }
 
-fn key(routine: Uuid) -> String {
-    format!("routine-{routine}")
+/// Keyed by its bot too, so the bot's screens close together.
+fn key(bot: Uuid, routine: Uuid) -> String {
+    format!("routine-{bot}-{routine}")
 }
 
 pub fn open(bot: Uuid, routine: Uuid, chat: Signal<Chat>) {
-    super::push(key(routine), move || screen(bot, routine, chat));
+    super::push(key(bot, routine), move || screen(bot, routine, chat));
 }
 
 /// What the screen asks of the server. Each is safe to repeat: switches
@@ -80,6 +81,14 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
             })
         })
     });
+    // Gone from the loaded lists (deleted elsewhere, or run once): the
+    // screen closes.
+    effect(move || {
+        let loaded = chat.with(|c| matches!(c, Chat::Ready(_)));
+        if loaded && routine.with(Option::is_none) {
+            super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot, id)));
+        }
+    });
     let request = signal(Request::<Change>::Idle);
     let idle = move || !request.with(Request::busy);
     let send = move |change: Change| {
@@ -105,7 +114,7 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
             move |()| {
                 request.try_set(Request::Idle);
                 if leave {
-                    super::routes().update(|r| r.0.retain(|route| *route.key != *key(id)));
+                    super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot, id)));
                 }
             },
         );
@@ -266,7 +275,7 @@ fn screen(bot: Uuid, id: Uuid, chat: Signal<Chat>) -> Screen {
             .map(parts::footnote)
     });
     nav_page()
-        .key(key(id))
+        .key(key(bot, id))
         .title(move || {
             routine.with(|r| {
                 r.as_ref()

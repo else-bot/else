@@ -363,6 +363,7 @@ fn handle(server: &Rc<Server>, event: LiveEvent) {
                 StreamMessage::Deleted => {
                     server.follow(bot, None);
                     chat.set(Chat::Failed("This bot was deleted.".into()));
+                    close_bot_screens(bot);
                 }
             }
         }
@@ -420,6 +421,12 @@ pub fn open_chat(bot: Uuid) -> Signal<Chat> {
     }
     load(server, bot, chat);
     chat
+}
+
+/// Closes every screen of `bot`: its chat and what was opened from it.
+pub fn close_bot_screens(bot: Uuid) {
+    let id = bot.to_string();
+    super::routes().update(|r| r.0.retain(|route| !route.key.contains(&id)));
 }
 
 /// Reads an open chat again over HTTP, for a change the live connection

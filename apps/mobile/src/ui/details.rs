@@ -289,8 +289,7 @@ fn delete_section(bot: Uuid, record: Memo<Option<Bot>>) -> impl IntoElement {
                 move |()| client.delete_bot(bot),
                 move |_| {
                     // Its chat and the screens over it close with it.
-                    let id = bot.to_string();
-                    super::routes().update(|r| r.0.retain(|route| !route.key.contains(&id)));
+                    session::close_bot_screens(bot);
                     session::refresh_bots();
                 },
             );

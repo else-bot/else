@@ -175,6 +175,11 @@ pub fn lines(
             .filter(|b| b.is_active())
             .collect();
         let category = group.category.map(|c| c.id);
+        // Unassigned shows only with a bot in it; a deleted bot's record
+        // does not count.
+        if category.is_none() && active.is_empty() {
+            continue;
+        }
         let section = category.map_or_else(|| "unassigned".to_owned(), |id| id.to_string());
         if grouped {
             lines.push(Line::Header {

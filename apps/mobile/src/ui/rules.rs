@@ -177,7 +177,13 @@ fn version_screen(bot: Uuid, number: i64, rules: Resource<RulesFile, String>) ->
             session::submit(
                 request,
                 (target, expected),
-                move |(target, expected)| client.restore_rules(bot, target, expected),
+                move |(target, expected)| async move {
+                    let result = client.restore_rules(bot, target, expected).await;
+                    // Whatever the answer, the history shows what the server
+                    // kept: a refused or lost restore may have saved already.
+                    rules.refetch();
+                    result
+                },
                 move |()| {
                     request.try_set(Request::Idle);
                     rules.refetch();
