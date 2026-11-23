@@ -21,6 +21,7 @@ mod routine;
 mod rules;
 mod search;
 pub mod session;
+mod swipe;
 mod waits;
 
 use std::rc::Rc;

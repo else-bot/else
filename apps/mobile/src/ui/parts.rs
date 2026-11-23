@@ -9,6 +9,7 @@ pub const ARROW_UP: ImageAsset = asset!("arrow-up.svg");
 pub const STOP: ImageAsset = asset!("stop.svg");
 pub const PLUS: ImageAsset = asset!("plus.svg");
 pub const SERVER: ImageAsset = asset!("server.svg");
+pub const BELL_SLASH: ImageAsset = asset!("bell-slash.svg");
 
 /// The theme's colors (`theme.json`), light and dark.
 pub mod colors {

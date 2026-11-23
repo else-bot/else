@@ -1,7 +1,8 @@
 //! The bot list: every bot of the server, those waiting on the owner
 //! first, as Messages lists its conversations.
 
-use nsh_base::{alert_dialog, nav_page};
+use else_client::api::ReadCommand;
+use nsh_base::{MenuButtonItem, alert_dialog, context_menu, nav_page};
 use nsh_core::HeaderSystemItem;
 use nsh_core::element::desktop::MenuItem;
 use nsh_core::element::header::HeaderItem;
@@ -9,6 +10,7 @@ use nsh_core::prelude::*;
 
 use super::parts::{self, colors};
 use super::session::{self, LiveState};
+use super::swipe;
 use std::collections::HashSet;
 
 use uuid::Uuid;
@@ -228,14 +230,12 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
         Status::Problem(_) => colors::destructive(),
         _ => colors::secondary(),
     };
-    view()
+    let content = view()
         .flex_row()
         .items_center()
         .pl_4()
-        .active(|s| s.bg(colors::fill()))
         .role(AccessibilityRole::Button)
         .label(move || row.with(|r| format!("{}, {}", r.name, r.subtitle())))
-        .on_press(open)
         .child(view().w(px(14.0)).items_center().child(when(
             move || row.with(|r| r.unread),
             || view().size(px(10.0)).rounded(px(5.0)).bg(colors::tint()),
@@ -263,6 +263,15 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(colors::label()),
                         )
+                        .child(when(
+                            move || row.with(|r| r.muted),
+                            || {
+                                image(parts::BELL_SLASH)
+                                    .size(px(14.0))
+                                    .tint_color(colors::secondary())
+                                    .label("Muted")
+                            },
+                        ))
                         .child(
                             text(time)
                                 .text_size(px(15.0))
@@ -276,7 +285,69 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
                         .line_height(px(20.0))
                         .text_color(subtitle_color),
                 ),
-        )
+        );
+    // Rebuilt when what the actions say changes (read, muted).
+    let state = computed(move || row.with(|r| (r.id, r.unread, r.muted)));
+    dynamic(move || {
+        let (id, unread, muted) = state.get();
+        let name = row.with_untracked(|r| r.name.clone());
+        let main = session::bots().with_untracked(|b| b.default_bot_id == Some(id));
+        let content = content.clone();
+        Some(untracked(|| {
+            let leading = vec![swipe::Action::new(
+                if unread { "Read" } else { "Unread" },
+                0x2b88fb,
+                move || mark_read(id, unread),
+            )];
+            let mut trailing = Vec::new();
+            if !main {
+                let name = name.clone();
+                trailing.push(swipe::Action::new("Delete", 0xff3b30, move || {
+                    confirm_delete(id, name.clone())
+                }));
+            }
+            trailing.push(swipe::Action::new(
+                if muted { "Unmute" } else { "Mute" },
+                0x5856d6,
+                move || set_muted(id, !muted),
+            ));
+            let mut items = vec![
+                menu_item(
+                    "read",
+                    if unread {
+                        "Mark as Read"
+                    } else {
+                        "Mark as Unread"
+                    },
+                    if unread {
+                        "envelope.open"
+                    } else {
+                        "envelope.badge"
+                    },
+                ),
+                menu_item(
+                    "mute",
+                    if muted { "Unmute" } else { "Mute" },
+                    if muted { "bell" } else { "bell.slash" },
+                ),
+            ];
+            if !main {
+                let mut delete = menu_item("delete", "Delete", "trash");
+                delete.destructive = true;
+                items.push(delete);
+            }
+            context_menu()
+                .items(items)
+                .trigger(swipe::row(content, leading, trailing, open).into_element())
+                .on_select(move |action: &SharedString| match action.as_ref() {
+                    "read" => mark_read(id, unread),
+                    "mute" => set_muted(id, !muted),
+                    "delete" => confirm_delete(id, name.clone()),
+                    _ => {}
+                })
+                .into_element()
+        }))
+    })
 }
 
 fn confirm_disconnect() {
@@ -292,6 +363,73 @@ fn confirm_disconnect() {
             .await;
         if matches!(choice, Ok(r) if r.action.as_deref() == Some("disconnect")) {
             session::disconnect();
+        }
+    });
+}
+
+fn menu_item(id: &'static str, label: &'static str, symbol: &'static str) -> MenuButtonItem {
+    let mut item = MenuButtonItem::new(id, label);
+    item.icon = Some(symbol.into());
+    item
+}
+
+/// Marks the bot read through its newest message, or unread; the bots
+/// channel brings the new state.
+fn mark_read(bot: Uuid, unread: bool) {
+    let client = session::server().client.clone();
+    spawn(async move {
+        let command = if unread {
+            ReadCommand::MarkRead { position: None }
+        } else {
+            ReadCommand::MarkUnread
+        };
+        if client.clone().read(bot, command).await.is_ok() {
+            haptic(Haptic::Selection);
+        }
+        session::refresh_bots();
+    });
+}
+
+fn set_muted(bot: Uuid, muted: bool) {
+    let client = session::server().client.clone();
+    spawn(async move {
+        if let Ok(saved) = client.set_muted(bot, muted).await {
+            session::update_bot(saved);
+            haptic(Haptic::Selection);
+        }
+    });
+}
+
+/// Deletes the bot after the owner confirms, as its details do.
+fn confirm_delete(bot: Uuid, name: String) {
+    spawn(async move {
+        let choice = alert_dialog()
+            .title(format!("Delete {name}?"))
+            .description(
+                "Any work in progress stops and the bot leaves your list. Its history, memory and files are kept.",
+            )
+            .cancel("cancel", "Cancel")
+            .destructive("delete", "Delete")
+            .show()
+            .await;
+        if !matches!(choice, Ok(r) if r.action.as_deref() == Some("delete")) {
+            return;
+        }
+        let client = session::server().client.clone();
+        match client.delete_bot(bot).await {
+            Ok(_) => {
+                haptic(Haptic::Notification(HapticNotification::Success));
+                session::close_bot_screens(bot);
+                session::refresh_bots();
+            }
+            Err(err) => {
+                let _ = alert_dialog()
+                    .title("Couldn't delete the bot")
+                    .description(err.to_string())
+                    .cancel("ok", "OK")
+                    .show()
+                    .await;
+            }
         }
     });
 }
