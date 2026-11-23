@@ -114,18 +114,15 @@ impl Ask {
     }
 }
 
-/// A reply that did not complete, as the owner's message shows it.
+/// What the owner's message says under it: its turn's status line, as the
+/// desktop words it (else_client::turn_status), and a retry when the server
+/// can run it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The owner stopped it.
-    Stopped,
-    Failed {
-        reason: String,
-        /// Set when the server can run the message again.
-        retry: Option<Retry>,
-    },
-    /// The server cannot tell whether it ran.
-    Unknown,
+pub struct Outcome {
+    pub label: String,
+    /// The line reports a failure.
+    pub failed: bool,
+    pub retry: Option<Retry>,
 }
 
 /// Running a failed turn again: the attempt that failed is the request's
@@ -134,16 +131,6 @@ pub enum Outcome {
 pub struct Retry {
     pub turn: Uuid,
     pub attempt: i64,
-}
-
-impl Outcome {
-    pub fn text(&self) -> &str {
-        match self {
-            Self::Stopped => "Stopped",
-            Self::Failed { reason, .. } => reason,
-            Self::Unknown => "The outcome of this reply is unknown",
-        }
-    }
 }
 
 impl Row {
@@ -444,25 +431,19 @@ pub fn thinking(conversation: &Conversation) -> bool {
 }
 
 fn outcome(turn: &Turn) -> Option<Outcome> {
-    match turn.status {
-        TurnStatus::Failed => Some(Outcome::Failed {
-            reason: turn
-                .error
-                .as_ref()
-                .and_then(|error| error.message.clone())
-                .unwrap_or_else(|| "The reply failed".into()),
-            retry: turn
-                .attempt
-                .filter(|_| turn.retryable)
-                .map(|attempt| Retry {
-                    turn: turn.id,
-                    attempt,
-                }),
-        }),
-        TurnStatus::Uncertain => Some(Outcome::Unknown),
-        TurnStatus::Interrupted => Some(Outcome::Stopped),
-        _ => None,
-    }
+    let (label, failed) = else_client::turn_status::label(turn);
+    let retry = turn
+        .attempt
+        .filter(|_| turn.status == TurnStatus::Failed && turn.retryable)
+        .map(|attempt| Retry {
+            turn: turn.id,
+            attempt,
+        });
+    (!label.is_empty() || retry.is_some()).then_some(Outcome {
+        label,
+        failed,
+        retry,
+    })
 }
 
 #[cfg(test)]
@@ -736,8 +717,9 @@ mod tests {
                 id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
                 text: "hi".into(),
                 files: vec![],
-                outcome: Some(Outcome::Failed {
-                    reason: "Codex is signed out.".into(),
+                outcome: Some(Outcome {
+                    label: "Failed. Codex is signed out.".into(),
+                    failed: true,
                     retry: Some(Retry {
                         turn: TURN.parse().unwrap(),
                         attempt: 2,

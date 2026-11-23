@@ -310,11 +310,12 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
         }))
         .child(dynamic(move || {
             outcome.get().map(|outcome| {
-                let color = match outcome {
-                    Outcome::Stopped => colors::secondary(),
-                    Outcome::Failed { .. } | Outcome::Unknown => colors::destructive(),
+                let color = if outcome.failed {
+                    colors::destructive()
+                } else {
+                    colors::secondary()
                 };
-                text(outcome.text().to_owned())
+                text(outcome.label)
                     .pt_1()
                     .text_size(px(12.0))
                     .text_color(color)
@@ -322,7 +323,7 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
         }))
         .child(dynamic(move || {
             let retry = outcome.with(|o| match o {
-                Some(Outcome::Failed { retry, .. }) => *retry,
+                Some(Outcome { retry, .. }) => *retry,
                 _ => None,
             })?;
             Some(untracked(|| retry_button(bot, retry)))
