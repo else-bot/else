@@ -344,7 +344,13 @@ impl Profile {
     pub fn load() -> Option<Self> {
         // Builds before the Keychain kept the key in this JSON entry.
         nsh_core::storage::Storage::remove_item("server-profile");
-        Self::saved(&Saved::load().active?)
+        // When the one in use lost its key, another saved server opens.
+        let saved = Saved::load();
+        saved
+            .active
+            .iter()
+            .chain(&saved.origins)
+            .find_map(|origin| Self::saved(origin))
     }
 
     /// The saved server at `origin`, with its key.
@@ -377,12 +383,14 @@ impl Profile {
     /// Removes the server at `origin` and its key; returns the server now
     /// in use, if another one is saved.
     pub fn forget(origin: &str) -> Option<Self> {
-        vault::remove(origin);
+        // The list first: a key left behind by a failed removal is unused,
+        // while a listed server without its key would be the one opened.
         let mut saved = Saved::load();
         saved.remove(origin);
         if let Err(err) = saved.store() {
             log::warn!("{err}");
         }
+        vault::remove(origin);
         Self::saved(saved.active.as_deref()?)
     }
 }
@@ -404,7 +412,10 @@ mod tests {
         assert_eq!(saved.active.as_deref(), Some("https://home.example"));
         saved.remove("https://home.example");
         assert_eq!(saved.active.as_deref(), Some("https://vps.example"));
+        saved.select("https://lab.example");
         saved.remove("https://vps.example");
+        assert_eq!(saved.active.as_deref(), Some("https://lab.example"));
+        saved.remove("https://lab.example");
         assert_eq!(saved, Saved::default());
     }
 

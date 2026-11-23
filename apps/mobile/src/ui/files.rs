@@ -21,9 +21,20 @@ pub fn is_image(media_type: &str) -> bool {
     )
 }
 
+/// The folder a server's files are kept in. Attachment IDs are chosen by
+/// the client that uploads, so two servers can hold the same ID with
+/// different bytes: each server, and each bot, has its own folder.
+pub fn server_dir(origin: &str) -> PathBuf {
+    let name: String = origin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    std::env::temp_dir().join("else-files").join(name)
+}
+
 /// Where a file's bytes are kept: its own folder, so its name stays as the
 /// owner sees it in the share sheet.
-fn cached(file: &Attachment) -> PathBuf {
+fn cached(origin: &str, bot: Uuid, file: &Attachment) -> PathBuf {
     let name: String = file
         .name
         .chars()
@@ -31,19 +42,20 @@ fn cached(file: &Attachment) -> PathBuf {
         .collect();
     let name = name.trim_start_matches('.');
     let name = if name.is_empty() { "file" } else { name };
-    std::env::temp_dir()
-        .join("else-files")
+    server_dir(origin)
+        .join(bot.to_string())
         .join(file.id.to_string())
         .join(name)
 }
 
 /// The file's local path, fetching it first when it is not kept yet.
 async fn fetch(bot: Uuid, file: &Attachment) -> Result<PathBuf, String> {
-    let path = cached(file);
+    let server = session::server();
+    let path = cached(server.profile.origin.as_str(), bot, file);
     if path.exists() {
         return Ok(path);
     }
-    let client = session::server().client.clone();
+    let client = server.client.clone();
     let bytes = client
         .attachment(bot, file.id)
         .await

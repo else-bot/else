@@ -16,9 +16,9 @@ use crate::api::{ClientError, Message};
 use crate::conversation::{Ask, Conversation, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
-/// is unknown keeps its request ID and text: sending the same text again
-/// reuses the ID, so the server cannot post it twice; edited text is a new
-/// message.
+/// is unknown keeps its request ID and the message it carried: sending the
+/// same text and files again reuses the ID, so the server cannot post it
+/// twice; any change makes a new message.
 #[derive(Clone, PartialEq)]
 enum Outbox {
     Idle,
@@ -27,20 +27,18 @@ enum Outbox {
     },
     Unknown {
         request_id: Uuid,
-        text: String,
+        sent: Message,
         message: String,
     },
     Refused(String),
 }
 
 impl Outbox {
-    fn request_id(&self, text: &str) -> Uuid {
+    fn request_id(&self, message: &Message) -> Uuid {
         match self {
             Self::Unknown {
-                request_id,
-                text: sent,
-                ..
-            } if sent == text => *request_id,
+                request_id, sent, ..
+            } if sent == message => *request_id,
             _ => Uuid::new_v4(),
         }
     }
@@ -366,17 +364,71 @@ fn typing() -> impl IntoElement {
 
 /// A file the composer holds for the next message: uploaded as soon as it
 /// is picked, so Send only names it.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct Pending {
     file: Attachment,
     upload: Upload,
 }
 
-#[derive(Clone, PartialEq)]
+impl PartialEq for Pending {
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file && self.upload == other.upload
+    }
+}
+
+#[derive(Clone)]
 enum Upload {
     Uploading,
     Done,
-    Failed(String),
+    /// Not stored, or not known to be: its bytes stay so a tap retries
+    /// it under the same ID, which the server takes once.
+    Failed {
+        message: String,
+        data: std::rc::Rc<Vec<u8>>,
+    },
+}
+
+impl PartialEq for Upload {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Uploading, Self::Uploading) | (Self::Done, Self::Done) => true,
+            (Self::Failed { message: a, .. }, Self::Failed { message: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Uploads one picked file and records how it went.
+fn upload(bot: Uuid, pending: Signal<Vec<Pending>>, file: Attachment, data: std::rc::Rc<Vec<u8>>) {
+    let id = file.id;
+    pending.update(|p| {
+        if let Some(item) = p.iter_mut().find(|item| item.file.id == id) {
+            item.upload = Upload::Uploading;
+        }
+    });
+    let client = session::server().client.clone();
+    spawn(async move {
+        let result = client.upload(bot, file, data.as_ref().clone()).await;
+        session::try_update(pending, |p| {
+            let Some(item) = p.iter_mut().find(|item| item.file.id == id) else {
+                return;
+            };
+            item.upload = match result {
+                Ok(stored) => {
+                    item.file = stored;
+                    Upload::Done
+                }
+                Err(err) => Upload::Failed {
+                    message: match err {
+                        ClientError::Api { message, .. } => message,
+                        err if err.outcome_unknown() => format!("{err} Tap to try again."),
+                        err => err.to_string(),
+                    },
+                    data,
+                },
+            };
+        });
+    });
 }
 
 /// The most files one message carries, and the largest one, as the server
@@ -384,15 +436,17 @@ enum Upload {
 const MAX_FILES: usize = 8;
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Asks where to pick from, picks, and uploads what was picked.
-fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, outbox: Signal<Outbox>) {
+/// Asks where to pick from, picks, and uploads what was picked. Problems
+/// with the picked files show in `notice`, apart from the send's state.
+fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, notice: Signal<Option<String>>) {
     let room = MAX_FILES.saturating_sub(pending.with_untracked(Vec::len)) as u32;
     if room == 0 {
-        outbox.set(Outbox::Refused(format!(
+        notice.set(Some(format!(
             "A message carries at most {MAX_FILES} files."
         )));
         return;
     }
+    notice.set(None);
     spawn(async move {
         let choice = alert_dialog()
             .action_sheet()
@@ -414,46 +468,30 @@ fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, outbox: Signal<Outbox>) {
         };
         for picked in picked {
             if picked.status == PickedStatus::TooLarge || picked.len > MAX_FILE_BYTES {
-                outbox.set(Outbox::Refused(format!(
-                    "{} is larger than 10 MB.",
-                    picked.name
-                )));
+                notice.try_set(Some(format!("{} is larger than 10 MB.", picked.name)));
                 continue;
             }
-            let data = picked.data.bytes().to_vec();
+            let data = std::rc::Rc::new(picked.data.bytes().to_vec());
             let file = Attachment {
                 id: Uuid::new_v4(),
                 name: picked.name,
                 media_type: picked.mime,
                 size: data.len() as u64,
             };
-            pending.update(|p| {
+            session::try_update(pending, |p| {
                 p.push(Pending {
                     file: file.clone(),
                     upload: Upload::Uploading,
                 })
             });
-            let client = session::server().client.clone();
-            let id = file.id;
-            spawn(async move {
-                let upload = match client.upload(bot, file, data).await {
-                    Ok(_) => Upload::Done,
-                    Err(ClientError::Api { message, .. }) => Upload::Failed(message),
-                    Err(err) => Upload::Failed(err.to_string()),
-                };
-                pending.update(|p| {
-                    if let Some(item) = p.iter_mut().find(|item| item.file.id == id) {
-                        item.upload = upload;
-                    }
-                });
-            });
+            upload(bot, pending, file, data);
         }
     });
 }
 
 /// The picked files above the text field, each with its state and a way
 /// to take it out.
-fn pending_strip(pending: Signal<Vec<Pending>>) -> impl IntoElement {
+fn pending_strip(bot: Uuid, pending: Signal<Vec<Pending>>) -> impl IntoElement {
     dynamic(move || {
         let items = pending.get();
         (!items.is_empty()).then(|| {
@@ -467,14 +505,24 @@ fn pending_strip(pending: Signal<Vec<Pending>>) -> impl IntoElement {
                         let detail = match &item.upload {
                             Upload::Uploading => "Uploading…".to_owned(),
                             Upload::Done => super::files::size_label(item.file.size),
-                            Upload::Failed(message) => message.clone(),
+                            Upload::Failed { message, .. } => message.clone(),
                         };
-                        let failed = matches!(item.upload, Upload::Failed(_));
+                        let retry = match &item.upload {
+                            Upload::Failed { data, .. } => Some(data.clone()),
+                            Upload::Uploading | Upload::Done => None,
+                        };
+                        let failed = retry.is_some();
+                        let file = item.file.clone();
                         view()
                             .flex_row()
                             .items_center()
                             .child(
                                 super::files::chip(item.file.name.clone(), detail)
+                                    .on_press(move || {
+                                        if let Some(data) = retry.clone() {
+                                            upload(bot, pending, file.clone(), data);
+                                        }
+                                    })
                                     .border_1()
                                     .border_color(move || {
                                         if failed {
@@ -506,6 +554,7 @@ fn pending_strip(pending: Signal<Vec<Pending>>) -> impl IntoElement {
 fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement {
     let draft = signal(String::new());
     let pending = signal(Vec::<Pending>::new());
+    let attach_notice = signal(None::<String>);
     let outbox = signal(Outbox::Idle);
     let input_height = signal(22.0_f32);
     let sending = computed(move || matches!(outbox.get(), Outbox::Sending { .. }));
@@ -524,18 +573,24 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
             text: draft.get_untracked().trim().to_owned(),
             files: pending.with_untracked(|p| p.iter().map(|item| item.file.clone()).collect()),
         };
-        // The key a retry is recognized by: the text with its files' markers.
-        let text = message.wire().0;
-        let request_id = outbox.with_untracked(|o| o.request_id(&text));
+        let request_id = outbox.with_untracked(|o| o.request_id(&message));
         outbox.set(Outbox::Sending { request_id });
         let client = session::server().client.clone();
-        spawn(async move {
-            match client.send(bot, request_id, message).await {
+        // Held by the server, not by the Send button: clearing the text
+        // swaps that button for Stop, which would cancel a send under way.
+        session::spawn_held(async move {
+            match client.send(bot, request_id, message.clone()).await {
                 Ok(sent) => {
                     batch(|| {
-                        draft.set(String::new());
-                        pending.set(Vec::new());
-                        outbox.set(Outbox::Idle);
+                        if !outbox.try_set(Outbox::Idle) {
+                            return;
+                        }
+                        // Only what was sent leaves the composer; text or
+                        // files added meanwhile stay.
+                        if draft.get_untracked().trim() == message.text {
+                            draft.set(String::new());
+                        }
+                        pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
                         chat.update(|c| {
                             if let Some(conversation) = c.conversation_mut() {
                                 conversation.insert_sent(sent.item, sent.turn);
@@ -543,15 +598,21 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                         });
                     });
                 }
-                Err(err) if err.outcome_unknown() => outbox.set(Outbox::Unknown {
-                    request_id,
-                    text,
-                    message: format!(
-                        "{err} It may have been sent. Sending the same text again cannot post it twice."
-                    ),
-                }),
-                Err(ClientError::Api { message, .. }) => outbox.set(Outbox::Refused(message)),
-                Err(err) => outbox.set(Outbox::Refused(err.to_string())),
+                Err(err) if err.outcome_unknown() => {
+                    outbox.try_set(Outbox::Unknown {
+                        request_id,
+                        sent: message,
+                        message: format!(
+                            "{err} It may have been sent. Sending it again unchanged cannot post it twice."
+                        ),
+                    });
+                }
+                Err(ClientError::Api { message, .. }) => {
+                    outbox.try_set(Outbox::Refused(message));
+                }
+                Err(err) => {
+                    outbox.try_set(Outbox::Refused(err.to_string()));
+                }
             }
         });
     };
@@ -574,7 +635,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
     let notice = dynamic(move || {
         let message = match outbox.get() {
             Outbox::Unknown { message, .. } | Outbox::Refused(message) => message,
-            Outbox::Idle | Outbox::Sending { .. } => return None,
+            Outbox::Idle | Outbox::Sending { .. } => attach_notice.get()?,
         };
         Some(
             text(message)
@@ -626,7 +687,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                 })
         })
         .child(notice)
-        .child(pending_strip(pending))
+        .child(pending_strip(bot, pending))
         .child(
             view()
                 .flex_row()
@@ -643,7 +704,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                         .active(|s| s.opacity(0.6))
                         .role(AccessibilityRole::Button)
                         .label("Attach")
-                        .on_press(move || attach(bot, pending, outbox))
+                        .on_press(move || attach(bot, pending, attach_notice))
                         .child(image(PLUS).size(px(18.0)).tint_color(colors::secondary())),
                 )
                 .child(

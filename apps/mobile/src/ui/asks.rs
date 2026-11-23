@@ -22,8 +22,9 @@ enum Action {
     Idle,
     Sending,
     Failed(String),
-    /// The response was lost: the server may have acted. The card stays
-    /// locked until the server's own update settles it.
+    /// The response was lost: the server may have acted. Trying again is
+    /// safe: a repeat of a settled ask is refused, an approval repeats as
+    /// itself, and the server's own update removes the card once settled.
     Unknown,
 }
 
@@ -60,7 +61,7 @@ fn failure(action: Signal<Action>) -> impl IntoElement {
         let message = match action.get() {
             Action::Failed(message) => message,
             Action::Unknown => {
-                "The connection dropped before the server answered. It may have gone through; this card updates once the server says.".into()
+                "The connection dropped before the server answered. It may have gone through, and trying again is safe.".into()
             }
             Action::Idle | Action::Sending => return None,
         };
@@ -129,16 +130,16 @@ fn button(
 fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
     let action = signal(Action::Idle);
     let picked = signal(BTreeSet::<String>::new());
-    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let idle = move || action.get() != Action::Sending;
     let id = question.id;
     let multiple = question.multiple;
     let send = move |choices: Vec<String>| {
         action.set(Action::Sending);
         let client = session::server().client.clone();
-        spawn(async move {
+        session::spawn_held(async move {
             match client.answer_question(bot, id, choices, multiple).await {
-                Ok(()) => action.set(Action::Idle),
-                Err(err) => action.set(failed(err)),
+                Ok(()) => action.try_set(Action::Idle),
+                Err(err) => action.try_set(failed(err)),
             }
         });
     };
@@ -261,7 +262,7 @@ fn draft_editor(
     mode: Signal<Mode>,
 ) -> impl IntoElement {
     let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let idle = move || action.get() != Action::Sending;
     let has_subject = original.subject.is_some();
     let body_height = signal(120.0_f32);
     let save = {
@@ -278,15 +279,12 @@ fn draft_editor(
             }
             action.set(Action::Sending);
             let client = session::server().client.clone();
-            spawn(async move {
+            session::spawn_held(async move {
                 match client.edit_draft(bot, draft_id, edit).await {
                     // The server's live update replaces this card with the
                     // saved version a moment later.
-                    Ok(()) => {
-                        action.set(Action::Idle);
-                        mode.set(Mode::Reading);
-                    }
-                    Err(err) => action.set(failed(err)),
+                    Ok(()) => action.try_set(Action::Idle) && mode.try_set(Mode::Reading),
+                    Err(err) => action.try_set(failed(err)),
                 }
             });
         }
@@ -366,7 +364,7 @@ fn draft_editor(
 
 fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoElement {
     let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let idle = move || action.get() != Action::Sending;
     // Everything Send would deliver is on the card: hidden copies and files
     // included.
     let (cc, bcc) = match &draft.content {
@@ -395,7 +393,7 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
     let approve = move || {
         let draft = draft.clone();
         let to = confirm_to.clone();
-        spawn(async move {
+        session::spawn_held(async move {
             let choice = alert_dialog()
                 .title("Send it now?")
                 .description(format!("It goes to {to} exactly as shown."))
@@ -404,23 +402,23 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 .show()
                 .await;
             if !matches!(choice, Ok(r) if r.action.as_deref() == Some("send")) {
-                return;
+                return false;
             }
-            action.set(Action::Sending);
+            action.try_set(Action::Sending);
             let client = session::server().client.clone();
             match client.approve_draft(bot, &draft).await {
-                Ok(()) => action.set(Action::Idle),
-                Err(err) => action.set(failed(err)),
+                Ok(()) => action.try_set(Action::Idle),
+                Err(err) => action.try_set(failed(err)),
             }
         });
     };
     let discard = move || {
         action.set(Action::Sending);
         let client = session::server().client.clone();
-        spawn(async move {
+        session::spawn_held(async move {
             match client.discard_draft(bot, draft_id).await {
-                Ok(()) => action.set(Action::Idle),
-                Err(err) => action.set(failed(err)),
+                Ok(()) => action.try_set(Action::Idle),
+                Err(err) => action.try_set(failed(err)),
             }
         });
     };
@@ -517,7 +515,7 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
 /// them; the card never shows a stored value again.
 fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
     let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let idle = move || action.get() != Action::Sending;
     let values = signal(BTreeMap::<String, String>::new());
     let names = request.env.clone();
     let complete = {
@@ -533,14 +531,14 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
     let id = request.id;
     let answer = move |env: Option<BTreeMap<String, String>>| {
         action.set(Action::Sending);
+        // The values leave the phone's memory with the request: a lost
+        // response never leaves them in the fields.
+        values.set(BTreeMap::new());
         let client = session::server().client.clone();
-        spawn(async move {
+        session::spawn_held(async move {
             match client.answer_secret(bot, id, env).await {
-                Ok(()) => {
-                    values.set(BTreeMap::new());
-                    action.set(Action::Idle);
-                }
-                Err(err) => action.set(failed(err)),
+                Ok(()) => action.try_set(Action::Idle),
+                Err(err) => action.try_set(failed(err)),
             }
         });
     };
@@ -569,7 +567,7 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
                                 v.insert(key.clone(), t.to_owned());
                             })
                         })
-                        .masked(!names_an_identity(name))
+                        .masked(true)
                         .auto_capitalize(AutoCapitalize::None)
                         .auto_correct(false)
                         .text_size(px(15.0))
@@ -626,13 +624,4 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
                 )),
         )
         .child(failure(action))
-}
-
-/// Whether a variable holds who signs in rather than a password, so its
-/// field can show what is typed. Any other name stays masked.
-fn names_an_identity(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    ["USER", "USERNAME", "LOGIN", "EMAIL", "HOST", "PORT", "URL"]
-        .iter()
-        .any(|end| name == *end || name.ends_with(&format!("_{end}")))
 }

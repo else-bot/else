@@ -329,7 +329,8 @@ impl Conversation {
         for request in &turn.secret_requests {
             let text = match request.status {
                 SecretRequestStatus::Stored => format!("You saved {}", request.name),
-                SecretRequestStatus::Cancelled => format!("You declined {}", request.name),
+                // Declined by the owner or withdrawn with its turn.
+                SecretRequestStatus::Cancelled => format!("{} was not saved", request.name),
                 SecretRequestStatus::Pending | SecretRequestStatus::Unknown => continue,
             };
             rows.push(Row::Note {
@@ -537,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_secret_request_is_an_ask_until_declined() {
+    fn a_pending_secret_request_is_an_ask_until_settled() {
         let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
         let request = |status: &str| {
             json!({ "event": "turn.updated", "data": { "turn": {
@@ -562,7 +563,7 @@ mod tests {
             conversation.rows().last(),
             Some(&Row::Note {
                 id: "00000000-0000-0000-0000-00000000000b".parse().unwrap(),
-                text: "You declined smtp".into(),
+                text: "smtp was not saved".into(),
             })
         );
     }

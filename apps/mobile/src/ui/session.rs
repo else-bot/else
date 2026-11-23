@@ -89,6 +89,7 @@ fn use_server(profile: Profile, client: Arc<Client>) {
 /// next saved server, or the connect screen when none is left.
 pub fn disconnect() {
     let origin = server().profile.origin.as_str().to_owned();
+    let _ = std::fs::remove_dir_all(super::files::server_dir(&origin));
     match Profile::forget(&origin).map(resume) {
         Some(Ok(())) => {}
         Some(Err(err)) => {
@@ -105,6 +106,44 @@ fn clear() {
         live_state().set(LiveState::Connecting);
         link().set(Link::None);
     });
+}
+
+/// The connected screen's owner, which outlives the cards and buttons a
+/// request starts from.
+#[derive(Clone, Copy, PartialEq)]
+struct Held(Owner);
+
+impl Default for Held {
+    fn default() -> Self {
+        Self(Owner::detached())
+    }
+}
+
+fn held() -> Signal<Held> {
+    global::<Held>()
+}
+
+/// Runs a request the server must see through under the connected server,
+/// not under the view that started it: a chat card that scrolls away or a
+/// button that is rebuilt would otherwise cancel it midway. It ends with
+/// the server, on a switch or a disconnect. Write the starter's signals
+/// with `try_set`, since the view may be gone by then.
+pub fn spawn_held<T: 'static>(future: impl std::future::Future<Output = T> + 'static) {
+    held().get_untracked().0.run(|| {
+        spawn(future);
+    });
+}
+
+/// Changes a signal in place unless its owner is gone; for a request that
+/// may outlive the view whose signal it writes.
+pub fn try_update<T: Clone + 'static>(signal: Signal<T>, f: impl FnOnce(&mut T)) -> bool {
+    match signal.try_get() {
+        Some(mut value) => {
+            f(&mut value);
+            signal.try_set(value)
+        }
+        None => false,
+    }
 }
 
 /// The bot list, as the server last sent it.
@@ -223,6 +262,8 @@ fn follow(bot: Uuid, cursor: Option<String>) {
 /// Starts the live connection and the first bot list; both end with the
 /// caller's owner (the connected screen).
 pub fn start() {
+    held().set(Held(Owner::current()));
+    cleanup(|| held().set(Held::default()));
     let client = server().client.clone();
     let live = client.clone().live();
     wanted().set(Wanted(Some(live.wanted.clone())));

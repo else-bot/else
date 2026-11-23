@@ -23,19 +23,19 @@ enum Step {
     Failed(String),
     Unknown {
         request_id: Uuid,
-        name: String,
+        tried: (String, Avatar),
         message: String,
     },
 }
 
 impl Step {
-    fn request_id(&self, name: &str) -> Uuid {
+    /// The ID to create with: the unresolved one when name and avatar are
+    /// unchanged, since the server takes a repeat of it once.
+    fn request_id(&self, name: &str, avatar: Avatar) -> Uuid {
         match self {
             Self::Unknown {
-                request_id,
-                name: tried,
-                ..
-            } if tried == name => *request_id,
+                request_id, tried, ..
+            } if tried.0 == name && tried.1 == avatar => *request_id,
             _ => Uuid::new_v4(),
         }
     }
@@ -53,49 +53,53 @@ fn screen() -> Screen {
     let ready =
         computed(move || !name.with(|n| n.trim().is_empty()) && step.get() != Step::Creating);
 
-    // The request runs under the screen, not under the header button that
-    // starts it: the header is rebuilt when its label changes, which would
-    // end a task it owned.
-    let attempt = signal(None::<(Uuid, String, Avatar)>);
-    effect(move || {
-        let Some((request_id, name_now, avatar)) = attempt.get() else {
-            return;
-        };
-        let client = session::server().client.clone();
-        spawn(async move {
-            match client.create_bot(request_id, name_now.clone(), avatar).await {
-                Ok(bot) => {
-                    let (id, title) = (bot.id, bot.name.clone());
-                    session::update_bot(bot);
-                    super::routes().update(|r| r.0.retain(|route| route.key != KEY));
-                    super::push(format!("chat-{id}"), move || {
-                        super::chat::screen(id, title.clone())
-                    });
-                }
-                Err(err) if err.outcome_unknown() => step.set(Step::Unknown {
-                    request_id,
-                    message: format!(
-                        "{err} The bot may have been created. Creating the same name again cannot make two."
-                    ),
-                    name: name_now,
-                }),
-                Err(ClientError::Api { message, .. }) => step.set(Step::Failed(message)),
-                Err(err) => step.set(Step::Failed(err.to_string())),
-            }
-        });
-    });
     let create = move || {
         if !ready.get_untracked() {
             return;
         }
         let name_now = name.get_untracked().trim().to_owned();
-        let request_id = step.with_untracked(|s| s.request_id(&name_now));
-        step.set(Step::Creating);
         let avatar = Avatar {
             shape,
             color: picked.get_untracked(),
         };
-        attempt.set(Some((request_id, name_now, avatar)));
+        let request_id = step.with_untracked(|s| s.request_id(&name_now, avatar));
+        step.set(Step::Creating);
+        // Held by the server, not by the header button (rebuilt when its
+        // label changes) or this screen: leaving it does not cancel the
+        // create, and the new bot still reaches the list.
+        let client = session::server().client.clone();
+        session::spawn_held(async move {
+            match client
+                .create_bot(request_id, name_now.clone(), avatar)
+                .await
+            {
+                Ok(bot) => {
+                    let (id, title) = (bot.id, bot.name.clone());
+                    session::update_bot(bot);
+                    if step.try_set(Step::Editing) {
+                        super::routes().update(|r| r.0.retain(|route| route.key != KEY));
+                        super::push(format!("chat-{id}"), move || {
+                            super::chat::screen(id, title.clone())
+                        });
+                    }
+                }
+                Err(err) if err.outcome_unknown() => {
+                    step.try_set(Step::Unknown {
+                        request_id,
+                        message: format!(
+                            "{err} The bot may have been created. Creating it again unchanged cannot make two."
+                        ),
+                        tried: (name_now, avatar),
+                    });
+                }
+                Err(ClientError::Api { message, .. }) => {
+                    step.try_set(Step::Failed(message));
+                }
+                Err(err) => {
+                    step.try_set(Step::Failed(err.to_string()));
+                }
+            }
+        });
     };
 
     let create_item = move || {
