@@ -6,6 +6,7 @@
 use else_client::model::Conversation;
 use else_wire::bots::Phase;
 use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
+use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
@@ -56,6 +57,8 @@ pub enum Ask {
     Question(Box<Question>),
     Draft(Box<OutgoingDraft>),
     Secret(Box<SecretRequest>),
+    /// The bot is blocked or needs a decision, in its own words.
+    Notice(Box<OwnerNotice>),
 }
 
 impl Ask {
@@ -64,6 +67,7 @@ impl Ask {
             Self::Question(question) => format!("q-{}", question.id),
             Self::Draft(draft) => format!("d-{}", draft.id),
             Self::Secret(request) => format!("s-{}", request.id),
+            Self::Notice(notice) => format!("n-{}", notice.id),
         }
     }
 }
@@ -186,7 +190,7 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
     rows
 }
 
-/// The settled questions and drafts of `turn`, after its messages.
+/// The settled asks of `turn`, after its messages.
 fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>) {
     let Some(turn) = turn.and_then(|turn| conversation.turn(turn)) else {
         return;
@@ -224,6 +228,20 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
             text,
         });
     }
+    for notice in &turn.owner_notices {
+        let label = match notice.status {
+            OwnerNoticeStatus::Replied => "You replied",
+            OwnerNoticeStatus::Dismissed => "Handled",
+            // Pending is a card; a superseded one gave way to another card.
+            OwnerNoticeStatus::Pending
+            | OwnerNoticeStatus::Superseded
+            | OwnerNoticeStatus::Other(_) => continue,
+        };
+        rows.push(Row::Note {
+            id: notice.id,
+            text: format!("{label} · {}", notice.summary),
+        });
+    }
     for draft in &turn.outgoing_drafts {
         if !draft.is_open() && draft.status != DraftStatus::Superseded {
             rows.push(Row::Note {
@@ -234,7 +252,7 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
     }
 }
 
-/// The open questions and drafts, oldest turn first.
+/// What waits on the owner, oldest turn first.
 pub fn asks(conversation: &Conversation) -> Vec<Ask> {
     let mut asks = Vec::new();
     for turn in conversation.turns_in_order() {
@@ -258,6 +276,13 @@ pub fn asks(conversation: &Conversation) -> Vec<Ask> {
                 .filter(|r| r.is_pending())
                 .cloned()
                 .map(|r| Ask::Secret(Box::new(r))),
+        );
+        asks.extend(
+            turn.owner_notices
+                .iter()
+                .filter(|n| n.status == OwnerNoticeStatus::Pending)
+                .cloned()
+                .map(|n| Ask::Notice(Box::new(n))),
         );
     }
     asks
@@ -385,6 +410,39 @@ mod tests {
                 text: "smtp was not saved".into(),
             })
         );
+    }
+
+    #[test]
+    fn a_pending_owner_notice_is_an_ask_until_handled() {
+        let mut conversation = conversation();
+        let notice = |status: &str| {
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "completed", "error": null, "effect_uncertain": false,
+                "owner_notices": [{
+                    "id": "00000000-0000-0000-0000-00000000000c",
+                    "bot_id": "00000000-0000-0000-0000-00000000000d", "turn_id": TURN,
+                    "kind": "blocked", "summary": "The DNS zone is locked.",
+                    "tried": "dig", "status": status,
+                    "created_at": "2026-11-23T10:00:00Z", "settled_at": null,
+                }],
+            }}})
+        };
+        apply(&mut conversation, 5, notice("pending"));
+        assert!(
+            matches!(&asks(&conversation)[..], [Ask::Notice(n)] if n.summary == "The DNS zone is locked.")
+        );
+        apply(&mut conversation, 6, notice("dismissed"));
+        assert_eq!(asks(&conversation), vec![]);
+        assert_eq!(
+            rows(&conversation).last(),
+            Some(&Row::Note {
+                id: "00000000-0000-0000-0000-00000000000c".parse().unwrap(),
+                text: "Handled · The DNS zone is locked.".into(),
+            })
+        );
+        apply(&mut conversation, 7, notice("superseded"));
+        assert_eq!(asks(&conversation), vec![]);
     }
 
     #[test]

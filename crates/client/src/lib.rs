@@ -6,6 +6,7 @@
 pub mod api;
 pub mod model;
 pub mod origin;
+pub mod reply;
 pub mod request;
 
 #[cfg(any(test, feature = "testing"))]

@@ -67,6 +67,8 @@ pub struct Message {
     /// The draft this message answers, so the bot can send it; the server
     /// closes it if the reply moves on without sending it.
     pub draft: Option<DraftAttachment>,
+    /// The owner notice this message answers, so sending settles it.
+    pub answers_notice: Option<Uuid>,
 }
 
 impl Message {
@@ -85,7 +87,7 @@ impl Message {
             reaction: None,
             parts,
             open_draft: self.draft.clone(),
-            answers_notice: None,
+            answers_notice: self.answers_notice,
         }
     }
 
@@ -124,6 +126,7 @@ mod tests {
             text: "For March".into(),
             files: vec![file.clone()],
             draft: None,
+            answers_notice: None,
         };
         let request = message.request(Uuid::nil());
         assert_eq!(request.text, "For March\n[File: receipt.pdf]");
@@ -140,6 +143,7 @@ mod tests {
             text: "hi".into(),
             files: vec![],
             draft: None,
+            answers_notice: None,
         };
         let request = plain.request(Uuid::nil());
         assert_eq!((request.text.as_str(), request.parts.len()), ("hi", 0));

@@ -243,6 +243,7 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
             // Only the draft card's Send carries a draft: a message about
             // something else must not close the draft or change its reply.
             draft: None,
+            answers_notice: None,
         };
         let op = outbox.with_untracked(|o| match o.unconfirmed_op() {
             Some(unconfirmed) if unconfirmed.message == message => unconfirmed.clone(),

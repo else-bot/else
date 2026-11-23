@@ -42,18 +42,7 @@ impl MessageReference {
     }
 
     fn quote(&self) -> String {
-        self.text
-            .trim_end()
-            .lines()
-            .map(|line| {
-                if line.is_empty() {
-                    ">".to_owned()
-                } else {
-                    format!("> {line}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        else_client::reply::quote(&self.text)
     }
 }
 
@@ -195,10 +184,10 @@ impl Draft {
                     (false, false) => comment.to_owned(),
                     (false, true) => format!("{comment}\n\n{note}"),
                 };
-                Some(format!(
-                    "Replying to {}:\n{}\n\n{body}",
+                Some(else_client::reply::replying_to(
                     quote.source.subject(),
-                    quote.source.quote()
+                    &quote.source.text,
+                    &body,
                 ))
             }
             quotes => {
