@@ -295,6 +295,27 @@ impl Client {
         .await
     }
 
+    /// Saves the values a bot asked for (`Some`) to the server's vault, or
+    /// declines its request (`None`). The values travel only in this body.
+    pub async fn answer_secret(
+        self: Arc<Self>,
+        bot: Uuid,
+        request: Uuid,
+        env: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<(), ClientError> {
+        let (action, body) = match env {
+            Some(env) => ("fulfill", Some(json!({ "env": env }))),
+            None => ("cancel", None),
+        };
+        let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
+        run(async move {
+            self.call::<serde::de::IgnoredAny>(Method::POST, &path, body)
+                .await
+                .map(drop)
+        })
+        .await
+    }
+
     pub async fn discard_draft(self: Arc<Self>, bot: Uuid, draft: Uuid) -> Result<(), ClientError> {
         let path = format!("/v1/bots/{bot}/outgoing-drafts/{draft}/discard");
         run(async move {

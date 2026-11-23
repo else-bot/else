@@ -8,6 +8,7 @@ use else_wire::conversation::{BotUpdated, Event, Snapshot};
 use else_wire::items::{Item, ItemKind};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
+use else_wire::secrets::{SecretRequest, SecretRequestStatus};
 use else_wire::turns::{Turn, TurnStatus};
 use uuid::Uuid;
 
@@ -69,6 +70,7 @@ pub enum Row {
 pub enum Ask {
     Question(Box<Question>),
     Draft(Box<OutgoingDraft>),
+    Secret(Box<SecretRequest>),
 }
 
 impl Ask {
@@ -76,6 +78,7 @@ impl Ask {
         match self {
             Self::Question(question) => format!("q-{}", question.id),
             Self::Draft(draft) => format!("d-{}", draft.id),
+            Self::Secret(request) => format!("s-{}", request.id),
         }
     }
 }
@@ -301,6 +304,17 @@ impl Conversation {
                 text,
             });
         }
+        for request in &turn.secret_requests {
+            let text = match request.status {
+                SecretRequestStatus::Stored => format!("You saved {}", request.name),
+                SecretRequestStatus::Cancelled => format!("You declined {}", request.name),
+                SecretRequestStatus::Pending | SecretRequestStatus::Unknown => continue,
+            };
+            rows.push(Row::Note {
+                id: request.id,
+                text,
+            });
+        }
         for draft in &turn.outgoing_drafts {
             if !draft.is_open() && draft.status != DraftStatus::Superseded {
                 rows.push(Row::Note {
@@ -330,6 +344,13 @@ impl Conversation {
                     .filter(|d| d.is_open())
                     .cloned()
                     .map(|d| Ask::Draft(Box::new(d))),
+            );
+            asks.extend(
+                turn.secret_requests
+                    .iter()
+                    .filter(|r| r.is_pending())
+                    .cloned()
+                    .map(|r| Ask::Secret(Box::new(r))),
             );
         }
         asks
@@ -489,6 +510,37 @@ mod tests {
             Some(&Row::Note {
                 id: "00000000-0000-0000-0000-00000000000a".parse().unwrap(),
                 text: "You answered “Which plan?”: A".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_pending_secret_request_is_an_ask_until_declined() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let request = |status: &str| {
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "waiting", "error": null, "effect_uncertain": false,
+                "secret_requests": [{
+                    "id": "00000000-0000-0000-0000-00000000000b", "name": "smtp",
+                    "reason": "To send mail", "env": ["SMTP_PASSWORD"],
+                    "description": null, "website": null, "status": status,
+                }],
+            }}})
+        };
+        conversation
+            .apply("srv:bot:5", &request("pending"))
+            .unwrap();
+        assert!(matches!(&conversation.asks()[..], [Ask::Secret(r)] if r.name == "smtp"));
+        conversation
+            .apply("srv:bot:6", &request("cancelled"))
+            .unwrap();
+        assert_eq!(conversation.asks(), vec![]);
+        assert_eq!(
+            conversation.rows().last(),
+            Some(&Row::Note {
+                id: "00000000-0000-0000-0000-00000000000b".parse().unwrap(),
+                text: "You declined smtp".into(),
             })
         );
     }

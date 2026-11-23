@@ -2,10 +2,11 @@
 //! choices, and a draft to send or discard. Each card reflects the server:
 //! once settled, its turn's update removes it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use else_wire::outgoing::{DraftContent, OutgoingDraft};
 use else_wire::questions::{Question, QuestionKind};
+use else_wire::secrets::SecretRequest;
 use nsh_base::{alert_dialog, input};
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -30,6 +31,7 @@ pub fn card(bot: Uuid, ask: Ask) -> AnyElement {
     match ask {
         Ask::Question(question) => question_card(bot, *question).into_element(),
         Ask::Draft(draft) => draft_card(bot, *draft).into_element(),
+        Ask::Secret(request) => secret_card(bot, *request).into_element(),
     }
 }
 
@@ -508,4 +510,129 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 .text_color(colors::secondary())
         }))
         .child(failure(action))
+}
+
+/// A bot's request for credentials: one masked field per variable it
+/// named. Save stores them in the server's vault, where every bot may use
+/// them; the card never shows a stored value again.
+fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
+    let action = signal(Action::Idle);
+    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let values = signal(BTreeMap::<String, String>::new());
+    let names = request.env.clone();
+    let complete = {
+        let names = names.clone();
+        computed(move || {
+            values.with(|v| {
+                names
+                    .iter()
+                    .all(|n| v.get(n).is_some_and(|s| !s.is_empty()))
+            })
+        })
+    };
+    let id = request.id;
+    let answer = move |env: Option<BTreeMap<String, String>>| {
+        action.set(Action::Sending);
+        let client = session::server().client.clone();
+        spawn(async move {
+            match client.answer_secret(bot, id, env).await {
+                Ok(()) => {
+                    values.set(BTreeMap::new());
+                    action.set(Action::Idle);
+                }
+                Err(err) => action.set(failed(err)),
+            }
+        });
+    };
+    let fields: Vec<AnyElement> = names
+        .iter()
+        .map(|name| {
+            let key = name.clone();
+            let shown = name.clone();
+            view()
+                .gap_1()
+                .child(
+                    text(name.clone())
+                        .text_size(px(13.0))
+                        .font_family("Menlo")
+                        .text_color(colors::secondary()),
+                )
+                .child(
+                    input()
+                        .min_h(px(40.0))
+                        .px_3()
+                        .rounded(px(10.0))
+                        .bg(colors::fill())
+                        .value(move || values.with(|v| v.get(&shown).cloned().unwrap_or_default()))
+                        .on_change(move |t: &str| {
+                            values.update(|v| {
+                                v.insert(key.clone(), t.to_owned());
+                            })
+                        })
+                        .masked(!names_an_identity(name))
+                        .auto_capitalize(AutoCapitalize::None)
+                        .auto_correct(false)
+                        .text_size(px(15.0))
+                        .text_color(colors::label())
+                        .caret_color(|| color(colors::tint()))
+                        .label(name.clone()),
+                )
+                .into_element()
+        })
+        .collect();
+    let detail = request.description.clone().filter(|d| !d.trim().is_empty());
+    frame()
+        .child(eyebrow("NEEDS A SECRET"))
+        .child(
+            text(request.name.clone())
+                .text_size(px(17.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::label()),
+        )
+        .child(
+            text(request.reason.clone())
+                .text_size(px(15.0))
+                .line_height(px(20.0))
+                .text_color(colors::label()),
+        )
+        .child(detail.map(|detail| {
+            text(detail)
+                .text_size(px(15.0))
+                .line_height(px(20.0))
+                .text_color(colors::secondary())
+        }))
+        .child(request.website.clone().map(|site| {
+            text(format!("For {site}"))
+                .text_size(px(15.0))
+                .text_color(colors::secondary())
+        }))
+        .child(view().gap_3().children(fields))
+        .child(
+            text("Saved in the server's vault, where every bot can use it.")
+                .text_size(px(13.0))
+                .text_color(colors::secondary()),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .child(button("Decline", false, true, idle, move || answer(None)))
+                .child(button(
+                    "Save",
+                    true,
+                    false,
+                    move || idle() && complete.get(),
+                    move || answer(Some(values.get_untracked())),
+                )),
+        )
+        .child(failure(action))
+}
+
+/// Whether a variable holds who signs in rather than a password, so its
+/// field can show what is typed. Any other name stays masked.
+fn names_an_identity(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    ["USER", "USERNAME", "LOGIN", "EMAIL", "HOST", "PORT", "URL"]
+        .iter()
+        .any(|end| name == *end || name.ends_with(&format!("_{end}")))
 }

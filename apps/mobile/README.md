@@ -19,11 +19,13 @@ with the server and the desktop app.
   reply that is running.
 - Answer a bot’s question with one tap. Review a draft, edit its text, then Discard it
   or Send it after a confirmation. Settled ones leave a receipt in the chat.
+- Give a bot the secret it asks for, or decline. It is saved in the
+  server's vault.
 - Chats are marked read on the server, so the desktop's unread dots agree.
 - Light and dark mode. Reconnects when the app returns to the foreground.
 - Disconnect from the More menu, which removes the key from the phone.
 
-Not yet: secrets, computer takeovers, attachments, creating
+Not yet: the vault list, computer takeovers, attachments, creating
 bots, several servers, push notifications, iPad layout.
 
 ## Addresses and the owner key
