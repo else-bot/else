@@ -11,6 +11,7 @@ use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
 use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
+use else_wire::socials::{SetupStatus, SocialSetup};
 use else_wire::turns::{Turn, TurnStatus};
 use uuid::Uuid;
 
@@ -62,6 +63,8 @@ pub enum Ask {
     Notice(Box<OwnerNotice>),
     /// The bot wants a skill installed.
     Skill(Box<SkillInstall>),
+    /// The bot wants a Telegram, Discord or WhatsApp connection.
+    Social(Box<SocialSetup>),
 }
 
 impl Ask {
@@ -72,6 +75,7 @@ impl Ask {
             Self::Secret(request) => format!("s-{}", request.id),
             Self::Notice(notice) => format!("n-{}", notice.id),
             Self::Skill(install) => format!("k-{}", install.id),
+            Self::Social(setup) => format!("c-{}", setup.id),
         }
     }
 }
@@ -273,6 +277,16 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
             text,
         });
     }
+    for setup in &turn.social_setups {
+        let text = match setup.status {
+            SetupStatus::Connected => format!("{} connected", setup.provider.label()),
+            SetupStatus::Cancelled => {
+                format!("{} connection request cancelled", setup.provider.label())
+            }
+            SetupStatus::Pending | SetupStatus::Unknown => continue,
+        };
+        rows.push(Row::Note { id: setup.id, text });
+    }
     for draft in &turn.outgoing_drafts {
         if !draft.is_open() && draft.status != DraftStatus::Superseded {
             rows.push(Row::Note {
@@ -321,6 +335,13 @@ pub fn asks(conversation: &Conversation) -> Vec<Ask> {
                 .filter(|i| i.status == SkillInstallStatus::Pending)
                 .cloned()
                 .map(|i| Ask::Skill(Box::new(i))),
+        );
+        asks.extend(
+            turn.social_setups
+                .iter()
+                .filter(|s| s.is_pending())
+                .cloned()
+                .map(|s| Ask::Social(Box::new(s))),
         );
     }
     asks

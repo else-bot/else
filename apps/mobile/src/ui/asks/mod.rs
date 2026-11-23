@@ -9,6 +9,7 @@ mod notice;
 mod question;
 mod secret;
 mod skill;
+mod social;
 
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -27,6 +28,7 @@ pub fn card(bot: Uuid, ask: Ask) -> AnyElement {
         Ask::Secret(request) => secret::card(bot, *request).into_element(),
         Ask::Notice(notice) => notice::card(*notice).into_element(),
         Ask::Skill(install) => skill::card(bot, *install).into_element(),
+        Ask::Social(setup) => social::card(*setup).into_element(),
     }
 }
 
