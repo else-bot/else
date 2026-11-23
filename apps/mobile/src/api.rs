@@ -254,23 +254,41 @@ impl Client {
         .await
     }
 
-    /// Approves a draft exactly as the bot wrote it, at the version shown.
-    /// The server sends it; a newer version answers a conflict instead.
+    /// Approves a draft at the version shown, with the text shown. The
+    /// server sends it; a newer version answers a conflict instead.
     pub async fn approve_draft(
         self: Arc<Self>,
         bot: Uuid,
         draft: &OutgoingDraft,
     ) -> Result<(), ClientError> {
-        let mut body = json!({ "version": draft.version, "body": draft.content.body() });
-        if let Some(subject) = draft.content.subject() {
-            body["subject"] = json!(subject);
-        }
-        if let Some(attachments) = draft.content.attachment_ids() {
-            body["attachments"] = json!(attachments);
-        }
-        let path = format!("/v1/bots/{bot}/outgoing-drafts/{}/approve", draft.id);
+        let edit = DraftEdit::of(draft);
+        self.draft_call(Method::POST, bot, draft.id, "/approve", edit)
+            .await
+    }
+
+    /// Saves the owner's edits to a draft seen at `edit.version`; a draft
+    /// changed since answers a conflict.
+    pub async fn edit_draft(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+        edit: DraftEdit,
+    ) -> Result<(), ClientError> {
+        self.draft_call(Method::PUT, bot, draft, "", edit).await
+    }
+
+    async fn draft_call(
+        self: Arc<Self>,
+        method: Method,
+        bot: Uuid,
+        draft: Uuid,
+        action: &str,
+        edit: DraftEdit,
+    ) -> Result<(), ClientError> {
+        let path = format!("/v1/bots/{bot}/outgoing-drafts/{draft}{action}");
+        let body = serde_json::to_value(edit).expect("an edit serializes");
         run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
+            self.call::<serde::de::IgnoredAny>(method, &path, Some(body))
                 .await
                 .map(drop)
         })
@@ -302,6 +320,29 @@ impl Client {
                 .map(|envelope| envelope.bot)
         })
         .await
+    }
+}
+
+/// A draft's text at the version the owner saw. Its files are kept as
+/// they are: approving a draft with files must name the ones the owner saw.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DraftEdit {
+    pub version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Uuid>>,
+}
+
+impl DraftEdit {
+    pub fn of(draft: &OutgoingDraft) -> Self {
+        Self {
+            version: draft.version,
+            subject: draft.content.subject().map(str::to_owned),
+            body: draft.content.body().to_owned(),
+            attachments: draft.content.attachment_ids(),
+        }
     }
 }
 

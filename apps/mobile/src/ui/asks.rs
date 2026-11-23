@@ -6,13 +6,13 @@ use std::collections::BTreeSet;
 
 use else_wire::outgoing::{DraftContent, OutgoingDraft};
 use else_wire::questions::{Question, QuestionKind};
-use nsh_base::alert_dialog;
+use nsh_base::{alert_dialog, input};
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
 use super::parts::colors;
 use super::session;
-use crate::api::ClientError;
+use crate::api::{ClientError, DraftEdit};
 use crate::conversation::Ask;
 
 /// A card's request to the server.
@@ -220,7 +220,149 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
         .child(failure(action))
 }
 
+/// Whether the draft card shows the draft or the owner's edits to it.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Reading,
+    Editing,
+}
+
 fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
+    let mode = signal(Mode::Reading);
+    let original = DraftEdit::of(&draft);
+    let edit_subject = signal(original.subject.clone().unwrap_or_default());
+    let edit_body = signal(original.body.clone());
+    view().child(dynamic(move || match mode.get() {
+        Mode::Reading => untracked(|| draft_view(bot, draft.clone(), mode)).into_element(),
+        Mode::Editing => untracked(|| {
+            draft_editor(
+                bot,
+                draft.id,
+                original.clone(),
+                edit_subject,
+                edit_body,
+                mode,
+            )
+        })
+        .into_element(),
+    }))
+}
+
+/// The draft's subject and body as editable fields. Save stores them on
+/// the server at the version shown; the card then shows the new version.
+fn draft_editor(
+    bot: Uuid,
+    draft_id: Uuid,
+    original: DraftEdit,
+    subject: Signal<String>,
+    body: Signal<String>,
+    mode: Signal<Mode>,
+) -> impl IntoElement {
+    let action = signal(Action::Idle);
+    let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
+    let has_subject = original.subject.is_some();
+    let body_height = signal(120.0_f32);
+    let save = {
+        let original = original.clone();
+        move || {
+            let edit = DraftEdit {
+                subject: original.subject.as_ref().map(|_| subject.get_untracked()),
+                body: body.get_untracked(),
+                ..original.clone()
+            };
+            if edit == original {
+                mode.set(Mode::Reading);
+                return;
+            }
+            action.set(Action::Sending);
+            let client = session::server().client.clone();
+            spawn(async move {
+                match client.edit_draft(bot, draft_id, edit).await {
+                    // The server's live update replaces this card with the
+                    // saved version a moment later.
+                    Ok(()) => {
+                        action.set(Action::Idle);
+                        mode.set(Mode::Reading);
+                    }
+                    Err(err) => action.set(failed(err)),
+                }
+            });
+        }
+    };
+    let cancel = {
+        let original = original.clone();
+        move || {
+            subject.set(original.subject.clone().unwrap_or_default());
+            body.set(original.body.clone());
+            action.set(Action::Idle);
+            mode.set(Mode::Reading);
+        }
+    };
+    let field = |label: &'static str| {
+        text(label)
+            .text_size(px(13.0))
+            .text_color(colors::secondary())
+    };
+    frame()
+        .child(eyebrow("EDITING DRAFT"))
+        .child(has_subject.then(|| {
+            view().gap_1().child(field("Subject")).child(
+                input()
+                    .min_h(px(40.0))
+                    .px_3()
+                    .rounded(px(10.0))
+                    .bg(colors::fill())
+                    .value(subject)
+                    .on_change(move |t: &str| subject.set(t.to_owned()))
+                    .text_size(px(15.0))
+                    .text_color(colors::label())
+                    .caret_color(|| color(colors::tint()))
+                    .label("Subject"),
+            )
+        }))
+        .child(
+            view().gap_1().child(field("Message")).child(
+                input()
+                    .multiline(true)
+                    .value(body)
+                    .on_change(move |t: &str| body.set(t.to_owned()))
+                    .on_content_size_change(move |size: &Size<Points>| {
+                        body_height.set(size.height.0.clamp(80.0, 320.0));
+                    })
+                    .h(move || px(body_height.get() + 16.0))
+                    .p_3()
+                    .rounded(px(10.0))
+                    .bg(colors::fill())
+                    .text_size(px(15.0))
+                    .line_height(px(20.0))
+                    .text_color(colors::label())
+                    .caret_color(|| color(colors::tint()))
+                    .label("Message"),
+            ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .child(button("Cancel", false, false, idle, cancel))
+                .child(button(
+                    move || {
+                        SharedString::from(if action.get() == Action::Sending {
+                            "Saving…"
+                        } else {
+                            "Save"
+                        })
+                    },
+                    true,
+                    false,
+                    move || idle() && !body.with(|b| b.trim().is_empty()),
+                    save,
+                )),
+        )
+        .child(failure(action))
+}
+
+fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoElement {
     let action = signal(Action::Idle);
     let idle = move || action.get() != Action::Sending && action.get() != Action::Unknown;
     // Everything Send would deliver is on the card: hidden copies and files
@@ -282,7 +424,30 @@ fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
     };
 
     frame()
-        .child(eyebrow("DRAFT TO REVIEW"))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(eyebrow("DRAFT TO REVIEW"))
+                .child(
+                    text("Edit")
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors::tint())
+                        .opacity(move || if idle() { 1.0_f32 } else { 0.45 })
+                        .px_2()
+                        .py_1()
+                        .active(|s| s.opacity(0.5))
+                        .role(AccessibilityRole::Button)
+                        .label("Edit draft")
+                        .on_press(move || {
+                            if idle() {
+                                mode.set(Mode::Editing);
+                            }
+                        }),
+                ),
+        )
         .child(
             text(title)
                 .text_size(px(17.0))

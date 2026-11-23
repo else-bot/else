@@ -17,13 +17,13 @@ with the server and the desktop app.
 - A chat per bot. Replies render as Markdown and stream in live over the
   WebSocket. Older pages load as you scroll up. Send a message, or stop a
   reply that is running.
-- Answer a bot's question with one tap. Review a draft, then Discard it
+- Answer a bot’s question with one tap. Review a draft, edit its text, then Discard it
   or Send it after a confirmation. Settled ones leave a receipt in the chat.
 - Chats are marked read on the server, so the desktop's unread dots agree.
 - Light and dark mode. Reconnects when the app returns to the foreground.
 - Disconnect from the More menu, which removes the key from the phone.
 
-Not yet: editing drafts, secrets, computer takeovers, attachments, creating
+Not yet: secrets, computer takeovers, attachments, creating
 bots, several servers, push notifications, iPad layout.
 
 ## Addresses and the owner key
