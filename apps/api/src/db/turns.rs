@@ -462,6 +462,8 @@ pub enum AcceptError {
     RequestConflict,
     #[error("reaction target is not an assistant message of this conversation")]
     InvalidReaction,
+    #[error("a reaction named a notice it would answer")]
+    ReactionAnswersNotice,
     #[error("a file part is not one of this bot's attachments as stored")]
     InvalidAttachment,
     #[error("work is still stopping")]
@@ -600,6 +602,12 @@ pub async fn accept(
             item,
             placement: None,
         });
+    }
+    // A reaction answers no notice, so a new request naming one with a
+    // reaction is refused rather than dropping its reply. A request already
+    // accepted under its ID replays above.
+    if req.reaction.is_some() && req.answers_notice.is_some() {
+        return Err(AcceptError::ReactionAnswersNotice);
     }
     if let Some(reaction) = req.reaction {
         let target: Option<ItemKind> =

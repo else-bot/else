@@ -240,6 +240,30 @@ async fn a_reaction_never_answers_the_notice() {
     assert_eq!(reacted.status, StatusCode::ACCEPTED, "{}", reacted.body);
     let shown = notices(app, &target, child).await;
     assert_eq!(shown[0]["status"], "pending", "{shown:?}");
+
+    // A reaction naming the notice is refused, not taken as its answer.
+    let mixed = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{target}/turns"),
+            Some(json!({
+                "request_id": Uuid::new_v4(),
+                "text": "👍 Feedback on your earlier message",
+                "provider_id": "synthetic",
+                "reaction": { "item_id": assistant, "kind": "thumbs_up" },
+                "answers_notice": shown[0]["id"],
+            })),
+        )
+        .await;
+    assert_eq!(mixed.status, StatusCode::BAD_REQUEST, "{}", mixed.body);
+    assert_eq!(mixed.body["error"]["code"], "reaction_answers_notice");
+
+    // The owner can still answer it.
+    let answered = app
+        .send(&target, Uuid::new_v4(), "Hotfix it", Some("synthetic"))
+        .await;
+    assert_eq!(answered.status, StatusCode::ACCEPTED, "{}", answered.body);
+    assert_eq!(notices(app, &target, child).await[0]["status"], "replied");
 }
 
 #[tokio::test(flavor = "multi_thread")]

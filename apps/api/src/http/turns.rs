@@ -82,6 +82,10 @@ impl From<AcceptError> for ApiError {
                 "provider_unavailable",
                 format!("Provider {provider} has no saved execution profile; run else-api setup."),
             ),
+            AcceptError::ReactionAnswersNotice => ApiError::bad_request(
+                "reaction_answers_notice",
+                "A reaction answers no notice; send the answer as its own message.",
+            ),
             AcceptError::InvalidNotice => ApiError::bad_request(
                 "invalid_notice",
                 "answers_notice must be one of this bot's owner notices.",
