@@ -13,6 +13,7 @@ mod model;
 mod new_bot;
 mod parts;
 pub mod session;
+mod waits;
 
 use std::rc::Rc;
 

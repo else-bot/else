@@ -36,6 +36,7 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
         }
     });
 
+    let tray = super::waits::tray(bot, name.clone(), chat);
     nav_page()
         .key(format!("chat-{bot}"))
         .title(name)
@@ -54,6 +55,7 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
                 .bg(colors::chat())
                 .pb_keyboard()
                 .child(view().flex_1().child(transcript))
+                .child(tray)
                 .child(super::composer::composer(bot, chat, busy)),
         )
 }
