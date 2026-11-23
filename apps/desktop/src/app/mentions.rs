@@ -8,58 +8,8 @@ use uuid::Uuid;
 
 use super::ElseApp;
 use crate::avatar::bot_avatar;
+use else_client::mention::MentionQuery;
 use else_wire::bots::Bot;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MentionQuery {
-    range: Range<usize>,
-    text: String,
-}
-
-impl MentionQuery {
-    fn at(text: &str, selection: Range<usize>) -> Option<Self> {
-        if !selection.is_empty() {
-            return None;
-        }
-        let caret = selection.start;
-        let before = text.get(..caret)?;
-        let start = before.rfind('@')?;
-        if !mention_boundary(&before[..start]) {
-            return None;
-        }
-        let query = &before[start + 1..];
-        if query.is_empty() || !query.chars().all(mention_character) {
-            return None;
-        }
-        let suffix = &text[caret..];
-        let end = caret
-            + suffix
-                .find(|c| !mention_character(c))
-                .unwrap_or(suffix.len());
-        Some(Self {
-            range: start..end,
-            text: query.to_lowercase(),
-        })
-    }
-
-    fn candidates(&self, bots: &[Bot]) -> Vec<Uuid> {
-        bots.iter()
-            .filter(|bot| bot.is_active() && bot.name.to_lowercase().contains(&self.text))
-            .map(|bot| bot.id)
-            .collect()
-    }
-}
-
-pub(super) fn mention_boundary(before: &str) -> bool {
-    before
-        .chars()
-        .next_back()
-        .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\''))
-}
-
-fn mention_character(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '.')
-}
 
 #[derive(Default)]
 pub(super) enum MentionMenu {
@@ -356,64 +306,4 @@ pub(super) fn mention_keys<E: InteractiveElement>(element: E, cx: &mut Context<E
         .capture_action(cx.listener(|app, _: &IndentInline, window, cx| {
             app.mention_action(MentionAction::Accept, window, cx);
         }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MentionQuery;
-    use uuid::Uuid;
-
-    #[test]
-    fn opens_after_the_first_character_at_a_mention_boundary() {
-        for text in ["@s", "Hey @s", "Hello\n@日", "(@s", "@Scout @s"] {
-            assert!(
-                MentionQuery::at(text, text.len()..text.len()).is_some(),
-                "{text}"
-            );
-        }
-        for text in ["@", "Hey @", "a@scout", "hi@example.com", "@s ", "@@s"] {
-            assert!(
-                MentionQuery::at(text, text.len()..text.len()).is_none(),
-                "{text}"
-            );
-        }
-        assert!(MentionQuery::at("@scout", 1..3).is_none());
-    }
-
-    #[test]
-    fn replaces_only_the_mention_at_the_caret_with_unicode_and_a_suffix() {
-        let mut text = "Héllo @scout, help @todo".to_owned();
-        let caret = "Héllo @sc".len();
-        let query = MentionQuery::at(&text, caret..caret).unwrap();
-        assert_eq!(query.text, "sc");
-        text.replace_range(query.range, "@Scout Bot ");
-        assert_eq!(text, "Héllo @Scout Bot , help @todo");
-    }
-
-    #[test]
-    fn filters_active_bots_case_insensitively_including_multiword_names() {
-        let bot = |id, name, cleanup| {
-            serde_json::from_value(serde_json::json!({
-                "id": Uuid::from_u128(id), "name": name, "cleanup": cleanup,
-            }))
-            .unwrap()
-        };
-        let bots = vec![
-            bot(1, "Proliquid Scout", serde_json::Value::Null),
-            bot(2, "Todo", serde_json::Value::Null),
-            bot(
-                3,
-                "Scout removed",
-                serde_json::json!({"state": "done", "error": null}),
-            ),
-            bot(4, "SCOUT", serde_json::Value::Null),
-        ];
-        let query = MentionQuery::at("Hey @Sc", 7..7).unwrap();
-        assert_eq!(
-            query.candidates(&bots),
-            vec![Uuid::from_u128(1), Uuid::from_u128(4)]
-        );
-        let query = MentionQuery::at("@missing", 8..8).unwrap();
-        assert!(query.candidates(&bots).is_empty());
-    }
 }

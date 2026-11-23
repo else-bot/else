@@ -13,46 +13,8 @@ use uuid::Uuid;
 
 use super::ElseApp;
 use crate::avatar::bot_avatar;
-use else_wire::bots::Bot;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MentionBot {
-    id: Uuid,
-    name: String,
-    avatar: Avatar,
-}
-
-#[derive(Default, PartialEq, Eq)]
-pub(super) struct MentionRegistry(Vec<MentionBot>);
-
-impl MentionRegistry {
-    pub(super) fn name(&self, id: Uuid) -> Option<&str> {
-        self.0
-            .iter()
-            .find(|bot| bot.id == id)
-            .map(|bot| bot.name.as_str())
-    }
-
-    pub(super) fn new(bots: &[Bot]) -> Self {
-        let mut entries: Vec<_> = bots
-            .iter()
-            .filter(|bot| {
-                bot.is_active()
-                    && !bot
-                        .name
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
-            })
-            .map(|bot| MentionBot {
-                id: bot.id,
-                name: bot.name.clone(),
-                avatar: bot.avatar,
-            })
-            .collect();
-        entries.sort_by_key(|bot| bot.id);
-        Self(entries)
-    }
-}
+pub(super) use else_client::mention::Registry as MentionRegistry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BotMention {
@@ -65,62 +27,16 @@ pub(super) struct BotMention {
 
 impl BotMention {
     pub(super) fn find(source: &str, bots: &MentionRegistry) -> Vec<Self> {
-        let mut mentions = Vec::new();
-        let mut end = 0;
-        for (start, _) in source.match_indices('@') {
-            if start < end || !super::mentions::mention_boundary(&source[..start]) {
-                continue;
-            }
-            let suffix = &source[start + 1..];
-            let matched = bots
-                .0
-                .iter()
-                .filter_map(|bot| {
-                    let len = suffix
-                        .char_indices()
-                        .nth(bot.name.chars().count())
-                        .map_or(suffix.len(), |(ix, _)| ix);
-                    (suffix[..len].to_lowercase() == bot.name.to_lowercase()
-                        && suffix[len..].chars().next().is_none_or(|c| {
-                            c.is_whitespace()
-                                || matches!(
-                                    c,
-                                    '.' | ','
-                                        | '!'
-                                        | '?'
-                                        | ':'
-                                        | ';'
-                                        | ')'
-                                        | ']'
-                                        | '}'
-                                        | '"'
-                                        | '\''
-                                )
-                        }))
-                    .then_some((bot, start + 1 + len))
-                })
-                .max_by_key(|(_, end)| *end);
-            if let Some((bot, matched_end)) = matched {
-                if bots
-                    .0
-                    .iter()
-                    .filter(|candidate| candidate.name.to_lowercase() == bot.name.to_lowercase())
-                    .count()
-                    > 1
-                {
-                    continue;
-                }
-                end = matched_end;
-                mentions.push(Self {
-                    range: start..end,
-                    id: bot.id,
-                    name: bot.name.clone(),
-                    text: source[start..end].to_owned(),
-                    avatar: bot.avatar,
-                });
-            }
-        }
-        mentions
+        else_client::mention::find(source, bots)
+            .into_iter()
+            .map(|found| Self {
+                range: found.range,
+                id: found.id,
+                name: found.name,
+                text: found.text,
+                avatar: found.avatar,
+            })
+            .collect()
     }
 
     pub(super) fn in_markdown(source: &str, bots: &MentionRegistry) -> Vec<Self> {
