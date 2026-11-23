@@ -80,13 +80,15 @@ fn screen() -> Screen {
             match client.capabilities().await {
                 Ok(caps) => {
                     let providers = model::offered(caps.providers);
-                    let defaults = caps.defaults.and_then(|wanted| {
+                    let defaults = caps.defaults;
+                    // Shown as the catalog applies it now. When that differs
+                    // from the raw defaults, the shown one is sent.
+                    model.set(defaults.as_ref().and_then(|wanted| {
                         providers
                             .iter()
                             .find(|p| p.state.id == wanted.provider_id)
-                            .and_then(|p| p.choice(Some(&wanted)))
-                    });
-                    model.set(defaults.clone());
+                            .and_then(|p| p.choice(Some(wanted)))
+                    }));
                     models.set(Models::Ready {
                         providers,
                         defaults,

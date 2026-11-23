@@ -90,6 +90,9 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
         .child(dynamic(move || {
             let (provider, picked) = current()?;
             let model = provider.catalog.model(&picked.model)?.clone();
+            // A saved provider the server cannot run stays shown, but its
+            // options cannot change until the owner picks a runnable one.
+            let usable = provider.state.cli_available;
             let models = provider.catalog.models.iter().map(|model| {
                 let id = model.id.clone();
                 let info = provider.clone();
@@ -97,7 +100,7 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                     let id = id.clone();
                     move || choice.with(|c| c.as_ref().is_some_and(|c| c.model == id))
                 };
-                row(model.label.clone(), None, on, true, move || {
+                row(model.label.clone(), None, on, usable, move || {
                     let Some(mut next) = choice.get_untracked() else {
                         return;
                     };
@@ -112,20 +115,26 @@ pub fn picker(providers: Vec<ProviderInfo>, choice: Signal<Option<ProfileChoice>
                     let value = value.clone();
                     move || choice.with(|c| c.as_ref().is_some_and(|c| c.reasoning_effort == value))
                 };
-                row(effort_label(effort).to_owned(), None, on, true, move || {
-                    choice.update(|c| {
-                        if let Some(c) = c {
-                            c.reasoning_effort = value.clone();
-                        }
-                    });
-                })
+                row(
+                    effort_label(effort).to_owned(),
+                    None,
+                    on,
+                    usable,
+                    move || {
+                        choice.update(|c| {
+                            if let Some(c) = c {
+                                c.reasoning_effort = value.clone();
+                            }
+                        });
+                    },
+                )
                 .into_element()
             });
             let speeds = model.tiers.iter().any(|tier| tier == FAST_TIER).then(|| {
                 let speed = |label: &str, tier: &'static str| {
                     let on =
                         move || choice.with(|c| c.as_ref().is_some_and(|c| c.service_tier == tier));
-                    row(label.to_owned(), None, on, true, move || {
+                    row(label.to_owned(), None, on, usable, move || {
                         choice.update(|c| {
                             if let Some(c) = c {
                                 c.service_tier = tier.to_owned();
@@ -232,7 +241,8 @@ fn row(
         )
 }
 
-/// The Model screen's data: the providers and the bot's saved profile.
+/// The Model screen's data: the providers and the bot's profile as the
+/// server reports it (its own, or the defaults it follows).
 #[derive(Clone, PartialEq)]
 enum Load {
     Loading,
@@ -243,14 +253,25 @@ enum Load {
     },
 }
 
-/// The save request. A lost response leaves the outcome unknown; saving
-/// the same profile again is safe, since a PUT of it changes nothing.
+/// The save request. A lost response keeps what it tried: the retry reads
+/// the profile back first, so it neither repeats a save that landed nor
+/// overwrites a change made meanwhile on another device.
 #[derive(Clone, PartialEq)]
 enum Save {
     Idle,
     Saving,
     Failed(String),
-    Unknown,
+    Unknown { tried: ProfileChoice },
+}
+
+/// What a retry of an unknown save finds on the server.
+enum Reconciled {
+    /// The earlier save landed.
+    Saved(BotProfile),
+    /// Someone changed the profile since it was loaded.
+    Changed(Option<BotProfile>),
+    /// Nothing changed: saving again is safe.
+    Unchanged,
 }
 
 fn key(bot: Uuid) -> String {
@@ -274,31 +295,19 @@ fn screen(bot: Uuid) -> Screen {
         match (caps, saved) {
             (Ok(caps), Ok(saved)) => {
                 let providers = offered(caps.providers);
-                // A saved model the server no longer lists falls back to
-                // the closest one it does.
-                let shown = saved.as_ref().and_then(|saved| {
-                    providers
-                        .iter()
-                        .find(|p| p.state.id == saved.choice.provider_id)
-                        .and_then(|p| p.choice(Some(&saved.choice)))
-                });
-                let shown = shown.or_else(|| {
-                    providers
-                        .iter()
-                        .filter(|p| p.state.cli_available)
-                        .find_map(|p| p.choice(None))
-                });
-                choice.set(shown);
+                choice.set(shown(&providers, saved.as_ref()));
                 load.set(Load::Ready { providers, saved });
             }
             (Err(err), _) | (_, Err(err)) => load.set(Load::Failed(err.to_string())),
         }
     });
 
+    // Changed from what the bot uses now, own or followed: opening the
+    // screen and tapping Save cannot pin the defaults by accident.
     let dirty = computed(move || match load.get() {
         Load::Ready { saved, .. } => {
             let chosen = choice.get();
-            chosen.is_some() && chosen != saved.filter(|s| s.own).map(|s| s.choice)
+            chosen.is_some() && chosen != saved.map(|s| s.choice)
         }
         Load::Loading | Load::Failed(_) => false,
     });
@@ -311,22 +320,51 @@ fn screen(bot: Uuid) -> Screen {
         if !ready.get_untracked() {
             return;
         }
+        let retry = matches!(save.get_untracked(), Save::Unknown { tried } if tried == picked);
+        let loaded = load.with_untracked(|l| match l {
+            Load::Ready { saved, .. } => saved.clone(),
+            Load::Loading | Load::Failed(_) => None,
+        });
         save.set(Save::Saving);
         let client = session::server().client.clone();
+        let done = move |saved: BotProfile| {
+            if save.try_set(Save::Idle) {
+                load.update(|l| {
+                    if let Load::Ready { saved: slot, .. } = l {
+                        *slot = Some(saved);
+                    }
+                });
+                super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot)));
+            }
+        };
         session::spawn_held(async move {
-            match client.set_bot_profile(bot, picked).await {
-                Ok(saved) => {
-                    if save.try_set(Save::Idle) {
-                        load.update(|l| {
-                            if let Load::Ready { saved: slot, .. } = l {
-                                *slot = Some(saved);
-                            }
-                        });
-                        super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot)));
+            if retry {
+                match reconcile(&client, bot, &picked, loaded.as_ref()).await {
+                    Ok(Reconciled::Saved(saved)) => return done(saved),
+                    Ok(Reconciled::Changed(latest)) => {
+                        if save.try_set(Save::Failed(
+                            "The model was changed on another device. This shows it now.".into(),
+                        )) {
+                            load.update(|l| {
+                                if let Load::Ready { providers, saved } = l {
+                                    choice.set(shown(providers, latest.as_ref()));
+                                    *saved = latest;
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Ok(Reconciled::Unchanged) => {}
+                    Err(_) => {
+                        save.try_set(Save::Unknown { tried: picked });
+                        return;
                     }
                 }
+            }
+            match client.set_bot_profile(bot, picked.clone()).await {
+                Ok(saved) => done(saved),
                 Err(err) if err.outcome_unknown() => {
-                    save.try_set(Save::Unknown);
+                    save.try_set(Save::Unknown { tried: picked });
                 }
                 Err(ClientError::Api { message, .. }) => {
                     save.try_set(Save::Failed(message));
@@ -372,9 +410,18 @@ fn screen(bot: Uuid) -> Screen {
         }
         Load::Ready { providers, saved } => {
             let follows = saved.as_ref().is_none_or(|s| !s.own);
+            let gone = saved
+                .as_ref()
+                .filter(|s| !providers.iter().any(|p| p.state.id == s.choice.provider_id))
+                .map(|s| s.choice.provider_id.clone());
             Some(
                 view()
                     .gap_2()
+                    .child(gone.map(|id| {
+                        parts::footnote(format!(
+                            "The server no longer offers {id}, which this bot uses. Pick another provider."
+                        ))
+                    }))
                     .child(untracked(|| picker(providers, choice)))
                     .child(follows.then(|| {
                         parts::footnote(
@@ -389,7 +436,7 @@ fn screen(bot: Uuid) -> Screen {
     let status = dynamic(move || {
         let message = match save.get() {
             Save::Failed(message) => message,
-            Save::Unknown => "The connection dropped before the server answered. It may have saved, and saving again is safe.".into(),
+            Save::Unknown { .. } => "The connection dropped before the server answered. It may have saved. Save checks the server before saving again.".into(),
             Save::Idle | Save::Saving => return None,
         };
         Some(
@@ -412,4 +459,37 @@ fn screen(bot: Uuid) -> Screen {
                 .bg(colors::background())
                 .child(view().py_6().gap_4().child(status).child(body)),
         )
+}
+
+/// The choice the screen opens on: the bot's profile as the server's
+/// catalog applies it now, else the first runnable provider. A provider
+/// the server no longer offers opens with nothing picked.
+fn shown(providers: &[ProviderInfo], saved: Option<&BotProfile>) -> Option<ProfileChoice> {
+    match saved {
+        Some(saved) => providers
+            .iter()
+            .find(|p| p.state.id == saved.choice.provider_id)
+            .and_then(|p| p.choice(Some(&saved.choice))),
+        None => providers
+            .iter()
+            .filter(|p| p.state.cli_available)
+            .find_map(|p| p.choice(None)),
+    }
+}
+
+/// Reads the profile back after a save whose outcome is unknown.
+async fn reconcile(
+    client: &std::sync::Arc<crate::api::Client>,
+    bot: Uuid,
+    tried: &ProfileChoice,
+    loaded: Option<&BotProfile>,
+) -> Result<Reconciled, ClientError> {
+    let now = client.clone().bot_profile(bot).await?;
+    Ok(match now {
+        Some(now) if now.own && now.choice == *tried => Reconciled::Saved(now),
+        now if now.as_ref().map(|p| (p.own, p.revision)) != loaded.map(|p| (p.own, p.revision)) => {
+            Reconciled::Changed(now)
+        }
+        _ => Reconciled::Unchanged,
+    })
 }

@@ -13,13 +13,13 @@ use uuid::Uuid;
 
 use super::parts::{ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
-use crate::api::{ClientError, Message, OpenDraft};
+use crate::api::{ClientError, Message};
 use crate::conversation::{Ask, Conversation, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
 /// is unknown keeps its request ID and the message it carried: sending the
-/// same text, files and draft again reuses the ID, so the server cannot
-/// post it twice; any change makes a new message.
+/// same text and files again reuses the ID, so the server cannot post it
+/// twice; any change makes a new message.
 #[derive(Clone, PartialEq)]
 enum Outbox {
     Idle,
@@ -581,11 +581,9 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
         let message = Message {
             text: draft.get_untracked().trim().to_owned(),
             files: pending.with_untracked(|p| p.iter().map(|item| item.file.clone()).collect()),
-            draft: chat.with_untracked(|c| {
-                c.conversation()
-                    .and_then(Conversation::open_draft)
-                    .map(OpenDraft::of)
-            }),
+            // Only the draft card's Send carries a draft: a message about
+            // something else must not close the draft or change its reply.
+            draft: None,
         };
         let request_id = outbox.with_untracked(|o| o.request_id(&message));
         outbox.set(Outbox::Sending { request_id });

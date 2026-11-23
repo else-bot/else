@@ -480,8 +480,8 @@ impl Client {
 pub struct Message {
     pub text: String,
     pub files: Vec<Attachment>,
-    /// The draft the bot waits on, sent along so the bot can revise or
-    /// send it; the server closes it if the reply moves on without either.
+    /// The draft this message answers, so the bot can send it; the server
+    /// closes it if the reply moves on without sending it.
     pub draft: Option<OpenDraft>,
 }
 

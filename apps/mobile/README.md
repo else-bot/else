@@ -27,9 +27,8 @@ with the server and the desktop app.
 - Answer a bot’s question with one tap. Review a draft, edit its text, then Discard it
   or Send it after a confirmation. Settled ones leave a receipt in the chat.
   Once the bot's turn has ended, Send replies in the chat with the draft
-  attached, asking the bot to send it as it is. Every message you send
-  carries the open draft, as on the desktop: a reply that neither revises
-  nor sends it closes it.
+  attached, asking the bot to send it as it is. Other messages leave the
+  draft alone.
 - Give a bot the secret it asks for, or decline. It is saved in the
   server's vault.
 - Chats are marked read on the server, so the desktop's unread dots agree.
