@@ -382,7 +382,13 @@ pub fn load(bot: Uuid, chat: Signal<Chat>) {
         let mut delay = Duration::from_secs(1);
         let open = move || chats().with_untracked(|c| c.0.get(&bot) == Some(&chat));
         while open() {
-            match client.clone().latest(bot).await {
+            let result = client.clone().latest(bot).await;
+            // The chat may have closed during the request; its signal is
+            // then gone.
+            if !open() {
+                return;
+            }
+            match result {
                 Ok(snapshot) => {
                     match Conversation::from_snapshot(snapshot) {
                         Ok(conversation) => {
@@ -418,7 +424,8 @@ pub fn load_older(bot: Uuid, chat: Signal<Chat>) {
     let client = server().client.clone();
     spawn(async move {
         if let Ok(page) = client.older(bot, before).await {
-            chat.update(|c| {
+            // The chat may have closed during the request.
+            try_update(chat, |c| {
                 if let Chat::Ready(conversation) = c {
                     conversation.merge_older(page);
                 }

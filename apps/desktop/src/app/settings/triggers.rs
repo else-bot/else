@@ -5,6 +5,7 @@ use crate::app::request::{Request, Settle};
 use crate::controls::toggle;
 use chrono::{DateTime, Utc};
 use else_wire::conversation::BotExtras;
+use else_wire::schedule::webhook_pace as pace;
 use else_wire::socials::Provider;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -353,16 +354,6 @@ fn trigger_cards(automations: &BotExtras) -> Vec<TriggerCard> {
         last_woke: webhook.last_wake.as_ref().map(|wake| wake.woke_at),
     });
     mail.chain(social).chain(webhooks).collect()
-}
-
-/// How often a webhook may wake the bot, at most.
-fn pace(minutes: i64) -> String {
-    match minutes {
-        1 => "at most every minute".to_owned(),
-        m if m % 60 == 0 && m > 60 => format!("at most every {} hours", m / 60),
-        60 => "at most hourly".to_owned(),
-        m => format!("at most every {m} min"),
-    }
 }
 
 /// Whether a trigger's local change still waits for the server: a save until

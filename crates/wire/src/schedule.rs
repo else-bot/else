@@ -1,7 +1,9 @@
 //! Routine schedules as people read them: a cron expression, active
 //! hours, and a moment in the routine's time zone.
 
-use crate::routines::ActiveHours;
+use crate::routines::{
+    ActiveHours, LastRun, PausedReason, Routine, RunStatus, SkipReason, Watcher, WatcherStatus,
+};
 use chrono::{DateTime, Utc};
 
 pub fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
@@ -151,10 +153,168 @@ pub fn describe_hours(hours: &ActiveHours) -> String {
     format!("{days} {} to {}", hours.start, hours.end)
 }
 
+impl Routine {
+    /// When it runs, in parts: a reminder's moment, else its schedule and
+    /// active hours. Times are in its own time zone.
+    pub fn when(&self) -> Vec<String> {
+        match (self.run_at, &self.active_hours) {
+            (Some(at), _) => vec!["Once".to_owned(), local_time(at, &self.timezone)],
+            (None, Some(hours)) => vec![describe_cron(&self.cron), describe_hours(hours)],
+            (None, None) => vec![describe_cron(&self.cron)],
+        }
+    }
+
+    /// [`Routine::when`] on one line, ending with the time zone.
+    pub fn schedule(&self) -> String {
+        format!("{} · {}", self.when().join(" · "), self.timezone)
+    }
+
+    /// A routine's next run; `None` for a paused routine or a reminder.
+    pub fn next_run(&self) -> Option<String> {
+        match (self.enabled, self.next_run_at) {
+            (false, _) => None,
+            _ if self.run_at.is_some() => None,
+            (true, Some(at)) => Some(format!("Next run {}", local_time(at, &self.timezone))),
+            (true, None) => Some("No further runs".to_owned()),
+        }
+    }
+
+    /// The last run as a line for the owner, and whether it needs them:
+    /// a retry in progress, a pause and why, or what became of the last due
+    /// run. `None` before the first run.
+    pub fn last_run_line(&self) -> Option<(String, bool)> {
+        let routine = self;
+        let run = routine.last_run.as_ref()?;
+        let when = local_time(run.due_at, &routine.timezone);
+        let error = run.error.as_ref().and_then(|e| e.message.clone());
+        if routine.retrying {
+            let progress = match run.status {
+                RunStatus::Queued => "Retrying: waiting to start",
+                RunStatus::Checking | RunStatus::Running => "Retrying: running now",
+                _ => "Retrying: checking the result",
+            };
+            return Some((progress.to_owned(), false));
+        }
+        if !routine.enabled
+            && let Some(reason) = &routine.paused_reason
+        {
+            let why = match reason {
+                PausedReason::Repeated => {
+                    format!("Paused after {} failed runs", routine.failed_runs)
+                }
+                _ => "Paused: retrying won't fix the last failure".to_owned(),
+            };
+            let detail = error.map_or_else(String::new, |e| format!(" ({e})"));
+            return Some((format!("{why}{detail}"), true));
+        }
+        let (text, attention) = last_run_status(run, &when, error);
+        Some((
+            text,
+            attention && (routine.failed_runs > 0 || run.status == RunStatus::Skipped),
+        ))
+    }
+}
+
+fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String, bool) {
+    let reason = |skip: Option<SkipReason>| match skip {
+        Some(SkipReason::Overlap) => "the previous run was still going",
+        Some(SkipReason::QueueFull) => "too many messages were waiting",
+        Some(SkipReason::ProviderUnavailable) => "no provider was available",
+        Some(SkipReason::CheckCancelled) => "its check was stopped",
+        Some(SkipReason::CheckUnavailable) => "its check could not start",
+        Some(SkipReason::NothingNew | SkipReason::Unknown) | None => "it could not start",
+    };
+    let status = run.status.as_str();
+    match run.status {
+        RunStatus::Skipped if run.skip_reason == Some(SkipReason::NothingNew) => {
+            (format!("Last run {when}: nothing new"), false)
+        }
+        RunStatus::NoNews => (format!("Last run {when}: no news"), false),
+        RunStatus::Failed | RunStatus::Uncertain | RunStatus::Interrupted => {
+            let detail = error.unwrap_or_else(|| status.to_owned());
+            (format!("Last run {when} {status}: {detail}"), true)
+        }
+        RunStatus::Skipped => (format!("Skipped {when}: {}", reason(run.skip_reason)), true),
+        RunStatus::Checking => (format!("Checking for new work (due {when})"), false),
+        RunStatus::Queued | RunStatus::Running => (format!("Running now (due {when})"), false),
+        RunStatus::Completed | RunStatus::Other(_) => (format!("Last run {when}: {status}"), false),
+    }
+}
+
+/// A watcher's deadline: its time when it is today, else its date.
+pub fn watcher_deadline<Tz: chrono::TimeZone>(
+    until: DateTime<Tz>,
+    today: chrono::NaiveDate,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if until.date_naive() == today {
+        until.format("%H:%M").to_string()
+    } else {
+        until.format("%b %-d").to_string()
+    }
+}
+
+fn watcher_duration(minutes: i64) -> String {
+    match minutes {
+        ..=59 => format!("{minutes} min"),
+        60..1440 => format!("{} hr", minutes / 60),
+        1440..2880 => "1 day".to_owned(),
+        _ => format!("{} days", minutes / 1440),
+    }
+}
+
+/// When a watcher last checked and what it found, or why it has not.
+pub fn watcher_last_check(watcher: &Watcher, now: DateTime<Utc>) -> String {
+    let Some(at) = watcher.last_checked_at else {
+        return match &watcher.last_status {
+            Some(status) => format!("not checked yet: {status}"),
+            None => "not checked yet".to_owned(),
+        };
+    };
+    let minutes = (now - at).num_minutes();
+    let when = if minutes <= 0 {
+        "just now".to_owned()
+    } else {
+        format!("{} ago", watcher_duration(minutes))
+    };
+    match &watcher.last_status {
+        Some(status) => format!("checked {when}: {status}"),
+        None => format!("checked {when}"),
+    }
+}
+
+/// When a watcher checks next, or that it is checking now.
+pub fn watcher_next(watcher: &Watcher, now: DateTime<Utc>) -> Option<String> {
+    let at = match watcher.status {
+        WatcherStatus::Checking => return Some("checking now".to_owned()),
+        WatcherStatus::Waiting => watcher.next_check_at?,
+        WatcherStatus::Waking | WatcherStatus::Ended | WatcherStatus::Unknown => return None,
+    };
+    Some(match (at - now).num_minutes() {
+        _ if at <= now => "next check due now".to_owned(),
+        0 => "next check in <1 min".to_owned(),
+        minutes => format!("next check in {}", watcher_duration(minutes)),
+    })
+}
+
+/// How often a webhook may wake the bot, at most.
+pub fn webhook_pace(minutes: i64) -> String {
+    match minutes {
+        1 => "at most every minute".to_owned(),
+        m if m % 60 == 0 && m > 60 => format!("at most every {} hours", m / 60),
+        60 => "at most hourly".to_owned(),
+        m => format!("at most every {m} min"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{describe_cron, describe_hours};
-    use crate::routines::ActiveHours;
+    use super::{watcher_deadline, watcher_last_check, watcher_next};
+    use crate::routines::{ActiveHours, Routine, Watcher};
+    use serde_json::json;
 
     #[test]
     fn common_cron_schedules_read_as_prose() {
@@ -248,5 +408,132 @@ mod tests {
         ] {
             assert_eq!(describe_cron(cron), cron);
         }
+    }
+
+    #[test]
+    fn a_routine_card_flags_pauses_and_undismissed_failures_only() {
+        let routine = |extra: serde_json::Value| -> Routine {
+            let mut value = serde_json::json!({
+                "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
+                "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": true,
+                "next_run_at": null, "updated_at": "2026-11-08T03:00:00Z",
+                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "failed",
+                              "skip_reason": null,
+                              "error": { "code": "provider_unavailable",
+                                         "message": "the provider process exited" } },
+            });
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let (text, attention) = routine(serde_json::json!({ "failed_runs": 1 }))
+            .last_run_line()
+            .unwrap();
+        assert!(attention);
+        assert!(
+            text.ends_with("failed: the provider process exited"),
+            "{text}"
+        );
+        let (_, attention) = routine(serde_json::json!({})).last_run_line().unwrap();
+        assert!(!attention, "dismissed failures stay visible but quiet");
+        let (text, attention) = routine(serde_json::json!({
+            "enabled": false, "failed_runs": 3, "paused_reason": "repeated",
+        }))
+        .last_run_line()
+        .unwrap();
+        assert!(attention);
+        assert_eq!(
+            text,
+            "Paused after 3 failed runs (the provider process exited)"
+        );
+        let (text, attention) = routine(serde_json::json!({
+            "enabled": false, "failed_runs": 1, "paused_reason": "needs_action", "retrying": true,
+            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "running",
+                          "skip_reason": null, "error": null },
+        }))
+        .last_run_line()
+        .unwrap();
+        assert!(!attention, "a retry in progress hides the old failure");
+        assert_eq!(text, "Retrying: running now");
+        let skipped = |reason: &str| {
+            routine(serde_json::json!({
+                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "skipped",
+                              "skip_reason": reason, "error": null },
+            }))
+            .last_run_line()
+            .unwrap()
+        };
+        let (text, attention) = skipped("nothing_new");
+        assert!(!attention, "a check that found nothing is a normal run");
+        assert!(text.ends_with(": nothing new"), "{text}");
+        let (text, attention) = skipped("check_unavailable");
+        assert!(attention);
+        assert!(text.ends_with(": its check could not start"), "{text}");
+        let (text, attention) = routine(serde_json::json!({
+            "quiet": true,
+            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "no_news",
+                          "skip_reason": null, "error": null },
+        }))
+        .last_run_line()
+        .unwrap();
+        assert!(!attention, "a run with no news is a normal run");
+        assert_eq!(text, "Last run Sun 8 Nov, 03:00: no news");
+    }
+
+    #[test]
+    fn watcher_labels_show_the_deadline_and_check_times() {
+        let now = "2026-11-20T08:00:00Z".parse().unwrap();
+        let watcher: Watcher = serde_json::from_value(json!({
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z", "status": "waiting",
+            "last_status": "unavailable", "last_checked_at": "2026-11-20T07:58:00Z",
+            "next_check_at": "2026-11-20T08:13:00Z", "last_output": null,
+        }))
+        .unwrap();
+        let today = "2026-11-20".parse().unwrap();
+        assert_eq!(watcher_deadline(watcher.until, today), "Dec 4");
+        let tonight: chrono::DateTime<chrono::Utc> = "2026-11-20T18:30:00Z".parse().unwrap();
+        assert_eq!(watcher_deadline(tonight, today), "18:30");
+        assert_eq!(
+            watcher_last_check(&watcher, now),
+            "checked 2 min ago: unavailable"
+        );
+        assert_eq!(
+            watcher_next(&watcher, now).as_deref(),
+            Some("next check in 13 min")
+        );
+        assert_eq!(
+            watcher_next(&watcher, "2026-11-20T08:13:01Z".parse().unwrap()).as_deref(),
+            Some("next check due now")
+        );
+    }
+
+    #[test]
+    fn watcher_labels_show_a_first_check_in_progress() {
+        let now = "2026-11-20T08:00:00Z".parse().unwrap();
+        let watcher: Watcher = serde_json::from_value(json!({
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z", "status": "checking",
+            "last_status": null, "last_checked_at": null, "next_check_at": null, "last_output": null,
+        })).unwrap();
+        assert_eq!(watcher_last_check(&watcher, now), "not checked yet");
+        assert_eq!(watcher_next(&watcher, now).as_deref(), Some("checking now"));
+    }
+
+    #[test]
+    fn a_watcher_that_never_ran_says_why() {
+        let now = "2026-11-20T08:00:00Z".parse().unwrap();
+        let watcher: Watcher = serde_json::from_value(json!({
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z", "status": "waiting",
+            "last_status": "check did not run: the computer was not available",
+            "last_checked_at": null, "next_check_at": "2026-11-20T08:01:00Z", "last_output": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            watcher_last_check(&watcher, now),
+            "not checked yet: check did not run: the computer was not available"
+        );
     }
 }

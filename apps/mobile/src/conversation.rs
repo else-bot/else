@@ -42,6 +42,9 @@ pub struct Conversation {
     pub activity: Activity,
     /// The bot's routines, reminders, watchers and triggers.
     pub extras: BotExtras,
+    /// Counts the bot's `bot.updated` events, which also mark a change of
+    /// its model: screens that show the model read it again.
+    pub bot_updates: u64,
 }
 
 /// An owner message's text and its files. A message with files keeps its
@@ -145,6 +148,7 @@ impl Conversation {
             older_before_seq: snapshot.older_before_seq,
             activity: snapshot.activity,
             extras: snapshot.extras,
+            bot_updates: 0,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -203,6 +207,7 @@ impl Conversation {
                     self.activity = activity;
                 }
                 self.extras.update(extras);
+                self.bot_updates += 1;
             }
         }
         self.applied = seq;

@@ -6,9 +6,9 @@
 use chrono::{DateTime, Local, Utc};
 use else_wire::conversation::BotExtras;
 use else_wire::email::AccountState;
-use else_wire::routines::{PausedReason, Routine, Watcher, WatcherStatus};
+use else_wire::routines::{PausedReason, Routine, WatcherStatus};
 use else_wire::rules::RulesFile;
-use else_wire::schedule::{describe_cron, describe_hours, local_time};
+use else_wire::schedule::{watcher_deadline, watcher_last_check, watcher_next, webhook_pace};
 use else_wire::settings::{BotProfile, ProviderInfo};
 use nsh_base::nav_page;
 use nsh_core::prelude::*;
@@ -40,37 +40,96 @@ struct Model {
     profile: Option<BotProfile>,
 }
 
+/// The open chat's lists, as far as the chat has loaded.
+#[derive(Clone, PartialEq)]
+enum Lists {
+    Loading,
+    Failed(String),
+    /// `stale` while the chat fetches a newer page after a gap.
+    Ready {
+        extras: BotExtras,
+        stale: bool,
+    },
+}
+
 fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
     let model = signal(Fetch::<Model>::Loading);
     // The Model screen writes its saved profile here, so the row updates.
     let saved = signal(None::<BotProfile>);
     let rules = signal(Fetch::<RulesFile>::Loading);
-    let extras = computed(move || {
-        chat.with(|c| c.conversation().map(|c| c.extras.clone()))
-            .unwrap_or_default()
+    let lists = computed(move || {
+        chat.with(|c| match c {
+            Chat::Loading => Lists::Loading,
+            Chat::Failed(message) => Lists::Failed(message.clone()),
+            Chat::Ready(conversation) => Lists::Ready {
+                extras: conversation.extras.clone(),
+                stale: false,
+            },
+            Chat::Recovering(conversation) => Lists::Ready {
+                extras: conversation.extras.clone(),
+                stale: true,
+            },
+        })
     });
+    // Back online, what failed or went stale meanwhile is read again.
+    let live = computed(move || session::live_state().get() == session::LiveState::Live);
+    // Back on top of the stack (from the Model or Rules screen, or after
+    // another device changed something), the model and rules are read
+    // again: an owner's change on another device sends no live event.
+    let on_top = computed(move || {
+        super::routes().with(|r| r.0.last().is_some_and(|route| *route.key == *key(bot)))
+    });
+    let returns = {
+        let was = std::cell::Cell::new(true);
+        let count = std::cell::Cell::new(0_u64);
+        computed(move || {
+            let now = on_top.get();
+            if now && !was.replace(now) {
+                count.set(count.get() + 1);
+            }
+            was.set(now);
+            count.get()
+        })
+    };
 
+    // The model is read on open, after each bot.updated (another device or
+    // the bot itself may have changed it), and on reconnecting.
+    let updates = computed(move || chat.with(|c| c.conversation().map_or(0, |c| c.bot_updates)));
     let client = session::server().client.clone();
     {
         let client = client.clone();
-        spawn(async move {
-            let (caps, profile) = futures_util::join!(
-                client.clone().capabilities(),
-                client.clone().bot_profile(bot)
-            );
-            model.set(match (caps, profile) {
-                (Ok(caps), Ok(profile)) => Fetch::Ready(Model {
-                    providers: super::model::offered(caps.providers),
-                    profile,
-                }),
-                (Err(err), _) | (_, Err(err)) => Fetch::Failed(err.to_string()),
+        effect(move || {
+            let _ = (updates.get(), returns.get());
+            if !live.get() && model.get_untracked() != Fetch::Loading {
+                return;
+            }
+            let client = client.clone();
+            spawn(async move {
+                let (caps, profile) = futures_util::join!(
+                    client.clone().capabilities(),
+                    client.clone().bot_profile(bot)
+                );
+                model.set(match (caps, profile) {
+                    (Ok(caps), Ok(profile)) => Fetch::Ready(Model {
+                        providers: super::model::offered(caps.providers),
+                        profile,
+                    }),
+                    (Err(err), _) | (_, Err(err)) => Fetch::Failed(err.to_string()),
+                });
             });
         });
     }
-    // Loaded on open and again whenever the bot saves a new version.
-    let version = computed(move || extras.with(|e| e.rules_version));
+    // The rules are read on open, whenever the bot saves a new version, and
+    // on reconnecting.
+    let version = computed(move || match lists.get() {
+        Lists::Ready { extras, .. } => extras.rules_version,
+        Lists::Loading | Lists::Failed(_) => None,
+    });
     effect(move || {
-        let _ = version.get();
+        let _ = (version.get(), returns.get());
+        if !live.get() && rules.get_untracked() != Fetch::Loading {
+            return;
+        }
         let client = client.clone();
         spawn(async move {
             rules.set(match client.rules(bot).await {
@@ -108,53 +167,58 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             .text_color(colors::label()),
         );
 
+    // The Model screen loads and retries on its own, so the row always
+    // opens it, even while this screen's read is failing.
     let model_row = dynamic(move || {
-        let (detail, ready) = match model.get() {
-            Fetch::Loading => ("Loading…".to_owned(), false),
-            Fetch::Failed(message) => (message, false),
+        let detail = match model.get() {
+            Fetch::Loading => "Loading…".to_owned(),
+            Fetch::Failed(_) => "Couldn't load".to_owned(),
             Fetch::Ready(Model { providers, profile }) => match profile {
-                Some(p) => {
-                    let summary = super::model::summary(&providers, &p.choice);
-                    if p.own {
-                        (summary, true)
-                    } else {
-                        (format!("{summary} (default)"), true)
-                    }
-                }
-                None => ("Choose".to_owned(), true),
+                Some(p) if p.own => super::model::summary(&providers, &p.choice),
+                Some(p) => format!("{} (default)", super::model::summary(&providers, &p.choice)),
+                None => "Choose".to_owned(),
             },
         };
         Some(link_row(
             "Model",
             detail,
-            ready.then_some(move || super::model::open(bot, saved)),
+            Some(move || super::model::open(bot, saved)),
         ))
     });
 
     let rules_row = dynamic(move || {
-        let (detail, file) = match rules.get() {
-            Fetch::Loading => ("Loading…".to_owned(), None),
-            Fetch::Failed(message) => (message, None),
+        let (detail, any) = match rules.get() {
+            Fetch::Loading => ("Loading…".to_owned(), false),
+            Fetch::Failed(_) => ("Couldn't load".to_owned(), false),
             Fetch::Ready(file) => match file.sections.len() {
-                0 => ("None yet".to_owned(), None),
-                1 => ("1 rule".to_owned(), Some(file)),
-                n => (format!("{n} rules"), Some(file)),
+                0 => ("None yet".to_owned(), false),
+                1 => ("1 rule".to_owned(), true),
+                n => (format!("{n} rules"), true),
             },
         };
-        let open = file.map(|file| move || open_rules(bot, file.clone()));
-        Some(link_row("Rules", detail, open))
+        Some(link_row(
+            "Rules",
+            detail,
+            any.then_some(move || open_rules(bot, rules)),
+        ))
     });
 
     let lists = dynamic(move || {
-        let extras = extras.get();
-        Some(
-            view()
-                .gap_6()
-                .child(routines(&extras))
-                .child(reminders(&extras))
-                .child(watching(&extras))
-                .child(triggers(&extras)),
-        )
+        Some(match lists.get() {
+            Lists::Loading => parts::footnote("Loading…").into_element(),
+            Lists::Failed(message) => parts::footnote(message).into_element(),
+            Lists::Ready { extras, stale } => {
+                let now = Utc::now();
+                view()
+                    .gap_6()
+                    .child(stale.then(|| parts::footnote("Updating…")))
+                    .child(routines(&extras))
+                    .child(reminders(&extras))
+                    .child(watching(&extras, now))
+                    .child(triggers(&extras))
+                    .into_element()
+            }
+        })
     });
 
     nav_page()
@@ -285,6 +349,35 @@ fn item(title: String, lines: Vec<String>, warning: Option<String>, body: Option
     )
 }
 
+/// A routine's or reminder's lines: when it runs, in its own time zone,
+/// then its last run, in orange when it needs the owner.
+fn routine_item(routine: &Routine) -> View {
+    let mut lines = vec![routine.schedule()];
+    lines.extend(routine.next_run());
+    let (last, warning) = match routine.last_run_line() {
+        Some((line, true)) => (None, Some(line)),
+        Some((line, false)) => (Some(line), None),
+        None if !routine.enabled => (None, Some(paused(routine))),
+        None => (None, None),
+    };
+    lines.extend(last);
+    item(
+        routine.name.clone(),
+        lines,
+        warning,
+        Some(routine.prompt.clone()),
+    )
+}
+
+/// Why a routine without a run yet is off.
+fn paused(routine: &Routine) -> String {
+    match routine.paused_reason {
+        Some(PausedReason::Repeated) => format!("Paused after {} failed runs", routine.failed_runs),
+        Some(PausedReason::NeedsAction) => "Paused: retrying won't fix the last failure".to_owned(),
+        _ => "Paused".to_owned(),
+    }
+}
+
 fn routines(extras: &BotExtras) -> View {
     let rows = extras
         .routines
@@ -292,21 +385,7 @@ fn routines(extras: &BotExtras) -> View {
         .unwrap_or_default()
         .iter()
         .filter(|r| r.run_at.is_none())
-        .map(|routine| {
-            let mut lines = vec![describe_cron(&routine.cron)];
-            if let Some(hours) = &routine.active_hours {
-                lines.push(describe_hours(hours));
-            }
-            if let (true, Some(at)) = (routine.enabled, routine.next_run_at) {
-                lines.push(format!("Next run {}", local_time(at, &routine.timezone)));
-            }
-            item(
-                routine.name.clone(),
-                lines,
-                warning(routine),
-                Some(routine.prompt.clone()),
-            )
-        })
+        .map(routine_item)
         .collect();
     list(
         "Routines",
@@ -324,64 +403,30 @@ fn reminders(extras: &BotExtras) -> View {
         .filter(|r| r.run_at.is_some())
         .collect();
     due.sort_by_key(|r| (r.run_at, r.id));
-    let rows = due
-        .into_iter()
-        .map(|reminder| {
-            let when = reminder
-                .run_at
-                .map(|at| format!("Runs {}", local_time(at, &reminder.timezone)))
-                .into_iter()
-                .collect();
-            item(
-                reminder.name.clone(),
-                when,
-                warning(reminder),
-                Some(reminder.prompt.clone()),
-            )
-        })
-        .collect();
     list(
         "Reminders",
         "No reminders. Ask the bot to do something once, later, for example \"in 6 hours, check how Scout is doing\".",
-        rows,
+        due.into_iter().map(routine_item).collect(),
     )
 }
 
-/// Why a routine is not running, when it is not.
-fn warning(routine: &Routine) -> Option<String> {
-    if routine.enabled {
-        return match routine.failed_runs {
-            0 => None,
-            1 => Some("Its last run failed".to_owned()),
-            n => Some(format!("Its last {n} runs failed")),
-        };
-    }
-    Some(
-        match routine.paused_reason {
-            Some(PausedReason::NeedsAction) => "Paused: its last run needs you",
-            Some(PausedReason::Repeated) => "Paused after several failed runs",
-            _ => "Paused",
-        }
-        .to_owned(),
-    )
-}
-
-fn watching(extras: &BotExtras) -> View {
+fn watching(extras: &BotExtras, now: DateTime<Utc>) -> View {
+    let today = Local::now().date_naive();
     let rows = extras
         .watchers
         .iter()
         .filter(|w| w.status != WatcherStatus::Ended)
         .map(|watcher| {
-            let mut lines = vec![format!("Until {}", local(watcher.until))];
-            if let Some(next) = watcher.next_check_at {
-                lines.push(format!("Next check {}", local(next)));
+            let until = format!(
+                "Until {}",
+                watcher_deadline(watcher.until.with_timezone(&Local), today)
+            );
+            let mut lines = vec![capitalized(watcher_last_check(watcher, now))];
+            lines.extend(watcher_next(watcher, now).map(|next| format!("{until} · {next}")));
+            if lines.len() == 1 {
+                lines.push(until);
             }
-            item(
-                watcher.purpose.clone(),
-                lines,
-                watcher_problem(watcher),
-                None,
-            )
+            item(watcher.purpose.clone(), lines, None, None)
         })
         .collect();
     list(
@@ -391,19 +436,23 @@ fn watching(extras: &BotExtras) -> View {
     )
 }
 
-fn watcher_problem(watcher: &Watcher) -> Option<String> {
-    watcher
-        .last_status
-        .clone()
-        .filter(|_| watcher.status == WatcherStatus::Checking)
+fn capitalized(line: String) -> String {
+    let mut chars = line.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => line,
+    }
 }
 
 fn triggers(extras: &BotExtras) -> View {
+    let woke = |at: Option<DateTime<Utc>>| at.map(|at| format!("Last woke {}", local(at)));
+    let parse = |at: &Option<String>| at.as_deref().and_then(|at| at.parse().ok());
     let mail = extras.mail_triggers.iter().map(|t| {
         let mut lines = vec!["Email · New mail".to_owned()];
         if !t.wake {
             lines.push("Off".to_owned());
         }
+        lines.extend(woke(parse(&t.last_woke_at)));
         let warning = (t.state == AccountState::Paused).then(|| "Inbox paused".to_owned());
         item(t.address.clone(), lines, warning, t.instructions.clone())
     });
@@ -421,6 +470,7 @@ fn triggers(extras: &BotExtras) -> View {
         if !t.enabled {
             lines.push("Off".to_owned());
         }
+        lines.extend(woke(parse(&t.last_woke_at)));
         item(
             t.title().to_owned(),
             lines,
@@ -429,10 +479,14 @@ fn triggers(extras: &BotExtras) -> View {
         )
     });
     let webhooks = extras.webhooks.iter().map(|w| {
-        let mut lines = vec!["Webhook".to_owned()];
+        let mut lines = vec![format!(
+            "Webhook · {}",
+            webhook_pace(w.min_interval_minutes)
+        )];
         if !w.enabled {
             lines.push("Off".to_owned());
         }
+        lines.extend(woke(w.last_wake.as_ref().map(|wake| wake.woke_at)));
         item(w.name.clone(), lines, None, Some(w.prompt.clone()))
     });
     list(
@@ -442,47 +496,53 @@ fn triggers(extras: &BotExtras) -> View {
     )
 }
 
-/// A moment in the phone's time zone, as the routines show theirs.
+/// A moment in the phone's time zone, as the desktop shows trigger wakes.
 fn local(at: DateTime<Utc>) -> String {
     at.with_timezone(&Local)
         .format("%a %-d %b, %H:%M")
         .to_string()
 }
 
-fn open_rules(bot: Uuid, file: RulesFile) {
-    super::push(format!("rules-{bot}"), move || {
-        rules_screen(bot, file.clone())
-    });
+fn open_rules(bot: Uuid, rules: Signal<Fetch<RulesFile>>) {
+    super::push(format!("rules-{bot}"), move || rules_screen(bot, rules));
 }
 
-fn rules_screen(bot: Uuid, file: RulesFile) -> Screen {
-    let rows = file
-        .sections
-        .into_iter()
-        .map(|section| {
-            view().pl_4().child(
-                view()
-                    .py(px(11.0))
-                    .pr_4()
-                    .gap(px(4.0))
-                    .border_b(px(0.5))
-                    .border_color(colors::separator())
-                    .child(
-                        text(section.title)
-                            .text_size(px(17.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors::label()),
-                    )
-                    .child(
-                        text(section.body)
-                            .selectable(true)
-                            .text_size(px(15.0))
-                            .line_height(px(20.0))
-                            .text_color(colors::label()),
-                    ),
-            )
-        })
-        .collect();
+fn rules_screen(bot: Uuid, rules: Signal<Fetch<RulesFile>>) -> Screen {
+    // Shown from the Details screen's read, so a rule the bot changes
+    // updates here too.
+    let body = dynamic(move || {
+        let Fetch::Ready(file) = rules.get() else {
+            return None;
+        };
+        let rows: Vec<View> = file
+            .sections
+            .into_iter()
+            .map(|section| {
+                view().pl_4().child(
+                    view()
+                        .py(px(11.0))
+                        .pr_4()
+                        .gap(px(4.0))
+                        .border_b(px(0.5))
+                        .border_color(colors::separator())
+                        .child(
+                            text(section.title)
+                                .text_size(px(17.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors::label()),
+                        )
+                        .child(
+                            text(section.body)
+                                .selectable(true)
+                                .text_size(px(15.0))
+                                .line_height(px(20.0))
+                                .text_color(colors::label()),
+                        ),
+                )
+            })
+            .collect();
+        Some(list("Rules", "No rules right now.", rows))
+    });
     nav_page()
         .key(format!("rules-{bot}"))
         .title("Rules")
@@ -491,7 +551,7 @@ fn rules_screen(bot: Uuid, file: RulesFile) -> Screen {
             scroll().flex_1().bg(colors::background()).child(
                 view()
                     .py_6()
-                    .child(list("Rules", "", rows))
+                    .child(body)
                     .child(parts::footnote(
                         "Ask the bot in the chat to add, change or remove a rule. The desktop app shows each version and can restore one.",
                     )),
