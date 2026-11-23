@@ -196,6 +196,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                             .child(list::card([
                                 model_row.into_element(),
                                 rules_row.into_element(),
+                                category_row(bot).into_element(),
                             ]))
                             .child(parts::footnote(
                                 "Rules are what the bot does whenever something happens. Ask it in the chat to add or change one.",
@@ -206,6 +207,25 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                     .child(delete_section(bot, bot_record)),
             ),
         )
+}
+
+/// The bot's category, opening the picker.
+fn category_row(bot: Uuid) -> impl IntoElement {
+    dynamic(move || {
+        let name = session::bots().with(|b| {
+            let id =
+                b.list.iter().find(|it| it.id == bot).and_then(|it| {
+                    else_client::layout::known_category(&b.categories, it.category_id)
+                });
+            id.and_then(|id| b.categories.iter().find(|c| c.id == id))
+                .map_or_else(|| "Unassigned".to_owned(), |c| c.name.clone())
+        });
+        Some(list::link_row(
+            "Category",
+            name,
+            Some(move || super::categories::open_picker(bot)),
+        ))
+    })
 }
 
 /// Mute: a muted bot is unread and announced only while it waits on the

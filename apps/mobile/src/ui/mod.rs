@@ -3,6 +3,7 @@
 
 mod asks;
 mod bot_list;
+mod categories;
 mod chat;
 mod composer;
 mod connect;

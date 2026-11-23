@@ -2,7 +2,10 @@
 //! record alone so the list stays a plain function of `GET /v1/bots`.
 
 use chrono::{DateTime, Datelike as _, Local, Utc};
-use else_wire::bots::{Avatar, Bot, Phase, SidebarStatus};
+use std::collections::HashSet;
+
+use else_client::layout::Layout;
+use else_wire::bots::{Avatar, Bot, Category, Phase, SidebarStatus};
 use uuid::Uuid;
 
 /// The line under a bot's name, most urgent first.
@@ -91,21 +94,105 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The bots in list order: those waiting on the owner first, then by their
-/// newest message, never-used bots last by name.
-pub fn rows(bots: &[Bot]) -> Vec<BotRow> {
-    let mut rows: Vec<BotRow> = bots
-        .iter()
+/// One line of the bot list: a section's header or a bot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A category's header; `None` is the unassigned bots, the waiting
+    /// section has no category and its own key.
+    Header {
+        key: String,
+        category: Option<Uuid>,
+        title: String,
+        count: usize,
+        collapsible: bool,
+    },
+    /// A bot, keyed by its section, since a waiting bot also shows in its
+    /// category.
+    Bot { key: String, row: BotRow },
+}
+
+impl Line {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Header { key, .. } | Self::Bot { key, .. } => key,
+        }
+    }
+}
+
+/// The bot list as the desktop's sidebar lays it out (else_client::layout):
+/// the main bot, the bots waiting on the owner oldest request first, then
+/// each category in the owner's order and the unassigned bots. Without
+/// categories the bots follow the waiting ones without headers. A collapsed
+/// category keeps its header.
+pub fn lines(
+    bots: &[Bot],
+    categories: &[Category],
+    main: Option<Uuid>,
+    collapsed: &HashSet<Option<Uuid>>,
+) -> Vec<Line> {
+    let layout = Layout::new(categories, bots, main).without_empty_unassigned();
+    let grouped = !categories.is_empty();
+    let bot = |section: &str, bot: &Bot| Line::Bot {
+        key: format!("{section}-{}", bot.id),
+        row: BotRow::of(bot),
+    };
+    let mut lines: Vec<Line> = layout
+        .pinned
         .filter(|b| b.is_active())
-        .map(BotRow::of)
+        .map(|b| bot("main", b))
+        .into_iter()
         .collect();
-    rows.sort_by(|a, b| {
-        b.needs_you()
-            .cmp(&a.needs_you())
-            .then(b.last_message_at.cmp(&a.last_message_at))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    rows
+    let waiting: Vec<&Bot> = layout
+        .waiting
+        .iter()
+        .copied()
+        .filter(|b| b.is_active())
+        .collect();
+    if !waiting.is_empty() && grouped {
+        lines.push(Line::Header {
+            key: "waiting".into(),
+            category: None,
+            title: "Waiting on you".into(),
+            count: waiting.len(),
+            collapsible: false,
+        });
+    }
+    lines.extend(waiting.iter().map(|b| bot("waiting", b)));
+    for group in &layout.groups {
+        let active: Vec<&Bot> = group
+            .bots
+            .iter()
+            .copied()
+            .filter(|b| b.is_active())
+            .collect();
+        let category = group.category.map(|c| c.id);
+        let section = category.map_or_else(|| "unassigned".to_owned(), |id| id.to_string());
+        if grouped {
+            lines.push(Line::Header {
+                key: format!("header-{section}"),
+                category,
+                title: group
+                    .category
+                    .map_or_else(|| "Unassigned".to_owned(), |c| c.name.clone()),
+                count: active.len(),
+                collapsible: true,
+            });
+            if collapsed.contains(&category) {
+                continue;
+            }
+        } else {
+            // Ungrouped, a waiting bot is listed once, above the rest.
+            lines.extend(
+                active
+                    .iter()
+                    .filter(|b| !waiting.iter().any(|w| w.id == b.id))
+                    .map(|b| bot(&section, b)),
+            );
+            continue;
+        }
+        lines.extend(active.iter().map(|b| bot(&section, b)));
+    }
+    lines
 }
 
 /// A message time as iOS lists show it: the time today, "Yesterday", the
@@ -142,6 +229,16 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn names(lines: &[Line]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| match line {
+                Line::Header { title, .. } => format!("# {title}"),
+                Line::Bot { row, .. } => row.name.clone(),
+            })
+            .collect()
+    }
+
     #[test]
     fn a_waiting_bot_shows_its_ask_and_sorts_first() {
         let bots = [
@@ -157,10 +254,60 @@ mod tests {
                 }),
             ),
         ];
-        let rows = rows(&bots);
-        assert_eq!(rows[0].name, "Inbox");
-        assert_eq!(rows[0].subtitle(), "Send the reply?");
-        assert_eq!(rows[1].name, "Research");
+        let lines = lines(&bots, &[], None, &HashSet::new());
+        assert_eq!(names(&lines), ["Inbox", "Research"]);
+        let Line::Bot { row, .. } = &lines[0] else {
+            panic!("a bot first")
+        };
+        assert_eq!(row.subtitle(), "Send the reply?");
+    }
+
+    #[test]
+    fn categories_group_the_list_and_a_collapsed_one_keeps_its_header() {
+        let growth: Category = serde_json::from_value(json!({
+            "id": "00000000-0000-0000-0000-0000000000c1", "name": "Growth", "position": 0,
+            "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z",
+        }))
+        .unwrap();
+        let bots = [
+            bot("Main", json!({})),
+            bot("Scout", json!({ "category_id": growth.id })),
+            bot(
+                "Ledger",
+                json!({ "sidebar_status": { "kind": "needs_you", "preview": "Pick one" } }),
+            ),
+        ];
+        let main = Some(bots[0].id);
+        let open = lines(&bots, std::slice::from_ref(&growth), main, &HashSet::new());
+        assert_eq!(
+            names(&open),
+            [
+                "Main",
+                "# Waiting on you",
+                "Ledger",
+                "# Growth",
+                "Scout",
+                "# Unassigned",
+                "Ledger"
+            ]
+        );
+        let folded = lines(
+            &bots,
+            std::slice::from_ref(&growth),
+            main,
+            &HashSet::from([Some(growth.id)]),
+        );
+        assert_eq!(
+            names(&folded),
+            [
+                "Main",
+                "# Waiting on you",
+                "Ledger",
+                "# Growth",
+                "# Unassigned",
+                "Ledger"
+            ]
+        );
     }
 
     #[test]

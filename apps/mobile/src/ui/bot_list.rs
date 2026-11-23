@@ -9,10 +9,20 @@ use nsh_core::prelude::*;
 
 use super::parts::{self, colors};
 use super::session::{self, LiveState};
-use crate::bots::{self, BotRow, Status};
+use std::collections::HashSet;
+
+use uuid::Uuid;
+
+use crate::bots::{self, BotRow, Line, Status};
 
 pub fn screen() -> Screen {
-    let rows = computed(|| session::bots().with(|b| bots::rows(&b.list)));
+    // Collapsed categories, for this visit of the list.
+    let collapsed = signal(HashSet::<Option<Uuid>>::new());
+    let lines = computed(move || {
+        collapsed.with(|folded| {
+            session::bots().with(|b| bots::lines(&b.list, &b.categories, b.default_bot_id, folded))
+        })
+    });
     let loaded = computed(|| session::bots().with(|b| b.loaded));
     let refreshing = signal(false);
     let server = session::server();
@@ -35,6 +45,9 @@ pub fn screen() -> Screen {
         .key("more")
         .label("More")
         .menu([
+            MenuItem::new("Categories")
+                .symbol("folder")
+                .on_select(super::categories::open),
             MenuItem::submenu("Servers", servers).inline(true),
             MenuItem::new("Add Server…")
                 .symbol("plus")
@@ -62,15 +75,25 @@ pub fn screen() -> Screen {
             if !loaded.get() {
                 return placeholder("Loading bots…").into_element();
             }
-            if rows.with(Vec::is_empty) {
+            if lines.with(Vec::is_empty) {
                 return placeholder("No bots yet. Tap Compose to create one.").into_element();
             }
             view()
                 .pb_safe_area()
                 .child(each(
-                    move || rows.get(),
-                    |row: &BotRow| row.id,
-                    |row, _| bot_row(row),
+                    move || lines.get(),
+                    |line: &Line| line.key().to_owned(),
+                    move |line, _| match line.get_untracked() {
+                        Line::Header { .. } => header(line, collapsed).into_element(),
+                        Line::Bot { .. } => {
+                            bot_row(computed(move || match line.get() {
+                                Line::Bot { row, .. } => row,
+                                // A key keeps its kind.
+                                Line::Header { .. } => unreachable!(),
+                            }))
+                            .into_element()
+                        }
+                    },
                 ))
                 .into_element()
         }));
@@ -123,7 +146,70 @@ fn banner() -> impl IntoElement {
     })
 }
 
-fn bot_row(row: ReadSignal<BotRow>) -> impl IntoElement {
+/// A section's header; a category's folds its bots away on a tap.
+fn header(line: ReadSignal<Line>, collapsed: Signal<HashSet<Option<Uuid>>>) -> impl IntoElement {
+    let Line::Header {
+        category,
+        collapsible,
+        ..
+    } = line.get_untracked()
+    else {
+        unreachable!("a header's key stays a header")
+    };
+    let folded = move || collapsed.with(|c| c.contains(&category));
+    let title = move || match line.get() {
+        Line::Header { title, count, .. } => (title, count),
+        Line::Bot { .. } => (String::new(), 0),
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_4()
+        .pt_4()
+        .pb(px(6.0))
+        .role(AccessibilityRole::Button)
+        .label(move || {
+            let (title, count) = title();
+            format!("{title}, {count}")
+        })
+        .accessibility_state(move || AccessibilityState {
+            expanded: collapsible.then(|| !folded()),
+            ..AccessibilityState::default()
+        })
+        .on_press(move || {
+            if collapsible {
+                collapsed.update(|c| {
+                    if !c.remove(&category) {
+                        c.insert(category);
+                    }
+                });
+            }
+        })
+        .child(
+            text(move || title().0.to_uppercase())
+                .flex_1()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::secondary()),
+        )
+        .child(
+            text(move || {
+                let count = title().1.to_string();
+                if !collapsible {
+                    count
+                } else if folded() {
+                    format!("{count}  ›")
+                } else {
+                    format!("{count}  ⌄")
+                }
+            })
+            .text_size(px(13.0))
+            .text_color(colors::secondary()),
+        )
+}
+
+fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
     let open = move || {
         let BotRow { id, name, .. } = row.get_untracked();
         super::push(format!("chat-{id}"), move || {

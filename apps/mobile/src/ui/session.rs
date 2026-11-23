@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use else_wire::bots::Bot;
+use else_wire::bots::{Bot, BotList, Category};
 use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -230,6 +230,19 @@ pub struct Bots {
     pub loaded: bool,
     pub list: Vec<Bot>,
     pub default_bot_id: Option<Uuid>,
+    /// In the owner's order.
+    pub categories: Vec<Category>,
+}
+
+impl Bots {
+    fn of(list: BotList) -> Self {
+        Self {
+            loaded: true,
+            list: list.bots,
+            default_bot_id: list.default_bot_id,
+            categories: list.categories,
+        }
+    }
 }
 
 pub fn bots() -> Signal<Bots> {
@@ -327,11 +340,7 @@ fn handle(server: &Rc<Server>, event: LiveEvent) {
         LiveEvent::Connected => live_state().set(LiveState::Live),
         LiveEvent::Disconnected(reason) => live_state().set(LiveState::Offline(reason)),
         LiveEvent::Unauthorized => live_state().set(LiveState::Unauthorized),
-        LiveEvent::Bots(list) => bots().set(Bots {
-            loaded: true,
-            list: list.bots,
-            default_bot_id: list.default_bot_id,
-        }),
+        LiveEvent::Bots(list) => bots().set(Bots::of(list)),
         // The phone shows no maintenance banner yet.
         LiveEvent::ServerPause(_) => {}
         LiveEvent::Bot { bot, message } => {
@@ -386,11 +395,7 @@ pub fn refresh_bots() -> Spawned<()> {
     let client = server().client.clone();
     spawn(async move {
         match client.bots().await {
-            Ok(list) => bots().set(Bots {
-                loaded: true,
-                list: list.bots,
-                default_bot_id: list.default_bot_id,
-            }),
+            Ok(list) => bots().set(Bots::of(list)),
             Err(ClientError::Unauthorized) => live_state().set(LiveState::Unauthorized),
             Err(err) => live_state().set(LiveState::Offline(err.to_string())),
         }
