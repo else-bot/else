@@ -215,3 +215,58 @@ async fn a_delegated_task_cannot_change_mail_triggers() {
     );
     h.release(child).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_a_trigger_never_grants_read_or_recreates_a_deleted_one() {
+    let app = common::TestApp::builder().start().await;
+    let account = account(&app).await;
+    let bot = app.create_bot("Mail helper").await;
+    let base = format!("/v1/connectors/email/accounts/{}/bots/{bot}", account.id);
+    let wake = format!("{base}/wake");
+    let triggers = || async {
+        app.owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+            .await
+            .body["mail_triggers"]
+            .clone()
+    };
+    let resume = || async {
+        app.owner("PUT", &wake, Some(json!({"wake": true, "resume": true})))
+            .await
+    };
+    // A paused trigger on a readable inbox comes back on.
+    app.owner("PUT", &wake, Some(json!({"wake": true}))).await;
+    app.owner("PUT", &wake, Some(json!({"wake": false}))).await;
+    assert_eq!(resume().await.status, StatusCode::OK);
+    assert_eq!(triggers().await[0]["wake"], true);
+
+    // Read withdrawn elsewhere: refused, and read stays withdrawn.
+    app.owner("PUT", &wake, Some(json!({"wake": false}))).await;
+    let revoked = app
+        .owner(
+            "PUT",
+            &base,
+            Some(json!({"read": false, "write": false, "send": false, "wake": false})),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+    let refused = resume().await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let bot_id: Uuid = bot.parse().unwrap();
+    let left = store::permissions(&app.db.pool, account.id, bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!left.read && !left.wake, "a resume grants nothing");
+
+    // Deleted meanwhile: not found, and no trigger comes back.
+    app.owner(
+        "PUT",
+        &base,
+        Some(json!({"read": true, "write": false, "send": false, "wake": false})),
+    )
+    .await;
+    app.owner("PUT", &wake, Some(json!({"wake": true}))).await;
+    app.owner("DELETE", &format!("{base}/trigger"), None).await;
+    assert_eq!(resume().await.status, StatusCode::NOT_FOUND);
+    assert_eq!(triggers().await, json!([]));
+}

@@ -149,6 +149,22 @@ impl Client {
         .await
     }
 
+    /// Turns a paused trigger back on without granting anything: refused
+    /// (`mail_forbidden`) when the bot can no longer read the inbox, and
+    /// not found when the trigger was deleted meanwhile.
+    pub async fn resume_email_trigger(
+        self: Arc<Self>,
+        account: Uuid,
+        bot: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call_unit(
+            Method::PUT,
+            format!("/v1/connectors/email/accounts/{account}/bots/{bot}/wake"),
+            Some(json!({"wake": true, "resume": true})),
+        )
+        .await
+    }
+
     /// Remove an inbox for every bot. Its messages stay in the mailbox.
     pub async fn remove_email(self: Arc<Self>, account: Uuid) -> Result<(), ClientError> {
         self.call_unit(

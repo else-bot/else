@@ -94,7 +94,10 @@ pub fn mail(bot: Uuid, trigger: MailTrigger) {
             "delete" if confirm(format!("Delete {title}?"), DELETE_TRIGGER).await => {
                 run(client.delete_email_trigger(account, bot)).await;
             }
-            "on" | "off" => run(client.set_email_wake(account, bot, action == "on")).await,
+            // Turning it back on never grants read the owner withdrew, nor
+            // brings back a trigger deleted meanwhile.
+            "on" => run(client.resume_email_trigger(account, bot)).await,
+            "off" => run(client.set_email_wake(account, bot, false)).await,
             _ => {}
         }
     });

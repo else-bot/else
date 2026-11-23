@@ -49,6 +49,39 @@ async fn wake_in(
     write_grant(conn, account_id, bot_id, &p).await
 }
 
+/// Turn an existing, paused trigger back on, as a trigger's switch does.
+/// Unlike [`set_wake`] it never grants read the owner withdrew and never
+/// creates a trigger: a trigger deleted meanwhile is not found, and an inbox
+/// the bot can no longer read is forbidden. A trigger already on is
+/// unchanged. Returns whether anything changed.
+pub async fn resume_trigger(
+    pool: &SqlitePool,
+    account_id: Uuid,
+    bot_id: Uuid,
+) -> Result<bool, StoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let current = grant_in(&mut tx, account_id, bot_id)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM connector_grants
+         WHERE account_id = ?1 AND bot_id = ?2 AND wake_instructions IS NOT NULL)",
+    )
+    .bind(account_id)
+    .bind(bot_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !exists {
+        return Err(StoreError::NotFound);
+    }
+    if !current.read {
+        return Err(StoreError::Forbidden);
+    }
+    let changed = wake_if_readable_in(&mut tx, account_id, bot_id).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
 /// Wake a bot on an inbox it can already read. Never restores read the
 /// owner withdrew. Returns whether anything changed.
 pub async fn wake_if_readable_in(

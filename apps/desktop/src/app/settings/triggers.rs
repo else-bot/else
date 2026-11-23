@@ -69,8 +69,13 @@ impl BotPanel {
         let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match (source, enabled) {
-                (TriggerSource::Mail { account }, Some(wake)) => {
-                    client.set_email_wake(account, bot, wake).await
+                // Turning a trigger back on never grants read the owner
+                // withdrew, nor brings back a trigger deleted meanwhile.
+                (TriggerSource::Mail { account }, Some(true)) => {
+                    client.resume_email_trigger(account, bot).await
+                }
+                (TriggerSource::Mail { account }, Some(false)) => {
+                    client.set_email_wake(account, bot, false).await
                 }
                 (TriggerSource::Mail { account }, None) => {
                     client.delete_email_trigger(account, bot).await
