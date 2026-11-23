@@ -1,7 +1,7 @@
 use super::ElseApp;
 use super::request::{Request, Settle};
 use crate::api::CreateBotRequest;
-use crate::avatar::{AvatarLook, AvatarPicker, bot_avatar};
+use crate::avatar::{AvatarPicker, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
 use crate::profile_picker::ProfilePicker;
 use else_wire::bots::Avatar;

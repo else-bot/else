@@ -1,5 +1,5 @@
-//! Creating a bot: its name and color. It starts with the server's default
-//! provider and model; the desktop app changes those.
+//! Creating a bot: its name and its avatar's shape and color. It starts
+//! with the server's default provider and model.
 
 use else_wire::bots::{Avatar, AvatarColor, AvatarShape};
 use nsh_base::{input, nav_page};
@@ -10,7 +10,6 @@ use uuid::Uuid;
 use super::parts::{self, colors};
 use super::session;
 use crate::api::ClientError;
-use crate::bots;
 
 pub const KEY: &str = "new-bot";
 
@@ -48,7 +47,11 @@ pub fn open() {
 fn screen() -> Screen {
     let name = signal(String::new());
     let picked = signal(AvatarColor::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12]);
-    let shape = AvatarShape::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12];
+    let shape = signal(AvatarShape::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12]);
+    let look = move || Avatar {
+        shape: shape.get(),
+        color: picked.get(),
+    };
     let step = signal(Step::Editing);
     let ready =
         computed(move || !name.with(|n| n.trim().is_empty()) && step.get() != Step::Creating);
@@ -59,7 +62,7 @@ fn screen() -> Screen {
         }
         let name_now = name.get_untracked().trim().to_owned();
         let avatar = Avatar {
-            shape,
+            shape: shape.get_untracked(),
             color: picked.get_untracked(),
         };
         let request_id = step.with_untracked(|s| s.request_id(&name_now, avatar));
@@ -115,51 +118,26 @@ fn screen() -> Screen {
         ]
     };
 
-    let initial = move || {
-        SharedString::from(
-            name.with(|n| n.chars().find(|c| c.is_alphanumeric()))
-                .map(|c| c.to_uppercase().collect::<String>())
-                .unwrap_or_else(|| "?".into()),
+    let shapes = picker(AvatarShape::ALL, shape, AvatarShape::label, move |choice| {
+        parts::avatar(
+            move || Avatar {
+                shape: choice,
+                color: picked.get(),
+            },
+            34.0,
         )
-    };
-
-    let swatches = view()
-        .flex_row()
-        .flex_wrap()
-        .gap_3()
-        .justify_center()
-        .children(AvatarColor::ALL.into_iter().map(move |choice| {
-            view()
-                .size(px(36.0))
-                .rounded(px(18.0))
-                .items_center()
-                .justify_center()
-                .border_2()
-                .border_color(move || {
-                    if picked.get() == choice {
-                        colors::label()
-                    } else {
-                        colors::card()
-                    }
-                })
-                .role(AccessibilityRole::Button)
-                .label(move || {
-                    let mark = if picked.get() == choice {
-                        ", selected"
-                    } else {
-                        ""
-                    };
-                    format!("{choice:?}{mark}")
-                })
-                .on_press(move || picked.set(choice))
-                .child(
-                    view()
-                        .size(px(28.0))
-                        .rounded(px(14.0))
-                        .bg(rgb(bots::avatar_rgb(choice))),
-                )
-                .into_element()
-        }));
+    });
+    let swatches = picker(AvatarColor::ALL, picked, AvatarColor::label, |choice| {
+        let swatch = view()
+            .size(px(28.0))
+            .rounded(px(14.0))
+            .bg(rgb(choice.rgb()));
+        if choice == AvatarColor::White {
+            swatch.border(px(0.5)).border_color(colors::separator())
+        } else {
+            swatch
+        }
+    });
 
     let message = dynamic(move || match step.get() {
         Step::Failed(message) | Step::Unknown { message, .. } => Some(
@@ -186,13 +164,7 @@ fn screen() -> Screen {
                     view()
                         .py_6()
                         .gap_6()
-                        .child(
-                            view().items_center().child(parts::avatar(
-                                initial,
-                                move || bots::avatar_rgb(picked.get()),
-                                88.0,
-                            )),
-                        )
+                        .child(view().items_center().child(parts::avatar(look, 96.0)))
                         .child(
                             parts::group().child(
                                 input()
@@ -218,10 +190,46 @@ fn screen() -> Screen {
                             ),
                         )
                         .child(message)
-                        .child(parts::group().p_4().child(swatches))
-                        .child(parts::footnote(
-                            "The bot uses the server's default provider and model. Change them in the desktop app.",
-                        )),
+                        .child(parts::group().p_4().child(shapes))
+                        .child(parts::group().p_4().child(swatches)),
                 ),
         )
+}
+
+/// A wrapping row of choices, the selected one ringed.
+fn picker<T: Copy + PartialEq + 'static, E: IntoElement>(
+    choices: impl IntoIterator<Item = T>,
+    selected: Signal<T>,
+    label: fn(T) -> &'static str,
+    draw: impl Fn(T) -> E,
+) -> View {
+    view()
+        .flex_row()
+        .flex_wrap()
+        .gap_3()
+        .justify_center()
+        .children(choices.into_iter().map(move |choice| {
+            let chosen = move || selected.get() == choice;
+            view()
+                .size(px(42.0))
+                .rounded(px(21.0))
+                .items_center()
+                .justify_center()
+                .border_2()
+                .border_color(move || {
+                    if chosen() {
+                        colors::label()
+                    } else {
+                        colors::card()
+                    }
+                })
+                .role(AccessibilityRole::Button)
+                .label(move || {
+                    let mark = if chosen() { ", selected" } else { "" };
+                    format!("{}{mark}", label(choice))
+                })
+                .on_press(move || selected.set(choice))
+                .child(draw(choice))
+                .into_element()
+        }))
 }

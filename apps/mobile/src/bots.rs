@@ -2,7 +2,7 @@
 //! record alone so the list stays a plain function of `GET /v1/bots`.
 
 use chrono::{DateTime, Datelike as _, Local, Utc};
-use else_wire::bots::{AvatarColor, Bot, Phase, SidebarStatus};
+use else_wire::bots::{Avatar, Bot, Phase, SidebarStatus};
 use uuid::Uuid;
 
 /// The line under a bot's name, most urgent first.
@@ -21,29 +21,11 @@ pub enum Status {
 pub struct BotRow {
     pub id: Uuid,
     pub name: String,
-    pub initial: String,
-    pub color: u32,
+    pub avatar: Avatar,
     pub status: Status,
     pub unread: bool,
     pub muted: bool,
     pub last_message_at: Option<DateTime<Utc>>,
-}
-
-pub fn avatar_rgb(color: AvatarColor) -> u32 {
-    match color {
-        AvatarColor::White => 0xa1a1a6,
-        AvatarColor::Brown => 0xa4693f,
-        AvatarColor::Red => 0xee3b47,
-        AvatarColor::Orange => 0xf6631d,
-        AvatarColor::Amber => 0xf59e0b,
-        AvatarColor::Yellow => 0xe0b021,
-        AvatarColor::Green => 0x22c162,
-        AvatarColor::Teal => 0x17b3a3,
-        AvatarColor::Blue => 0x2b88fb,
-        AvatarColor::Purple => 0x8f5cf6,
-        AvatarColor::Pink => 0xec4b9a,
-        AvatarColor::Gray => 0x7d7d84,
-    }
 }
 
 impl BotRow {
@@ -77,13 +59,7 @@ impl BotRow {
         Self {
             id: bot.id,
             name: bot.name.clone(),
-            initial: bot
-                .name
-                .chars()
-                .find(|c| c.is_alphanumeric())
-                .map(|c| c.to_uppercase().collect())
-                .unwrap_or_else(|| "?".into()),
-            color: avatar_rgb(bot.avatar.color),
+            avatar: bot.avatar,
             status,
             unread,
             muted: bot.muted,
@@ -203,7 +179,6 @@ mod tests {
         ));
         assert_eq!(row.subtitle(), "Working…");
         assert!(row.unread);
-        assert_eq!(row.initial, "C");
     }
 
     #[test]

@@ -12,6 +12,7 @@
 #[macro_use]
 mod state;
 
+pub mod avatar;
 pub mod backups;
 pub mod bots;
 pub mod computers;

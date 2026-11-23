@@ -154,14 +154,7 @@ fn bot_row(row: ReadSignal<BotRow>) -> impl IntoElement {
             move || row.with(|r| r.unread),
             || view().size(px(10.0)).rounded(px(5.0)).bg(colors::tint()),
         )))
-        .child(
-            parts::avatar(
-                move || SharedString::from(row.with(|r| r.initial.clone())),
-                move || row.with(|r| r.color),
-                48.0,
-            )
-            .ml_1(),
-        )
+        .child(parts::avatar(move || row.with(|r| r.avatar), 48.0).ml_1())
         .child(
             view()
                 .flex_1()
