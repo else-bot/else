@@ -94,6 +94,15 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whether `incoming` may replace `shown`: not when it is an older copy of
+/// the bot's metadata, such as a slow answer landing after a live update.
+pub fn is_newer(shown: &Bot, incoming: &Bot) -> bool {
+    match (shown.metadata_revision, incoming.metadata_revision) {
+        (Some(shown), Some(incoming)) => incoming >= shown,
+        _ => true,
+    }
+}
+
 /// One line of the bot list: a section's header or a bot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
@@ -308,6 +317,18 @@ mod tests {
                 "Ledger"
             ]
         );
+    }
+
+    #[test]
+    fn an_older_copy_of_a_bot_never_replaces_a_newer_one() {
+        let renamed = bot("Renamed", json!({ "metadata_revision": 5 }));
+        let late = Bot {
+            name: "Old name".into(),
+            metadata_revision: Some(4),
+            ..renamed.clone()
+        };
+        assert!(!is_newer(&renamed, &late));
+        assert!(is_newer(&late, &renamed));
     }
 
     #[test]
