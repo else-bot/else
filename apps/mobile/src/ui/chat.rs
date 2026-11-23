@@ -51,26 +51,21 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
     });
 
     let tray = super::waits::tray(bot, name.clone(), chat);
+    // Follows a rename and a new avatar; what it opened with until the
+    // list has the bot.
+    let record = computed(move || {
+        session::bots().with(|b| b.list.iter().find(|b| b.id == bot).cloned())
+    });
+    let title = move || {
+        SharedString::from(record.with(|r| r.as_ref().map_or_else(|| name.clone(), |b| b.name.clone())))
+    };
     nav_page()
         .key(format!("chat-{bot}"))
-        // Follows a rename; the name it opened with until the list has it.
-        .title(move || {
-            session::bots().with(|b| {
-                SharedString::from(
-                    b.list
-                        .iter()
-                        .find(|b| b.id == bot)
-                        .map_or_else(|| name.clone(), |b| b.name.clone()),
-                )
-            })
-        })
+        .title(title.clone())
+        .header_title(title_button(bot, chat, record, title))
         .header_large_title(false)
         .header_right_items(move || {
             vec![
-                HeaderItem::symbol("info.circle")
-                    .key("details")
-                    .label("Details")
-                    .on_press(move || super::details::open(bot, chat)),
                 HeaderItem::symbol("magnifyingglass")
                     .key("search")
                     .label("Search")
@@ -540,6 +535,39 @@ impl Quote {
 
 /// A message with the system's long-press menu: react to the bot's
 /// message, reply to either, or copy its text.
+/// The bot's avatar and name atop its chat: a tap opens its details, as
+/// Messages opens a contact's.
+fn title_button(
+    bot: Uuid,
+    chat: Signal<Chat>,
+    record: Memo<Option<else_wire::bots::Bot>>,
+    title: impl Fn() -> SharedString + Clone + 'static,
+) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .role(AccessibilityRole::Button)
+        .label({
+            let title = title.clone();
+            move || SharedString::from(format!("{}, Details", title()))
+        })
+        .active(|s| s.opacity(0.6))
+        .on_press(move || super::details::open(bot, chat))
+        .child(dynamic(move || {
+            record
+                .with(|r| r.as_ref().map(|b| b.avatar))
+                .map(|avatar| super::parts::avatar(move || avatar, 28.0))
+        }))
+        .child(
+            text(title)
+                .number_of_lines(1)
+                .text_size(px(17.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::label()),
+        )
+}
+
 fn with_menu(
     bot: Uuid,
     chat: Signal<Chat>,
