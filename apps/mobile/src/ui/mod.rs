@@ -2,6 +2,7 @@
 //! bot list and the chats pushed over it.
 
 mod asks;
+mod automation;
 mod bot_list;
 mod categories;
 mod chat;

@@ -161,8 +161,8 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                     .child(stale.then(|| parts::footnote("Updating…")))
                     .child(routines(&extras, bot, chat))
                     .child(reminders(&extras, bot, chat))
-                    .child(watching(&extras, now))
-                    .child(triggers(&extras))
+                    .child(watching(&extras, now, bot))
+                    .child(triggers(&extras, bot))
                     .into_element()
             }
         })
@@ -196,7 +196,6 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                             .child(list::card([
                                 model_row.into_element(),
                                 rules_row.into_element(),
-                                category_row(bot).into_element(),
                             ]))
                             .child(parts::footnote(
                                 "Rules are what the bot does whenever something happens. Ask it in the chat to add or change one.",
@@ -246,12 +245,10 @@ fn mute_section(bot: Uuid, record: Memo<Option<Bot>>) -> View {
         );
     };
     view()
-        .child(list::card([list::switch_row(
-            "Mute",
-            muted,
-            move || !request.with(Request::busy),
-            set,
-        )]))
+        .child(list::card([
+            category_row(bot).into_element(),
+            list::switch_row("Mute", muted, move || !request.with(Request::busy), set),
+        ]))
         .child(parts::footnote(move || {
             request
                 .with(|r| r.error().map(str::to_owned))
@@ -391,13 +388,19 @@ fn paused(routine: &Routine) -> String {
     }
 }
 
+/// A list item that opens the owner's actions on it.
+fn pressable(item: View, on_press: impl Fn() + 'static) -> View {
+    item.active(|s| s.bg(colors::fill()))
+        .role(AccessibilityRole::Button)
+        .on_press(on_press)
+}
+
 /// A routine's or reminder's row, opening its controls.
 fn routine_row(routine: &Routine, bot: Uuid, chat: Signal<Chat>) -> View {
     let id = routine.id;
-    routine_item(routine)
-        .active(|s| s.bg(colors::fill()))
-        .role(AccessibilityRole::Button)
-        .on_press(move || super::routine::open(bot, id, chat))
+    pressable(routine_item(routine), move || {
+        super::routine::open(bot, id, chat)
+    })
 }
 
 fn routines(extras: &BotExtras, bot: Uuid, chat: Signal<Chat>) -> View {
@@ -432,7 +435,7 @@ fn reminders(extras: &BotExtras, bot: Uuid, chat: Signal<Chat>) -> View {
     )
 }
 
-fn watching(extras: &BotExtras, now: DateTime<Utc>) -> View {
+fn watching(extras: &BotExtras, now: DateTime<Utc>, bot: Uuid) -> View {
     let today = Local::now().date_naive();
     let rows = extras
         .watchers
@@ -448,7 +451,11 @@ fn watching(extras: &BotExtras, now: DateTime<Utc>) -> View {
             if lines.len() == 1 {
                 lines.push(until);
             }
-            item(watcher.purpose.clone(), lines, None, None)
+            let (id, purpose) = (watcher.id, watcher.purpose.clone());
+            pressable(
+                item(watcher.purpose.clone(), lines, None, None),
+                move || super::automation::watcher(bot, id, purpose.clone()),
+            )
         })
         .collect();
     list(
@@ -466,7 +473,7 @@ fn capitalized(line: String) -> String {
     }
 }
 
-fn triggers(extras: &BotExtras) -> View {
+fn triggers(extras: &BotExtras, bot: Uuid) -> View {
     let woke = |at: Option<DateTime<Utc>>| at.map(last_woke);
     let parse = |at: &Option<String>| at.as_deref().and_then(|at| at.parse().ok());
     let mail = extras.mail_triggers.iter().map(|t| {
@@ -476,7 +483,11 @@ fn triggers(extras: &BotExtras) -> View {
         }
         lines.extend(woke(parse(&t.last_woke_at)));
         let warning = (t.state == AccountState::Paused).then(|| "Inbox paused".to_owned());
-        item(t.address.clone(), lines, warning, t.instructions.clone())
+        let trigger = t.clone();
+        pressable(
+            item(t.address.clone(), lines, warning, t.instructions.clone()),
+            move || super::automation::mail(bot, trigger.clone()),
+        )
     });
     let social = extras.social_triggers.iter().map(|t| {
         let connection = t
@@ -493,11 +504,15 @@ fn triggers(extras: &BotExtras) -> View {
             lines.push("Off".to_owned());
         }
         lines.extend(woke(parse(&t.last_woke_at)));
-        item(
-            t.title().to_owned(),
-            lines,
-            None,
-            Some(t.instructions.clone()),
+        let trigger = t.clone();
+        pressable(
+            item(
+                t.title().to_owned(),
+                lines,
+                None,
+                Some(t.instructions.clone()),
+            ),
+            move || super::automation::social(bot, trigger.clone()),
         )
     });
     let webhooks = extras.webhooks.iter().map(|w| {
@@ -509,7 +524,11 @@ fn triggers(extras: &BotExtras) -> View {
             lines.push("Off".to_owned());
         }
         lines.extend(woke(w.last_wake.as_ref().map(|wake| wake.woke_at)));
-        item(w.name.clone(), lines, None, Some(w.prompt.clone()))
+        let hook = w.clone();
+        pressable(
+            item(w.name.clone(), lines, None, Some(w.prompt.clone())),
+            move || super::automation::webhook(bot, hook.clone()),
+        )
     });
     list(
         "Triggers",
