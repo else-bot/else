@@ -125,18 +125,26 @@ fn editor(category: Option<Uuid>) -> Screen {
             move |edit| async move {
                 match (edit, category) {
                     (Edit::Create(request_id, name), _) => {
-                        client.create_category(request_id, name).await.map(drop)
+                        client.create_category(request_id, name).await.map(|_| None)
                     }
                     (Edit::Rename(name), Some(id)) => {
-                        client.rename_category(id, name).await.map(drop)
+                        client.rename_category(id, name).await.map(|_| None)
                     }
-                    (Edit::Reorder(ids), _) => client.reorder_categories(ids).await.map(drop),
-                    (Edit::Delete, Some(id)) => client.delete_category(id).await,
-                    _ => Ok(()),
+                    (Edit::Reorder(ids), _) => client.reorder_categories(ids).await.map(Some),
+                    (Edit::Delete, Some(id)) => match client.delete_category(id).await {
+                        // Deleted by an earlier try whose answer was lost.
+                        Err(err) if err.code() == Some("category_not_found") => Ok(None),
+                        result => result.map(|()| None),
+                    },
+                    _ => Ok(None),
                 }
             },
-            move |()| {
-                // The bots channel brings the new list.
+            move |order: Option<Vec<Category>>| {
+                // The server's order shows before the buttons unlock, so the
+                // next move starts from it.
+                if let Some(order) = order {
+                    session::bots().update(|b| b.categories = order);
+                }
                 session::refresh_bots();
                 request.try_set(Request::Idle);
                 if leave {
@@ -182,6 +190,16 @@ fn editor(category: Option<Uuid>) -> Screen {
     };
     let shift = move |by: isize| {
         let Some(id) = category else { return };
+        // A move whose answer was lost goes again as it was, not as a
+        // second move from the order shown now.
+        let unconfirmed = request.with_untracked(|r| match r.unconfirmed_op() {
+            Some(op @ Edit::Reorder(_)) => Some(op.clone()),
+            _ => None,
+        });
+        if let Some(op) = unconfirmed {
+            send(op, false);
+            return;
+        }
         let mut ids: Vec<Uuid> = categories().iter().map(|c| c.id).collect();
         let Some(at) = ids.iter().position(|c| *c == id) else {
             return;
