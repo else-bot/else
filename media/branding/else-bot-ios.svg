@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">else.bot iOS icon</title>
+<desc id="desc">The macOS icon tile, square and full bleed, since iOS rounds the corners itself.</desc>
+<defs>
+  <rect id="tile" x="96" y="96" width="832" height="832"/>
+  <clipPath id="tile-clip"><use href="#tile"/></clipPath>
+  <linearGradient id="tile-fill" x1="260" y1="96" x2="690" y2="928" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#282a35"/><stop offset=".53" stop-color="#12131c"/><stop offset="1" stop-color="#090a10"/>
+  </linearGradient>
+  <radialGradient id="tile-bloom" cx="300" cy="130" r="660" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#9e92c7" stop-opacity=".11"/><stop offset="1" stop-color="#9e92c7" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="tile-accent" cx="790" cy="925" r="620" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#3c294c" stop-opacity=".22"/><stop offset="1" stop-color="#3c294c" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="glass-reflection" x1="470" y1="100" x2="480" y2="340" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#ffffff" stop-opacity=".09"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+  </linearGradient>
+  <radialGradient id="tile-sheen" cx="280" cy="90" r="630" gradientTransform="translate(0 45) scale(1 .72)" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#fff" stop-opacity=".12"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+  </radialGradient>
+  <filter id="mascot-shadow" x="-.3" y="-.3" width="1.6" height="1.7" color-interpolation-filters="sRGB">
+    <feGaussianBlur in="SourceAlpha" stdDeviation="12"/><feOffset dy="17"/><feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .43 0"/><feBlend in="SourceGraphic"/>
+  </filter>
+</defs>
+<g transform="scale(1.230769) translate(-96 -96)">
+<use href="#tile" fill="url(#tile-fill)"/>
+<g clip-path="url(#tile-clip)">
+ <use href="#tile" fill="url(#tile-bloom)"/>
+ <use href="#tile" fill="url(#tile-accent)"/>
+ <use href="#tile" fill="url(#tile-sheen)"/>
+ <path d="M70 96H960V255C810 315 620 325 425 285C260 252 154 265 70 330Z" fill="url(#glass-reflection)"/>
+</g>
+<g filter="url(#mascot-shadow)">
+<image x="152" y="152" width="720" height="720" href="else-bot.svg"/>
+</g>
+</g>
+</svg>
