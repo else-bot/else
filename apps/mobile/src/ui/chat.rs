@@ -1,6 +1,8 @@
 //! One bot's chat: the transcript as bubbles, the bot's replies as
 //! Markdown that streams in, and the composer.
 
+use std::collections::HashMap;
+
 use else_wire::items::{Reaction, ReactionKind};
 use nsh_base::{
     MarkdownOptions, MenuButtonItem, TextViewPart, TextViewParts, context_menu, nav_page, text_view,
@@ -552,9 +554,27 @@ fn with_menu(
         .into_element()
 }
 
+/// Reactions sent whose answer is not in yet, by the message and the
+/// mark: choosing the same one again resends it under its request ID, so
+/// the server keeps one.
+#[derive(Clone, Default, PartialEq)]
+struct PendingReactions(HashMap<(Uuid, bool), Uuid>);
+
 /// Reacts to a bot's message: a message carrying the reaction, which the
 /// chat shows as the mark on that message.
 fn react(bot: Uuid, chat: Signal<Chat>, item: Uuid, text: String, kind: ReactionKind) {
+    let pending = global::<PendingReactions>();
+    // Keyed by the message and whether it is a thumbs up.
+    let key = (item, kind == ReactionKind::ThumbsUp);
+    let request_id = pending
+        .with_untracked(|p| p.0.get(&key).copied())
+        .unwrap_or_else(|| {
+            let fresh = Uuid::new_v4();
+            pending.update(|p| {
+                p.0.insert(key, fresh);
+            });
+            fresh
+        });
     let message = Message {
         text: else_client::reply::reaction(kind, "your earlier message", &text),
         files: Vec::new(),
@@ -567,8 +587,11 @@ fn react(bot: Uuid, chat: Signal<Chat>, item: Uuid, text: String, kind: Reaction
     };
     let client = session::server().client.clone();
     session::spawn_held(async move {
-        match client.send(bot, message.request(Uuid::new_v4())).await {
+        match client.send(bot, message.request(request_id)).await {
             Ok(sent) => {
+                pending.update(|p| {
+                    p.0.remove(&key);
+                });
                 session::try_update(chat, |c| {
                     if let Some(conversation) = c.conversation_mut() {
                         conversation.insert_item(sent.item);
@@ -578,8 +601,10 @@ fn react(bot: Uuid, chat: Signal<Chat>, item: Uuid, text: String, kind: Reaction
             }
             Err(err) => {
                 let _ = nsh_base::alert_dialog()
-                    .title("Couldn't send the reaction")
-                    .description(err.to_string())
+                    .title("Couldn't confirm the reaction")
+                    .description(format!(
+                        "{err} It may have been sent. Choosing it again can't send it twice."
+                    ))
                     .cancel("ok", "OK")
                     .show()
                     .await;
