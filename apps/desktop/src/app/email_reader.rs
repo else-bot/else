@@ -925,9 +925,10 @@ pub(super) fn mail_banner(
             id.and_then(|id| bots.iter().find(|bot| bot.id == id))
                 .map(|bot| bot.name.as_str())
         };
+        let row = turn.finished_at.or(turn.started_at);
         let stamp = |at: &str| {
             at.parse()
-                .map(super::message_row::short_stamp)
+                .map(|at| super::message_row::stamp_in_row(at, row))
                 .unwrap_or_else(|_| at.to_owned())
         };
         let verb = match &first.location {

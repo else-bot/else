@@ -331,7 +331,26 @@ pub(super) fn transcript_rows(
         let own = c.item(*anchor).map(|item| item.turn_id);
         turns.sort_by_key(|&turn| (Some(turn) != own, c.turn(turn).map(|t| t.turn_no)));
     }
+    // A task with no shown message, such as a mail turn that failed before
+    // replying, sits at the time it finished, which also dates it; an
+    // unfinished one stays last.
+    let (mut finished, unfinished): (Vec<_>, Vec<_>) = c
+        .turns_in_order()
+        .into_iter()
+        .filter(|turn| {
+            tasks
+                .get(&turn.id)
+                .is_some_and(|reply| reply.anchor.is_none())
+        })
+        .partition(|turn| turn.finished_at.is_some());
+    finished.sort_by_key(|turn| turn.finished_at);
+    let mut finished = finished.into_iter().peekable();
     for item in c.items() {
+        if let Some(at) = item.created_at {
+            while let Some(turn) = finished.next_if(|turn| turn.finished_at < Some(at)) {
+                rows.push(RowKey::Task(turn.id));
+            }
+        }
         if c.gap_below(item.seq).is_some() {
             rows.push(RowKey::Gap(item.seq));
         }
@@ -365,14 +384,7 @@ pub(super) fn transcript_rows(
             !here
         });
     }
-    for turn in c.turns_in_order() {
-        if tasks
-            .get(&turn.id)
-            .is_some_and(|reply| reply.anchor.is_none())
-        {
-            rows.push(RowKey::Task(turn.id));
-        }
-    }
+    rows.extend(finished.chain(unfinished).map(|turn| RowKey::Task(turn.id)));
     rows.extend(requests.into_iter().map(|(key, _)| key));
     rows
 }
