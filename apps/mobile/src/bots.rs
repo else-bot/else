@@ -5,7 +5,7 @@ use chrono::{DateTime, Datelike as _, Local, Utc};
 use std::collections::HashSet;
 
 use else_client::layout::Layout;
-use else_wire::bots::{Avatar, Bot, Category, Phase, SidebarStatus};
+use else_wire::bots::{Avatar, Bot, Category, Phase, ReplyPosition, SidebarStatus};
 use uuid::Uuid;
 
 /// The line under a bot's name, most urgent first.
@@ -20,6 +20,15 @@ pub enum Status {
     Empty,
 }
 
+/// Where the owner is in reading a bot's chat, whether or not the list
+/// shows it (a muted bot never looks unread).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// Unread; marking it read goes through its newest reply, when it has one.
+    Unread { newest: Option<ReplyPosition> },
+    Read,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BotRow {
     pub id: Uuid,
@@ -27,6 +36,7 @@ pub struct BotRow {
     pub avatar: Avatar,
     pub status: Status,
     pub unread: bool,
+    pub reading: Reading,
     pub muted: bool,
     pub last_message_at: Option<DateTime<Utc>>,
 }
@@ -58,13 +68,20 @@ impl BotRow {
                 _ => Status::Empty,
             },
         };
-        let unread = bot.read_state.as_ref().is_some_and(|r| r.unread) && !bot.silenced();
+        let reading = match &bot.read_state {
+            Some(read) if read.unread => Reading::Unread {
+                newest: read.latest.as_ref().map(|latest| latest.position),
+            },
+            _ => Reading::Read,
+        };
+        let unread = reading != Reading::Read && !bot.silenced();
         Self {
             id: bot.id,
             name: bot.name.clone(),
             avatar: bot.avatar,
             status,
             unread,
+            reading,
             muted: bot.muted,
             last_message_at: bot.last_message_at,
         }
@@ -376,6 +393,13 @@ mod tests {
         ));
         assert_eq!(row.subtitle(), "Working…");
         assert!(row.unread);
+        // Marking it read goes through the newest reply.
+        assert_eq!(
+            row.reading,
+            Reading::Unread {
+                newest: Some(ReplyPosition { item_seq: 1, text_bytes: 2 })
+            }
+        );
     }
 
     #[test]

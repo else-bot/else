@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use crate::bots::{self, BotRow, Line, Status};
+use crate::bots::{self, BotRow, Line, Reading, Status};
 
 pub fn screen() -> Screen {
     // Collapsed categories, for this visit of the list.
@@ -342,23 +342,22 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
                 ),
         );
     // Rebuilt when what the actions say changes (read, muted).
-    let state = computed(move || row.with(|r| (r.id, r.unread, r.muted)));
+    let state = computed(move || row.with(|r| (r.id, r.reading, r.muted)));
     dynamic(move || {
-        let (id, unread, muted) = state.get();
-        let name = row.with_untracked(|r| r.name.clone());
+        let (id, reading, muted) = state.get();
+        let unread = reading != Reading::Read;
         let main = session::bots().with_untracked(|b| b.default_bot_id == Some(id));
         let content = content.clone();
         Some(untracked(|| {
             let leading = vec![swipe::Action::new(
                 if unread { "Read" } else { "Unread" },
                 0x2b88fb,
-                move || mark_read(id, unread),
+                move || mark_read(id, reading),
             )];
             let mut trailing = Vec::new();
             if !main {
-                let name = name.clone();
                 trailing.push(swipe::Action::new("Delete", 0xff3b30, move || {
-                    confirm_delete(id, name.clone())
+                    confirm_delete(id)
                 }));
             }
             trailing.push(swipe::Action::new(
@@ -395,9 +394,9 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
                 .items(items)
                 .trigger(swipe::row(content, leading, trailing, open).into_element())
                 .on_select(move |action: &SharedString| match action.as_ref() {
-                    "read" => mark_read(id, unread),
+                    "read" => mark_read(id, reading),
                     "mute" => set_muted(id, !muted),
-                    "delete" => confirm_delete(id, name.clone()),
+                    "delete" => confirm_delete(id),
                     _ => {}
                 })
                 .into_element()
@@ -428,15 +427,14 @@ fn menu_item(id: &'static str, label: &'static str, symbol: &'static str) -> Men
     item
 }
 
-/// Marks the bot read through its newest message, or unread; the bots
-/// channel brings the new state.
-fn mark_read(bot: Uuid, unread: bool) {
+/// Marks an unread bot read through its newest reply, or a read one
+/// unread; the bots channel brings the new state.
+fn mark_read(bot: Uuid, reading: Reading) {
     let client = session::server().client.clone();
     spawn(async move {
-        let command = if unread {
-            ReadCommand::MarkRead { position: None }
-        } else {
-            ReadCommand::MarkUnread
+        let command = match reading {
+            Reading::Unread { newest } => ReadCommand::MarkRead { position: newest },
+            Reading::Read => ReadCommand::MarkUnread,
         };
         if client.clone().read(bot, command).await.is_ok() {
             haptic(Haptic::Selection);
@@ -455,9 +453,15 @@ fn set_muted(bot: Uuid, muted: bool) {
     });
 }
 
-/// Deletes the bot after the owner confirms, as its details do.
-fn confirm_delete(bot: Uuid, name: String) {
-    spawn(async move {
+/// Deletes the bot after the owner confirms, as its details do. Held by
+/// the connected server, not the row, which a live update can rebuild
+/// while the prompt is up; the prompt names the bot as it is now.
+fn confirm_delete(bot: Uuid) {
+    let name = session::bots().with_untracked(|b| {
+        b.list.iter().find(|b| b.id == bot).map(|b| b.name.clone())
+    });
+    let Some(name) = name else { return };
+    session::spawn_held(async move {
         let choice = alert_dialog()
             .title(format!("Delete {name}?"))
             .description(
