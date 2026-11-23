@@ -16,6 +16,7 @@ mod model;
 mod new_bot;
 mod parts;
 mod routine;
+mod rules;
 pub mod session;
 mod waits;
 

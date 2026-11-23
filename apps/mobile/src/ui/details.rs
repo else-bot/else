@@ -9,7 +9,6 @@ use else_wire::bots::Bot;
 use else_wire::conversation::BotExtras;
 use else_wire::email::AccountState;
 use else_wire::routines::{PausedReason, Routine, WatcherStatus};
-use else_wire::rules::RulesFile;
 use else_wire::schedule::{
     last_woke, watcher_deadline, watcher_last_check, watcher_next, webhook_pace,
 };
@@ -135,18 +134,21 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
 
     let rules_row = dynamic(move || {
         let (detail, any) = match (rules.get(), rules.error()) {
-            (Some(file), _) => match file.sections.len() {
-                0 => ("None yet".to_owned(), false),
-                1 => ("1 rule".to_owned(), true),
-                n => (format!("{n} rules"), true),
-            },
+            (Some(file), _) => {
+                let history = !file.history.is_empty();
+                match file.sections.len() {
+                    0 => ("None yet".to_owned(), history),
+                    1 => ("1 rule".to_owned(), true),
+                    n => (format!("{n} rules"), true),
+                }
+            }
             (None, Some(_)) => ("Couldn't load".to_owned(), false),
             (None, None) => ("Loading…".to_owned(), false),
         };
         Some(list::link_row(
             "Rules",
             detail,
-            any.then_some(move || open_rules(bot, rules)),
+            any.then_some(move || super::rules::open(bot, rules)),
         ))
     });
 
@@ -535,54 +537,4 @@ fn triggers(extras: &BotExtras, bot: Uuid) -> View {
         "No triggers yet. Ask the bot to react to something, for example \"wake up when new mail arrives from my accountant\".",
         mail.chain(social).chain(webhooks).collect(),
     )
-}
-
-fn open_rules(bot: Uuid, rules: Resource<RulesFile, String>) {
-    super::push(format!("rules-{bot}"), move || rules_screen(bot, rules));
-}
-
-fn rules_screen(bot: Uuid, rules: Resource<RulesFile, String>) -> Screen {
-    // Shown from the Details screen's read, so a rule the bot changes
-    // updates here too.
-    let body = dynamic(move || {
-        let file = rules.get()?;
-        let rows: Vec<View> = file
-            .sections
-            .into_iter()
-            .map(|section| {
-                view().px_4().py(px(11.0)).gap(px(4.0)).child(
-                    view()
-                        .gap(px(4.0))
-                        .child(
-                            text(section.title)
-                                .text_size(px(17.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors::label()),
-                        )
-                        .child(
-                            text(section.body)
-                                .selectable(true)
-                                .text_size(px(15.0))
-                                .line_height(px(20.0))
-                                .text_color(colors::label()),
-                        ),
-                )
-            })
-            .collect();
-        Some(list("Rules", "No rules right now.", rows))
-    });
-    nav_page()
-        .key(format!("rules-{bot}"))
-        .title("Rules")
-        .header_large_title(false)
-        .child(
-            scroll().flex_1().bg(colors::background()).child(
-                view()
-                    .py_6()
-                    .child(body)
-                    .child(parts::footnote(
-                        "Ask the bot in the chat to add, change or remove a rule. The desktop app shows each version and can restore one.",
-                    )),
-            ),
-        )
 }
