@@ -304,16 +304,19 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
                             ),
                     )
                 }))
+                // Mentions of bots show in bold, the rest exactly as typed.
                 .child(
-                    text(move || {
-                        let shown = row_text(line)();
-                        else_client::reply::Replying::parse(&shown)
-                            .map_or_else(|| shown.clone(), |read| read.body.to_owned())
-                    })
-                    .selectable(true)
-                    .text_size(px(17.0))
-                    .line_height(px(22.0))
-                    .text_color(rgb(0xffffff)),
+                    text_view()
+                        .markdown(move || {
+                            let shown = row_text(line)();
+                            let words = else_client::reply::Replying::parse(&shown)
+                                .map_or_else(|| shown.clone(), |read| read.body.to_owned());
+                            SharedString::from(crate::mentions::plain(&words, &mention_bots()))
+                        })
+                        .selectable(true)
+                        .text_size(px(17.0))
+                        .line_height(px(22.0))
+                        .text_color(rgb(0xffffff)),
                 )
         }))
         .child(dynamic(move || {
@@ -410,7 +413,9 @@ fn bot_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
         .gap_1()
         .child(
             text_view()
-                .markdown(move || SharedString::from(markdown()))
+                .markdown(move || {
+                    SharedString::from(crate::mentions::markdown(&markdown(), &mention_bots()))
+                })
                 .options(move || MarkdownOptions {
                     streaming: streaming.get(),
                     ..Default::default()
@@ -492,6 +497,11 @@ fn typing() -> impl IntoElement {
                     .text_color(colors::secondary()),
             ),
     )
+}
+
+/// The bots a message can mention, as the list has them now.
+fn mention_bots() -> else_client::mention::Registry {
+    session::bots().with(|b| else_client::mention::Registry::new(&b.list))
 }
 
 fn menu_item(id: &'static str, label: &'static str, symbol: &'static str) -> MenuButtonItem {

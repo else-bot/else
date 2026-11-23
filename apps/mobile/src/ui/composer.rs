@@ -227,6 +227,10 @@ pub fn composer(
     quote: Signal<Option<Quote>>,
 ) -> impl IntoElement {
     let draft = signal(String::new());
+    // Where the caret is in the text (UTF-16 units), and where a picked
+    // mention puts it.
+    let caret = signal(0_u32);
+    let placed = signal((0_u32, 0_u32));
     let pending = signal(Vec::<Pending>::new());
     let attach_notice = signal(None::<String>);
     let outbox = signal(Request::<Outgoing>::Idle);
@@ -380,6 +384,7 @@ pub fn composer(
         })
         .child(notice)
         .child(quote_bar(quote))
+        .child(mention_picker(draft, caret, placed))
         .child(pending_strip(bot, pending))
         .child(
             view()
@@ -424,6 +429,8 @@ pub fn composer(
                                     }
                                 })
                                 .placeholder("Message")
+                                .on_selection_change(move |s: &Selection| caret.set(s.end))
+                                .selected_range(move || placed.get())
                                 .on_content_size_change(move |size: &Size<Points>| {
                                     input_height.set(size.height.0.clamp(22.0, 120.0));
                                 })
@@ -490,4 +497,109 @@ fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
                 ),
         )
     })
+}
+
+/// Byte offset of UTF-16 offset `units` in `text`, clamped to its end.
+fn byte_at(text: &str, units: u32) -> usize {
+    let mut seen = 0;
+    for (at, c) in text.char_indices() {
+        if seen >= units as usize {
+            return at;
+        }
+        seen += c.len_utf16();
+    }
+    text.len()
+}
+
+/// The bots whose name matches what follows "@" at the caret, as the
+/// desktop's picker offers them; a tap writes the bot's name in its place.
+fn mention_picker(
+    draft: Signal<String>,
+    caret: Signal<u32>,
+    placed: Signal<(u32, u32)>,
+) -> impl IntoElement {
+    let offered = computed(move || {
+        let text = draft.get();
+        let at = byte_at(&text, caret.get());
+        let query = else_client::mention::MentionQuery::at(&text, at..at)?;
+        let bots = session::bots().with(|b| {
+            query
+                .candidates(&b.list)
+                .into_iter()
+                .filter_map(|id| b.list.iter().find(|bot| bot.id == id).cloned())
+                .take(5)
+                .collect::<Vec<_>>()
+        });
+        (!bots.is_empty()).then_some((query.range, bots))
+    });
+    dynamic(move || {
+        let (range, bots) = offered.get()?;
+        let rows: Vec<AnyElement> = bots
+            .into_iter()
+            .map(|bot| {
+                let range = range.clone();
+                let name = bot.name.clone();
+                let avatar = bot.avatar;
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py(px(8.0))
+                    .active(|s| s.bg(colors::fill()))
+                    .role(AccessibilityRole::Button)
+                    .label(format!("Mention {name}"))
+                    .on_press(move || {
+                        let mut text = draft.get_untracked();
+                        if range.end > text.len() {
+                            return;
+                        }
+                        let inserted = format!("@{name} ");
+                        text.replace_range(range.clone(), &inserted);
+                        let end = (text[..range.start].encode_utf16().count()
+                            + inserted.encode_utf16().count())
+                            as u32;
+                        batch(|| {
+                            draft.set(text);
+                            caret.set(end);
+                            placed.set((end, end));
+                        });
+                    })
+                    .child(super::parts::avatar(move || avatar, 28.0))
+                    .child(
+                        text(bot.name.clone())
+                            .text_size(px(17.0))
+                            .text_color(colors::label()),
+                    )
+                    .into_element()
+            })
+            .collect();
+        Some(
+            view()
+                .mx_3()
+                .mb_2()
+                .rounded(px(12.0))
+                .border_curve(BorderCurve::Continuous)
+                .bg(colors::card())
+                .border_1()
+                .border_color(colors::separator())
+                .overflow_hidden()
+                .children(rows),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::byte_at;
+
+    #[test]
+    fn a_caret_in_utf16_units_lands_on_the_right_byte() {
+        let text = "Hé 😀 @Sc";
+        assert_eq!(byte_at(text, 0), 0);
+        assert_eq!(byte_at(text, 2), "Hé".len());
+        // The emoji is two UTF-16 units and four bytes.
+        assert_eq!(byte_at(text, 5), "Hé 😀".len());
+        assert_eq!(byte_at(text, 99), text.len());
+    }
 }

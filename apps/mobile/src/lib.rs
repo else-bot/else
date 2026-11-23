@@ -3,6 +3,7 @@
 pub mod api;
 pub mod bots;
 pub mod conversation;
+mod mentions;
 pub mod server;
 mod ui;
 
