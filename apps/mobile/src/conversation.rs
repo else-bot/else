@@ -5,7 +5,7 @@
 
 use else_client::model::Conversation;
 use else_wire::bots::Phase;
-use else_wire::items::{Attachment, Item, ItemKind, MessagePart, ReactionKind};
+use else_wire::items::{Attachment, BotReplyStatus, Item, ItemKind, MessagePart, ReactionKind};
 use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
@@ -53,6 +53,35 @@ pub enum Row {
     },
     /// A receipt or notice, centered and quiet.
     Note { id: Uuid, text: String },
+    /// Work handed between bots: a task another bot sent this one, or the
+    /// answer to a task this one sent.
+    Exchange(Box<Exchange>),
+}
+
+/// One side of a task between bots, as a card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchange {
+    pub id: Uuid,
+    /// The other bot: who sent the task, or who answered it.
+    pub peer: Uuid,
+    pub peer_name: String,
+    /// The task's short name, when the sender gave one.
+    pub title: Option<String>,
+    pub prompt: String,
+    pub kind: ExchangeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeKind {
+    /// A task another bot sent this one.
+    Received,
+    /// The answer to a task this bot sent.
+    Answered {
+        status: BotReplyStatus,
+        answer: String,
+        /// Why a failed task failed.
+        reason: Option<String>,
+    },
 }
 
 /// Something the bot waits on the owner to settle, shown as a card.
@@ -118,6 +147,7 @@ impl Row {
     pub fn key(&self) -> String {
         match self {
             Self::Owner { id, .. } | Self::Bot { id, .. } | Self::Note { id, .. } => id.to_string(),
+            Self::Exchange(exchange) => exchange.id.to_string(),
         }
     }
 }
@@ -151,11 +181,14 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
             ItemKind::User if item.reaction.is_some() => {}
             ItemKind::User => {
                 if let Some(task) = &item.bot_task {
-                    let title = task.title.as_deref().unwrap_or("a task");
-                    rows.push(Row::Note {
+                    rows.push(Row::Exchange(Box::new(Exchange {
                         id: item.id,
-                        text: format!("{} sent {title}", task.sender_name),
-                    });
+                        peer: task.sender_bot_id,
+                        peer_name: task.sender_name.clone(),
+                        title: task.title.clone(),
+                        prompt: task.prompt.clone(),
+                        kind: ExchangeKind::Received,
+                    })));
                     continue;
                 }
                 let (text, files) = owner_parts(item);
@@ -184,12 +217,29 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
                 });
             }
             ItemKind::Status | ItemKind::Routine => {
-                if let Some(reply) = &item.bot_reply {
-                    let title = reply.title.as_deref().unwrap_or("its task");
-                    rows.push(Row::Note {
+                // A task another bot sent arrives as a status item.
+                if let Some(task) = &item.bot_task {
+                    rows.push(Row::Exchange(Box::new(Exchange {
                         id: item.id,
-                        text: format!("{} finished {title}", reply.sender_name),
-                    });
+                        peer: task.sender_bot_id,
+                        peer_name: task.sender_name.clone(),
+                        title: task.title.clone(),
+                        prompt: task.prompt.clone(),
+                        kind: ExchangeKind::Received,
+                    })));
+                } else if let Some(reply) = &item.bot_reply {
+                    rows.push(Row::Exchange(Box::new(Exchange {
+                        id: item.id,
+                        peer: reply.sender_bot_id,
+                        peer_name: reply.sender_name.clone(),
+                        title: reply.title.clone(),
+                        prompt: reply.prompt.clone(),
+                        kind: ExchangeKind::Answered {
+                            status: reply.status.clone(),
+                            answer: item.text.clone(),
+                            reason: reply.reason.clone(),
+                        },
+                    })));
                 } else if !item.text.trim().is_empty() {
                     rows.push(Row::Note {
                         id: item.id,
@@ -303,9 +353,17 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
     }
 }
 
-/// What waits on the owner, oldest turn first.
+/// What waits on the owner, oldest turn first, then what the tasks this
+/// bot sent ask of the owner, as their answers carry it.
 pub fn asks(conversation: &Conversation) -> Vec<Ask> {
     let mut asks = Vec::new();
+    let mut from_tasks: Vec<Ask> = conversation
+        .items()
+        .filter_map(|item| item.bot_reply.as_ref())
+        .flat_map(|reply| &reply.asks)
+        .filter(|ask| ask.status == OwnerNoticeStatus::Pending)
+        .map(|ask| Ask::Notice(Box::new(OwnerNotice::from(ask))))
+        .collect();
     for turn in conversation.turns_in_order() {
         asks.extend(
             turn.questions
@@ -350,6 +408,9 @@ pub fn asks(conversation: &Conversation) -> Vec<Ask> {
                 .map(|s| Ask::Social(Box::new(s))),
         );
     }
+    // A notice also on this bot's own turns shows once.
+    from_tasks.retain(|ask| !asks.iter().any(|a| a.key() == ask.key()));
+    asks.append(&mut from_tasks);
     asks
 }
 
@@ -567,6 +628,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_task_answer_is_a_card_and_its_open_ask_waits_here_too() {
+        let mut conversation = conversation();
+        apply(
+            &mut conversation,
+            5,
+            json!({ "event": "item.upsert", "data": { "item": {
+                "id": "00000000-0000-0000-0000-000000000011", "seq": 2, "turn_id": TURN,
+                "request_id": null, "kind": "status", "text": "Three spaces found.",
+                "provider_id": null,
+                "bot_reply": {
+                    "sender_bot_id": "00000000-0000-0000-0000-00000000000d",
+                    "sender_name": "Scout", "prompt": "Find coworking spaces.",
+                    "status": "completed", "title": "Coworking",
+                    "asks": [{
+                        "id": "00000000-0000-0000-0000-00000000000c",
+                        "bot_id": "00000000-0000-0000-0000-00000000000d",
+                        "bot_name": "Scout", "turn_id": TURN, "kind": "decision",
+                        "summary": "Pick one of the three.", "status": "pending",
+                        "created_at": "2026-11-23T10:00:00Z",
+                    }],
+                },
+            }}}),
+        );
+        let row = rows(&conversation).pop().unwrap();
+        let Row::Exchange(exchange) = row else {
+            panic!("an exchange row")
+        };
+        assert_eq!(exchange.peer_name, "Scout");
+        assert!(matches!(
+            &exchange.kind,
+            ExchangeKind::Answered { answer, .. } if answer == "Three spaces found."
+        ));
+        assert!(
+            matches!(&asks(&conversation)[..], [Ask::Notice(n)] if n.summary == "Pick one of the three.")
+        );
     }
 
     #[test]

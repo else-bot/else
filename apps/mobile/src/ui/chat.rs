@@ -113,6 +113,7 @@ enum LineKind {
     Owner,
     Bot,
     Note,
+    Exchange,
     Typing,
     Ask,
 }
@@ -123,6 +124,7 @@ impl LineKind {
             Line::Row(Row::Owner { .. }) => Self::Owner,
             Line::Row(Row::Bot { .. }) => Self::Bot,
             Line::Row(Row::Note { .. }) => Self::Note,
+            Line::Row(Row::Exchange(_)) => Self::Exchange,
             Line::Typing => Self::Typing,
             Line::Ask(_) => Self::Ask,
         }
@@ -173,6 +175,16 @@ fn transcript(
                         }
                         LineKind::Bot => with_menu(bot, chat, line, quote, bot_bubble(line)),
                         LineKind::Note => note(line).into_element(),
+                        LineKind::Exchange => dynamic(move || {
+                            line.with(|l| match l {
+                                Some(Line::Row(Row::Exchange(exchange))) => {
+                                    Some((**exchange).clone())
+                                }
+                                _ => None,
+                            })
+                            .map(|exchange| untracked(|| super::exchange::card(exchange)))
+                        })
+                        .into_element(),
                         LineKind::Typing => typing().into_element(),
                         LineKind::Ask => dynamic(move || {
                             line.with(|l| match l {

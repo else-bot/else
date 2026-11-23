@@ -10,6 +10,7 @@ mod composer;
 mod connect;
 mod details;
 mod edit_bot;
+mod exchange;
 mod files;
 mod list;
 mod model;
