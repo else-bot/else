@@ -230,6 +230,11 @@ def stream(turn, latest, packet, stopped):
                 'reason': 'To post the weekly report in the team chat.'})
             finish(turn, stopped, 'completed')
             return
+        if latest == '[ui:webhook]':
+            outgoing_tool('webhook_create', {
+                'name': 'Deploy finished', 'prompt': 'Summarize the deploy and flag failures.'})
+            finish(turn, stopped, 'completed')
+            return
         if latest == '[ui:skill]':
             outgoing_tool('skill_install', {
                 'url': 'https://github.com/anthropics/skills/tree/main/skills/brand-guidelines',

@@ -65,6 +65,7 @@ the register, authorize and token calls. To ask again after connecting,
 Send `[ui:social-telegram]`, `[ui:social-discord]` or `[ui:social-whatsapp]`
 for a social setup card. A made-up token is refused by the platform, and
 WhatsApp shows a live pairing code that only a real account can scan.
+Send `[ui:webhook]` for a webhook trigger named Deploy finished.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
