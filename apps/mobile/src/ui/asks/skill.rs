@@ -109,7 +109,7 @@ pub(super) fn card(bot: Uuid, install: SkillInstall) -> impl IntoElement {
             },
         );
     };
-    let install_now = {
+    let install_from_fields = {
         let names = names.clone();
         move || match keys(&names, &typed.get_untracked()) {
             Ok(keys) => send(Answer::Install {
@@ -117,6 +117,22 @@ pub(super) fn card(bot: Uuid, install: SkillInstall) -> impl IntoElement {
                 keys,
             }),
             Err(message) => request.update(|r| r.reject(message)),
+        }
+    };
+    let install_now = {
+        move || {
+            // An install whose answer was lost goes again exactly as sent:
+            // the fields were cleared with it, and rebuilding it from them
+            // would install without its keys.
+            let unconfirmed = request.with_untracked(|r| match r.unconfirmed_op() {
+                Some(op @ Answer::Install { .. }) => Some(op.clone()),
+                _ => None,
+            });
+            if let Some(op) = unconfirmed {
+                send(op);
+                return;
+            }
+            install_from_fields()
         }
     };
     let scripts = install.files.iter().filter(|file| file.script).count();
@@ -131,6 +147,9 @@ pub(super) fn card(bot: Uuid, install: SkillInstall) -> impl IntoElement {
     let install_label = {
         let name = name.clone();
         move || {
+            if request.with(|r| matches!(r.unconfirmed_op(), Some(Answer::Install { .. }))) {
+                return SharedString::from("Send the install again");
+            }
             SharedString::from(match scope.get() {
                 SkillScope::Bot => format!("Install for {name}"),
                 SkillScope::All | SkillScope::Unknown => "Install for all bots".to_owned(),
