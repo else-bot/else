@@ -2,7 +2,7 @@
 //! first, as Messages lists its conversations.
 
 use else_client::api::ReadCommand;
-use nsh_base::{MenuButtonItem, alert_dialog, context_menu, nav_page};
+use nsh_base::{MenuButtonItem, alert_dialog, context_menu, input, nav_page};
 use nsh_core::HeaderSystemItem;
 use nsh_core::element::desktop::MenuItem;
 use nsh_core::element::header::HeaderItem;
@@ -20,9 +20,17 @@ use crate::bots::{self, BotRow, Line, Status};
 pub fn screen() -> Screen {
     // Collapsed categories, for this visit of the list.
     let collapsed = signal(HashSet::<Option<Uuid>>::new());
+    let query = signal(String::new());
+    let searching = computed(move || query.with(|q| !q.trim().is_empty()));
     let lines = computed(move || {
-        collapsed.with(|folded| {
-            session::bots().with(|b| bots::lines(&b.list, &b.categories, b.default_bot_id, folded))
+        session::bots().with(|b| {
+            if searching.get() {
+                query.with(|q| bots::found(&b.list, b.default_bot_id, q))
+            } else {
+                collapsed.with(|folded| {
+                    bots::lines(&b.list, &b.categories, b.default_bot_id, folded)
+                })
+            }
         })
     });
     let loaded = computed(|| session::bots().with(|b| b.loaded));
@@ -72,10 +80,15 @@ pub fn screen() -> Screen {
                 refreshing.set(false);
             });
         })
+        .keyboard_dismiss_mode(KeyboardDismissMode::OnDrag)
         .child(banner())
+        .child(search_field(query))
         .child(dynamic(move || {
             if !loaded.get() {
                 return placeholder("Loading bots…").into_element();
+            }
+            if searching.get() && lines.with(Vec::is_empty) {
+                return placeholder("No bots match.").into_element();
             }
             if lines.with(Vec::is_empty) {
                 return placeholder("No bots yet. Tap Compose to create one.").into_element();
@@ -111,6 +124,48 @@ pub fn screen() -> Screen {
         .header_large_title(true)
         .header_right_items(vec![compose, menu])
         .child(list)
+}
+
+/// The search field atop the list, as Messages has it: it narrows the
+/// list to the bots whose name holds what is typed.
+fn search_field(query: Signal<String>) -> impl IntoElement {
+    view()
+        .mx_4()
+        .mt_1()
+        .mb_2()
+        .px_2()
+        .min_h(px(36.0))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .rounded(px(10.0))
+        .border_curve(BorderCurve::Continuous)
+        .bg(colors::fill())
+        .child(
+            image(parts::MAGNIFYING_GLASS)
+                .size(px(16.0))
+                .tint_color(colors::secondary()),
+        )
+        .child(
+            input()
+                .flex_1()
+                .min_h(px(36.0))
+                .value(query)
+                .on_change(move |t: &str| query.set(t.to_owned()))
+                .placeholder("Search")
+                .auto_capitalize(AutoCapitalize::None)
+                .auto_correct(false)
+                .return_key_type(ReturnKeyType::Search)
+                .text_size(px(17.0))
+                .text_color(colors::label())
+                .placeholder_color(|| color(colors::secondary()))
+                .caret_color(|| color(colors::tint()))
+                .label("Search bots"),
+        )
+        .child(when(
+            move || query.with(|q| !q.is_empty()),
+            move || parts::remove_button("Clear search", move || query.set(String::new())).p_1(),
+        ))
 }
 
 fn placeholder(message: &'static str) -> impl IntoElement {

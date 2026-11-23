@@ -14,6 +14,7 @@ pub const CHEVRON_RIGHT: ImageAsset = asset!("chevron-right.svg");
 pub const CHEVRON_DOWN: ImageAsset = asset!("chevron-down.svg");
 pub const CHECKMARK: ImageAsset = asset!("checkmark.svg");
 pub const XMARK_CIRCLE: ImageAsset = asset!("xmark-circle-fill.svg");
+pub const MAGNIFYING_GLASS: ImageAsset = asset!("magnifyingglass.svg");
 
 /// The disclosure chevron at the end of a row that opens another screen.
 pub fn chevron() -> impl IntoElement {

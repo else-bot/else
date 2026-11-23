@@ -227,6 +227,19 @@ pub fn time_label(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
+/// The active bots whose name holds `query`, ignoring case, in the list's
+/// order (main first, then waiting and newest), without category headers.
+pub fn found(bots: &[Bot], main: Option<Uuid>, query: &str) -> Vec<Line> {
+    let query = query.trim().to_lowercase();
+    lines(bots, &[], main, &HashSet::new())
+        .into_iter()
+        .filter(|line| match line {
+            Line::Bot { row, .. } => row.name.to_lowercase().contains(&query),
+            Line::Header { .. } => false,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +264,17 @@ mod tests {
                 Line::Bot { row, .. } => row.name.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_search_finds_bots_by_name_ignoring_case_and_categories() {
+        let bots = [
+            bot("Scout", json!({ "category_id": Uuid::from_u128(1) })),
+            bot("Ledger", json!({})),
+            bot("Scoutmaster", json!({})),
+        ];
+        assert_eq!(names(&found(&bots, None, " scout ")), ["Scout", "Scoutmaster"]);
+        assert!(found(&bots, None, "nobody").is_empty());
     }
 
     #[test]
