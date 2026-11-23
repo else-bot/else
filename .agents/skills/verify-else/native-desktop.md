@@ -53,6 +53,10 @@ Send `[ui:secret]` for a `fixture-smtp` secret request with two fields; a
 save shows up in `GET /v1/task-secrets`.
 Send `[ui:delegate-blocked] BOT_ID` to hand that bot a task it reports as
 blocked: a pending owner notice on its turn, with **Mark handled** and **Reply**.
+Send `[ui:skill]` for a skill install card for Anthropic's public
+`brand-guidelines` skill with one key, `BRAND_API_KEY`. The API fetches it
+from GitHub, so this one needs network. Once installed, a repeat fails with
+`ALREADY_INSTALLED` until `DELETE /v1/settings/skills/brand-guidelines`.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It

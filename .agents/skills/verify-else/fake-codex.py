@@ -209,6 +209,12 @@ def stream(turn, latest, packet, stopped):
             if result['status'] == 'pending':
                 finish(turn, stopped, 'completed')
                 return
+        if latest == '[ui:skill]':
+            outgoing_tool('skill_install', {
+                'url': 'https://github.com/anthropics/skills/tree/main/skills/brand-guidelines',
+                'reason': 'To keep the weekly report on brand.', 'env': ['BRAND_API_KEY']})
+            finish(turn, stopped, 'completed')
+            return
         if latest == '[ui:secret]':
             outgoing_tool('request_secret', {
                 'name': 'fixture-smtp', 'reason': 'To send the weekly report by email.',
