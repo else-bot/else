@@ -275,7 +275,7 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
     for launch in [created, resumed] {
         assert!(!has(&launch["args"], "--force"), "web stays unapproved");
         assert_eq!(launch["config"]["approvalMode"], "unrestricted");
-        assert_eq!(launch["cwd"], project.to_str().unwrap());
+        assert_same_dir(&launch["cwd"], &project);
         assert!(!has(&launch["args"], "--approve-mcps"));
         assert!(has(&launch["args"], "--disable-project-configs"));
         assert_eq!(launch["direnv"], "1");
@@ -384,11 +384,7 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
         .path("data/bots")
         .join(Uuid::nil().to_string())
         .join("cursor-home/workspace");
-    assert_eq!(
-        launch["cwd"],
-        private.to_str().unwrap(),
-        "the guest-writable project never loads"
-    );
+    assert_same_dir(&launch["cwd"], &private);
     assert!(has(&launch["args"], private.to_str().unwrap()));
     assert!(
         private.join(".git/HEAD").is_file(),
@@ -954,4 +950,13 @@ pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
             cursor.fingerprint(&cursor.ready().unwrap(), &profile, input)
         },
     )
+}
+
+/// A launch ran in `dir`. The fake CLI reports its working directory as
+/// the OS resolves it, which on macOS goes through the `/var` symlink to
+/// `/private/var`.
+#[track_caller]
+fn assert_same_dir(cwd: &serde_json::Value, dir: &std::path::Path) {
+    let cwd = std::fs::canonicalize(cwd.as_str().expect("a cwd")).expect("the cwd exists");
+    assert_eq!(cwd, std::fs::canonicalize(dir).expect("the dir exists"));
 }
