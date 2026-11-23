@@ -16,7 +16,7 @@ use crate::api::Message;
 #[derive(Debug, Clone, PartialEq)]
 enum NoticeOp {
     Dismiss,
-    /// A reply quoting the ask, under a request ID fixed by its text.
+    /// A reply quoting the ask, built once and resent as is.
     Reply(Message, Uuid),
 }
 
@@ -41,17 +41,10 @@ pub(super) fn card(notice: OwnerNotice) -> impl IntoElement {
             move |op| async move {
                 let result = match op {
                     NoticeOp::Dismiss => client.dismiss_owner_notice(bot, id).await.map(drop),
-                    NoticeOp::Reply(mut message, request_id) => {
-                        // Servers that cannot settle one ask refuse the
-                        // field; the quote still tells the bot which ask.
-                        if !client.clone().capabilities().await?.answers_notice {
-                            message.answers_notice = None;
-                        }
-                        client
-                            .send(bot, message.request(request_id))
-                            .await
-                            .map(drop)
-                    }
+                    NoticeOp::Reply(message, request_id) => client
+                        .send(bot, message.request(request_id))
+                        .await
+                        .map(drop),
                 };
                 match result {
                     // The owner's message settled it first; its update
@@ -65,19 +58,43 @@ pub(super) fn card(notice: OwnerNotice) -> impl IntoElement {
             },
         );
     };
+    // The reply is built once, with what the server supports: a resend
+    // after a lost answer repeats that exact request, and the owner cannot
+    // edit it into a second message meanwhile.
     let reply = move || {
+        let unconfirmed = request.with_untracked(|r| match r.unconfirmed_op() {
+            Some(op @ NoticeOp::Reply(..)) => Some(op.clone()),
+            _ => None,
+        });
+        if let Some(op) = unconfirmed {
+            send(op);
+            return;
+        }
         let words = body.get_untracked().trim().to_owned();
         let text = else_client::reply::replying_to("your earlier message", &summary, &words);
-        let request_id = Uuid::new_v5(&id, text.as_bytes());
-        send(NoticeOp::Reply(
-            Message {
-                text,
-                files: Vec::new(),
-                draft: None,
-                answers_notice: Some(id),
-            },
-            request_id,
-        ));
+        let client = session::server().client.clone();
+        session::spawn_held(async move {
+            // Servers that cannot settle one ask refuse the field; the
+            // quote still tells the bot which ask.
+            let settles = match client.capabilities().await {
+                Ok(caps) => caps.answers_notice,
+                Err(err) => {
+                    session::try_update(request, |r| r.reject(err.to_string()));
+                    return;
+                }
+            };
+            // From the text, so a double tap while this loads posts once.
+            let request_id = Uuid::new_v5(&id, text.as_bytes());
+            send(NoticeOp::Reply(
+                Message {
+                    text,
+                    files: Vec::new(),
+                    draft: None,
+                    answers_notice: settles.then_some(id),
+                },
+                request_id,
+            ));
+        });
     };
     let eyebrow_label = match notice.kind {
         OwnerNoticeKind::Blocked => "BLOCKED, NEEDS YOU",
@@ -117,6 +134,27 @@ pub(super) fn card(notice: OwnerNotice) -> impl IntoElement {
                         replying.set(true)
                     }))
                     .into_element();
+            }
+            let sent = request.with(|r| match r.unconfirmed_op() {
+                Some(NoticeOp::Reply(message, _)) => Some(message.text.clone()),
+                _ => None,
+            });
+            if let Some(sent) = sent {
+                return untracked(|| {
+                    view()
+                        .gap_2()
+                        .child(
+                            text(sent)
+                                .p_3()
+                                .rounded(px(10.0))
+                                .bg(colors::fill())
+                                .text_size(px(15.0))
+                                .line_height(px(20.0))
+                                .text_color(colors::label()),
+                        )
+                        .child(button("Send again", Fill::Prominent, idle, reply.clone()))
+                        .into_element()
+                });
             }
             untracked(|| {
                 view()
