@@ -589,6 +589,7 @@ struct PendingReactions(HashMap<(Uuid, bool), Uuid>);
 /// Reacts to a bot's message: a message carrying the reaction, which the
 /// chat shows as the mark on that message.
 fn react(bot: Uuid, chat: Signal<Chat>, item: Uuid, text: String, kind: ReactionKind) {
+    haptic(Haptic::Impact(HapticImpact::Light));
     let pending = global::<PendingReactions>();
     // Keyed by the message and whether it is a thumbs up.
     let key = (item, kind == ReactionKind::ThumbsUp);

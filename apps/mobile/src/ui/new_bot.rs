@@ -264,7 +264,10 @@ fn picker<T: Copy + PartialEq + 'static, E: IntoElement>(
                     selected: chosen(),
                     ..AccessibilityState::default()
                 })
-                .on_press(move || selected.set(choice))
+                .on_press(move || {
+                    haptic(Haptic::Selection);
+                    selected.set(choice)
+                })
                 .child(draw(choice))
                 .into_element()
         }))

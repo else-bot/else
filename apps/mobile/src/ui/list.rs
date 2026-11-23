@@ -115,7 +115,10 @@ pub fn option_row(
                 ..AccessibilityState::default()
             }
         })
-        .on_press(on_press)
+        .on_press(move || {
+            haptic(Haptic::Selection);
+            on_press()
+        })
         .child(
             view()
                 .flex_1()
