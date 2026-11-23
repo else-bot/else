@@ -223,6 +223,13 @@ def stream(turn, latest, packet, stopped):
                                           'purpose': 'Read the fixture value for the report.'})
             finish(turn, stopped, 'completed')
             return
+        social = re.fullmatch(r'\[ui:social-(telegram|discord|whatsapp)\]', latest)
+        if social:
+            outgoing_tool('social_connect', {
+                'provider': social.group(1),
+                'reason': 'To post the weekly report in the team chat.'})
+            finish(turn, stopped, 'completed')
+            return
         if latest == '[ui:skill]':
             outgoing_tool('skill_install', {
                 'url': 'https://github.com/anthropics/skills/tree/main/skills/brand-guidelines',

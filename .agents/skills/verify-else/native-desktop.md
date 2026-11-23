@@ -62,6 +62,9 @@ For an MCP sign-in, run `python3 -u apps/api/tests/fixtures/mcp_oauth.py`
 installs that OAuth MCP and asks to connect it. The fixture's `/test` lists
 the register, authorize and token calls. To ask again after connecting,
 `DELETE /v1/bots/{id}/mcp/oauth-fixture/connection`.
+Send `[ui:social-telegram]`, `[ui:social-discord]` or `[ui:social-whatsapp]`
+for a social setup card. A made-up token is refused by the platform, and
+WhatsApp shows a live pairing code that only a real account can scan.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
