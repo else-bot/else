@@ -165,7 +165,7 @@ pub async fn place(
             .await?;
     }
     let mut asked = if typed {
-        typed_over(conn, bot_id, turn_id).await?
+        typed_over(conn, bot_id).await?
     } else {
         Vec::new()
     };
@@ -187,25 +187,19 @@ pub async fn place(
     })
 }
 
-/// The turns whose cards owner message `message` types over: every pending
-/// question and computer handoff of `bot_id`, which its chat shows, asked
-/// before the message. A message placed late (deferred) leaves newer cards.
-async fn typed_over(
-    conn: &mut SqliteConnection,
-    bot_id: Uuid,
-    message: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
+/// The turns whose cards a typed owner message types over: every pending
+/// question and computer handoff of `bot_id`, which its chat shows. A typed
+/// message is placed in the transaction that accepts it, so every card
+/// pending here was open when the owner sent it; timestamps would tie
+/// within a millisecond. A deferred message is placed later and is never
+/// typed, so it leaves cards asked after it.
+async fn typed_over(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT turn_id FROM owner_questions
-         WHERE bot_id = ?1 AND status = 'pending'
-           AND created_at < (SELECT created_at FROM turns WHERE id = ?2)
+        "SELECT turn_id FROM owner_questions WHERE bot_id = ?1 AND status = 'pending'
          UNION
-         SELECT turn_id FROM computer_handoffs
-         WHERE bot_id = ?1 AND status = 'pending'
-           AND created_at < (SELECT created_at FROM turns WHERE id = ?2)",
+         SELECT turn_id FROM computer_handoffs WHERE bot_id = ?1 AND status = 'pending'",
     )
     .bind(bot_id)
-    .bind(message)
     .fetch_all(&mut *conn)
     .await
 }
