@@ -199,7 +199,7 @@ async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
     );
     let tasks: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
         "SELECT root_turn_id, status, takeover_turn_id FROM delegations
-         WHERE id IN (?1, ?2) ORDER BY created_at",
+         WHERE id IN (?1, ?2) ORDER BY id = ?2",
     )
     .bind(outbound)
     .bind(inbound)

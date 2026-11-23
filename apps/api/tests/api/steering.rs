@@ -622,6 +622,39 @@ async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
     );
 }
 
+/// A card stamped in the same millisecond as the owner's message (or
+/// later, after the clock steps back) was still open when the message was
+/// accepted, so the message skips it.
+#[tokio::test]
+async fn a_message_skips_a_card_stamped_no_earlier_than_itself() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    common::seed::force_status(pool, first, TurnStatus::Waiting).await;
+    let question = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, created_at)
+         VALUES (?1, ?2, ?3, 1, 'choice', 'Which file?', '[]',
+                 strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 minute'))",
+    )
+    .bind(question)
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let (_, placement) = accept_on(pool, bot, "Use the staging key.", "codex").await;
+
+    assert_eq!(placement, Some(Placement::Queued));
+    let asked: String = sqlx::query_scalar("SELECT status FROM owner_questions WHERE id = ?1")
+        .bind(question)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, "skipped");
+    assert_eq!(status(pool, first).await.0, "queued", "the reply continues");
+}
+
 /// The provider answered that it took nothing (Codex after its turn
 /// ended): the message is pending again and the parked reply continues
 /// with it.
