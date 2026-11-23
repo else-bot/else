@@ -49,10 +49,11 @@ pub fn card(rows: impl IntoIterator<Item = AnyElement>) -> View {
 /// A row that opens another screen: its title, its value, and a chevron
 /// when there is something to open.
 pub fn link_row(
-    title: &'static str,
+    title: impl Into<String>,
     value: String,
     open: Option<impl Fn() + 'static>,
 ) -> AnyElement {
+    let title = title.into();
     let enabled = open.is_some();
     view()
         .flex_row()
@@ -70,7 +71,12 @@ pub fn link_row(
                 open();
             }
         })
-        .child(text(title).text_size(px(17.0)).text_color(colors::label()))
+        .child(
+            text(title)
+                .number_of_lines(1)
+                .text_size(px(17.0))
+                .text_color(colors::label()),
+        )
         .child(
             text(value)
                 .flex_1()

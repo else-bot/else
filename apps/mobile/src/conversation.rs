@@ -10,6 +10,7 @@ use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
+use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
 use else_wire::turns::{Turn, TurnStatus};
 use uuid::Uuid;
 
@@ -59,6 +60,8 @@ pub enum Ask {
     Secret(Box<SecretRequest>),
     /// The bot is blocked or needs a decision, in its own words.
     Notice(Box<OwnerNotice>),
+    /// The bot wants a skill installed.
+    Skill(Box<SkillInstall>),
 }
 
 impl Ask {
@@ -68,6 +71,7 @@ impl Ask {
             Self::Draft(draft) => format!("d-{}", draft.id),
             Self::Secret(request) => format!("s-{}", request.id),
             Self::Notice(notice) => format!("n-{}", notice.id),
+            Self::Skill(install) => format!("k-{}", install.id),
         }
     }
 }
@@ -242,6 +246,33 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
             text: format!("{label} · {}", notice.summary),
         });
     }
+    for install in &turn.skill_installs {
+        let text = match install.status {
+            SkillInstallStatus::Installed => format!(
+                "Installed {} for {} · {}",
+                install.name,
+                if install.scope == Some(SkillScope::Bot) {
+                    "this bot"
+                } else {
+                    "all bots"
+                },
+                if install.key_stored {
+                    "key saved"
+                } else if install.env.is_empty() {
+                    "no key needed"
+                } else {
+                    "key not set"
+                }
+            ),
+            SkillInstallStatus::Declined => format!("You declined {}", install.name),
+            SkillInstallStatus::Cancelled => format!("{} was not installed", install.name),
+            SkillInstallStatus::Pending | SkillInstallStatus::Unknown => continue,
+        };
+        rows.push(Row::Note {
+            id: install.id,
+            text,
+        });
+    }
     for draft in &turn.outgoing_drafts {
         if !draft.is_open() && draft.status != DraftStatus::Superseded {
             rows.push(Row::Note {
@@ -283,6 +314,13 @@ pub fn asks(conversation: &Conversation) -> Vec<Ask> {
                 .filter(|n| n.status == OwnerNoticeStatus::Pending)
                 .cloned()
                 .map(|n| Ask::Notice(Box::new(n))),
+        );
+        asks.extend(
+            turn.skill_installs
+                .iter()
+                .filter(|i| i.status == SkillInstallStatus::Pending)
+                .cloned()
+                .map(|i| Ask::Skill(Box::new(i))),
         );
     }
     asks
@@ -443,6 +481,40 @@ mod tests {
         );
         apply(&mut conversation, 7, notice("superseded"));
         assert_eq!(asks(&conversation), vec![]);
+    }
+
+    #[test]
+    fn a_pending_skill_install_is_an_ask_until_answered() {
+        let mut conversation = conversation();
+        let install = |status: &str, scope: serde_json::Value| {
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "completed", "error": null, "effect_uncertain": false,
+                "skill_installs": [{
+                    "id": "00000000-0000-0000-0000-00000000000e", "skill_id": "brand",
+                    "name": "Brand guidelines", "description": "House style.",
+                    "reason": "On brand.", "files": [], "env": ["BRAND_API_KEY"],
+                    "source": { "url": "u", "repo": "anthropics/skills",
+                                "path": "skills/brand", "commit": "abcdef1" },
+                    "secret": "brand", "status": status, "scope": scope,
+                    "key_stored": false, "created_at": "2026-11-23T10:00:00Z",
+                    "settled_at": null,
+                }],
+            }}})
+        };
+        apply(&mut conversation, 5, install("pending", json!(null)));
+        assert!(
+            matches!(&asks(&conversation)[..], [Ask::Skill(i)] if i.name == "Brand guidelines")
+        );
+        apply(&mut conversation, 6, install("installed", json!("bot")));
+        assert_eq!(asks(&conversation), vec![]);
+        assert_eq!(
+            rows(&conversation).last(),
+            Some(&Row::Note {
+                id: "00000000-0000-0000-0000-00000000000e".parse().unwrap(),
+                text: "Installed Brand guidelines for this bot · key not set".into(),
+            })
+        );
     }
 
     #[test]
