@@ -14,6 +14,7 @@ mod list;
 mod model;
 mod new_bot;
 mod parts;
+mod routine;
 pub mod session;
 mod waits;
 

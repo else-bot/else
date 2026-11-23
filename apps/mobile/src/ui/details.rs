@@ -159,8 +159,8 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                 view()
                     .gap_6()
                     .child(stale.then(|| parts::footnote("Updating…")))
-                    .child(routines(&extras))
-                    .child(reminders(&extras))
+                    .child(routines(&extras, bot, chat))
+                    .child(reminders(&extras, bot, chat))
                     .child(watching(&extras, now))
                     .child(triggers(&extras))
                     .into_element()
@@ -391,14 +391,23 @@ fn paused(routine: &Routine) -> String {
     }
 }
 
-fn routines(extras: &BotExtras) -> View {
+/// A routine's or reminder's row, opening its controls.
+fn routine_row(routine: &Routine, bot: Uuid, chat: Signal<Chat>) -> View {
+    let id = routine.id;
+    routine_item(routine)
+        .active(|s| s.bg(colors::fill()))
+        .role(AccessibilityRole::Button)
+        .on_press(move || super::routine::open(bot, id, chat))
+}
+
+fn routines(extras: &BotExtras, bot: Uuid, chat: Signal<Chat>) -> View {
     let rows = extras
         .routines
         .as_deref()
         .unwrap_or_default()
         .iter()
         .filter(|r| r.run_at.is_none())
-        .map(routine_item)
+        .map(|r| routine_row(r, bot, chat))
         .collect();
     list(
         "Routines",
@@ -407,7 +416,7 @@ fn routines(extras: &BotExtras) -> View {
     )
 }
 
-fn reminders(extras: &BotExtras) -> View {
+fn reminders(extras: &BotExtras, bot: Uuid, chat: Signal<Chat>) -> View {
     let mut due: Vec<&Routine> = extras
         .routines
         .as_deref()
@@ -419,7 +428,7 @@ fn reminders(extras: &BotExtras) -> View {
     list(
         "Reminders",
         "No reminders. Ask the bot to do something once, later, for example \"in 6 hours, check how Scout is doing\".",
-        due.into_iter().map(routine_item).collect(),
+        due.into_iter().map(|r| routine_row(r, bot, chat)).collect(),
     )
 }
 
