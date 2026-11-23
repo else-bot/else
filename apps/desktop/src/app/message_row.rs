@@ -1115,6 +1115,32 @@ pub(super) fn short_stamp(at: DateTime<Utc>) -> String {
     short_stamp_in(at, Local::now())
 }
 
+/// A stamp inside a row dated `row`: the time alone on the row's day,
+/// otherwise with its date, since the separator above names another day.
+pub(super) fn stamp_in_row(at: DateTime<Utc>, row: Option<DateTime<Utc>>) -> String {
+    stamp_in_row_at(at, row, Local::now())
+}
+
+fn stamp_in_row_at<Tz: TimeZone>(
+    at: DateTime<Utc>,
+    row: Option<DateTime<Utc>>,
+    now: DateTime<Tz>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let zone = now.timezone();
+    match row {
+        None => short_stamp_in(at, now),
+        Some(row)
+            if row.with_timezone(&zone).date_naive() == at.with_timezone(&zone).date_naive() =>
+        {
+            at.with_timezone(&zone).format("%H:%M").to_string()
+        }
+        Some(_) => stamp_in(at, now),
+    }
+}
+
 fn short_stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -1216,7 +1242,7 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{day_label_in, short_stamp_in, stamp_in, turn_label};
+    use super::{day_label_in, short_stamp_in, stamp_in, stamp_in_row_at, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -1360,6 +1386,26 @@ mod tests {
             short_stamp_in(at("2026-11-03T21:30:00Z"), now),
             "3 Nov, 23:30"
         );
+    }
+
+    #[test]
+    fn a_stamp_in_a_row_from_another_day_names_its_date() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = "2026-11-23T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .with_timezone(&zone);
+        let at = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+        let moved = at("2026-11-23T07:00:00Z");
+        assert_eq!(
+            stamp_in_row_at(moved, Some(at("2026-11-20T09:36:00Z")), now),
+            "23 Nov, 09:00"
+        );
+        assert_eq!(
+            stamp_in_row_at(moved, Some(at("2026-11-23T06:00:00Z")), now),
+            "09:00"
+        );
+        assert_eq!(stamp_in_row_at(moved, None, now), "09:00");
     }
 
     #[test]

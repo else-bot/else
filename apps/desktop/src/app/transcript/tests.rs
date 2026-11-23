@@ -1172,6 +1172,105 @@ fn build_lays_out_messages_and_unsent_ones_without_a_window() {
 }
 
 #[test]
+fn a_mail_turn_that_failed_without_a_reply_stays_above_later_messages() {
+    let message = |seq: i64, turn: u128, kind: &str, at: &str| {
+        json!({
+            "id": Uuid::from_u128(seq as u128), "seq": seq, "turn_id": Uuid::from_u128(turn),
+            "kind": kind, "text": format!("Message {seq}"), "created_at": at
+        })
+    };
+    let c = Conversation::from_snapshot(serde_json::from_value(json!({
+        "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+        "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+        "items": [
+            message(1, 9, "user", "2026-11-19T10:00:00Z"),
+            message(2, 9, "assistant", "2026-11-19T10:01:00Z"),
+            message(4, 11, "user", "2026-11-23T09:00:00Z"),
+            message(5, 11, "assistant", "2026-11-23T09:01:00Z"),
+        ],
+        "turns": [
+            {"id": Uuid::from_u128(9), "request_id": Uuid::from_u128(109), "turn_no": 9,
+             "provider_id": "codex", "status": "completed", "effect_uncertain": false},
+            {"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 10,
+             "provider_id": "codex", "status": "failed", "effect_uncertain": false,
+             "error": {"code": "provider_failed", "message": "codex debug models failed"},
+             "started_at": "2026-11-20T11:35:00Z", "finished_at": "2026-11-20T11:36:00Z",
+             "mail": [{"account_id": Uuid::from_u128(50),
+                       "message": {"folder": "INBOX", "uid_validity": 1, "uid": 7}}]},
+            {"id": Uuid::from_u128(11), "request_id": Uuid::from_u128(111), "turn_no": 11,
+             "provider_id": "codex", "status": "completed", "effect_uncertain": false},
+        ],
+        "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+    })).unwrap()).unwrap();
+
+    let transcript = built(&c, &[], &[]);
+
+    assert_eq!(
+        transcript
+            .rows
+            .iter()
+            .map(|row| (row.key, row.day))
+            .collect::<Vec<_>>(),
+        [
+            (item(1), Some(instant("2026-11-19T10:00:00Z"))),
+            (item(2), None),
+            (
+                RowKey::Task(Uuid::from_u128(10)),
+                Some(instant("2026-11-20T11:36:00Z"))
+            ),
+            (item(4), Some(instant("2026-11-23T09:00:00Z"))),
+            (item(5), None),
+        ]
+    );
+}
+
+#[test]
+fn a_mail_turn_that_failed_after_a_later_message_sits_at_its_failure_time() {
+    let message = |seq: i64, turn: u128, kind: &str, at: &str| {
+        json!({
+            "id": Uuid::from_u128(seq as u128), "seq": seq, "turn_id": Uuid::from_u128(turn),
+            "kind": kind, "text": format!("Message {seq}"), "created_at": at
+        })
+    };
+    let c = Conversation::from_snapshot(serde_json::from_value(json!({
+        "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+        "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+        "items": [
+            message(2, 11, "user", "2026-11-20T23:59:00Z"),
+            message(3, 11, "assistant", "2026-11-21T00:05:00Z"),
+        ],
+        "turns": [
+            {"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 10,
+             "provider_id": "codex", "status": "failed", "effect_uncertain": false,
+             "started_at": "2026-11-20T23:57:00Z", "finished_at": "2026-11-21T00:02:00Z",
+             "mail": [{"account_id": Uuid::from_u128(50),
+                       "message": {"folder": "INBOX", "uid_validity": 1, "uid": 7}}]},
+            {"id": Uuid::from_u128(11), "request_id": Uuid::from_u128(111), "turn_no": 11,
+             "provider_id": "codex", "status": "completed", "effect_uncertain": false},
+        ],
+        "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+    })).unwrap()).unwrap();
+
+    let transcript = built(&c, &[], &[]);
+
+    assert_eq!(
+        transcript
+            .rows
+            .iter()
+            .map(|row| (row.key, row.day))
+            .collect::<Vec<_>>(),
+        [
+            (item(2), Some(instant("2026-11-20T23:59:00Z"))),
+            (
+                RowKey::Task(Uuid::from_u128(10)),
+                Some(instant("2026-11-21T00:02:00Z"))
+            ),
+            (item(3), None),
+        ]
+    );
+}
+
+#[test]
 fn build_shows_an_exchange_reply_as_an_excerpt_until_opened_in_full() {
     let full = "A long answer that keeps going. ".repeat(40);
     let c = Conversation::from_snapshot(serde_json::from_value(json!({

@@ -17,7 +17,9 @@ pub struct Snapshot {
     /// Ascending by `seq`.
     pub items: Vec<ItemRecord>,
     /// Turns of the returned items plus every unfinished turn of the bot,
-    /// delegated tasks included, and any turn with a pending computer handoff.
+    /// delegated tasks included, any turn with a pending computer handoff,
+    /// and each connector turn in the page's range that ended unsuccessfully,
+    /// such as a mail turn that failed before replying.
     pub turns: Vec<TurnRecord>,
     /// Pass as `before_seq` to load the previous page; `None` at the start.
     pub older_before_seq: Option<i64>,
@@ -62,11 +64,16 @@ pub async fn snapshot(
          WHERE t.bot_id = ?1
            AND ({} OR t.status IN {UNFINISHED_STATUSES}
                 OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status IN ('pending', 'taken'))
-                OR EXISTS (SELECT 1 FROM owner_notices n WHERE n.turn_id = t.id AND n.status = 'pending'))
+                OR EXISTS (SELECT 1 FROM owner_notices n WHERE n.turn_id = t.id AND n.status = 'pending')
+                OR (t.status IN ('failed', 'interrupted', 'uncertain')
+                    AND EXISTS (SELECT 1 FROM items ci WHERE ci.turn_id = t.id AND ci.kind = 'connector'
+                                AND (?3 IS NULL OR ci.seq >= ?3) AND (?4 IS NULL OR ci.seq < ?4))))
          ORDER BY t.turn_no", in_ids("t.id", "?2")
     )))
     .bind(bot_id)
     .bind(sqlx::types::Json(&turn_ids))
+    .bind(older_before_seq)
+    .bind(before_seq)
     .fetch_all(&mut *tx)
     .await?;
     super::turns::attach_owner_requests(&mut tx, &mut turns).await?;
