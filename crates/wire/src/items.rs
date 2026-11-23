@@ -81,6 +81,14 @@ impl Attachment {
     pub fn fallback(&self) -> String {
         format!("[File: {}]", self.name)
     }
+
+    /// Whether the apps draw it as a picture: the formats both can decode.
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    }
 }
 
 /// Ordered text or a stored file in a conversation message.

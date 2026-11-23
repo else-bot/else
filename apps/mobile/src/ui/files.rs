@@ -13,14 +13,6 @@ use uuid::Uuid;
 use super::parts::colors;
 use super::session;
 
-/// A file a message carries, or one the composer is about to send.
-pub fn is_image(media_type: &str) -> bool {
-    matches!(
-        media_type,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    )
-}
-
 /// The folder a server's files are kept in. Attachment IDs are chosen by
 /// the client that uploads, so two servers can hold the same ID with
 /// different bytes: each server, and each bot, has its own folder.
@@ -95,7 +87,7 @@ pub fn strip(bot: Uuid, files: Vec<Attachment>, trailing: bool) -> impl IntoElem
         row.justify_start()
     };
     row.children(files.into_iter().map(move |file| {
-        if is_image(&file.media_type) {
+        if file.is_image() {
             thumbnail(bot, file).into_element()
         } else {
             chip(file.name.clone(), size_label(file.size))

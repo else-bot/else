@@ -90,7 +90,7 @@ fn screen() -> Screen {
         spawn(async move {
             match client.capabilities().await {
                 Ok(caps) => {
-                    let providers = model::offered(caps.providers);
+                    let providers = caps.offered();
                     let defaults = caps.defaults;
                     // Shown as the catalog applies it now. When that differs
                     // from the raw defaults, the shown one is sent.

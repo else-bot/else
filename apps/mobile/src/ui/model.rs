@@ -4,7 +4,7 @@
 //! with the create.
 
 use else_wire::settings::{
-    BotProfile, FAST_TIER, ProfileChoice, ProviderInfo, effort_label, model_label,
+    BotProfile, FAST_TIER, ProfileChoice, ProviderInfo, effort_label, initial_choice, model_label,
 };
 use nsh_base::nav_page;
 use nsh_core::element::header::HeaderItem;
@@ -16,14 +16,6 @@ use uuid::Uuid;
 use super::parts::{self, colors};
 use super::session;
 use crate::api::ClientError;
-
-/// The providers a profile can name: those listing models.
-pub fn offered(providers: Vec<ProviderInfo>) -> Vec<ProviderInfo> {
-    providers
-        .into_iter()
-        .filter(|p| !p.catalog.models.is_empty())
-        .collect()
-}
 
 /// A profile in a few words, such as "Claude Opus 5.5, High".
 pub fn summary(providers: &[ProviderInfo], choice: &ProfileChoice) -> String {
@@ -295,7 +287,7 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
         );
         match (caps, saved) {
             (Ok(caps), Ok(saved)) => {
-                let providers = offered(caps.providers);
+                let providers = caps.offered();
                 choice.set(shown(&providers, saved.as_ref()));
                 load.set(Load::Ready { providers, saved });
             }
@@ -467,16 +459,11 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
 /// catalog applies it now, else the first runnable provider. A provider
 /// the server no longer offers opens with nothing picked.
 fn shown(providers: &[ProviderInfo], saved: Option<&BotProfile>) -> Option<ProfileChoice> {
-    match saved {
-        Some(saved) => providers
-            .iter()
-            .find(|p| p.state.id == saved.choice.provider_id)
-            .and_then(|p| p.choice(Some(&saved.choice))),
-        None => providers
-            .iter()
-            .filter(|p| p.state.cli_available)
-            .find_map(|p| p.choice(None)),
+    let gone = saved.is_some_and(|s| !providers.iter().any(|p| p.state.id == s.choice.provider_id));
+    if gone {
+        return None;
     }
+    initial_choice(providers, saved.map(|s| &s.choice))
 }
 
 /// Reads the profile back after a save whose outcome is unknown.

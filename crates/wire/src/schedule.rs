@@ -241,6 +241,14 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
     }
 }
 
+/// When a trigger last woke its bot, in the device's time zone.
+pub fn last_woke(at: DateTime<Utc>) -> String {
+    format!(
+        "Last woke {}",
+        at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
+    )
+}
+
 /// A watcher's deadline: its time when it is today, else its date.
 pub fn watcher_deadline<Tz: chrono::TimeZone>(
     until: DateTime<Tz>,

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use else_wire::outgoing::{DraftContent, OutgoingDraft};
+use else_wire::outgoing::{DraftAttachment, DraftContent, DraftEdit, OutgoingDraft};
 use else_wire::questions::{Question, QuestionKind};
 use else_wire::secrets::SecretRequest;
 use nsh_base::{alert_dialog, input};
@@ -14,7 +14,6 @@ use uuid::Uuid;
 use super::parts::colors;
 use super::session;
 use else_client::api::{SaveSecret, validate_secret_metadata};
-use else_client::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
 use else_wire::questions::QuestionAnswer;
 
 use crate::api::{ClientError, Message};

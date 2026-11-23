@@ -18,18 +18,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub(super) fn is_image(file: &Attachment) -> bool {
-    matches!(
-        file.media_type.as_str(),
-        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-    )
-}
-
 pub(super) fn image_files(parts: &[MessagePart]) -> Vec<Attachment> {
     let mut files = Vec::new();
     for part in parts {
         if let MessagePart::File { file } = part
-            && is_image(file)
+            && file.is_image()
             && !files.iter().any(|saved: &Attachment| saved.id == file.id)
         {
             files.push(file.clone());
@@ -80,7 +73,7 @@ fn unavailable_image_label(node: &markdown::mdast::Node) -> Option<&str> {
 pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Vec<MessagePart>) {
     let drawn = |ix: usize| {
         matches!(&parts[ix], MessagePart::File { file }
-            if (is_image(file) || super::visuals::is_visual(file)) && !in_prose(parts, ix))
+            if (file.is_image() || super::visuals::is_visual(file)) && !in_prose(parts, ix))
     };
     if !(0..parts.len()).any(drawn) {
         return (source.to_owned(), parts.to_vec());

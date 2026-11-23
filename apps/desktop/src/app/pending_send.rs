@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use super::reply::Quoted;
 use crate::api::SendRequest;
-use crate::model::outgoing::DraftAttachment;
 use else_wire::items::MessagePart;
 use else_wire::items::Reaction;
+use else_wire::outgoing::DraftAttachment;
 
 /// The API's code for a message refused because its bot's provider cannot
 /// run now, such as a CLI signed out on the server. The server checks the

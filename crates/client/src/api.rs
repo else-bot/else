@@ -54,7 +54,7 @@ pub struct SendRequest {
     pub provider_id: Option<String>,
     pub reaction: Option<Reaction>,
     pub parts: Vec<else_wire::items::MessagePart>,
-    pub open_draft: Option<crate::model::outgoing::DraftAttachment>,
+    pub open_draft: Option<else_wire::outgoing::DraftAttachment>,
     /// The owner ask this message replies to.
     pub answers_notice: Option<Uuid>,
 }
@@ -534,7 +534,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-        edit: crate::model::outgoing::DraftEdit,
+        edit: else_wire::outgoing::DraftEdit,
         always: bool,
     ) -> Result<OutgoingDraft, ClientError> {
         let mut body = json!(edit);
@@ -551,7 +551,7 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-        edit: crate::model::outgoing::DraftEdit,
+        edit: else_wire::outgoing::DraftEdit,
     ) -> Result<OutgoingDraft, ClientError> {
         self.call::<DraftResponse>(
             Method::PUT,
@@ -1260,7 +1260,7 @@ pub(crate) mod tests {
                     .approve_draft(
                         bot,
                         draft,
-                        crate::model::outgoing::DraftEdit {
+                        else_wire::outgoing::DraftEdit {
                             version: 7,
                             subject: None,
                             body: "See flyer.".into(),

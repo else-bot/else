@@ -47,21 +47,8 @@ pub struct ProfilePicker {
 
 impl ProfilePicker {
     pub fn new(caps: &Capabilities, initial: Option<&ProfileChoice>) -> Self {
-        let providers: Vec<_> = caps
-            .providers
-            .iter()
-            .filter(|p| !p.catalog.models.is_empty())
-            .cloned()
-            .collect();
-        let choice = initial
-            .and_then(|c| providers.iter().find(|p| p.state.id == c.provider_id))
-            .and_then(|p| p.choice(initial))
-            .or_else(|| {
-                providers
-                    .iter()
-                    .filter(|p| p.state.cli_available)
-                    .find_map(|p| p.choice(None))
-            });
+        let providers = caps.offered();
+        let choice = else_wire::settings::initial_choice(&providers, initial);
         let browsing = choice
             .as_ref()
             .map(|c| c.provider_id.clone())

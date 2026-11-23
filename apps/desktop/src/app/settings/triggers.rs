@@ -197,10 +197,7 @@ impl BotPanel {
             facts.push("Paused".to_owned());
         }
         if let Some(at) = card.last_woke {
-            facts.push(format!(
-                "Last woke {}",
-                at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
-            ));
+            facts.push(else_wire::schedule::last_woke(at));
         }
         // Same anatomy as a routine: the name over one meta line, beside a
         // centred switch. What the trigger asks for follows as its body.

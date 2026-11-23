@@ -8,7 +8,9 @@ use else_wire::conversation::BotExtras;
 use else_wire::email::AccountState;
 use else_wire::routines::{PausedReason, Routine, WatcherStatus};
 use else_wire::rules::RulesFile;
-use else_wire::schedule::{watcher_deadline, watcher_last_check, watcher_next, webhook_pace};
+use else_wire::schedule::{
+    last_woke, watcher_deadline, watcher_last_check, watcher_next, webhook_pace,
+};
 use else_wire::settings::{BotProfile, ProviderInfo};
 use nsh_base::nav_page;
 use nsh_core::prelude::*;
@@ -111,7 +113,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                 );
                 model.set(match (caps, profile) {
                     (Ok(caps), Ok(profile)) => Fetch::Ready(Model {
-                        providers: super::model::offered(caps.providers),
+                        providers: caps.offered(),
                         profile,
                     }),
                     (Err(err), _) | (_, Err(err)) => Fetch::Failed(err.to_string()),
@@ -445,7 +447,7 @@ fn capitalized(line: String) -> String {
 }
 
 fn triggers(extras: &BotExtras) -> View {
-    let woke = |at: Option<DateTime<Utc>>| at.map(|at| format!("Last woke {}", local(at)));
+    let woke = |at: Option<DateTime<Utc>>| at.map(last_woke);
     let parse = |at: &Option<String>| at.as_deref().and_then(|at| at.parse().ok());
     let mail = extras.mail_triggers.iter().map(|t| {
         let mut lines = vec!["Email · New mail".to_owned()];
@@ -494,13 +496,6 @@ fn triggers(extras: &BotExtras) -> View {
         "No triggers yet. Ask the bot to react to something, for example \"wake up when new mail arrives from my accountant\".",
         mail.chain(social).chain(webhooks).collect(),
     )
-}
-
-/// A moment in the phone's time zone, as the desktop shows trigger wakes.
-fn local(at: DateTime<Utc>) -> String {
-    at.with_timezone(&Local)
-        .format("%a %-d %b, %H:%M")
-        .to_string()
 }
 
 fn open_rules(bot: Uuid, rules: Signal<Fetch<RulesFile>>) {

@@ -11,8 +11,8 @@ use else_client::api::Tailnet;
 pub use else_client::api::{
     Client, ClientError, CreateBotRequest, LiveEvent, SendRequest, StreamMessage,
 };
-use else_client::model::outgoing::DraftAttachment;
 use else_wire::items::{Attachment, MessagePart};
+use else_wire::outgoing::DraftAttachment;
 use uuid::Uuid;
 
 use crate::server::Profile;

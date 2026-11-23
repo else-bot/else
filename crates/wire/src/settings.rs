@@ -196,6 +196,34 @@ impl From<WireCatalog> for Catalog {
     }
 }
 
+impl Capabilities {
+    /// The providers a profile can name: those listing models.
+    pub fn offered(&self) -> Vec<ProviderInfo> {
+        self.providers
+            .iter()
+            .filter(|p| !p.catalog.models.is_empty())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Where a model picker over `providers` opens: `saved` as the catalog
+/// applies it now, else the first runnable provider's default choice.
+pub fn initial_choice(
+    providers: &[ProviderInfo],
+    saved: Option<&ProfileChoice>,
+) -> Option<ProfileChoice> {
+    saved
+        .and_then(|c| providers.iter().find(|p| p.state.id == c.provider_id))
+        .and_then(|p| p.choice(saved))
+        .or_else(|| {
+            providers
+                .iter()
+                .filter(|p| p.state.cli_available)
+                .find_map(|p| p.choice(None))
+        })
+}
+
 /// The service tier that runs a model faster where the provider offers it.
 pub const FAST_TIER: &str = "priority";
 

@@ -27,8 +27,6 @@ use else_wire::waits::{ComputerJobWait, McpWait};
 use serde::Deserialize;
 use uuid::Uuid;
 
-pub mod outgoing;
-
 /// One event of a `bot:<id>` channel: its cursor and its event, decoded
 /// once. An event this build does not know, or one whose data does not
 /// parse, waits for `apply` to ask for a snapshot.
@@ -743,7 +741,6 @@ impl Conversation {
 
 #[cfg(test)]
 mod tests {
-    use super::outgoing::OutgoingDraftEdit as _;
     use super::*;
     use else_wire::bots::Bot;
     use else_wire::items::BotReplyStatus;
