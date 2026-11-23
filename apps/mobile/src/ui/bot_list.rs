@@ -27,9 +27,8 @@ pub fn screen() -> Screen {
             if searching.get() {
                 query.with(|q| bots::found(&b.list, b.default_bot_id, q))
             } else {
-                collapsed.with(|folded| {
-                    bots::lines(&b.list, &b.categories, b.default_bot_id, folded)
-                })
+                collapsed
+                    .with(|folded| bots::lines(&b.list, &b.categories, b.default_bot_id, folded))
             }
         })
     });
@@ -392,13 +391,20 @@ fn bot_row(row: Memo<BotRow>) -> impl IntoElement {
             }
             context_menu()
                 .items(items)
-                .trigger(swipe::row(
-                    content,
-                    move || row.with(|r| SharedString::from(format!("{}, {}", r.name, r.subtitle()))),
-                    leading,
-                    trailing,
-                    open,
-                ).into_element())
+                .trigger(
+                    swipe::row(
+                        content,
+                        move || {
+                            row.with(|r| {
+                                SharedString::from(format!("{}, {}", r.name, r.subtitle()))
+                            })
+                        },
+                        leading,
+                        trailing,
+                        open,
+                    )
+                    .into_element(),
+                )
                 .on_select(move |action: &SharedString| match action.as_ref() {
                     "read" => mark_read(id, reading),
                     "mute" => set_muted(id, !muted),
@@ -463,9 +469,8 @@ fn set_muted(bot: Uuid, muted: bool) {
 /// the connected server, not the row, which a live update can rebuild
 /// while the prompt is up; the prompt names the bot as it is now.
 fn confirm_delete(bot: Uuid) {
-    let name = session::bots().with_untracked(|b| {
-        b.list.iter().find(|b| b.id == bot).map(|b| b.name.clone())
-    });
+    let name = session::bots()
+        .with_untracked(|b| b.list.iter().find(|b| b.id == bot).map(|b| b.name.clone()));
     let Some(name) = name else { return };
     session::spawn_held(async move {
         let choice = alert_dialog()

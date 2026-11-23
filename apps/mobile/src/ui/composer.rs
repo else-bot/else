@@ -203,11 +203,10 @@ fn pending_strip(bot: Uuid, pending: Signal<Vec<Pending>>) -> impl IntoElement {
                                         }
                                     }),
                             )
-                            .child(
-                                parts::remove_button(format!("Remove {}", item.file.name), move || {
-                                    pending.update(|p| p.retain(|item| item.file.id != id))
-                                }),
-                            )
+                            .child(parts::remove_button(
+                                format!("Remove {}", item.file.name),
+                                move || pending.update(|p| p.retain(|item| item.file.id != id)),
+                            ))
                             .into_element()
                     })),
             )
@@ -486,9 +485,9 @@ fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
                                 .text_color(colors::secondary()),
                         ),
                 )
-                .child(
-                    parts::remove_button("Cancel reply", move || quote.set(None)),
-                ),
+                .child(parts::remove_button("Cancel reply", move || {
+                    quote.set(None)
+                })),
         )
     })
 }
@@ -662,8 +661,20 @@ mod tests {
         let scout = Uuid::from_u128(1);
         // The field changed since the picker showed: the range follows it.
         assert_eq!(pick_range("😀 @Sc", (6, 6), scout, &list), Some((3, 6)));
-        assert_eq!(pick_range("@Scz", (4, 4), scout, &list), None, "no longer offered");
-        assert_eq!(pick_range("@Sc", (1, 3), scout, &list), None, "a selection, not a caret");
-        assert_eq!(pick_range("@Sc", (9, 9), scout, &list), None, "a caret the text lacks");
+        assert_eq!(
+            pick_range("@Scz", (4, 4), scout, &list),
+            None,
+            "no longer offered"
+        );
+        assert_eq!(
+            pick_range("@Sc", (1, 3), scout, &list),
+            None,
+            "a selection, not a caret"
+        );
+        assert_eq!(
+            pick_range("@Sc", (9, 9), scout, &list),
+            None,
+            "a caret the text lacks"
+        );
     }
 }

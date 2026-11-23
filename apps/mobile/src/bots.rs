@@ -25,7 +25,9 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reading {
     /// Unread; marking it read goes through its newest reply, when it has one.
-    Unread { newest: Option<ReplyPosition> },
+    Unread {
+        newest: Option<ReplyPosition>,
+    },
     Read,
 }
 
@@ -290,7 +292,10 @@ mod tests {
             bot("Ledger", json!({})),
             bot("Scoutmaster", json!({})),
         ];
-        assert_eq!(names(&found(&bots, None, " scout ")), ["Scout", "Scoutmaster"]);
+        assert_eq!(
+            names(&found(&bots, None, " scout ")),
+            ["Scout", "Scoutmaster"]
+        );
         assert!(found(&bots, None, "nobody").is_empty());
     }
 
@@ -397,7 +402,10 @@ mod tests {
         assert_eq!(
             row.reading,
             Reading::Unread {
-                newest: Some(ReplyPosition { item_seq: 1, text_bytes: 2 })
+                newest: Some(ReplyPosition {
+                    item_seq: 1,
+                    text_bytes: 2
+                })
             }
         );
     }

@@ -80,7 +80,11 @@ pub fn row(
         }
     };
     let side = |actions: Vec<Action>, trailing: bool| {
-        let open = if trailing { Rest::Trailing } else { Rest::Leading };
+        let open = if trailing {
+            Rest::Trailing
+        } else {
+            Rest::Leading
+        };
         view()
             // Screen readers reach a side's buttons only while it is open.
             .accessibility_elements_hidden(move || shown.get() != open)

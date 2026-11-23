@@ -53,11 +53,12 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
     let tray = super::waits::tray(bot, name.clone(), chat);
     // Follows a rename and a new avatar; what it opened with until the
     // list has the bot.
-    let record = computed(move || {
-        session::bots().with(|b| b.list.iter().find(|b| b.id == bot).cloned())
-    });
+    let record =
+        computed(move || session::bots().with(|b| b.list.iter().find(|b| b.id == bot).cloned()));
     let title = move || {
-        SharedString::from(record.with(|r| r.as_ref().map_or_else(|| name.clone(), |b| b.name.clone())))
+        SharedString::from(
+            record.with(|r| r.as_ref().map_or_else(|| name.clone(), |b| b.name.clone())),
+        )
     };
     nav_page()
         .key(format!("chat-{bot}"))

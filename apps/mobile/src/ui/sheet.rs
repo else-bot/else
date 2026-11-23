@@ -205,9 +205,8 @@ fn cancel() {
 
 /// A sheet page's header: Cancel at its start, off while the form saves.
 pub fn page(screen: Screen) -> Screen {
-    let saving = computed(|| {
-        sheet().with(|s| s.form().is_some_and(|(_, form)| form == Form::Saving))
-    });
+    let saving =
+        computed(|| sheet().with(|s| s.form().is_some_and(|(_, form)| form == Form::Saving)));
     screen
         .header_left(
             view()
@@ -239,9 +238,7 @@ pub fn layer() -> impl IntoElement {
                 })
             },
         );
-        let clean = move || {
-            sheet().with(|s| s.form().is_some_and(|(_, form)| form == Form::Clean))
-        };
+        let clean = move || sheet().with(|s| s.form().is_some_and(|(_, form)| form == Form::Clean));
         Some(
             dialog()
                 .presentation(ModalPresentation::PageSheet)
