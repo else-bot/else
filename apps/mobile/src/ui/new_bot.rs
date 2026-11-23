@@ -2,7 +2,7 @@
 //! provider and model, which start at the server's defaults.
 
 use else_wire::bots::{Avatar, AvatarColor, AvatarShape};
-use else_wire::settings::{ProfileChoice, ProviderInfo};
+use else_wire::settings::{Capabilities, ProfileChoice, ProviderInfo};
 use nsh_base::{input, nav_page};
 use nsh_core::element::header::HeaderItem;
 use nsh_core::prelude::*;
@@ -44,19 +44,6 @@ fn create_request(
     }
 }
 
-/// The providers and defaults, once the server has listed them.
-#[derive(Clone, PartialEq)]
-enum Models {
-    Loading,
-    /// The bot is created with the defaults; the chat's Model screen
-    /// changes them later.
-    Unavailable,
-    Ready {
-        providers: Vec<ProviderInfo>,
-        defaults: Option<ProfileChoice>,
-    },
-}
-
 pub fn open() {
     super::push(KEY, screen);
 }
@@ -70,39 +57,36 @@ fn screen() -> Screen {
         color: picked.get(),
     };
     let step = signal(Request::<CreateBotRequest>::Idle);
-    let models = signal(Models::Loading);
+    // The server's providers and defaults. Without them, the bot is
+    // created with the defaults; the chat's Model screen changes them later.
+    let caps = resource(
+        || Some(()),
+        |(), _| {
+            let client = session::server().client.clone();
+            async move { client.capabilities().await.map_err(|err| err.to_string()) }
+        },
+    );
     let model = signal(None::<ProfileChoice>);
-    {
-        let client = session::server().client.clone();
-        spawn(async move {
-            match client.capabilities().await {
-                Ok(caps) => {
-                    let providers = caps.offered();
-                    let defaults = caps.defaults;
-                    // Shown as the catalog applies it now. When that differs
-                    // from the raw defaults, the shown one is sent.
-                    model.set(defaults.as_ref().and_then(|wanted| {
-                        providers
-                            .iter()
-                            .find(|p| p.state.id == wanted.provider_id)
-                            .and_then(|p| p.choice(Some(wanted)))
-                    }));
-                    models.set(Models::Ready {
-                        providers,
-                        defaults,
-                    });
-                }
-                Err(_) => models.set(Models::Unavailable),
-            }
-        });
-    }
+    // Shown as the catalog applies the defaults now. When that differs
+    // from the raw defaults, the shown one is sent.
+    effect(move || {
+        if let Some(caps) = caps.get() {
+            let providers = caps.offered();
+            model.set(caps.defaults.as_ref().and_then(|wanted| {
+                providers
+                    .iter()
+                    .find(|p| p.state.id == wanted.provider_id)
+                    .and_then(|p| p.choice(Some(wanted)))
+            }));
+        }
+    });
     // Only a change from the defaults is sent: a bot without its own
     // profile keeps following the server's defaults.
-    let profile = move || match models.get_untracked() {
-        Models::Ready { defaults, .. } => model
+    let profile = move || {
+        let defaults = untracked(|| caps.get())?.defaults;
+        model
             .get_untracked()
-            .filter(|m| Some(m) != defaults.as_ref()),
-        Models::Loading | Models::Unavailable => None,
+            .filter(|m| Some(m) != defaults.as_ref())
     };
     let ready = computed(move || !name.with(|n| n.trim().is_empty()) && !step.with(Request::busy));
 
@@ -231,7 +215,7 @@ fn screen() -> Screen {
                         .child(message)
                         .child(parts::group().p_4().child(shapes))
                         .child(parts::group().p_4().child(swatches))
-                        .child(model_row(models, model)),
+                        .child(model_row(caps, model)),
                 ),
         )
 }
@@ -275,15 +259,20 @@ fn picker<T: Copy + PartialEq + 'static, E: IntoElement>(
 }
 
 /// The Model row: the profile the bot starts with, opening the picker.
-fn model_row(models: Signal<Models>, model: Signal<Option<ProfileChoice>>) -> impl IntoElement {
+fn model_row(
+    caps: Resource<Capabilities, String>,
+    model: Signal<Option<ProfileChoice>>,
+) -> impl IntoElement {
     dynamic(move || {
-        let (detail, providers) = match models.get() {
-            Models::Loading => ("Loading…".to_owned(), None),
-            Models::Unavailable => ("The server's default".to_owned(), None),
-            Models::Ready { providers, .. } => match model.get() {
-                Some(choice) => (model::summary(&providers, &choice), Some(providers)),
-                None if providers.is_empty() => ("No provider lists models".to_owned(), None),
-                None => ("Choose".to_owned(), Some(providers)),
+        let (detail, providers) = match (caps.get(), caps.error()) {
+            (None, None) => ("Loading…".to_owned(), None),
+            (None, Some(_)) => ("The server's default".to_owned(), None),
+            (Some(caps), _) => match (caps.offered(), model.get()) {
+                (providers, Some(choice)) => (model::summary(&providers, &choice), Some(providers)),
+                (providers, None) if providers.is_empty() => {
+                    ("No provider lists models".to_owned(), None)
+                }
+                (providers, None) => ("Choose".to_owned(), Some(providers)),
             },
         };
         let open = providers.clone();

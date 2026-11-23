@@ -17,7 +17,9 @@ use super::parts::{self, colors};
 use super::session;
 use else_client::request::Request;
 
-use crate::api::ClientError;
+use std::sync::Arc;
+
+use crate::api::{Client, ClientError};
 
 /// A profile in a few words, such as "Claude Opus 5.5, High".
 pub fn summary(providers: &[ProviderInfo], choice: &ProfileChoice) -> String {
@@ -235,16 +237,21 @@ fn row(
         )
 }
 
-/// The Model screen's data: the providers and the bot's profile as the
-/// server reports it (its own, or the defaults it follows).
-#[derive(Clone, PartialEq)]
-enum Load {
-    Loading,
-    Failed(String),
-    Ready {
-        providers: Vec<ProviderInfo>,
-        saved: Option<BotProfile>,
-    },
+/// The providers a bot can pick from and its profile as the server reports
+/// it (its own, or the defaults it follows).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileInfo {
+    pub providers: Vec<ProviderInfo>,
+    pub saved: Option<BotProfile>,
+}
+
+/// Reads a bot's profile and the providers to label it with, together.
+pub async fn load_profile(client: Arc<Client>, bot: Uuid) -> Result<ProfileInfo, String> {
+    let (caps, saved) = futures_util::join!(client.clone().capabilities(), client.bot_profile(bot));
+    Ok(ProfileInfo {
+        providers: caps.map_err(|err| err.to_string())?.offered(),
+        saved: saved.map_err(|err| err.to_string())?,
+    })
 }
 
 /// What a retry of a save whose outcome is unknown finds on the server
@@ -263,39 +270,35 @@ fn key(bot: Uuid) -> String {
     format!("model-{bot}")
 }
 
-/// Opens the Model screen; a saved profile is also written to `saved`.
-pub fn open(bot: Uuid, saved: Signal<Option<BotProfile>>) {
-    super::push(key(bot), move || screen(bot, saved));
+pub fn open(bot: Uuid) {
+    super::push(key(bot), move || screen(bot));
 }
 
-fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
-    let load = signal(Load::Loading);
+fn screen(bot: Uuid) -> Screen {
+    let load = resource(
+        || Some(()),
+        move |(), _| load_profile(session::server().client.clone(), bot),
+    );
     let choice = signal(None::<ProfileChoice>);
     let save = signal(Request::<ProfileChoice>::Idle);
-    let client = session::server().client.clone();
-    spawn(async move {
-        let (caps, saved) = futures_util::join!(
-            client.clone().capabilities(),
-            client.clone().bot_profile(bot)
-        );
-        match (caps, saved) {
-            (Ok(caps), Ok(saved)) => {
-                let providers = caps.offered();
-                choice.set(shown(&providers, saved.as_ref()));
-                load.set(Load::Ready { providers, saved });
-            }
-            (Err(err), _) | (_, Err(err)) => load.set(Load::Failed(err.to_string())),
+    // The picker opens on what the bot uses now, once it has loaded.
+    let opened = stored(false);
+    effect(move || {
+        if let Some(info) = load.get()
+            && !opened.replace(true)
+        {
+            choice.set(shown(&info.providers, info.saved.as_ref()));
         }
     });
 
     // Changed from what the bot uses now, own or followed: opening the
     // screen and tapping Save cannot pin the defaults by accident.
     let dirty = computed(move || match load.get() {
-        Load::Ready { saved, .. } => {
+        Some(ProfileInfo { saved, .. }) => {
             let chosen = choice.get();
             chosen.is_some() && chosen != saved.map(|s| s.choice)
         }
-        Load::Loading | Load::Failed(_) => false,
+        None => false,
     });
     let ready = computed(move || dirty.get() && !save.with(Request::busy));
 
@@ -307,10 +310,7 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
             return;
         }
         let retry = save.with_untracked(|r| r.unconfirmed_op() == Some(&picked));
-        let loaded = load.with_untracked(|l| match l {
-            Load::Ready { saved, .. } => saved.clone(),
-            Load::Loading | Load::Failed(_) => None,
-        });
+        let loaded = untracked(|| load.get()).and_then(|info| info.saved);
         let client = session::server().client.clone();
         session::submit(
             save,
@@ -329,25 +329,26 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
             },
             move |found| match found {
                 Reconciled::Saved(saved) => {
-                    written.try_set(Some(saved.clone()));
                     save.try_set(Request::Idle);
-                    load.update(|l| {
-                        if let Load::Ready { saved: slot, .. } = l {
-                            *slot = Some(saved);
-                        }
-                    });
+                    if let Some(info) = untracked(|| load.get()) {
+                        load.mutate(ProfileInfo {
+                            saved: Some(saved),
+                            ..info
+                        });
+                    }
                     super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot)));
                 }
                 Reconciled::Changed(latest) => {
                     save.try_set(Request::Failed(
                         "The model was changed on another device. This shows it now.".into(),
                     ));
-                    load.update(|l| {
-                        if let Load::Ready { providers, saved } = l {
-                            choice.set(shown(providers, latest.as_ref()));
-                            *saved = latest;
-                        }
-                    });
+                    if let Some(info) = untracked(|| load.get()) {
+                        choice.set(shown(&info.providers, latest.as_ref()));
+                        load.mutate(ProfileInfo {
+                            saved: latest,
+                            ..info
+                        });
+                    }
                 }
                 Reconciled::Unchanged => {}
             },
@@ -367,26 +368,25 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
         ]
     };
 
-    let body = dynamic(move || match load.get() {
-        Load::Loading => Some(
+    let body = dynamic(move || match (load.get(), load.error()) {
+        (None, None) => Some(
             text("Loading…")
                 .mx_4()
                 .text_size(px(15.0))
                 .text_color(colors::secondary())
                 .into_element(),
         ),
-        Load::Failed(message) => Some(
+        (None, Some(message)) => Some(
             text(message)
                 .mx_4()
                 .text_size(px(15.0))
                 .text_color(colors::destructive())
                 .into_element(),
         ),
-        Load::Ready { providers, saved } if providers.is_empty() => {
-            let _ = saved;
+        (Some(info), _) if info.providers.is_empty() => {
             Some(parts::footnote("No provider on the server lists models yet.").into_element())
         }
-        Load::Ready { providers, saved } => {
+        (Some(ProfileInfo { providers, saved }), _) => {
             let follows = saved.as_ref().is_none_or(|s| !s.own);
             let gone = saved
                 .as_ref()

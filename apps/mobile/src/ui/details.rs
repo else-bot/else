@@ -11,7 +11,6 @@ use else_wire::rules::RulesFile;
 use else_wire::schedule::{
     last_woke, watcher_deadline, watcher_last_check, watcher_next, webhook_pace,
 };
-use else_wire::settings::{BotProfile, ProviderInfo};
 use nsh_base::nav_page;
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -27,21 +26,6 @@ pub fn open(bot: Uuid, chat: Signal<Chat>) {
     super::push(key(bot), move || screen(bot, chat));
 }
 
-/// What the server answered for a part of the screen loaded on open.
-#[derive(Clone, PartialEq)]
-enum Fetch<T> {
-    Loading,
-    Failed(String),
-    Ready(T),
-}
-
-/// The model row's data: the providers, for labels, and the profile.
-#[derive(Clone, PartialEq)]
-struct Model {
-    providers: Vec<ProviderInfo>,
-    profile: Option<BotProfile>,
-}
-
 /// The open chat's lists, as far as the chat has loaded.
 #[derive(Clone, PartialEq)]
 enum Lists {
@@ -55,10 +39,6 @@ enum Lists {
 }
 
 fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
-    let model = signal(Fetch::<Model>::Loading);
-    // The Model screen writes its saved profile here, so the row updates.
-    let saved = signal(None::<BotProfile>);
-    let rules = signal(Fetch::<RulesFile>::Loading);
     let lists = computed(move || {
         chat.with(|c| match c {
             Chat::Loading => Lists::Loading,
@@ -73,82 +53,39 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             },
         })
     });
-    // Back online, what failed or went stale meanwhile is read again.
-    let live = computed(move || session::live_state().get() == session::LiveState::Live);
+    // Offline, nothing is read; back online, it is read again.
+    let reachable = computed(move || {
+        !matches!(
+            session::live_state().get(),
+            session::LiveState::Offline(_) | session::LiveState::Unauthorized
+        )
+    });
     // Back on top of the stack (from the Model or Rules screen, or after
     // another device changed something), the model and rules are read
     // again: an owner's change on another device sends no live event.
     let on_top = computed(move || {
         super::routes().with(|r| r.0.last().is_some_and(|route| *route.key == *key(bot)))
     });
-    let returns = {
-        let was = std::cell::Cell::new(true);
-        let count = std::cell::Cell::new(0_u64);
-        computed(move || {
-            let now = on_top.get();
-            if now && !was.replace(now) {
-                count.set(count.get() + 1);
-            }
-            was.set(now);
-            count.get()
-        })
-    };
-
-    // The model is read on open, after each bot.updated (another device or
-    // the bot itself may have changed it), and on reconnecting.
+    // The model is read again after each bot.updated: the bot may have
+    // changed its own model.
     let updates = computed(move || chat.with(|c| c.conversation().map_or(0, |c| c.bot_updates())));
-    let client = session::server().client.clone();
-    {
-        let client = client.clone();
-        effect(move || {
-            let _ = (updates.get(), returns.get());
-            if !live.get() && model.get_untracked() != Fetch::Loading {
-                return;
-            }
-            let client = client.clone();
-            spawn(async move {
-                let (caps, profile) = futures_util::join!(
-                    client.clone().capabilities(),
-                    client.clone().bot_profile(bot)
-                );
-                model.set(match (caps, profile) {
-                    (Ok(caps), Ok(profile)) => Fetch::Ready(Model {
-                        providers: caps.offered(),
-                        profile,
-                    }),
-                    (Err(err), _) | (_, Err(err)) => Fetch::Failed(err.to_string()),
-                });
-            });
-        });
-    }
-    // The rules are read on open, whenever the bot saves a new version, and
-    // on reconnecting.
+    let model = resource(
+        move || (reachable.get() && on_top.get()).then(|| updates.get()),
+        move |_, _| super::model::load_profile(session::server().client.clone(), bot),
+    );
+    // The rules are read again whenever the bot saves a new version, also
+    // while the Rules page shows them.
     let version = computed(move || match lists.get() {
         Lists::Ready { extras, .. } => extras.rules_version,
         Lists::Loading | Lists::Failed(_) => None,
     });
-    effect(move || {
-        let _ = (version.get(), returns.get());
-        if !live.get() && rules.get_untracked() != Fetch::Loading {
-            return;
-        }
-        let client = client.clone();
-        spawn(async move {
-            rules.set(match client.rules(bot).await {
-                Ok(file) => Fetch::Ready(file),
-                Err(err) => Fetch::Failed(err.to_string()),
-            });
-        });
-    });
-    effect(move || {
-        if let Some(profile) = saved.get() {
-            model.update(|m| {
-                if let Fetch::Ready(m) = m {
-                    m.profile = Some(profile);
-                }
-            });
-        }
-    });
+    let rules = resource(
+        move || reachable.get().then(|| (version.get(), on_top.get())),
+        move |_, _| {
+            let client = session::server().client.clone();
+            async move { client.rules(bot).await.map_err(|err| err.to_string()) }
+        },
+    );
 
     let bot_record =
         computed(move || session::bots().with(|b| b.list.iter().find(|x| x.id == bot).cloned()));
@@ -172,31 +109,34 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
     // The Model screen loads and retries on its own, so the row always
     // opens it, even while this screen's read is failing.
     let model_row = dynamic(move || {
-        let detail = match model.get() {
-            Fetch::Loading => "Loading…".to_owned(),
-            Fetch::Failed(_) => "Couldn't load".to_owned(),
-            Fetch::Ready(Model { providers, profile }) => match profile {
-                Some(p) if p.own => super::model::summary(&providers, &p.choice),
-                Some(p) => format!("{} (default)", super::model::summary(&providers, &p.choice)),
+        let detail = match (model.get(), model.error()) {
+            (Some(info), _) => match info.saved {
+                Some(p) if p.own => super::model::summary(&info.providers, &p.choice),
+                Some(p) => format!(
+                    "{} (default)",
+                    super::model::summary(&info.providers, &p.choice)
+                ),
                 None => "Choose".to_owned(),
             },
+            (None, Some(_)) => "Couldn't load".to_owned(),
+            (None, None) => "Loading…".to_owned(),
         };
         Some(link_row(
             "Model",
             detail,
-            Some(move || super::model::open(bot, saved)),
+            Some(move || super::model::open(bot)),
         ))
     });
 
     let rules_row = dynamic(move || {
-        let (detail, any) = match rules.get() {
-            Fetch::Loading => ("Loading…".to_owned(), false),
-            Fetch::Failed(_) => ("Couldn't load".to_owned(), false),
-            Fetch::Ready(file) => match file.sections.len() {
+        let (detail, any) = match (rules.get(), rules.error()) {
+            (Some(file), _) => match file.sections.len() {
                 0 => ("None yet".to_owned(), false),
                 1 => ("1 rule".to_owned(), true),
                 n => (format!("{n} rules"), true),
             },
+            (None, Some(_)) => ("Couldn't load".to_owned(), false),
+            (None, None) => ("Loading…".to_owned(), false),
         };
         Some(link_row(
             "Rules",
@@ -498,17 +438,15 @@ fn triggers(extras: &BotExtras) -> View {
     )
 }
 
-fn open_rules(bot: Uuid, rules: Signal<Fetch<RulesFile>>) {
+fn open_rules(bot: Uuid, rules: Resource<RulesFile, String>) {
     super::push(format!("rules-{bot}"), move || rules_screen(bot, rules));
 }
 
-fn rules_screen(bot: Uuid, rules: Signal<Fetch<RulesFile>>) -> Screen {
+fn rules_screen(bot: Uuid, rules: Resource<RulesFile, String>) -> Screen {
     // Shown from the Details screen's read, so a rule the bot changes
     // updates here too.
     let body = dynamic(move || {
-        let Fetch::Ready(file) = rules.get() else {
-            return None;
-        };
+        let file = rules.get()?;
         let rows: Vec<View> = file
             .sections
             .into_iter()
