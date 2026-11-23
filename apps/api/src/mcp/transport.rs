@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use super::{Error, Transport, USER_AGENT};
 use crate::db::task_secrets::{self, Redact};
-use crate::providers::host::{Host, MARKER_VAR, Supervised};
+use crate::providers::host::{Host, Supervised};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -119,11 +119,7 @@ pub(super) async fn connect(
                 }
             }
             process.envs(env);
-            let host = Host::new(data_dir, data_dir);
-            process.env(
-                MARKER_VAR,
-                format!("{}:{}", host.marker_prefix(), uuid::Uuid::new_v4()),
-            );
+            Host::new(data_dir, data_dir).mark(&mut process, uuid::Uuid::new_v4());
             let mut process = Supervised::spawn(process).map_err(|_| Error::Connection)?;
             let stdout = process.child.stdout.take().ok_or(Error::Connection)?;
             let stdin = process.child.stdin.take().ok_or(Error::Connection)?;
@@ -266,6 +262,7 @@ fn initialize_error(error: rmcp::service::ClientInitializeError) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::host::MARKER_VAR;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

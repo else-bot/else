@@ -18,7 +18,9 @@
 //! every process carries an installation marker in its environment so a
 //! restarted API can find and terminate leftovers before dispatching new
 //! work (on Linux through `/proc` and pidfds, on macOS through libproc and
-//! `KERN_PROCARGS2`).
+//! `KERN_PROCARGS2`). macOS hides the environment of its own binaries, so
+//! there each process also holds a marker file open, which its children
+//! inherit, and libproc lists.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
@@ -423,6 +425,25 @@ impl Host {
         Ok(dirs)
     }
 
+    /// Removes the marker files of a swept turn, or of every turn: no
+    /// process of theirs is left to hold them.
+    fn forget_markers(&self, turn_id: Option<Uuid>) {
+        let dir = self.data_dir.join("process-markers");
+        match turn_id {
+            Some(turn) => {
+                let _ = fs::remove_file(dir.join(self.marker(turn)));
+            }
+            None => {
+                let prefix = format!("{}:", self.marker_prefix);
+                for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
     fn marker(&self, turn_id: Uuid) -> String {
         format!("{}:{turn_id}", self.marker_prefix)
     }
@@ -455,10 +476,30 @@ impl Host {
         command
             .args(args)
             .envs(env.iter().map(|(k, v)| (k, v)))
-            .env(MARKER_VAR, self.marker(marker))
             .process_group(0)
             .kill_on_drop(true);
+        self.mark(&mut command, marker);
         command
+    }
+
+    /// Marks a process of this installation for turn `turn_id`, so a sweep
+    /// finds it and its descendants: by the marker in its environment, and
+    /// on macOS, which hides processes' environments, by a marker file it
+    /// holds open (see `procs::mark`).
+    pub fn mark(&self, command: &mut tokio::process::Command, turn_id: Uuid) {
+        command.env(MARKER_VAR, self.marker(turn_id));
+        #[cfg(target_os = "macos")]
+        procs::mark(command, &self.marker_file(turn_id));
+    }
+
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only macOS marks processes by file")
+    )]
+    fn marker_file(&self, turn_id: Uuid) -> PathBuf {
+        self.data_dir
+            .join("process-markers")
+            .join(self.marker(turn_id))
     }
 
     /// Terminate every provider process of this installation left from an
@@ -497,6 +538,7 @@ impl Host {
                 ));
             }
         }
+        self.forget_markers(turn_id);
         Ok(count)
     }
 
@@ -592,6 +634,10 @@ mod procs {
 /// that instant.
 #[cfg(target_os = "macos")]
 mod procs {
+    use std::ffi::OsStr;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::time::{Duration, Instant};
 
     fn info(pid: i32) -> Option<(libc::uid_t, (u64, u64), bool)> {
@@ -669,6 +715,132 @@ mod procs {
         environ(pid).is_some_and(|env| env.iter().any(|v| v.starts_with(wanted.as_bytes())))
     }
 
+    /// `struct proc_fileinfo` and `struct vnode_fdinfowithpath` from
+    /// `<sys/proc_info.h>`, which libc does not define.
+    #[repr(C)]
+    struct ProcFileInfo {
+        openflags: u32,
+        status: u32,
+        offset: libc::off_t,
+        kind: i32,
+        guardflags: u32,
+    }
+
+    #[repr(C)]
+    struct VnodeFdInfoWithPath {
+        file: ProcFileInfo,
+        vnode: libc::vnode_info_path,
+    }
+
+    const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+    /// Whether `pid` carries the marker `wanted`: in its environment, or
+    /// as an open marker file. macOS hides the environment of its own
+    /// binaries (`/bin/sh`, `/bin/sleep`) even from their user, so those
+    /// are found by the file their descriptor inherits; a process that
+    /// closes inherited descriptors (Python's `Popen` does) still shows
+    /// its environment unless it is such a binary.
+    fn carries(pid: i32, wanted: &str) -> bool {
+        environ_has(pid, wanted) || holds(pid, wanted)
+    }
+
+    /// Whether `pid` holds open a marker file named `wanted` or starting
+    /// with it.
+    fn holds(pid: i32, wanted: &str) -> bool {
+        let Some(wanted) = wanted.strip_prefix(&format!("{}=", super::MARKER_VAR)) else {
+            return false;
+        };
+        let entry = std::mem::size_of::<libc::proc_fdinfo>() as libc::c_int;
+        // SAFETY: a size query with a null buffer.
+        let bytes =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        if bytes <= 0 {
+            return false;
+        }
+        // Room for descriptors opened since the size query.
+        let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity((bytes / entry) as usize + 16);
+        let room = (fds.capacity() * entry as usize) as libc::c_int;
+        // SAFETY: the buffer holds `room` bytes of proc_fdinfo.
+        let read = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), room)
+        };
+        if read <= 0 {
+            return false;
+        }
+        // SAFETY: proc_pidinfo wrote `read` bytes of whole entries.
+        unsafe { fds.set_len((read / entry) as usize) };
+        fds.iter()
+            .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
+            .any(|fd| {
+                // SAFETY: plain data; zeroed is a valid value.
+                let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
+                let size = std::mem::size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+                // SAFETY: the buffer is exactly one VnodeFdInfoWithPath.
+                let got = unsafe {
+                    libc::proc_pidfdinfo(
+                        pid,
+                        fd.proc_fd,
+                        PROC_PIDFDVNODEPATHINFO,
+                        (&mut info as *mut VnodeFdInfoWithPath).cast(),
+                        size,
+                    )
+                };
+                if got != size {
+                    return false;
+                }
+                // SAFETY: vip_path is a NUL-terminated path of MAXPATHLEN bytes.
+                let path = unsafe {
+                    std::ffi::CStr::from_ptr(info.vnode.vip_path.as_ptr().cast::<libc::c_char>())
+                };
+                std::path::Path::new(OsStr::from_bytes(path.to_bytes()))
+                    .file_name()
+                    .is_some_and(|name| name.as_bytes().starts_with(wanted.as_bytes()))
+            })
+    }
+
+    /// Hands the spawned process an open descriptor of `file`, which it and
+    /// its children keep unless they close it. A marker that cannot be made
+    /// leaves the process unmarked, as it would be on an unsupported OS.
+    pub fn mark(command: &mut tokio::process::Command, file: &std::path::Path) {
+        let opened = file
+            .parent()
+            .map_or(Ok(()), |dir| {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+            })
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(file)
+            });
+        let marker = match opened {
+            Ok(marker) => marker,
+            Err(err) => {
+                tracing::warn!(error = %err, "the process marker file could not be opened");
+                return;
+            }
+        };
+        // The file stays open in the parent until the command is dropped,
+        // after it spawned.
+        let fd = marker.as_raw_fd();
+        // SAFETY: fcntl is async-signal-safe, so it may run between fork
+        // and exec; it only clears close-on-exec on a descriptor this
+        // process owns.
+        unsafe {
+            command.pre_exec(move || {
+                let _keep = &marker;
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     pub fn marked(wanted: &str) -> Vec<i32> {
         let uid = rustix::process::getuid().as_raw();
         // SAFETY: a count query with a null buffer.
@@ -689,7 +861,7 @@ mod procs {
             .filter(|pid| *pid > 0 && *pid != own)
             .filter(|pid| {
                 info(*pid).is_some_and(|(owner, _, zombie)| owner == uid && !zombie)
-                    && environ_has(*pid, wanted)
+                    && carries(*pid, wanted)
             })
             .collect()
     }
@@ -701,7 +873,7 @@ mod procs {
 
     pub fn pin(pid: i32, wanted: &str) -> Option<Pinned> {
         let (_, start, zombie) = info(pid)?;
-        (!zombie && environ_has(pid, wanted)).then_some(Pinned { pid, start })
+        (!zombie && carries(pid, wanted)).then_some(Pinned { pid, start })
     }
 
     impl Pinned {
