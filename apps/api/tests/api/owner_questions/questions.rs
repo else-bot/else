@@ -432,3 +432,109 @@ async fn an_open_question_uses_a_card_and_chat_supersedes_it_without_approval() 
         StatusCode::BAD_REQUEST
     );
 }
+
+/// The owner typed over a card a routine run asked in their chat: a run
+/// never takes an owner message, so the message gets its own reply, and
+/// the card still closes as skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_message_skips_a_card_a_routine_run_asked() {
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let (setup, token) = h.running(&main, GATE).await;
+    let created = tool(
+        app,
+        &token,
+        "routine_create",
+        json!({ "name": "Uptime", "prompt": format!("{GATE} Check that example.com answers."),
+                "cron": "0 9 1 1 *" }),
+    )
+    .await;
+    created.ok();
+    h.release(setup).await;
+    app.wait_turn(setup, &["completed"]).await;
+    let due = chrono::DateTime::parse_from_rfc3339(
+        created.result["routine"]["next_run_at"].as_str().unwrap(),
+    )
+    .unwrap()
+    .to_utc();
+    let admitted =
+        else_api::db::routines::admit_due(&app.db.pool, &app.state.registry, None, due, 8)
+            .await
+            .unwrap();
+    assert_eq!(admitted.queued, 1);
+    app.scheduler.wake();
+    let run: Uuid = sqlx::query_scalar("SELECT turn_id FROM routine_runs")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let (_, run_token) = h.started(run).await;
+    let asked = tool(app, &run_token, "ask_owner", choice_args())
+        .await
+        .result;
+    let question: Uuid = asked["question_id"].as_str().unwrap().parse().unwrap();
+    h.release(run).await;
+    app.wait_turn(run, &["waiting"]).await;
+
+    let sent = app
+        .send(&main, Uuid::new_v4(), "Use plain text.", Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], Value::Null);
+    assert_eq!(question_row(app, question).await.0, "skipped");
+    assert_eq!(journaled(app, &main, question).await["status"], "skipped");
+    assert_eq!(sidebar_status(app, &main).await, Value::Null);
+    let late = answer(app, &main, question, "a").await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    app.wait_turn(run, &["completed"]).await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert_eq!(
+        attempts(app, run).await,
+        2,
+        "the run learned it was skipped"
+    );
+}
+
+/// The owner sent their reply to another provider: it gets its own reply
+/// instead of joining, and still skips the card it typed over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_another_provider_skips_the_card() {
+    let other = std::sync::Arc::new(else_api::providers::synthetic::Synthetic::named(
+        "other",
+        "Other",
+        Duration::from_millis(1),
+    ));
+    let h = harness(TestApp::builder().providers(vec![other])).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let asked = tool(app, &token, "ask_owner", choice_args()).await.result;
+    let question: Uuid = asked["question_id"].as_str().unwrap().parse().unwrap();
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+    assert_eq!(
+        sidebar_status(app, &main).await["kind"],
+        "waiting_for_answer"
+    );
+
+    let sent = app
+        .send(&main, Uuid::new_v4(), "Use plain text.", Some("other"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], Value::Null);
+    assert_eq!(question_row(app, question).await.0, "skipped");
+    assert_eq!(
+        shown_turn(app, &main, turn).await["questions"][0]["status"],
+        "skipped"
+    );
+    assert_eq!(sidebar_status(app, &main).await, Value::Null);
+    app.wait_turn(turn, &["completed"]).await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert_eq!(
+        attempts(app, turn).await,
+        2,
+        "the reply learned it was skipped"
+    );
+}
