@@ -3,6 +3,7 @@
 //! settled, its turn's update replaces it with a receipt.
 //! This module holds what every card shares; each card has its own module.
 
+mod connection;
 mod draft;
 mod notice;
 mod question;
@@ -18,6 +19,9 @@ use else_client::request::Request;
 
 pub fn card(bot: Uuid, ask: Ask) -> AnyElement {
     match ask {
+        Ask::Question(question) if connection::handles(&question) => {
+            connection::card(bot, *question).into_element()
+        }
         Ask::Question(question) => question::card(bot, *question).into_element(),
         Ask::Draft(draft) => draft::card(bot, *draft).into_element(),
         Ask::Secret(request) => secret::card(bot, *request).into_element(),
