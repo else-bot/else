@@ -424,30 +424,11 @@ pub(super) trait Feedback {
 
 impl Feedback for ReactionKind {
     fn mark(self) -> &'static str {
-        match self {
-            ReactionKind::ThumbsUp => "👍",
-            ReactionKind::ThumbsDown => "👎",
-        }
+        else_client::reply::mark(self)
     }
 
     fn message(self, reference: &MessageReference) -> String {
-        let request = match self {
-            ReactionKind::ThumbsUp => {
-                "I reacted 👍 to this message. This is approval, not an instruction, so do not \
-                 save a rule from it. Do not send an acknowledgement. Only reply if there is \
-                 something actionable to tell me or a question that needs my answer."
-            }
-            ReactionKind::ThumbsDown => {
-                "I reacted 👎 to this message. Don't assume a cause. Reply with one short \
-                 question asking me what went wrong, then use my answer to improve."
-            }
-        };
-        format!(
-            "{} Feedback on {}:\n{}\n\n{request}",
-            self.mark(),
-            reference.subject(),
-            reference.quote()
-        )
+        else_client::reply::reaction(self, reference.subject(), &reference.text)
     }
 }
 
