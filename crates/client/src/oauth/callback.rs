@@ -14,7 +14,9 @@ use tokio::{
 };
 use url::Url;
 
-#[derive(Debug, PartialEq, Serialize)]
+/// A provider's redirect. Its state and code redeem a sign-in, so its
+/// `Debug` leaves them out.
+#[derive(PartialEq, Serialize)]
 pub struct Callback {
     pub state: String,
     #[serde(flatten)]
@@ -23,11 +25,30 @@ pub struct Callback {
     pub issuer: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Code(String),
     Error(String),
+}
+
+impl std::fmt::Debug for Callback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Callback")
+            .field("outcome", &self.outcome)
+            .field("issuer", &self.issuer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code(_) => f.write_str("Code(..)"),
+            // The provider's error code, such as access_denied.
+            Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
+        }
+    }
 }
 
 /// What the browser shows once the callback arrived.
@@ -407,6 +428,17 @@ mod tests {
         assert_eq!(pending.wait().await, Err(WaitError::Stopped));
         task.await.unwrap();
         assert!(client.get(url).send().await.is_err());
+    }
+
+    #[test]
+    fn a_callback_never_prints_its_state_or_code() {
+        let callback = Callback {
+            state: "secret-state".into(),
+            outcome: Outcome::Code("secret-code".into()),
+            issuer: None,
+        };
+        let printed = format!("{callback:?}");
+        assert!(!printed.contains("secret"), "{printed}");
     }
 
     #[tokio::test]
