@@ -162,13 +162,16 @@ def draft_reply(turn, latest, packet, stopped):
 
 
 def handoff(turn, packet, stopped):
-    found = re.search(r'\[ui:(delegate|council)\]((?:\s+[0-9a-f-]{36})+)\s*$', packet)
+    found = re.search(r'\[ui:(delegate|delegate-blocked|council)\]((?:\s+[0-9a-f-]{36})+)\s*$', packet)
     if not found:
         return False
     targets = found.group(2).split()
     if found.group(1) == 'delegate':
         result = outgoing_tool('delegate', {'target_bot_id': targets[0],
             'task': 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'})
+    elif found.group(1) == 'delegate-blocked':
+        result = outgoing_tool('delegate', {'target_bot_id': targets[0],
+            'task': 'Renew the studio.example domain before Friday. [ui:notice]'})
     else:
         result = outgoing_tool('council', {'target_bot_ids': targets,
             'task': 'Should the studio plan move from 29 to 39 EUR a month? [ui:slow]'})
@@ -184,6 +187,11 @@ def stream(turn, latest, packet, stopped):
     try:
         if handoff(turn, packet, stopped):
             return
+        if latest.endswith('[ui:notice]'):
+            outgoing_tool('notify_owner', {
+                'kind': 'blocked',
+                'summary': 'The registrar wants a card on file before it renews studio.example.',
+                'tried': 'Checked the registrar account; renewal needs a payment method.'})
         if latest == '[ui:handoff]':
             outgoing_tool('computer_handoff', {'reason': 'X Chat is blank at x.com/messages.'})
             event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,

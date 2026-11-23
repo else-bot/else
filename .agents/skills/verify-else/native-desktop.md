@@ -51,6 +51,8 @@ Choose **Always allow** and check the saved task through the permissions API.
 The fixture requests approval but never runs SSH or changes Tailscale.
 Send `[ui:secret]` for a `fixture-smtp` secret request with two fields; a
 save shows up in `GET /v1/task-secrets`.
+Send `[ui:delegate-blocked] BOT_ID` to hand that bot a task it reports as
+blocked: a pending owner notice on its turn, with **Mark handled** and **Reply**.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
