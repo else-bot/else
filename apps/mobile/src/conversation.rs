@@ -5,6 +5,7 @@
 
 use else_client::model::Conversation;
 use else_wire::bots::Phase;
+use else_wire::email::TurnMail;
 use else_wire::items::{Attachment, BotReplyStatus, Item, ItemKind, MessagePart, ReactionKind};
 use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
@@ -56,6 +57,8 @@ pub enum Row {
     /// Work handed between bots: a task another bot sent this one, or the
     /// answer to a task this one sent.
     Exchange(Box<Exchange>),
+    /// Email that woke the bot, before what it did with it.
+    Mail { turn: Uuid, mails: Vec<TurnMail> },
 }
 
 /// One side of a task between bots, as a card.
@@ -148,6 +151,7 @@ impl Row {
         match self {
             Self::Owner { id, .. } | Self::Bot { id, .. } | Self::Note { id, .. } => id.to_string(),
             Self::Exchange(exchange) => exchange.id.to_string(),
+            Self::Mail { turn, .. } => format!("mail-{turn}"),
         }
     }
 }
@@ -174,8 +178,21 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
         if previous.is_some_and(|turn| turn != item.turn_id) {
             receipts(conversation, previous, &mut rows);
         }
+        let first_of_turn = previous != Some(item.turn_id);
         previous = Some(item.turn_id);
         let turn = conversation.turn(item.turn_id);
+        // A turn new mail woke opens with that mail.
+        if first_of_turn
+            && let Some(turn) = turn.filter(|turn| !turn.mail.is_empty())
+            && !rows
+                .iter()
+                .any(|row| matches!(row, Row::Mail { turn: t, .. } if *t == turn.id))
+        {
+            rows.push(Row::Mail {
+                turn: turn.id,
+                mails: turn.mail.clone(),
+            });
+        }
         match item.kind {
             // A reaction shows as its mark on the message it is about.
             ItemKind::User if item.reaction.is_some() => {}
@@ -666,6 +683,30 @@ mod tests {
         assert!(
             matches!(&asks(&conversation)[..], [Ask::Notice(n)] if n.summary == "Pick one of the three.")
         );
+    }
+
+    #[test]
+    fn mail_that_woke_the_bot_comes_before_its_reply_once() {
+        let mut conversation = conversation();
+        apply(
+            &mut conversation,
+            5,
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "completed", "error": null, "effect_uncertain": false,
+                "mail": [{
+                    "account_id": "00000000-0000-0000-0000-0000000000a1",
+                    "message": { "folder": "INBOX", "uid_validity": 1, "uid": 7 },
+                    "subject": "Invoice 42", "sender": "Ledger <ap@example.com>",
+                }],
+            }}}),
+        );
+        let rows = rows(&conversation);
+        assert!(
+            matches!(&rows[0], Row::Mail { mails, .. } if mails[0].subject.as_deref() == Some("Invoice 42"))
+        );
+        assert!(matches!(&rows[1], Row::Bot { .. }));
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

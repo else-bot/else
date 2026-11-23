@@ -118,6 +118,7 @@ enum LineKind {
     Bot,
     Note,
     Exchange,
+    Mail,
     Typing,
     Ask,
 }
@@ -129,6 +130,7 @@ impl LineKind {
             Line::Row(Row::Bot { .. }) => Self::Bot,
             Line::Row(Row::Note { .. }) => Self::Note,
             Line::Row(Row::Exchange(_)) => Self::Exchange,
+            Line::Row(Row::Mail { .. }) => Self::Mail,
             Line::Typing => Self::Typing,
             Line::Ask(_) => Self::Ask,
         }
@@ -187,6 +189,14 @@ fn transcript(
                                 _ => None,
                             })
                             .map(|exchange| untracked(|| super::exchange::card(exchange)))
+                        })
+                        .into_element(),
+                        LineKind::Mail => dynamic(move || {
+                            line.with(|l| match l {
+                                Some(Line::Row(Row::Mail { mails, .. })) => Some(mails.clone()),
+                                _ => None,
+                            })
+                            .map(|mails| untracked(|| super::mail::card(mails)))
                         })
                         .into_element(),
                         LineKind::Typing => typing().into_element(),

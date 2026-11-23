@@ -13,6 +13,7 @@ mod edit_bot;
 mod exchange;
 mod files;
 mod list;
+mod mail;
 mod model;
 mod new_bot;
 mod parts;
