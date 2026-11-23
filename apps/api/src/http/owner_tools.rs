@@ -372,17 +372,16 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
     };
     match secret_requests::create(&state.db, grant.turn_id, &spec).await {
         Ok(request) if request.status != Status::Pending => {
-            let stored = request.status == Status::Stored;
             let log = format!("already {:?} {}", request.status, request.id).to_lowercase();
             let result = json!({
                 "status": request.status,
                 "request_id": request.id,
                 "secret": request.name,
                 "env": request.env,
-                "next": if stored {
-                    "The owner saved it in the Vault; type it with computer_browser (secret, field) or name it in the secrets argument of computer_run or computer_job_start."
-                } else {
-                    "The owner declined this request; continue without it and do not ask again unless they do."
+                "next": match request.status {
+                    Status::Stored => "The owner saved it in the Vault; type it with computer_browser (secret, field) or name it in the secrets argument of computer_run or computer_job_start.",
+                    Status::Skipped => "The owner sent a new message instead of answering; continue without it and do not ask again unless they do.",
+                    Status::Pending | Status::Cancelled => "The owner declined this request; continue without it and do not ask again unless they do.",
                 },
             });
             Ok(Done::json(result).logged(log))

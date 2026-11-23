@@ -237,8 +237,8 @@ fn secrets_block(input: &TurnInput) -> String {
         "[else.bot secret requests] The owner answered your requests for credentials. You \
          never see the values: a stored secret is used by naming it in the secrets argument \
          of computer_run or computer_job_start. Do not ask again for a declined one unless \
-         the owner says so. A skipped one was closed by the owner's new message: follow that \
-         message instead.\n",
+         the owner says so. A skipped one was closed because the owner sent a new message \
+         instead of answering; treat it like a declined one.\n",
     );
     for secret in &input.secrets {
         text.push_str(&format!(
