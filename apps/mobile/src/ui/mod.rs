@@ -18,6 +18,7 @@ mod new_bot;
 mod parts;
 mod routine;
 mod rules;
+mod search;
 pub mod session;
 mod waits;
 

@@ -53,6 +53,10 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
                     .key("details")
                     .label("Details")
                     .on_press(move || super::details::open(bot, chat)),
+                HeaderItem::symbol("magnifyingglass")
+                    .key("search")
+                    .label("Search")
+                    .on_press(move || super::search::open(bot)),
             ]
         })
         .child(
