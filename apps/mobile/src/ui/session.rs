@@ -419,6 +419,16 @@ pub fn open_chat(bot: Uuid) -> Signal<Chat> {
     chat
 }
 
+/// Reads an open chat again over HTTP, for a change the live connection
+/// may not deliver (a proxy can serve HTTP while it blocks WebSockets).
+pub fn reload_chat(bot: Uuid) {
+    if let Link::Connected(server) = link().get_untracked()
+        && let Some(chat) = server.chat(bot)
+    {
+        recover(&server, bot, chat);
+    }
+}
+
 /// Fetches a fresh page for a chat the stream moved past.
 fn recover(server: &Rc<Server>, bot: Uuid, chat: Signal<Chat>) {
     let mut start = false;

@@ -44,20 +44,35 @@ async fn confirm(title: String, description: &'static str) -> bool {
     matches!(choice, Ok(r) if r.action.as_deref() == Some("delete"))
 }
 
-/// Runs a change and says so when it failed. A removed item that is
-/// already gone is done.
-async fn run(change: impl Future<Output = Result<(), ClientError>>) {
-    match change.await {
-        Ok(()) => {}
-        Err(err) if err.code() == Some("not_found") => {}
-        Err(err) => {
-            let _ = alert_dialog()
-                .title("Couldn't save")
-                .description(err.to_string())
-                .cancel("ok", "OK")
-                .show()
-                .await;
+/// How a change that removes an item treats an item already gone.
+#[derive(Clone, Copy, PartialEq)]
+enum Gone {
+    /// Stopping or deleting: an item already gone is done.
+    Done,
+    /// Turning it off or on: an item gone is a failure to report.
+    Failure,
+}
+
+/// Runs a change, says so when it failed, then reads the bot's lists
+/// again so the row shows what the server kept even without live updates.
+async fn run(bot: Uuid, gone: Gone, change: impl Future<Output = Result<(), ClientError>>) {
+    let failure = match change.await {
+        Ok(()) => None,
+        Err(err)
+            if gone == Gone::Done && matches!(err.code(), Some("not_found" | "not_active")) =>
+        {
+            None
         }
+        Err(err) => Some(err.to_string()),
+    };
+    session::reload_chat(bot);
+    if let Some(message) = failure {
+        let _ = alert_dialog()
+            .title("Couldn't save")
+            .description(message)
+            .cancel("ok", "OK")
+            .show()
+            .await;
     }
 }
 
@@ -68,7 +83,7 @@ pub fn watcher(bot: Uuid, id: Uuid, purpose: String) {
             .is_some()
         {
             let client = session::server().client.clone();
-            run(client.stop_watcher(bot, id)).await;
+            run(bot, Gone::Done, client.stop_watcher(bot, id)).await;
         }
     });
 }
@@ -92,12 +107,26 @@ pub fn mail(bot: Uuid, trigger: MailTrigger) {
         let account = trigger.account_id;
         match action.as_str() {
             "delete" if confirm(format!("Delete {title}?"), DELETE_TRIGGER).await => {
-                run(client.delete_email_trigger(account, bot)).await;
+                run(bot, Gone::Done, client.delete_email_trigger(account, bot)).await;
             }
             // Turning it back on never grants read the owner withdrew, nor
             // brings back a trigger deleted meanwhile.
-            "on" => run(client.resume_email_trigger(account, bot)).await,
-            "off" => run(client.set_email_wake(account, bot, false)).await,
+            "on" => {
+                run(
+                    bot,
+                    Gone::Failure,
+                    client.resume_email_trigger(account, bot),
+                )
+                .await
+            }
+            "off" => {
+                run(
+                    bot,
+                    Gone::Failure,
+                    client.set_email_wake(account, bot, false),
+                )
+                .await
+            }
             _ => {}
         }
     });
@@ -119,10 +148,10 @@ pub fn social(bot: Uuid, trigger: Trigger) {
         let id = trigger.id;
         match action.as_str() {
             "delete" if confirm(format!("Delete {title}?"), DELETE_TRIGGER).await => {
-                run(client.delete_social_trigger(bot, id)).await;
+                run(bot, Gone::Done, client.delete_social_trigger(bot, id)).await;
             }
             "on" | "off" => {
-                run(async {
+                run(bot, Gone::Failure, async {
                     client
                         .set_social_trigger_enabled(bot, id, action == "on")
                         .await
@@ -156,9 +185,11 @@ pub fn webhook(bot: Uuid, hook: Webhook) {
                 )
                 .await =>
             {
-                run(client.delete_webhook(bot, hook.id)).await;
+                run(bot, Gone::Done, client.delete_webhook(bot, hook.id)).await;
             }
-            "on" | "off" => run(client.set_webhook_enabled(bot, hook.id, action == "on")).await,
+            "on" | "off" => {
+                run(bot, Gone::Failure, client.set_webhook_enabled(bot, hook.id, action == "on")).await
+            }
             _ => {}
         }
     });
