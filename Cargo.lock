@@ -2532,6 +2532,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "else-client"
+version = "0.0.30"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "else-tailnet",
+ "else-wire",
+ "futures-util",
+ "iana-time-zone",
+ "image",
+ "reqwest 0.13.5",
+ "rustls",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "else-desktop"
 version = "0.0.30"
 dependencies = [
@@ -2543,6 +2568,7 @@ dependencies = [
  "chrono-tz",
  "croner",
  "dotenvy",
+ "else-client",
  "else-plain-text",
  "else-tailnet",
  "else-visual",

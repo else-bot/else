@@ -18,7 +18,13 @@ wire_state! {
     _ => Unknown
 }
 
+/// The largest file a message may carry, in bytes.
+pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+/// The most files one message may carry.
+pub const MAX_FILES: usize = 8;
+
 /// One conversation message: the owner's, the bot's, or a receipt.
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: Uuid,

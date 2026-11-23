@@ -15,7 +15,7 @@ mod icon_assets_tests;
 mod inbox;
 mod launch;
 mod mcp_oauth;
-mod model;
+use else_client::model;
 mod oauth_callback;
 mod panel_kit;
 mod preferences;

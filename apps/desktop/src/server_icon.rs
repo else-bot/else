@@ -277,13 +277,7 @@ pub(crate) fn shareable_png(png: &[u8]) -> Vec<u8> {
 }
 
 /// The lowercase hex SHA-256 the server names a picture by.
-pub(crate) fn digest(png: &[u8]) -> String {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(png)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
+pub(crate) use else_client::api::picture_digest as digest;
 
 /// What a desktop does with the icon a saved server reports.
 #[derive(Debug, PartialEq)]

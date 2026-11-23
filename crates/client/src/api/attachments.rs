@@ -1,7 +1,7 @@
 use super::{Client, ClientError};
-use crate::attachments::MAX_FILE_BYTES;
 use base64::Engine as _;
 use else_wire::items::Attachment;
+use else_wire::items::MAX_FILE_BYTES;
 use futures_util::StreamExt as _;
 use reqwest::{Method, StatusCode};
 use std::sync::Arc;

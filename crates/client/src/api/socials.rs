@@ -190,7 +190,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::OwnerToken;
+    use crate::origin::OwnerToken;
 
     fn response(value: serde_json::Value) -> &'static str {
         let body = value.to_string();

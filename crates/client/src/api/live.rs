@@ -3,7 +3,6 @@ use crate::model::Frame;
 use else_wire::maintenance::ServerPause;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
-use reqwest::header::AUTHORIZATION;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,19 +163,6 @@ impl Client {
         }
     }
 
-    fn ws_request(&self) -> tokio_tungstenite::tungstenite::handshake::client::Request {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let mut request = self
-            .origin
-            .ws_url()
-            .into_client_request()
-            .expect("valid ws URL");
-        request
-            .headers_mut()
-            .insert(AUTHORIZATION, self.auth.clone());
-        request
-    }
-
     async fn run_live(
         &self,
         mut commands: tokio::sync::watch::Receiver<HashMap<Uuid, String>>,
@@ -223,10 +209,10 @@ impl Client {
                 result = tokio::time::timeout(
                     HANDSHAKE,
                     tokio_tungstenite::connect_async_tls_with_config(
-                        self.ws_request(),
+                        self.ws_request(&self.origin().ws_url()),
                         None,
                         false,
-                        Some(tokio_tungstenite::Connector::Rustls(self.tls.clone())),
+                        Some(self.ws_connector()),
                     ),
                 ) => result,
             };

@@ -5,8 +5,7 @@ use uuid::Uuid;
 #[cfg(target_os = "linux")]
 pub mod clipboard;
 
-pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_FILES: usize = 8;
+pub use else_wire::items::{MAX_FILE_BYTES, MAX_FILES};
 
 pub fn token(file: &Attachment) -> InlineToken {
     InlineToken::new(format!("file:{}", file.id), file.fallback()).with_label(file.name.clone())

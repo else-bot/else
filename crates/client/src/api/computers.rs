@@ -1,10 +1,76 @@
 use super::{Client, ClientError};
-use else_wire::computers::{CancelledComputers, Computers, QueuedComputers};
-use reqwest::Method;
+use else_wire::computers::{CancelledComputers, ComputerState, Computers, QueuedComputers};
+use reqwest::{Method, StatusCode};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 impl Client {
+    pub async fn computer(self: Arc<Self>, bot: Uuid) -> Result<ComputerState, ClientError> {
+        let this = self.clone();
+        self.run(async move {
+            let request = this.request(Method::GET, &format!("/v1/bots/{bot}/computer"));
+            this.send_json(request).await
+        })
+        .await
+    }
+
+    pub async fn resume_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(bot, "resume", None).await
+    }
+
+    /// Starts moving the computer to the server's latest image; the
+    /// computer state reports its progress.
+    pub async fn upgrade_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(bot, "upgrade", None).await
+    }
+
+    /// Return the computer to its configured memory; it restarts if running.
+    pub async fn reset_computer_memory(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(
+            bot,
+            "memory",
+            Some(serde_json::json!({ "memory_mib": null })),
+        )
+        .await
+    }
+
+    async fn post_computer(
+        self: Arc<Self>,
+        bot: Uuid,
+        action: &'static str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(), ClientError> {
+        let this = self.clone();
+        self.run(async move {
+            let mut request = this
+                .request(Method::POST, &format!("/v1/bots/{bot}/computer/{action}"))
+                .timeout(Duration::from_secs(if body.is_some() { 120 } else { 15 }));
+            if let Some(body) = body {
+                request = request.json(&body);
+            }
+            let response = this.send_request(request).await?;
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(ClientError::Unauthorized);
+            }
+            if status.is_success() {
+                return Ok(());
+            }
+            if status.is_redirection() {
+                return Err(ClientError::Protocol(format!(
+                    "redirect ({status}) refused"
+                )));
+            }
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
+            Err(ClientError::from_http(status, &bytes))
+        })
+        .await
+    }
+
     pub async fn computers(self: Arc<Self>) -> Result<Computers, ClientError> {
         let this = self.clone();
         self.run(async move {
@@ -40,7 +106,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use else_wire::computers::{Computer, ComputerUpgrade};
+    use else_wire::computers::{Computer, ComputerState, ComputerUpgrade};
     use serde_json::json;
 
     fn computer(upgrade: serde_json::Value) -> Computer {
@@ -56,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn computers_requests_authenticate_and_preserve_refusals() {
-        use crate::config::OwnerToken;
+        use crate::origin::OwnerToken;
         for (operation, response, path) in [
             (
                 0,
@@ -165,5 +231,64 @@ mod tests {
         assert!(!report.computers[0].outdated());
         assert_eq!(report.computers[0].cpu_percent, None);
         assert_eq!(report.computers[0].memory_used_bytes, None);
+    }
+
+    fn resume_client(origin: crate::origin::Origin) -> Arc<Client> {
+        let token = crate::origin::OwnerToken::parse(&"T".repeat(43)).unwrap();
+        Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[test]
+    fn computer_state_reports_an_outdated_image_and_upgrade_progress() {
+        let parse =
+            |json: serde_json::Value| -> ComputerState { serde_json::from_value(json).unwrap() };
+        let base = serde_json::json!({ "state": "stopped", "desired_state": "auto" });
+        assert!(
+            !parse(base.clone()).outdated(),
+            "an older server sends no images"
+        );
+        let outdated = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "image": "img:old", "latest_image": "img:new", "upgrade": null,
+        }));
+        assert!(outdated.outdated());
+        assert_eq!(outdated.upgrade, None);
+        let running = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto", "upgrade": { "state": "running" },
+        }));
+        assert_eq!(running.upgrade, Some(ComputerUpgrade::Running));
+        let failed = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "upgrade": { "state": "failed", "error": "busy" },
+        }));
+        assert_eq!(
+            failed.upgrade,
+            Some(ComputerUpgrade::Failed {
+                error: "busy".into()
+            })
+        );
+        let partial = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "upgrade": { "state": "completed", "unrestored_packages": ["ffmpeg"] },
+        }));
+        assert_eq!(
+            partial.upgrade,
+            Some(ComputerUpgrade::Completed {
+                unrestored_packages: vec!["ffmpeg".into()]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_accepts_no_content_and_keeps_the_token_in_its_header() {
+        let (origin, server) =
+            crate::testing::serve_once("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        let bot = Uuid::new_v4();
+        resume_client(origin).resume_computer(bot).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with(&format!("POST /v1/bots/{bot}/computer/resume ")));
+        assert!(request.contains(&format!("Bearer {}", "T".repeat(43))));
+        assert!(!request.lines().next().unwrap().contains(&"T".repeat(43)));
     }
 }

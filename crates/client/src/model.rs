@@ -27,7 +27,7 @@ use else_wire::waits::{ComputerJobWait, McpWait};
 use serde::Deserialize;
 use uuid::Uuid;
 
-pub(crate) mod outgoing;
+pub mod outgoing;
 
 /// One event of a `bot:<id>` channel: its cursor and its event, decoded
 /// once. An event this build does not know, or one whose data does not
