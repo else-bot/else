@@ -5,6 +5,7 @@ mod asks;
 mod bot_list;
 mod chat;
 mod connect;
+mod details;
 mod files;
 mod model;
 mod new_bot;

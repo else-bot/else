@@ -73,10 +73,10 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
         .header_large_title(false)
         .header_right_items(move || {
             vec![
-                HeaderItem::symbol("cpu")
-                    .key("model")
-                    .label("Model")
-                    .on_press(move || super::model::open(bot)),
+                HeaderItem::symbol("info.circle")
+                    .key("details")
+                    .label("Details")
+                    .on_press(move || super::details::open(bot, chat)),
             ]
         })
         .child(

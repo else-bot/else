@@ -17,8 +17,11 @@ with the server and the desktop app.
 - Create a bot with Compose: a name, its avatar's shape and color, and
   its provider and model. Avatars are drawn from the same shapes as the
   desktop's. Left at the server's defaults, the bot keeps following them.
-- Change a bot's provider, model, reasoning and speed from Model in its
-  chat. A provider the server cannot run shows why instead of its models.
+- Tap the info button in a chat for the bot's details, as the desktop's
+  right panel shows them: its model, rules, routines, reminders, what it
+  is watching, and what wakes it. They follow the bot's live updates.
+  Model there changes its provider, model, reasoning and speed; a
+  provider the server cannot run shows why instead of its models.
 - A chat per bot. Replies render as Markdown and stream in live over the
   WebSocket. Older pages load as you scroll up. Send a message, or stop a
   reply that is running.

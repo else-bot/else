@@ -1,6 +1,5 @@
 mod card;
 
-use super::schedule_text::local_time;
 use super::{BotPanel, PanelEvent, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::request::{Request, Settle};
@@ -8,6 +7,7 @@ use else_wire::routines::PausedReason;
 use else_wire::routines::RunStatus;
 use else_wire::routines::SkipReason;
 use else_wire::routines::{LastRun, Routine};
+use else_wire::schedule::local_time;
 use gpui_kit::*;
 use uuid::Uuid;
 

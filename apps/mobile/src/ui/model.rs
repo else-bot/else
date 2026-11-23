@@ -278,11 +278,12 @@ fn key(bot: Uuid) -> String {
     format!("model-{bot}")
 }
 
-pub fn open(bot: Uuid) {
-    super::push(key(bot), move || screen(bot));
+/// Opens the Model screen; a saved profile is also written to `saved`.
+pub fn open(bot: Uuid, saved: Signal<Option<BotProfile>>) {
+    super::push(key(bot), move || screen(bot, saved));
 }
 
-fn screen(bot: Uuid) -> Screen {
+fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
     let load = signal(Load::Loading);
     let choice = signal(None::<ProfileChoice>);
     let save = signal(Save::Idle);
@@ -328,6 +329,7 @@ fn screen(bot: Uuid) -> Screen {
         save.set(Save::Saving);
         let client = session::server().client.clone();
         let done = move |saved: BotProfile| {
+            written.try_set(Some(saved.clone()));
             if save.try_set(Save::Idle) {
                 load.update(|l| {
                     if let Load::Ready { saved: slot, .. } = l {

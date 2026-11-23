@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use else_wire::bots::{Activity, Phase};
-use else_wire::conversation::{BotUpdated, Event, Snapshot};
+use else_wire::conversation::{BotExtras, BotUpdated, Event, Snapshot};
 use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
@@ -40,6 +40,8 @@ pub struct Conversation {
     turns: HashMap<Uuid, Turn>,
     pub older_before_seq: Option<i64>,
     pub activity: Activity,
+    /// The bot's routines, reminders, watchers and triggers.
+    pub extras: BotExtras,
 }
 
 /// An owner message's text and its files. A message with files keeps its
@@ -142,6 +144,7 @@ impl Conversation {
             turns: HashMap::new(),
             older_before_seq: snapshot.older_before_seq,
             activity: snapshot.activity,
+            extras: snapshot.extras,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -195,10 +198,11 @@ impl Conversation {
                 self.turns.insert(update.turn.id, update.turn);
             }
             Event::BotUpdated(update) => {
-                let BotUpdated { bot, .. } = *update;
+                let BotUpdated { bot, extras, .. } = *update;
                 if let Some(activity) = bot.activity {
                     self.activity = activity;
                 }
+                self.extras.update(extras);
             }
         }
         self.applied = seq;
@@ -591,5 +595,16 @@ mod tests {
                 outcome: Some(Outcome::Failed("Codex is signed out.".into())),
             })
         );
+    }
+
+    #[test]
+    fn a_bot_update_refreshes_its_routines() {
+        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        assert_eq!(conversation.extras.routines, None);
+        let update = json!({ "event": "bot.updated", "data": {
+            "bot": { "id": Uuid::nil(), "name": "Inbox" }, "routines": [],
+        } });
+        conversation.apply("srv:bot:5", &update).unwrap();
+        assert_eq!(conversation.extras.routines, Some(vec![]));
     }
 }

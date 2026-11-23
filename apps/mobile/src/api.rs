@@ -15,6 +15,7 @@ use else_wire::bots::{Avatar, Bot, BotEnvelope, BotList, ReplyPosition};
 use else_wire::conversation::{Sent, Snapshot};
 use else_wire::items::{Attachment, MessagePart};
 use else_wire::outgoing::OutgoingDraft;
+use else_wire::rules::RulesFile;
 use else_wire::settings::{BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, ProfileChoice};
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -312,6 +313,12 @@ impl Client {
                 .map(|envelope| envelope.bot)
         })
         .await
+    }
+
+    /// The bot's rules: its current sections and every saved version.
+    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<RulesFile, ClientError> {
+        let path = format!("/v1/bots/{bot}/rules");
+        run(async move { self.call(Method::GET, &path, None).await }).await
     }
 
     /// The providers, their models, and the defaults new bots start with.

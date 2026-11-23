@@ -27,6 +27,7 @@ pub mod outgoing;
 pub mod questions;
 pub mod routines;
 pub mod rules;
+pub mod schedule;
 pub mod secrets;
 pub mod settings;
 pub mod skills;

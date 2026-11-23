@@ -1,7 +1,6 @@
 mod identity;
 pub(super) mod model;
 pub(super) mod routines;
-mod schedule_text;
 mod triggers;
 mod watchers;
 

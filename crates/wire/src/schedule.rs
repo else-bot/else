@@ -1,7 +1,10 @@
-use chrono::{DateTime, Utc};
-use else_wire::routines::ActiveHours;
+//! Routine schedules as people read them: a cron expression, active
+//! hours, and a moment in the routine's time zone.
 
-pub(super) fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
+use crate::routines::ActiveHours;
+use chrono::{DateTime, Utc};
+
+pub fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
     match timezone.parse::<chrono_tz::Tz>() {
         Ok(tz) => at.with_timezone(&tz).format("%a %-d %b, %H:%M").to_string(),
         Err(_) => at.format("%a %-d %b, %H:%M UTC").to_string(),
@@ -37,7 +40,7 @@ const WEEKDAYS: [&str; 7] = [
 /// accepts shows croner's description beside its expression, because that
 /// description can blur cron's rules (`*/7` restarts every hour). Any other
 /// expression shows as written.
-pub(super) fn describe_cron(expr: &str) -> String {
+pub fn describe_cron(expr: &str) -> String {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     let server_grammar = fields.len() == 5
         && fields.iter().all(|field| {
@@ -121,7 +124,7 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     }
 }
 
-pub(super) fn describe_hours(hours: &ActiveHours) -> String {
+pub fn describe_hours(hours: &ActiveHours) -> String {
     let has = |names: &[&str]| {
         hours.days.len() == names.len() && names.iter().all(|n| hours.days.iter().any(|d| d == n))
     };
@@ -151,7 +154,7 @@ pub(super) fn describe_hours(hours: &ActiveHours) -> String {
 #[cfg(test)]
 mod tests {
     use super::{describe_cron, describe_hours};
-    use else_wire::routines::ActiveHours;
+    use crate::routines::ActiveHours;
 
     #[test]
     fn common_cron_schedules_read_as_prose() {

@@ -1,5 +1,4 @@
 use super::super::model::{model_available, model_name, provider_label};
-use super::super::schedule_text::{describe_cron, describe_hours, local_time};
 use super::super::{BotPanel, PanelEvent};
 use super::{Banner, RoutineChange, banner, last_run, retryable};
 use crate::app::panel::{alert, item_name, meta, meta_line};
@@ -7,6 +6,7 @@ use crate::app::request::Request;
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::Utc;
 use else_wire::routines::Routine;
+use else_wire::schedule::{describe_cron, describe_hours, local_time};
 use else_wire::settings::effort_label;
 use gpui_kit::base::HoverCard;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
