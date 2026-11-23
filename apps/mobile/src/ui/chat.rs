@@ -562,7 +562,12 @@ fn with_menu(
     }
     items.push(menu_item("reply", "Reply", "arrowshape.turn.up.left"));
     items.push(menu_item("copy", "Copy", "doc.on.doc"));
-    context_menu()
+    let reply = move || {
+        if let Some((_, owner, text)) = picked() {
+            quote.set(Some(Quote { owner, text }));
+        }
+    };
+    let menu = context_menu()
         .items(items)
         .trigger(bubble.into_element())
         .on_select(move |action: &SharedString| {
@@ -576,8 +581,8 @@ fn with_menu(
                 "copy" => set_clipboard(text),
                 _ => {}
             }
-        })
-        .into_element()
+        });
+    super::swipe::to_reply(menu, reply).into_element()
 }
 
 /// Reactions sent whose answer is not in yet, by the message and the

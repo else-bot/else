@@ -1,4 +1,4 @@
-//! Swipe actions on a list row, as iOS lists have them (Mail, Messages): a
+//! Swipe gestures. Actions on a list row, as iOS lists have them (Mail, Messages): a
 //! drag sideways uncovers the actions on that side; letting go past half
 //! of them leaves them open, a long swipe runs the first one, and a tap on
 //! an action runs it. The drag follows the finger natively; the row
@@ -178,6 +178,61 @@ pub fn row(
                     }
                 })
                 .child(content),
+        )
+}
+
+/// How far a message is dragged for a reply.
+const REPLY_AT: f32 = 56.0;
+/// The strip at the screen's left edge a reply drag leaves to the
+/// stack's swipe back: a view over it, outside the dragged one, takes the
+/// touches there.
+const EDGE: f32 = 24.0;
+
+/// A message that a drag to the right quotes in a reply, as Messages
+/// does: it follows the finger, slower past the point where letting go
+/// replies, while the reply arrow fades in behind it. Leftward drags do
+/// nothing; the message springs back either way.
+pub fn to_reply(content: impl IntoElement, reply: impl Fn() + 'static) -> impl IntoElement {
+    let x = animated_value(0.0);
+    let shown = x.interpolate(&[0.0, REPLY_AT, 400.0], &[0.0, REPLY_AT, REPLY_AT + 50.0]);
+    let arrow = x.interpolate(&[0.0, REPLY_AT], &[0.0, 1.0]);
+    view()
+        .child(
+            view()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(16.0))
+                .justify_center()
+                .accessibility_elements_hidden(true)
+                .bind_opacity(&arrow)
+                .child(
+                    image(super::parts::REPLY_ARROW)
+                        .size(px(20.0))
+                        .tint_color(super::parts::colors::secondary()),
+                ),
+        )
+        .child(
+            view()
+                .pan_values(Some(&x), None)
+                .bind_translate_x(&shown)
+                .on_pan_end(move |event: &PanEvent| {
+                    if event.value_x.unwrap_or(event.translation.x.0) >= REPLY_AT {
+                        haptic(Haptic::Impact(HapticImpact::Light));
+                        reply();
+                    }
+                    drop(x.spring(0.0, spring()));
+                })
+                .child(content),
+        )
+        .child(
+            view()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(EDGE))
+                .accessibility_elements_hidden(true),
         )
 }
 
