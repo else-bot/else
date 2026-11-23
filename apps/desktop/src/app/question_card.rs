@@ -24,10 +24,10 @@ use uuid::Uuid;
 
 use super::card_markdown::{self, CardText};
 use super::message_row::CardPlacement;
-use super::request::{Request, Settle};
 use super::{ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY};
+use else_client::request::{Request, Settle};
 
 mod approval;
 pub(super) mod choice;

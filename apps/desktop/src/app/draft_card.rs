@@ -15,9 +15,9 @@ use uuid::Uuid;
 use super::RowKey;
 use super::images::MessageImages;
 use super::message_row::{CardPlacement, short_stamp};
-use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::attachments::byte_size;
+use else_client::request::{Request, Settle};
 use else_wire::items::Attachment;
 use else_wire::items::MessagePart;
 

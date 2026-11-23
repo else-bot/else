@@ -11,49 +11,36 @@ use uuid::Uuid;
 use super::model;
 use super::parts::{self, colors};
 use super::session;
-use crate::api::{ClientError, CreateBotRequest};
+use else_client::request::Request;
+
+use crate::api::CreateBotRequest;
 
 pub const KEY: &str = "new-bot";
 
-/// The create request. One whose outcome is unknown is kept whole, so
-/// creating the same bot again repeats it under the same request ID and
-/// cannot make two.
-#[derive(Clone, PartialEq)]
-enum Step {
-    Editing,
-    Creating,
-    Failed(String),
-    Unknown {
-        request: CreateBotRequest,
-        message: String,
-    },
-}
-
-impl Step {
-    /// The request to send: the unresolved one when the owner asks for the
-    /// same bot again, else a new one.
-    fn request(
-        &self,
-        name: String,
-        avatar: Avatar,
-        profile: Option<ProfileChoice>,
-    ) -> CreateBotRequest {
-        match self {
-            Self::Unknown { request, .. }
-                if request.name == name
-                    && request.avatar == Some(avatar)
-                    && request.profile == profile =>
-            {
-                request.clone()
-            }
-            _ => CreateBotRequest {
-                request_id: Uuid::new_v4(),
-                name,
-                profile,
-                category_id: None,
-                avatar: Some(avatar),
-            },
+/// The request that creates the bot the owner asked for: the one whose
+/// outcome is unknown when it asks for the same bot again, which the server
+/// takes once under its request ID, else a new one.
+fn create_request(
+    unconfirmed: Option<&CreateBotRequest>,
+    name: String,
+    avatar: Avatar,
+    profile: Option<ProfileChoice>,
+) -> CreateBotRequest {
+    match unconfirmed {
+        Some(request)
+            if request.name == name
+                && request.avatar == Some(avatar)
+                && request.profile == profile =>
+        {
+            request.clone()
         }
+        _ => CreateBotRequest {
+            request_id: Uuid::new_v4(),
+            name,
+            profile,
+            category_id: None,
+            avatar: Some(avatar),
+        },
     }
 }
 
@@ -82,7 +69,7 @@ fn screen() -> Screen {
         shape: shape.get(),
         color: picked.get(),
     };
-    let step = signal(Step::Editing);
+    let step = signal(Request::<CreateBotRequest>::Idle);
     let models = signal(Models::Loading);
     let model = signal(None::<ProfileChoice>);
     {
@@ -117,8 +104,7 @@ fn screen() -> Screen {
             .filter(|m| Some(m) != defaults.as_ref()),
         Models::Loading | Models::Unavailable => None,
     };
-    let ready =
-        computed(move || !name.with(|n| n.trim().is_empty()) && step.get() != Step::Creating);
+    let ready = computed(move || !name.with(|n| n.trim().is_empty()) && !step.with(Request::busy));
 
     let create = move || {
         if !ready.get_untracked() {
@@ -129,45 +115,32 @@ fn screen() -> Screen {
             shape: shape.get_untracked(),
             color: picked.get_untracked(),
         };
-        let request = step.with_untracked(|s| s.request(name_now, avatar, profile()));
-        step.set(Step::Creating);
+        let request = step
+            .with_untracked(|s| create_request(s.unconfirmed_op(), name_now, avatar, profile()));
         // Held by the server, not by the header button (rebuilt when its
         // label changes) or this screen: leaving it does not cancel the
         // create, and the new bot still reaches the list.
         let client = session::server().client.clone();
-        session::spawn_held(async move {
-            match client.clone().create_bot(request.clone()).await {
-                Ok(bot) => {
-                    let (id, title) = (bot.id, bot.name.clone());
-                    session::update_bot(bot);
-                    if step.try_set(Step::Editing) {
-                        super::routes().update(|r| r.0.retain(|route| route.key != KEY));
-                        super::push(format!("chat-{id}"), move || {
-                            super::chat::screen(id, title.clone())
-                        });
-                    }
-                }
-                Err(err) if err.outcome_unknown() => {
-                    step.try_set(Step::Unknown {
-                        request,
-                        message: format!(
-                            "{err} The bot may have been created. Creating it again unchanged cannot make two."
-                        ),
+        session::submit(
+            step,
+            request,
+            move |request| client.create_bot(request),
+            move |bot| {
+                let (id, title) = (bot.id, bot.name.clone());
+                session::update_bot(bot);
+                if step.try_set(Request::Idle) {
+                    super::routes().update(|r| r.0.retain(|route| route.key != KEY));
+                    super::push(format!("chat-{id}"), move || {
+                        super::chat::screen(id, title.clone())
                     });
                 }
-                Err(ClientError::Api { message, .. }) => {
-                    step.try_set(Step::Failed(message));
-                }
-                Err(err) => {
-                    step.try_set(Step::Failed(err.to_string()));
-                }
-            }
-        });
+            },
+        );
     };
 
     let create_item = move || {
         vec![
-            HeaderItem::new(if step.get() == Step::Creating {
+            HeaderItem::new(if step.with(Request::busy) {
                 "Creating…"
             } else {
                 "Create"
@@ -199,15 +172,21 @@ fn screen() -> Screen {
         }
     });
 
-    let message = dynamic(move || match step.get() {
-        Step::Failed(message) | Step::Unknown { message, .. } => Some(
+    let message = dynamic(move || {
+        let message = match step.get() {
+            Request::Failed(message) => message,
+            Request::Unconfirmed { error, .. } => format!(
+                "{error} The bot may have been created. Creating it again unchanged cannot make two."
+            ),
+            _ => return None,
+        };
+        Some(
             text(message)
                 .mx_4()
                 .text_size(px(13.0))
                 .line_height(px(18.0))
                 .text_color(colors::destructive()),
-        ),
-        Step::Editing | Step::Creating => None,
+        )
     });
 
     nav_page()
@@ -233,8 +212,8 @@ fn screen() -> Screen {
                                     .value(name)
                                     .on_change(move |t: &str| {
                                         name.set(t.to_owned());
-                                        if matches!(step.get_untracked(), Step::Failed(_)) {
-                                            step.set(Step::Editing);
+                                        if matches!(step.get_untracked(), Request::Failed(_)) {
+                                            step.set(Request::Idle);
                                         }
                                     })
                                     .placeholder("Name")

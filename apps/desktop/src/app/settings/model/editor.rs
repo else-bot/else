@@ -1,9 +1,9 @@
 use super::super::routines::RoutineChange;
 use crate::app::panel::{muted, note};
-use crate::app::request::{Request, Settle};
 use crate::app::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use crate::profile_picker::ProfilePicker;
+use else_client::request::{Request, Settle};
 use else_wire::routines::Routine;
 use else_wire::settings::BotProfile;
 use else_wire::settings::ProfileChoice;

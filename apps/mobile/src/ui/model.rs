@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 use super::parts::{self, colors};
 use super::session;
+use else_client::request::Request;
+
 use crate::api::ClientError;
 
 /// A profile in a few words, such as "Claude Opus 5.5, High".
@@ -245,18 +247,9 @@ enum Load {
     },
 }
 
-/// The save request. A lost response keeps what it tried: the retry reads
-/// the profile back first, so it neither repeats a save that landed nor
+/// What a retry of a save whose outcome is unknown finds on the server
+/// before saving again, so it neither repeats a save that landed nor
 /// overwrites a change made meanwhile on another device.
-#[derive(Clone, PartialEq)]
-enum Save {
-    Idle,
-    Saving,
-    Failed(String),
-    Unknown { tried: ProfileChoice },
-}
-
-/// What a retry of an unknown save finds on the server.
 enum Reconciled {
     /// The earlier save landed.
     Saved(BotProfile),
@@ -278,7 +271,7 @@ pub fn open(bot: Uuid, saved: Signal<Option<BotProfile>>) {
 fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
     let load = signal(Load::Loading);
     let choice = signal(None::<ProfileChoice>);
-    let save = signal(Save::Idle);
+    let save = signal(Request::<ProfileChoice>::Idle);
     let client = session::server().client.clone();
     spawn(async move {
         let (caps, saved) = futures_util::join!(
@@ -304,7 +297,7 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
         }
         Load::Loading | Load::Failed(_) => false,
     });
-    let ready = computed(move || dirty.get() && save.get() != Save::Saving);
+    let ready = computed(move || dirty.get() && !save.with(Request::busy));
 
     let submit = move || {
         let Some(picked) = choice.get_untracked() else {
@@ -313,66 +306,57 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
         if !ready.get_untracked() {
             return;
         }
-        let retry = matches!(save.get_untracked(), Save::Unknown { tried } if tried == picked);
+        let retry = save.with_untracked(|r| r.unconfirmed_op() == Some(&picked));
         let loaded = load.with_untracked(|l| match l {
             Load::Ready { saved, .. } => saved.clone(),
             Load::Loading | Load::Failed(_) => None,
         });
-        save.set(Save::Saving);
         let client = session::server().client.clone();
-        let done = move |saved: BotProfile| {
-            written.try_set(Some(saved.clone()));
-            if save.try_set(Save::Idle) {
-                load.update(|l| {
-                    if let Load::Ready { saved: slot, .. } = l {
-                        *slot = Some(saved);
+        session::submit(
+            save,
+            picked,
+            move |picked| async move {
+                if retry {
+                    match reconcile(&client, bot, &picked, loaded.as_ref()).await? {
+                        Reconciled::Unchanged => {}
+                        found => return Ok(found),
                     }
-                });
-                super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot)));
-            }
-        };
-        session::spawn_held(async move {
-            if retry {
-                match reconcile(&client, bot, &picked, loaded.as_ref()).await {
-                    Ok(Reconciled::Saved(saved)) => return done(saved),
-                    Ok(Reconciled::Changed(latest)) => {
-                        if save.try_set(Save::Failed(
-                            "The model was changed on another device. This shows it now.".into(),
-                        )) {
-                            load.update(|l| {
-                                if let Load::Ready { providers, saved } = l {
-                                    choice.set(shown(providers, latest.as_ref()));
-                                    *saved = latest;
-                                }
-                            });
+                }
+                client
+                    .set_bot_profile(bot, picked)
+                    .await
+                    .map(Reconciled::Saved)
+            },
+            move |found| match found {
+                Reconciled::Saved(saved) => {
+                    written.try_set(Some(saved.clone()));
+                    save.try_set(Request::Idle);
+                    load.update(|l| {
+                        if let Load::Ready { saved: slot, .. } = l {
+                            *slot = Some(saved);
                         }
-                        return;
-                    }
-                    Ok(Reconciled::Unchanged) => {}
-                    Err(_) => {
-                        save.try_set(Save::Unknown { tried: picked });
-                        return;
-                    }
+                    });
+                    super::routes().update(|r| r.0.retain(|route| *route.key != *key(bot)));
                 }
-            }
-            match client.set_bot_profile(bot, picked.clone()).await {
-                Ok(saved) => done(saved),
-                Err(err) if err.outcome_unknown() => {
-                    save.try_set(Save::Unknown { tried: picked });
+                Reconciled::Changed(latest) => {
+                    save.try_set(Request::Failed(
+                        "The model was changed on another device. This shows it now.".into(),
+                    ));
+                    load.update(|l| {
+                        if let Load::Ready { providers, saved } = l {
+                            choice.set(shown(providers, latest.as_ref()));
+                            *saved = latest;
+                        }
+                    });
                 }
-                Err(ClientError::Api { message, .. }) => {
-                    save.try_set(Save::Failed(message));
-                }
-                Err(err) => {
-                    save.try_set(Save::Failed(err.to_string()));
-                }
-            }
-        });
+                Reconciled::Unchanged => {}
+            },
+        );
     };
 
     let save_item = move || {
         vec![
-            HeaderItem::new(if save.get() == Save::Saving {
+            HeaderItem::new(if save.with(Request::busy) {
                 "Saving…"
             } else {
                 "Save"
@@ -429,9 +413,11 @@ fn screen(bot: Uuid, written: Signal<Option<BotProfile>>) -> Screen {
 
     let status = dynamic(move || {
         let message = match save.get() {
-            Save::Failed(message) => message,
-            Save::Unknown { .. } => "The connection dropped before the server answered. It may have saved. Save checks the server before saving again.".into(),
-            Save::Idle | Save::Saving => return None,
+            Request::Failed(message) => message,
+            Request::Unconfirmed { error, .. } => {
+                format!("{error} It may have saved. Save checks the server before saving again.")
+            }
+            _ => return None,
         };
         Some(
             text(message)

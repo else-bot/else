@@ -1,9 +1,9 @@
 use super::{BotPanel, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::panel::{alert, item_name, meta, meta_line};
-use crate::app::request::{Request, Settle};
 use crate::controls::toggle;
 use chrono::{DateTime, Utc};
+use else_client::request::{Request, Settle};
 use else_wire::conversation::BotExtras;
 use else_wire::schedule::webhook_pace as pace;
 use else_wire::socials::Provider;

@@ -15,36 +15,19 @@ use super::parts::{ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
 use else_client::api::ReadCommand;
 
+use else_client::request::Request;
+
 use crate::api::{ClientError, Message};
 use crate::conversation::{self, Ask, Outcome, Row};
 
-/// The composer's message on its way to the server. A send whose outcome
-/// is unknown keeps its request ID and the message it carried: sending the
-/// same text and files again reuses the ID, so the server cannot post it
-/// twice; any change makes a new message.
-#[derive(Clone, PartialEq)]
-enum Outbox {
-    Idle,
-    Sending {
-        request_id: Uuid,
-    },
-    Unknown {
-        request_id: Uuid,
-        sent: Message,
-        message: String,
-    },
-    Refused(String),
-}
-
-impl Outbox {
-    fn request_id(&self, message: &Message) -> Uuid {
-        match self {
-            Self::Unknown {
-                request_id, sent, ..
-            } if sent == message => *request_id,
-            _ => Uuid::new_v4(),
-        }
-    }
+/// The composer's message and the request ID it is sent under. A send
+/// whose outcome is unknown keeps both: sending the same text and files
+/// again repeats it under that ID, so the server cannot post it twice; any
+/// change makes a new message.
+#[derive(Debug, Clone, PartialEq)]
+struct Outgoing {
+    request_id: Uuid,
+    message: Message,
 }
 
 pub fn screen(bot: Uuid, name: String) -> Screen {
@@ -570,9 +553,9 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
     let draft = signal(String::new());
     let pending = signal(Vec::<Pending>::new());
     let attach_notice = signal(None::<String>);
-    let outbox = signal(Outbox::Idle);
+    let outbox = signal(Request::<Outgoing>::Idle);
     let input_height = signal(22.0_f32);
-    let sending = computed(move || matches!(outbox.get(), Outbox::Sending { .. }));
+    let sending = computed(move || outbox.with(Request::busy));
     let empty =
         computed(move || draft.with(|d| d.trim().is_empty()) && pending.with(Vec::is_empty));
     let uploaded =
@@ -591,49 +574,40 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
             // something else must not close the draft or change its reply.
             draft: None,
         };
-        let request_id = outbox.with_untracked(|o| o.request_id(&message));
-        outbox.set(Outbox::Sending { request_id });
+        let op = outbox.with_untracked(|o| match o.unconfirmed_op() {
+            Some(unconfirmed) if unconfirmed.message == message => unconfirmed.clone(),
+            _ => Outgoing {
+                request_id: Uuid::new_v4(),
+                message: message.clone(),
+            },
+        });
         let client = session::server().client.clone();
         // Held by the server, not by the Send button: clearing the text
         // swaps that button for Stop, which would cancel a send under way.
-        session::spawn_held(async move {
-            match client.send(bot, message.request(request_id)).await {
-                Ok(sent) => {
-                    batch(|| {
-                        if !outbox.try_set(Outbox::Idle) {
-                            return;
+        session::submit(
+            outbox,
+            op,
+            move |op| client.send(bot, op.message.request(op.request_id)),
+            move |sent| {
+                batch(|| {
+                    if !outbox.try_set(Request::Idle) {
+                        return;
+                    }
+                    // Only what was sent leaves the composer; text or files
+                    // added meanwhile stay.
+                    if draft.get_untracked().trim() == message.text {
+                        draft.set(String::new());
+                    }
+                    pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
+                    chat.update(|c| {
+                        if let Some(conversation) = c.conversation_mut() {
+                            conversation.insert_item(sent.item);
+                            conversation.insert_turn(sent.turn);
                         }
-                        // Only what was sent leaves the composer; text or
-                        // files added meanwhile stay.
-                        if draft.get_untracked().trim() == message.text {
-                            draft.set(String::new());
-                        }
-                        pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
-                        chat.update(|c| {
-                            if let Some(conversation) = c.conversation_mut() {
-                                conversation.insert_item(sent.item);
-                                conversation.insert_turn(sent.turn);
-                            }
-                        });
                     });
-                }
-                Err(err) if err.outcome_unknown() => {
-                    outbox.try_set(Outbox::Unknown {
-                        request_id,
-                        sent: message,
-                        message: format!(
-                            "{err} It may have been sent. Sending it again unchanged cannot post it twice."
-                        ),
-                    });
-                }
-                Err(ClientError::Api { message, .. }) => {
-                    outbox.try_set(Outbox::Refused(message));
-                }
-                Err(err) => {
-                    outbox.try_set(Outbox::Refused(err.to_string()));
-                }
-            }
-        });
+                });
+            },
+        );
     };
 
     let stop = move || {
@@ -653,8 +627,11 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
 
     let notice = dynamic(move || {
         let message = match outbox.get() {
-            Outbox::Unknown { message, .. } | Outbox::Refused(message) => message,
-            Outbox::Idle | Outbox::Sending { .. } => attach_notice.get()?,
+            Request::Unconfirmed { error, .. } => format!(
+                "{error} It may have been sent. Sending it again unchanged cannot post it twice."
+            ),
+            Request::Failed(error) => error,
+            _ => attach_notice.get()?,
         };
         Some(
             text(message)
@@ -745,8 +722,8 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                                 .value(draft)
                                 .on_change(move |t: &str| {
                                     draft.set(t.to_owned());
-                                    if matches!(outbox.get_untracked(), Outbox::Refused(_)) {
-                                        outbox.set(Outbox::Idle);
+                                    if matches!(outbox.get_untracked(), Request::Failed(_)) {
+                                        outbox.set(Request::Idle);
                                     }
                                 })
                                 .placeholder("Message")

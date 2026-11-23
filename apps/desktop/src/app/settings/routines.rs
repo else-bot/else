@@ -2,7 +2,7 @@ mod card;
 
 use super::{BotPanel, PanelEvent, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
-use crate::app::request::{Request, Settle};
+use else_client::request::{Request, Settle};
 use else_wire::routines::Routine;
 use gpui_kit::*;
 use uuid::Uuid;

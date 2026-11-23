@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 
 // Value-bearing payloads deliberately do not implement Debug.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SaveSecret {
     pub env: BTreeMap<String, String>,
     pub description: String,

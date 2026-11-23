@@ -16,19 +16,19 @@ use super::session;
 use else_client::api::{SaveSecret, validate_secret_metadata};
 use else_wire::questions::QuestionAnswer;
 
-use crate::api::{ClientError, Message};
+use else_client::request::Request;
+
+use crate::api::Message;
 use crate::conversation::Ask;
 
-/// A card's request to the server.
-#[derive(Clone, PartialEq)]
-enum Action {
-    Idle,
-    Sending,
-    Failed(String),
-    /// The response was lost: the server may have acted. Trying again is
-    /// safe: a repeat of a settled ask is refused, an approval repeats as
-    /// itself, and the server's own update removes the card once settled.
-    Unknown,
+/// What a draft card asks of the server.
+#[derive(Debug, Clone, PartialEq)]
+enum DraftOp {
+    Approve(DraftEdit),
+    /// The turn that drafted it has ended: a reply carrying it asks the bot
+    /// to send it.
+    SendAsIs(Message, Uuid),
+    Discard,
 }
 
 pub fn card(bot: Uuid, ask: Ask) -> AnyElement {
@@ -59,15 +59,17 @@ fn eyebrow(label: &'static str) -> impl IntoElement {
         .text_color(colors::warning())
 }
 
-fn failure(action: Signal<Action>) -> impl IntoElement {
+/// Why the card's last request did not go through. A lost response is an
+/// unknown outcome: trying again repeats it, a repeat of a settled ask is
+/// refused, and the server's own update removes the card once settled.
+fn failure<Op: Clone + 'static>(request: Signal<Request<Op>>) -> impl IntoElement {
     dynamic(move || {
-        let message = match action.get() {
-            Action::Failed(message) => message,
-            Action::Unknown => {
-                "The connection dropped before the server answered. It may have gone through, and trying again is safe.".into()
-            }
-            Action::Idle | Action::Sending => return None,
-        };
+        let message = request.with(|r| match r {
+            Request::Unconfirmed { error, .. } => Some(format!(
+                "{error} It may have gone through; trying again is safe."
+            )),
+            r => r.error().map(str::to_owned),
+        })?;
         Some(
             text(message)
                 .text_size(px(13.0))
@@ -75,18 +77,6 @@ fn failure(action: Signal<Action>) -> impl IntoElement {
                 .text_color(colors::destructive()),
         )
     })
-}
-
-/// The server's own words for a refusal (a settled question, a draft that
-/// changed since it was shown); a lost response is an unknown outcome.
-fn failed(err: ClientError) -> Action {
-    if err.outcome_unknown() {
-        return Action::Unknown;
-    }
-    match err {
-        ClientError::Api { message, .. } => Action::Failed(message),
-        err => Action::Failed(err.to_string()),
-    }
 }
 
 /// A full-width button: filled for the main action, tinted otherwise.
@@ -131,9 +121,9 @@ fn button(
 }
 
 fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
-    let action = signal(Action::Idle);
+    let request = signal(Request::<QuestionAnswer>::Idle);
     let picked = signal(BTreeSet::<String>::new());
-    let idle = move || action.get() != Action::Sending;
+    let idle = move || !request.with(Request::busy);
     let id = question.id;
     let multiple = question.multiple;
     let send = move |choices: Vec<String>| {
@@ -145,14 +135,13 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
                 None => return,
             }
         };
-        action.set(Action::Sending);
         let client = session::server().client.clone();
-        session::spawn_held(async move {
-            match client.answer_question(bot, id, answer).await {
-                Ok(()) => action.try_set(Action::Idle),
-                Err(err) => action.try_set(failed(err)),
-            }
-        });
+        session::submit(
+            request,
+            answer,
+            move |answer| client.answer_question(bot, id, answer),
+            |()| {},
+        );
     };
     let approval = question.kind != QuestionKind::Choice;
     let choices: Vec<AnyElement> = question
@@ -231,7 +220,7 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
                 move || send(picked.get_untracked().into_iter().collect()),
             )
         }))
-        .child(failure(action))
+        .child(failure(request))
 }
 
 /// Whether the draft card shows the draft or the owner's edits to it.
@@ -272,8 +261,8 @@ fn draft_editor(
     body: Signal<String>,
     mode: Signal<Mode>,
 ) -> impl IntoElement {
-    let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending;
+    let request = signal(Request::<DraftEdit>::Idle);
+    let idle = move || !request.with(Request::busy);
     let has_subject = original.subject.is_some();
     let body_height = signal(120.0_f32);
     let save = {
@@ -288,16 +277,18 @@ fn draft_editor(
                 mode.set(Mode::Reading);
                 return;
             }
-            action.set(Action::Sending);
             let client = session::server().client.clone();
-            session::spawn_held(async move {
-                match client.edit_draft(bot, draft_id, edit).await {
-                    // The server's live update replaces this card with the
-                    // saved version a moment later.
-                    Ok(_) => action.try_set(Action::Idle) && mode.try_set(Mode::Reading),
-                    Err(err) => action.try_set(failed(err)),
-                }
-            });
+            // The server's live update replaces this card with the saved
+            // version a moment later.
+            session::submit(
+                request,
+                edit,
+                move |edit| client.edit_draft(bot, draft_id, edit),
+                move |_| {
+                    request.try_set(Request::Idle);
+                    mode.try_set(Mode::Reading);
+                },
+            );
         }
     };
     let cancel = {
@@ -305,7 +296,7 @@ fn draft_editor(
         move || {
             subject.set(original.subject.clone().unwrap_or_default());
             body.set(original.body.clone());
-            action.set(Action::Idle);
+            request.set(Request::Idle);
             mode.set(Mode::Reading);
         }
     };
@@ -358,7 +349,7 @@ fn draft_editor(
                 .child(button("Cancel", false, false, idle, cancel))
                 .child(button(
                     move || {
-                        SharedString::from(if action.get() == Action::Sending {
+                        SharedString::from(if request.with(Request::busy) {
                             "Saving…"
                         } else {
                             "Save"
@@ -370,12 +361,12 @@ fn draft_editor(
                     save,
                 )),
         )
-        .child(failure(action))
+        .child(failure(request))
 }
 
 fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoElement {
-    let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending;
+    let request = signal(Request::<DraftOp>::Idle);
+    let idle = move || !request.with(Request::busy);
     // Everything Send would deliver is on the card: hidden copies and files
     // included.
     let (cc, bcc) = match &draft.content {
@@ -415,13 +406,8 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
             if !matches!(choice, Ok(r) if r.action.as_deref() == Some("send")) {
                 return false;
             }
-            action.try_set(Action::Sending);
-            let client = session::server().client.clone();
-            let result = if can_approve {
-                client
-                    .approve_draft(bot, draft.id, draft.edit(), false)
-                    .await
-                    .map(drop)
+            let op = if can_approve {
+                DraftOp::Approve(draft.edit())
             } else {
                 // The turn that drafted it has ended, so the button cannot
                 // approve it. A reply carrying the draft asks the bot to
@@ -436,25 +422,13 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                     }),
                 };
                 let id = format!("send-as-is:{}", draft.version);
-                let request_id = Uuid::new_v5(&draft.id, id.as_bytes());
-                client.send(bot, reply.request(request_id)).await.map(drop)
+                DraftOp::SendAsIs(reply, Uuid::new_v5(&draft.id, id.as_bytes()))
             };
-            match result {
-                Ok(()) => action.try_set(Action::Idle),
-                Err(err) => action.try_set(failed(err)),
-            }
+            submit_draft(bot, draft.id, request, op);
+            true
         });
     };
-    let discard = move || {
-        action.set(Action::Sending);
-        let client = session::server().client.clone();
-        session::spawn_held(async move {
-            match client.discard_draft(bot, draft_id).await {
-                Ok(_) => action.try_set(Action::Idle),
-                Err(err) => action.try_set(failed(err)),
-            }
-        });
-    };
+    let discard = move || submit_draft(bot, draft_id, request, DraftOp::Discard);
 
     frame()
         .child(
@@ -535,17 +509,40 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 .line_height(px(18.0))
                 .text_color(colors::secondary())
         }))
-        .child(failure(action))
+        .child(failure(request))
+}
+
+/// Sends a draft card's request. Once accepted, the server's update
+/// replaces the card with its receipt.
+fn submit_draft(bot: Uuid, draft: Uuid, request: Signal<Request<DraftOp>>, op: DraftOp) {
+    let client = session::server().client.clone();
+    session::submit(
+        request,
+        op,
+        move |op| async move {
+            match op {
+                DraftOp::Approve(edit) => client
+                    .approve_draft(bot, draft, edit, false)
+                    .await
+                    .map(drop),
+                DraftOp::SendAsIs(reply, request_id) => {
+                    client.send(bot, reply.request(request_id)).await.map(drop)
+                }
+                DraftOp::Discard => client.discard_draft(bot, draft).await.map(drop),
+            }
+        },
+        |()| {},
+    );
 }
 
 /// A bot's request for credentials: one masked field per variable it
 /// named. Save stores them in the server's vault, where every bot may use
 /// them; the card never shows a stored value again.
-fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
-    let action = signal(Action::Idle);
-    let idle = move || action.get() != Action::Sending;
+fn secret_card(bot: Uuid, asked: SecretRequest) -> impl IntoElement {
+    let request = signal(Request::<Option<SaveSecret>>::Idle);
+    let idle = move || !request.with(Request::busy);
     let values = signal(BTreeMap::<String, String>::new());
-    let names = request.env.clone();
+    let names = asked.env.clone();
     let complete = {
         let names = names.clone();
         computed(move || {
@@ -556,12 +553,12 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
             })
         })
     };
-    let id = request.id;
+    let id = asked.id;
     // Saved with the description and website the bot gave, as the desktop
     // saves it; the phone does not edit them.
     let meta = stored((
-        request.description.clone().unwrap_or_default(),
-        request.website.clone().unwrap_or_default(),
+        asked.description.clone().unwrap_or_default(),
+        asked.website.clone().unwrap_or_default(),
     ));
     let answer = move |env: Option<BTreeMap<String, String>>| {
         let (description, website) = meta.get();
@@ -574,22 +571,21 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
         }) {
             Some(Ok(secret)) => Some(secret),
             Some(Err(message)) => {
-                action.set(Action::Failed(message));
+                request.update(|r| r.reject(message));
                 return;
             }
             None => None,
         };
-        action.set(Action::Sending);
-        // The values leave the phone's memory with the request: a lost
-        // response never leaves them in the fields.
+        // The values leave the fields with the request: a lost response
+        // never leaves them on screen.
         values.set(BTreeMap::new());
         let client = session::server().client.clone();
-        session::spawn_held(async move {
-            match client.answer_secret(bot, id, secret).await {
-                Ok(()) => action.try_set(Action::Idle),
-                Err(err) => action.try_set(failed(err)),
-            }
-        });
+        session::submit(
+            request,
+            secret,
+            move |secret| client.answer_secret(bot, id, secret),
+            |()| {},
+        );
     };
     let fields: Vec<AnyElement> = names
         .iter()
@@ -627,17 +623,17 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
                 .into_element()
         })
         .collect();
-    let detail = request.description.clone().filter(|d| !d.trim().is_empty());
+    let detail = asked.description.clone().filter(|d| !d.trim().is_empty());
     frame()
         .child(eyebrow("NEEDS A SECRET"))
         .child(
-            text(request.name.clone())
+            text(asked.name.clone())
                 .text_size(px(17.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::label()),
         )
         .child(
-            text(request.reason.clone())
+            text(asked.reason.clone())
                 .text_size(px(15.0))
                 .line_height(px(20.0))
                 .text_color(colors::label()),
@@ -648,7 +644,7 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
                 .line_height(px(20.0))
                 .text_color(colors::secondary())
         }))
-        .child(request.website.clone().map(|site| {
+        .child(asked.website.clone().map(|site| {
             text(format!("For {site}"))
                 .text_size(px(15.0))
                 .text_color(colors::secondary())
@@ -672,5 +668,5 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
                     move || answer(Some(values.get_untracked())),
                 )),
         )
-        .child(failure(action))
+        .child(failure(request))
 }

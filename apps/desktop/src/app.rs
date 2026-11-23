@@ -31,7 +31,6 @@ mod question_card;
 mod quotes;
 mod reading;
 mod reply;
-mod request;
 mod row_text;
 mod rules;
 mod secret_card;

@@ -1,4 +1,5 @@
-//! The one request a card or dialog sends, and its outcome.
+//! The one request a card, dialog or screen sends, and its outcome: shared
+//! by the apps, so retrying an unknown outcome works the same in both.
 
 use crate::api::ClientError;
 use uuid::Uuid;
@@ -6,7 +7,7 @@ use uuid::Uuid;
 /// A card's or dialog's request. `Op` is what was sent, kept while the
 /// outcome matters: to show it optimistically, or to resend it unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(in crate::app) enum Request<Op> {
+pub enum Request<Op> {
     #[default]
     Idle,
     Sending {
@@ -35,7 +36,7 @@ pub(in crate::app) enum Request<Op> {
 /// handle the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
-pub(in crate::app) enum Settle {
+pub enum Settle {
     /// The attempt is not the request in flight; nothing changed.
     Stale,
     /// The owner token was rejected. The request is idle again, or still
@@ -47,14 +48,14 @@ pub(in crate::app) enum Settle {
 
 impl Settle {
     /// Whether the caller goes on to handle the result.
-    pub(in crate::app) fn settled(self) -> bool {
+    pub fn settled(self) -> bool {
         self == Self::Settled
     }
 }
 
 impl<Op> Request<Op> {
     /// Whether the controls stay locked: sent and not yet failed.
-    pub(in crate::app) fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         matches!(
             self,
             Self::Sending { .. } | Self::Resending { .. } | Self::Accepted(_)
@@ -63,26 +64,26 @@ impl<Op> Request<Op> {
 
     /// The op sent and not failed, for showing its effect before the
     /// stream confirms it.
-    pub(in crate::app) fn pending(&self) -> Option<&Op> {
+    pub fn pending(&self) -> Option<&Op> {
         match self {
             Self::Sending { op, .. } | Self::Resending { op, .. } | Self::Accepted(op) => Some(op),
             _ => None,
         }
     }
 
-    pub(in crate::app) fn error(&self) -> Option<&str> {
+    pub fn error(&self) -> Option<&str> {
         match self {
             Self::Failed(error) | Self::Unconfirmed { error, .. } => Some(error),
             _ => None,
         }
     }
 
-    pub(in crate::app) fn unconfirmed(&self) -> bool {
+    pub fn unconfirmed(&self) -> bool {
         matches!(self, Self::Unconfirmed { .. })
     }
 
     /// The op whose outcome is unknown, which a resend must repeat.
-    pub(in crate::app) fn unconfirmed_op(&self) -> Option<&Op> {
+    pub fn unconfirmed_op(&self) -> Option<&Op> {
         match self {
             Self::Unconfirmed { op, .. } => Some(op),
             _ => None,
@@ -91,7 +92,7 @@ impl<Op> Request<Op> {
 
     /// Starts sending `op`, unless a request is already busy. Returns the
     /// attempt that its result must settle.
-    pub(in crate::app) fn begin(&mut self, op: Op) -> Option<Uuid> {
+    pub fn begin(&mut self, op: Op) -> Option<Uuid> {
         if self.busy() {
             return None;
         }
@@ -102,7 +103,7 @@ impl<Op> Request<Op> {
 
     /// Resends the op whose outcome is unknown. Returns the attempt and the
     /// op to send.
-    pub(in crate::app) fn retry(&mut self) -> Option<(Uuid, Op)>
+    pub fn retry(&mut self) -> Option<(Uuid, Op)>
     where
         Op: Clone,
     {
@@ -121,7 +122,7 @@ impl<Op> Request<Op> {
 
     /// Records a rejection found before anything was sent, such as an
     /// empty field. Ignored while busy.
-    pub(in crate::app) fn reject(&mut self, message: impl Into<String>) {
+    pub fn reject(&mut self, message: impl Into<String>) {
         if !self.busy() {
             *self = Self::Failed(message.into());
         }
@@ -129,18 +130,14 @@ impl<Op> Request<Op> {
 
     /// Settles `attempt` with `result`, changing nothing when `attempt` is
     /// not the request in flight.
-    pub(in crate::app) fn settle<T>(
-        &mut self,
-        attempt: Uuid,
-        result: &Result<T, ClientError>,
-    ) -> Settle {
+    pub fn settle<T>(&mut self, attempt: Uuid, result: &Result<T, ClientError>) -> Settle {
         self.settle_as(attempt, result, ToString::to_string)
     }
 
     /// Like [`Self::settle`], with `message` describing a failure. A
     /// resend the server never handled says nothing about the earlier
     /// attempt, so it stays unconfirmed.
-    pub(in crate::app) fn settle_as<T>(
+    pub fn settle_as<T>(
         &mut self,
         attempt: Uuid,
         result: &Result<T, ClientError>,
@@ -186,7 +183,7 @@ impl<Op> Request<Op> {
 
     /// Fails `attempt` with `message`, for results that are not a
     /// [`ClientError`]. Returns false when `attempt` is stale.
-    pub(in crate::app) fn fail(&mut self, attempt: Uuid, message: String) -> bool {
+    pub fn fail(&mut self, attempt: Uuid, message: String) -> bool {
         match self {
             Self::Sending {
                 attempt: current, ..

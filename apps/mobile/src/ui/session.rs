@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use else_client::api::{LiveCommand, LiveCommands};
 
+use else_client::request::Request;
+
 use crate::api::{Client, ClientError, LiveEvent, StreamMessage};
 use crate::server::Profile;
 use else_client::model::Conversation;
@@ -133,6 +135,42 @@ fn held() -> Signal<Held> {
 pub fn spawn_held<T: 'static>(future: impl std::future::Future<Output = T> + 'static) {
     held().get_untracked().0.run(|| {
         spawn(future);
+    });
+}
+
+/// Sends `op` for `request`, held by the connected server (see
+/// [`spawn_held`]). An op equal to the one whose outcome is unknown is a
+/// resend of it, under the same request ID it carries; any other starts a
+/// new request. `send` makes the call, and `done` gets the server's answer
+/// once `request` accepted it. Nothing is sent while `request` is busy.
+pub fn submit<Op, T, F>(
+    request: Signal<Request<Op>>,
+    op: Op,
+    send: impl FnOnce(Op) -> F + 'static,
+    done: impl FnOnce(T) + 'static,
+) where
+    Op: Clone + PartialEq + 'static,
+    T: 'static,
+    F: std::future::Future<Output = Result<T, ClientError>> + 'static,
+{
+    let mut started = None;
+    request.update(|r| {
+        started = if r.unconfirmed_op() == Some(&op) {
+            r.retry()
+        } else {
+            r.begin(op.clone()).map(|attempt| (attempt, op))
+        };
+    });
+    let Some((attempt, op)) = started else {
+        return;
+    };
+    spawn_held(async move {
+        let result = send(op).await;
+        let mut settled = false;
+        try_update(request, |r| settled = r.settle(attempt, &result).settled());
+        if let (true, Ok(value)) = (settled, result) {
+            done(value);
+        }
     });
 }
 
