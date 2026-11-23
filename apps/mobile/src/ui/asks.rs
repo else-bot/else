@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use else_wire::outgoing::{DraftAttachment, DraftContent, DraftEdit, OutgoingDraft};
 use else_wire::notices::{OwnerNotice, OwnerNoticeKind};
+use else_wire::outgoing::{DraftAttachment, DraftContent, DraftEdit, OutgoingDraft};
 use else_wire::questions::{Question, QuestionKind};
 use else_wire::secrets::SecretRequest;
 use nsh_base::{alert_dialog, input};
@@ -722,7 +722,10 @@ fn notice_card(notice: OwnerNotice) -> impl IntoElement {
                         if !client.clone().capabilities().await?.answers_notice {
                             message.answers_notice = None;
                         }
-                        client.send(bot, message.request(request_id)).await.map(drop)
+                        client
+                            .send(bot, message.request(request_id))
+                            .await
+                            .map(drop)
                     }
                 };
                 match result {
@@ -765,12 +768,18 @@ fn notice_card(notice: OwnerNotice) -> impl IntoElement {
                 .line_height(px(22.0))
                 .text_color(colors::label()),
         )
-        .child(notice.tried.clone().filter(|t| !t.trim().is_empty()).map(|tried| {
-            text(format!("Tried: {tried}"))
-                .text_size(px(15.0))
-                .line_height(px(20.0))
-                .text_color(colors::secondary())
-        }))
+        .child(
+            notice
+                .tried
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .map(|tried| {
+                    text(format!("Tried: {tried}"))
+                        .text_size(px(15.0))
+                        .line_height(px(20.0))
+                        .text_color(colors::secondary())
+                }),
+        )
         .child(dynamic(move || {
             if !replying.get() {
                 return view()
