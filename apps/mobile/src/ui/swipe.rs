@@ -2,7 +2,8 @@
 //! drag sideways uncovers the actions on that side; letting go past half
 //! of them leaves them open, a long swipe runs the first one, and a tap on
 //! an action runs it. The drag follows the finger natively; the row
-//! springs to rest.
+//! springs to rest. Screen readers get the actions as the row's own
+//! (VoiceOver's Actions rotor), not as buttons hidden behind it.
 
 use std::rc::Rc;
 
@@ -78,6 +79,7 @@ pub fn row(
     };
     let side = |actions: Vec<Action>, trailing: bool| {
         view()
+            .accessibility_elements_hidden(move || shown.get() == Rest::Closed)
             .absolute()
             .top_0()
             .bottom_0()
@@ -114,6 +116,14 @@ pub fn row(
                 }),
             )
     };
+    let all: Vec<Action> = leading.iter().chain(&trailing).cloned().collect();
+    let offered = all
+        .iter()
+        .map(|action| nsh_core::AccessibilityActionDef {
+            name: action.label.into(),
+            label: Some(action.label.into()),
+        })
+        .collect();
     let first_lead = leading.first().map(|a| a.run.clone());
     let first_trail = trailing.first().map(|a| a.run.clone());
     let ended = {
@@ -161,6 +171,12 @@ pub fn row(
                 .bind_translate_x(&x)
                 .on_pan_end(ended)
                 .on_press(tap)
+                .accessibility_actions(offered)
+                .on_accessibility_action(move |name: &str| {
+                    if let Some(action) = all.iter().find(|a| a.label == name) {
+                        (action.run)();
+                    }
+                })
                 .child(content),
         )
 }
