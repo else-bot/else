@@ -280,10 +280,10 @@ pub fn composer(
                     }
                     // Only what was sent leaves the composer; text or files
                     // added meanwhile stay.
-                    if draft.get_untracked().trim() == typed {
+                    // The words and the quote they answer leave together,
+                    // or neither does: edited words keep their quote.
+                    if draft.get_untracked().trim() == typed && quote.get_untracked() == quoted {
                         draft.set(String::new());
-                    }
-                    if quote.get_untracked() == quoted {
                         quote.set(None);
                     }
                     pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
