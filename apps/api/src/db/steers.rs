@@ -134,7 +134,8 @@ impl Placement {
 /// as an owner who types instead of clicking does; any other message skips
 /// only the target's cards. Each turn that asked continues once nothing
 /// else holds it. Joining continues a waiting target at once with every
-/// other hold kept. Runs in the accepting immediate transaction.
+/// other hold kept. Runs in the accepting immediate transaction, or for a
+/// deferred message (never `typed`) in the one that settles it.
 pub async fn place(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -190,9 +191,10 @@ pub async fn place(
 /// The turns whose cards a typed owner message types over: every pending
 /// question and computer handoff of `bot_id`, which its chat shows. A typed
 /// message is placed in the transaction that accepts it, so every card
-/// pending here was open when the owner sent it; timestamps would tie
-/// within a millisecond. A deferred message is placed later and is never
-/// typed, so it leaves cards asked after it.
+/// pending here was committed before the server accepted the message;
+/// millisecond stamps could tie with the message's, so they are not
+/// compared. A deferred message is placed later and is never typed, so it
+/// skips only the cards of the turn it joins.
 async fn typed_over(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT turn_id FROM owner_questions WHERE bot_id = ?1 AND status = 'pending'

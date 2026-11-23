@@ -700,7 +700,10 @@ pub async fn answer(
 /// pending that was asked after the owner's previous message (of the joined
 /// turn `joined`, when the message joins one). A bot-wide destructive grant
 /// still needs a click. Returns the answered card; otherwise it answers
-/// nothing, and the message skips cards as usual.
+/// nothing, and the message skips cards as usual. It runs in the
+/// transaction that accepts the message, so every pending card and every
+/// other owner message was there before it; their millisecond stamps may
+/// tie with the message's, so only the previous message bounds the cards.
 pub(crate) async fn answer_typed(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -715,13 +718,11 @@ pub(crate) async fn answer_typed(
         "SELECT {COLUMNS} FROM owner_questions q
          WHERE q.bot_id = ?1 AND q.status = 'pending' AND q.kind <> 'choice'
            AND (?2 IS NULL OR q.turn_id = ?2)
-           AND q.created_at < (SELECT created_at FROM turns WHERE id = ?3)
            AND q.created_at > coalesce((
                SELECT max(t.created_at) FROM turns t
                JOIN conversations c ON c.id = t.conversation_id AND c.kind = 'owner'
                JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user' AND NOT i.hidden
-               WHERE c.bot_id = ?1 AND t.id <> ?3
-                 AND t.created_at < (SELECT created_at FROM turns WHERE id = ?3)), '')"
+               WHERE c.bot_id = ?1 AND t.id <> ?3), '')"
     )))
     .bind(bot_id)
     .bind(joined)
