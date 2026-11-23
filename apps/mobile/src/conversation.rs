@@ -73,16 +73,28 @@ impl Ask {
 pub enum Outcome {
     /// The owner stopped it.
     Stopped,
-    Failed(String),
+    Failed {
+        reason: String,
+        /// Set when the server can run the message again.
+        retry: Option<Retry>,
+    },
     /// The server cannot tell whether it ran.
     Unknown,
+}
+
+/// Running a failed turn again: the attempt that failed is the request's
+/// stable ID, so a repeat queues one new attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    pub turn: Uuid,
+    pub attempt: i64,
 }
 
 impl Outcome {
     pub fn text(&self) -> &str {
         match self {
             Self::Stopped => "Stopped",
-            Self::Failed(reason) => reason,
+            Self::Failed { reason, .. } => reason,
             Self::Unknown => "The outcome of this reply is unknown",
         }
     }
@@ -265,12 +277,20 @@ pub fn thinking(conversation: &Conversation) -> bool {
 
 fn outcome(turn: &Turn) -> Option<Outcome> {
     match turn.status {
-        TurnStatus::Failed => Some(Outcome::Failed(
-            turn.error
+        TurnStatus::Failed => Some(Outcome::Failed {
+            reason: turn
+                .error
                 .as_ref()
                 .and_then(|error| error.message.clone())
                 .unwrap_or_else(|| "The reply failed".into()),
-        )),
+            retry: turn
+                .attempt
+                .filter(|_| turn.retryable)
+                .map(|attempt| Retry {
+                    turn: turn.id,
+                    attempt,
+                }),
+        }),
         TurnStatus::Uncertain => Some(Outcome::Unknown),
         TurnStatus::Interrupted => Some(Outcome::Stopped),
         _ => None,
@@ -383,7 +403,7 @@ mod tests {
             6,
             json!({ "event": "turn.updated", "data": { "turn": {
                 "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
-                "status": "failed",
+                "status": "failed", "attempt": 2, "retryable": true,
                 "error": { "code": "provider_failed", "message": "Codex is signed out." },
                 "effect_uncertain": false,
             }}}),
@@ -394,7 +414,13 @@ mod tests {
                 id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
                 text: "hi".into(),
                 files: vec![],
-                outcome: Some(Outcome::Failed("Codex is signed out.".into())),
+                outcome: Some(Outcome::Failed {
+                    reason: "Codex is signed out.".into(),
+                    retry: Some(Retry {
+                        turn: TURN.parse().unwrap(),
+                        attempt: 2,
+                    }),
+                }),
             })
         );
     }

@@ -10,7 +10,9 @@ use super::parts::colors;
 use super::session::{self, Chat};
 use else_client::api::ReadCommand;
 
-use crate::conversation::{self, Ask, Outcome, Row};
+use else_client::request::Request;
+
+use crate::conversation::{self, Ask, Outcome, Retry, Row};
 
 pub fn screen(bot: Uuid, name: String) -> Screen {
     let chat = session::open_chat(bot);
@@ -250,12 +252,64 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
             outcome.get().map(|outcome| {
                 let color = match outcome {
                     Outcome::Stopped => colors::secondary(),
-                    Outcome::Failed(_) | Outcome::Unknown => colors::destructive(),
+                    Outcome::Failed { .. } | Outcome::Unknown => colors::destructive(),
                 };
                 text(outcome.text().to_owned())
                     .pt_1()
                     .text_size(px(12.0))
                     .text_color(color)
+            })
+        }))
+        .child(dynamic(move || {
+            let retry = outcome.with(|o| match o {
+                Some(Outcome::Failed { retry, .. }) => *retry,
+                _ => None,
+            })?;
+            Some(untracked(|| retry_button(bot, retry)))
+        }))
+}
+
+/// Runs a failed message again. The turn's update that queues it replaces
+/// the failure; until then a lost response can be retried as is.
+fn retry_button(bot: Uuid, retry: Retry) -> impl IntoElement {
+    let request = signal(Request::<i64>::Idle);
+    let press = move || {
+        let client = session::server().client.clone();
+        session::submit(
+            request,
+            retry.attempt,
+            move |attempt| client.retry_turn(bot, retry.turn, attempt),
+            |_| {},
+        );
+    };
+    view()
+        .items_end()
+        .gap_1()
+        .child(
+            text(move || {
+                SharedString::from(if request.with(Request::busy) {
+                    "Retrying…"
+                } else {
+                    "Retry"
+                })
+            })
+            .px_2()
+            .py_1()
+            .text_size(px(15.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(colors::tint())
+            .disabled(move || request.with(Request::busy))
+            .disabled_style(|s| s.opacity(0.45))
+            .active(|s| s.opacity(0.5))
+            .role(AccessibilityRole::Button)
+            .label("Retry this message")
+            .on_press(press),
+        )
+        .child(dynamic(move || {
+            request.with(|r| r.error().map(str::to_owned)).map(|error| {
+                text(error)
+                    .text_size(px(12.0))
+                    .text_color(colors::destructive())
             })
         }))
 }
