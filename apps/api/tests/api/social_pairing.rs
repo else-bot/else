@@ -27,7 +27,9 @@ struct Phone {
     number: Mutex<String>,
     scanned: Notify,
     expire: std::sync::atomic::AtomicBool,
-    listen: Mutex<Option<Error>>,
+    /// The account signed this device out: every listener fails until the
+    /// test clears it, as a real signed-out device does.
+    signed_out: std::sync::atomic::AtomicBool,
     /// Set once a stopped listener finished shutting its client down.
     closed: std::sync::atomic::AtomicBool,
 }
@@ -37,7 +39,7 @@ impl Phone {
             number: Mutex::new(number.into()),
             scanned: Notify::new(),
             expire: Default::default(),
-            listen: Mutex::new(None),
+            signed_out: Default::default(),
             closed: Default::default(),
         })
     }
@@ -101,8 +103,8 @@ impl Transport for Phone {
             matches!(session, Session::WhatsApp(_)),
             "a paired connection opens its device"
         );
-        if let Some(error) = self.listen.lock().unwrap().take() {
-            return Err(error);
+        if self.signed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::SignedOut);
         }
         stop.cancelled().await;
         // A real client flushes its device state here.
@@ -365,7 +367,9 @@ async fn a_device_the_account_signed_out_asks_to_pair_again_and_stops_retrying()
     let phone = Phone::new("33612345678");
     let m = manager(&db, &phone);
     let (_, c) = paired(&db, &m, &phone).await;
-    *phone.listen.lock().unwrap() = Some(Error::SignedOut);
+    phone
+        .signed_out
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     m.changed(c.id).await;
     tokio::time::timeout(common::SETTLE, async {
         while store::connection(&db.pool, c.id).await.unwrap().health != Health::SignedOut {
@@ -374,6 +378,9 @@ async fn a_device_the_account_signed_out_asks_to_pair_again_and_stops_retrying()
     })
     .await
     .expect("health shows the sign-out");
+    phone
+        .signed_out
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     m.changed(c.id).await;
     tokio::time::timeout(common::SETTLE, async {
         while store::connection(&db.pool, c.id).await.unwrap().health != Health::Connected {
