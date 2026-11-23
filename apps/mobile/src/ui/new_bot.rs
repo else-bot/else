@@ -11,37 +11,48 @@ use uuid::Uuid;
 use super::model;
 use super::parts::{self, colors};
 use super::session;
-use crate::api::ClientError;
+use crate::api::{ClientError, CreateBotRequest};
 
 pub const KEY: &str = "new-bot";
 
-/// The create request. One whose outcome is unknown keeps its request ID,
-/// so creating the same name again cannot make two bots.
+/// The create request. One whose outcome is unknown is kept whole, so
+/// creating the same bot again repeats it under the same request ID and
+/// cannot make two.
 #[derive(Clone, PartialEq)]
 enum Step {
     Editing,
     Creating,
     Failed(String),
     Unknown {
-        request_id: Uuid,
-        tried: Tried,
+        request: CreateBotRequest,
         message: String,
     },
 }
 
-/// What a create asked for: the name, the avatar, and the profile when
-/// it differs from the defaults.
-type Tried = (String, Avatar, Option<ProfileChoice>);
-
 impl Step {
-    /// The ID to create with: the unresolved one when the request is
-    /// unchanged, since the server takes a repeat of it once.
-    fn request_id(&self, request: &Tried) -> Uuid {
+    /// The request to send: the unresolved one when the owner asks for the
+    /// same bot again, else a new one.
+    fn request(
+        &self,
+        name: String,
+        avatar: Avatar,
+        profile: Option<ProfileChoice>,
+    ) -> CreateBotRequest {
         match self {
-            Self::Unknown {
-                request_id, tried, ..
-            } if tried == request => *request_id,
-            _ => Uuid::new_v4(),
+            Self::Unknown { request, .. }
+                if request.name == name
+                    && request.avatar == Some(avatar)
+                    && request.profile == profile =>
+            {
+                request.clone()
+            }
+            _ => CreateBotRequest {
+                request_id: Uuid::new_v4(),
+                name,
+                profile,
+                category_id: None,
+                avatar: Some(avatar),
+            },
         }
     }
 }
@@ -118,18 +129,14 @@ fn screen() -> Screen {
             shape: shape.get_untracked(),
             color: picked.get_untracked(),
         };
-        let tried: Tried = (name_now.clone(), avatar, profile());
-        let request_id = step.with_untracked(|s| s.request_id(&tried));
+        let request = step.with_untracked(|s| s.request(name_now, avatar, profile()));
         step.set(Step::Creating);
         // Held by the server, not by the header button (rebuilt when its
         // label changes) or this screen: leaving it does not cancel the
         // create, and the new bot still reaches the list.
         let client = session::server().client.clone();
         session::spawn_held(async move {
-            match client
-                .create_bot(request_id, name_now, avatar, tried.2.clone())
-                .await
-            {
+            match client.clone().create_bot(request.clone()).await {
                 Ok(bot) => {
                     let (id, title) = (bot.id, bot.name.clone());
                     session::update_bot(bot);
@@ -142,11 +149,10 @@ fn screen() -> Screen {
                 }
                 Err(err) if err.outcome_unknown() => {
                     step.try_set(Step::Unknown {
-                        request_id,
+                        request,
                         message: format!(
                             "{err} The bot may have been created. Creating it again unchanged cannot make two."
                         ),
-                        tried,
                     });
                 }
                 Err(ClientError::Api { message, .. }) => {

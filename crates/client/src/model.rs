@@ -122,7 +122,7 @@ pub enum Applied {
     Changed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Conversation {
     /// `<server_instance_id>:<bot_id>`; events must carry the same prefix.
     cursor_prefix: String,
@@ -139,6 +139,9 @@ pub struct Conversation {
     extras: Arc<BotExtras>,
     /// Read from the page saved on disk, so possibly behind the server.
     saved: bool,
+    /// How many `bot.updated` events were applied; one also marks a change
+    /// of the bot's model, which views showing it read again.
+    bot_updates: u64,
 }
 
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
@@ -161,6 +164,7 @@ impl Conversation {
             activity: Some(snapshot.activity),
             extras: Arc::new(snapshot.extras),
             saved: false,
+            bot_updates: 0,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -181,6 +185,10 @@ impl Conversation {
 
     pub fn is_saved(&self) -> bool {
         self.saved
+    }
+
+    pub fn bot_updates(&self) -> u64 {
+        self.bot_updates
     }
 
     /// The cursor of the last applied event, for `Last-Event-ID`.
@@ -244,6 +252,7 @@ impl Conversation {
                     self.selected_provider_id = bot.selected_provider_id;
                 }
                 Arc::make_mut(&mut self.extras).update(extras);
+                self.bot_updates += 1;
             }
         }
         self.applied = seq;

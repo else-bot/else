@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use super::parts::{self, SERVER, colors};
 use super::session;
-use crate::api::{Client, ClientError};
+use crate::api::ClientError;
 use crate::server::Profile;
 
 /// Where the connect form is.
@@ -48,7 +48,7 @@ fn page(first: bool) -> Screen {
             Ok(profile) => profile,
             Err(err) => return step.set(Step::Failed(err)),
         };
-        let client = match Client::new(&profile) {
+        let client = match crate::api::connect(&profile) {
             Ok(client) => client,
             Err(err) => return step.set(Step::Failed(err)),
         };

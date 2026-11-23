@@ -73,6 +73,13 @@ impl Origin {
         &self.serialized
     }
 
+    /// The host as the owner reads it, without the scheme.
+    pub fn display(&self) -> &str {
+        self.serialized
+            .split_once("://")
+            .map_or(self.serialized.as_str(), |(_, rest)| rest)
+    }
+
     /// Whether the owner token sent here stays on this machine.
     pub fn is_loopback(&self) -> bool {
         Url::parse(&self.serialized).is_ok_and(|url| is_loopback(&url))

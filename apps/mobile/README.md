@@ -81,11 +81,18 @@ to the printed `http://127.0.0.1:PORT` with `.else-dev/mobile/data/owner-token`.
 
 ## Layout
 
-- `src/server.rs` validates the origin and the key, checks Tailscale, and
-  saves the profile.
-- `src/api.rs` holds the HTTP and WebSocket client, on its own Tokio runtime.
-- `src/conversation.rs` applies live events to a loaded conversation in
-  cursor order.
+The client side is shared with the desktop: `crates/client` (`else-client`)
+holds the HTTP and WebSocket client, the endpoints, the server origin and
+owner key, and the conversation model live events build. `crates/wire`
+holds the wire types and the wording both apps show (avatars, schedules).
+A fix or a new endpoint there reaches both apps.
+
+- `src/server.rs` saves servers and their keys (Keychain) and checks that
+  Tailscale is connected.
+- `src/api.rs` runs the shared client on the phone's own Tokio runtime and
+  builds the messages the composer sends.
+- `src/conversation.rs` turns the shared conversation into what the phone
+  shows: transcript rows, asks, and whether the bot is replying.
 - `src/bots.rs` decides each bot list row from the server's bot record.
-- `src/ui/` holds the screens: connect, the bot list, and a chat.
-  `session.rs` holds the connected server's state as signals.
+- `src/ui/` holds the screens. `session.rs` holds the connected server's
+  state as signals.

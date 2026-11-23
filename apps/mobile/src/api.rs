@@ -1,30 +1,21 @@
-//! The else.bot API client.
-//!
-//! Requests run on a private Tokio runtime, away from NSH's engine thread;
-//! [`run`] hands each result back as a future the engine awaits. Redirects
-//! are never followed, so the key can only reach the one saved origin; it
-//! travels as a sensitive header, never in a URL. HTTPS and WSS verify the
-//! certificate with the platform's trust store.
+//! The phone's connection to the server: the client the desktop uses too
+//! (`else_client`), on the phone's own network runtime, with the phone's
+//! way of checking Tailscale. Requests run away from NSH's engine thread;
+//! the engine awaits their results.
 
-use std::collections::HashMap;
-use std::future::Future;
+use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
-use else_wire::bots::{Avatar, Bot, BotEnvelope, BotList, ReplyPosition};
-use else_wire::conversation::{Sent, Snapshot};
+use else_client::api::Tailnet;
+pub use else_client::api::{
+    Client, ClientError, CreateBotRequest, LiveEvent, SendRequest, StreamMessage,
+};
+use else_client::model::outgoing::DraftAttachment;
 use else_wire::items::{Attachment, MessagePart};
-use else_wire::outgoing::OutgoingDraft;
-use else_wire::rules::RulesFile;
-use else_wire::settings::{BotProfile, BotProfileEnvelope, Capabilities, ErrorBody, ProfileChoice};
-use futures_util::{SinkExt as _, StreamExt as _};
-use reqwest::header::{AUTHORIZATION, HeaderValue};
-use reqwest::{Method, StatusCode};
-use serde::de::DeserializeOwned;
-use serde_json::json;
 use uuid::Uuid;
 
-use crate::server::{Origin, Profile};
+use crate::server::Profile;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -38,803 +29,82 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Runs `work` on the network runtime; the engine awaits its result.
-pub fn run<T: Send + 'static>(
-    work: impl Future<Output = T> + Send + 'static,
-) -> impl Future<Output = T> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let task = runtime().spawn(async move {
-        let _ = tx.send(work.await);
-    });
-    let guard = AbortOnDrop(task.abort_handle());
-    async move {
-        let value = rx.await.expect("the network task finished");
-        drop(guard);
-        value
-    }
+/// A client for the saved server.
+pub fn connect(profile: &Profile) -> Result<Arc<Client>, String> {
+    Client::with_tailnet(
+        profile.origin.clone(),
+        &profile.token,
+        runtime().handle().clone(),
+        Arc::new(PhoneTailnet),
+    )
+    .map(Arc::new)
 }
 
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// A Tailscale IP is reachable once the Tailscale app has connected this
+/// phone; the phone cannot list the tailnet's devices.
+struct PhoneTailnet;
 
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Errors shown to the owner. None of them contain the key.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum ClientError {
-    #[error("The server rejected the owner key.")]
-    Unauthorized,
-    #[error("Cannot reach {origin}. {cause}")]
-    Unreachable { origin: String, cause: String },
-    #[error("{0}")]
-    Transport(String),
-    #[error("{message}")]
-    Api {
-        status: u16,
-        code: String,
-        message: String,
-    },
-    #[error("Unexpected response from the server: {0}")]
-    Protocol(String),
-}
-
-impl ClientError {
-    fn from_http(status: StatusCode, bytes: &[u8]) -> Self {
-        match serde_json::from_slice::<ErrorBody>(bytes) {
-            Ok(body) => Self::Api {
-                status: status.as_u16(),
-                code: body.error.code,
-                message: body.error.message,
-            },
-            Err(_) => Self::Protocol(format!("HTTP {status}")),
-        }
-    }
-
-    /// Whether a send may or may not have reached the server.
-    pub fn outcome_unknown(&self) -> bool {
-        match self {
-            Self::Unreachable { .. } | Self::Protocol(_) => true,
-            Self::Api { status, .. } => *status >= 500,
-            Self::Unauthorized | Self::Transport(_) => false,
-        }
-    }
-}
-
-pub struct Client {
-    http: reqwest::Client,
-    tls: Arc<rustls::ClientConfig>,
-    origin: Origin,
-    auth: HeaderValue,
-}
-
-impl Client {
-    pub fn new(profile: &Profile) -> Result<Arc<Self>, String> {
-        use rustls_platform_verifier::BuilderVerifierExt as _;
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let tls = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .and_then(|builder| builder.with_platform_verifier())
-            .map(|builder| builder.with_no_client_auth())
-            .map_err(|err| format!("Cannot set up TLS: {err}"))?;
-        let http = reqwest::Client::builder()
-            .tls_backend_preconfigured(tls.clone())
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .connect_timeout(Duration::from_secs(8))
-            .build()
-            .map_err(|err| format!("Cannot set up the HTTP client: {err}"))?;
-        let mut auth = HeaderValue::from_str(&format!("Bearer {}", profile.token.expose()))
-            .expect("a validated key is a valid header value");
-        auth.set_sensitive(true);
-        Ok(Arc::new(Self {
-            http,
-            tls: Arc::new(tls),
-            origin: profile.origin.clone(),
-            auth,
-        }))
-    }
-
-    fn verify_transport(&self) -> Result<(), ClientError> {
-        if self.origin.tailscale_ip().is_some() && !crate::server::tailnet_connected() {
-            return Err(ClientError::Transport(
-                "Connect Tailscale on this iPhone first. The key is only sent over your tailnet."
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn call<T: DeserializeOwned>(
+impl Tailnet for PhoneTailnet {
+    fn verify(
         &self,
-        method: Method,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<T, ClientError> {
-        self.call_with(method, path, body, Duration::from_secs(20))
-            .await
-    }
-
-    async fn call_with<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<T, ClientError> {
-        let response = self.request(method, path, body, timeout).await?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
-        let body = if bytes.is_empty() {
-            b"null".as_slice()
-        } else {
-            bytes.as_ref()
-        };
-        serde_json::from_slice(body).map_err(|err| ClientError::Protocol(err.to_string()))
-    }
-
-    /// A successful response to the request, its body unread.
-    async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<reqwest::Response, ClientError> {
-        self.verify_transport()?;
-        let mut request = self
-            .http
-            .request(method, format!("{}{path}", self.origin.as_str()))
-            .timeout(timeout)
-            .header(AUTHORIZATION, self.auth.clone());
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request.send().await.map_err(|err| {
-            if err.is_connect() || err.is_timeout() || err.is_request() {
-                ClientError::Unreachable {
-                    origin: self.origin.display().to_owned(),
-                    cause: root_cause(&err),
-                }
+        _: IpAddr,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async {
+            if crate::server::tailnet_connected() {
+                Ok(())
             } else {
-                ClientError::Protocol(err.without_url().to_string())
+                Err("Connect Tailscale on this iPhone first. The key is only sent over your tailnet.".into())
             }
-        })?;
-        let status = response.status();
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized);
-        }
-        if status.is_redirection() {
-            return Err(ClientError::Protocol(format!(
-                "redirect ({status}) refused; the key is never sent to another origin"
-            )));
-        }
-        if !status.is_success() {
-            let bytes = response.bytes().await.unwrap_or_default();
-            return Err(ClientError::from_http(status, &bytes));
-        }
-        Ok(response)
-    }
-
-    pub async fn bots(self: Arc<Self>) -> Result<BotList, ClientError> {
-        run(async move { self.call(Method::GET, "/v1/bots", None).await }).await
-    }
-
-    pub async fn latest(self: Arc<Self>, bot: Uuid) -> Result<Snapshot, ClientError> {
-        let path = format!("/v1/bots/{bot}/conversation?limit=50");
-        run(async move { self.call(Method::GET, &path, None).await }).await
-    }
-
-    pub async fn older(self: Arc<Self>, bot: Uuid, before: i64) -> Result<Snapshot, ClientError> {
-        let path = format!("/v1/bots/{bot}/conversation?limit=50&before_seq={before}");
-        run(async move { self.call(Method::GET, &path, None).await }).await
-    }
-
-    /// Sends a message: `text` alone, or with files uploaded before. The
-    /// server takes the text as the flattening of the parts, so the files'
-    /// markers follow the text.
-    pub async fn send(
-        self: Arc<Self>,
-        bot: Uuid,
-        request_id: Uuid,
-        message: Message,
-    ) -> Result<Sent, ClientError> {
-        let body = message.body(request_id);
-        let path = format!("/v1/bots/{bot}/turns");
-        run(async move { self.call(Method::POST, &path, Some(body)).await }).await
-    }
-
-    /// Stores a file for a message to carry. Repeating an upload with the
-    /// same id and bytes is harmless.
-    pub async fn upload(
-        self: Arc<Self>,
-        bot: Uuid,
-        file: Attachment,
-        data: Vec<u8>,
-    ) -> Result<Attachment, ClientError> {
-        use base64::Engine as _;
-        let path = format!("/v1/bots/{bot}/attachments");
-        run(async move {
-            let body = json!({
-                "id": file.id, "name": file.name, "media_type": file.media_type,
-                "data": base64::engine::general_purpose::STANDARD.encode(&data),
-            });
-            drop(data);
-            let stored: Attachment = self
-                .call_with(Method::POST, &path, Some(body), Duration::from_secs(120))
-                .await?;
-            if stored.id != file.id || stored.size != file.size {
-                return Err(ClientError::Protocol(
-                    "the server stored a different file".into(),
-                ));
-            }
-            Ok(stored)
         })
-        .await
-    }
-
-    /// A stored file's bytes.
-    pub async fn attachment(self: Arc<Self>, bot: Uuid, id: Uuid) -> Result<Vec<u8>, ClientError> {
-        let path = format!("/v1/bots/{bot}/attachments/{id}");
-        run(async move {
-            let response = self
-                .request(Method::GET, &path, None, Duration::from_secs(60))
-                .await?;
-            response
-                .bytes()
-                .await
-                .map(|bytes| bytes.to_vec())
-                .map_err(|err| ClientError::Protocol(err.without_url().to_string()))
-        })
-        .await
-    }
-
-    /// Creates a bot. A retry with the same `request_id` answers the bot
-    /// it already created, so an unknown outcome is safe to repeat.
-    /// Without a profile, the bot uses the server's defaults.
-    pub async fn create_bot(
-        self: Arc<Self>,
-        request_id: Uuid,
-        name: String,
-        avatar: Avatar,
-        profile: Option<ProfileChoice>,
-    ) -> Result<Bot, ClientError> {
-        let mut body = json!({ "request_id": request_id, "name": name, "avatar": avatar });
-        if let Some(profile) = profile {
-            body["profile"] = json!(profile);
-        }
-        run(async move {
-            self.call::<BotEnvelope>(Method::POST, "/v1/bots", Some(body))
-                .await
-                .map(|envelope| envelope.bot)
-        })
-        .await
-    }
-
-    /// The bot's rules: its current sections and every saved version.
-    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<RulesFile, ClientError> {
-        let path = format!("/v1/bots/{bot}/rules");
-        run(async move { self.call(Method::GET, &path, None).await }).await
-    }
-
-    /// The providers, their models, and the defaults new bots start with.
-    pub async fn capabilities(self: Arc<Self>) -> Result<Capabilities, ClientError> {
-        run(async move { self.call(Method::GET, "/v1/capabilities", None).await }).await
-    }
-
-    /// The profile the bot's next messages use; `None` before the server
-    /// has any provider to default to.
-    pub async fn bot_profile(
-        self: Arc<Self>,
-        bot: Uuid,
-    ) -> Result<Option<BotProfile>, ClientError> {
-        let path = format!("/v1/bots/{bot}/profile");
-        run(async move {
-            self.call::<BotProfileEnvelope<Option<BotProfile>>>(Method::GET, &path, None)
-                .await
-                .map(|envelope| envelope.profile)
-        })
-        .await
-    }
-
-    /// Gives the bot its own profile, used from its next message. Saving
-    /// the same profile again changes nothing, so a retry is safe.
-    pub async fn set_bot_profile(
-        self: Arc<Self>,
-        bot: Uuid,
-        choice: ProfileChoice,
-    ) -> Result<BotProfile, ClientError> {
-        let path = format!("/v1/bots/{bot}/profile");
-        run(async move {
-            self.call::<BotProfileEnvelope<BotProfile>>(Method::PUT, &path, Some(json!(choice)))
-                .await
-                .map(|envelope| envelope.profile)
-        })
-        .await
-    }
-
-    /// Stops the bot's current reply.
-    pub async fn cancel(self: Arc<Self>, bot: Uuid, request_id: Uuid) -> Result<(), ClientError> {
-        let body = json!({ "request_id": request_id });
-        let path = format!("/v1/bots/{bot}/cancel");
-        run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
-                .await
-                .map(drop)
-        })
-        .await
-    }
-
-    /// Answers a question with its chosen option ids. A settled question
-    /// answers 409 `question_settled` and nothing changes.
-    pub async fn answer_question(
-        self: Arc<Self>,
-        bot: Uuid,
-        question: Uuid,
-        choices: Vec<String>,
-        multiple: bool,
-    ) -> Result<(), ClientError> {
-        let body = if multiple {
-            json!({ "choices": choices })
-        } else {
-            json!({ "choice": choices.into_iter().next().unwrap_or_default() })
-        };
-        let path = format!("/v1/bots/{bot}/questions/{question}/answer");
-        run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, Some(body))
-                .await
-                .map(drop)
-        })
-        .await
-    }
-
-    /// Approves a draft at the version shown, with the text shown. The
-    /// server sends it; a newer version answers a conflict instead.
-    pub async fn approve_draft(
-        self: Arc<Self>,
-        bot: Uuid,
-        draft: &OutgoingDraft,
-    ) -> Result<(), ClientError> {
-        let edit = DraftEdit::of(draft);
-        self.draft_call(Method::POST, bot, draft.id, "/approve", edit)
-            .await
-    }
-
-    /// Saves the owner's edits to a draft seen at `edit.version`; a draft
-    /// changed since answers a conflict.
-    pub async fn edit_draft(
-        self: Arc<Self>,
-        bot: Uuid,
-        draft: Uuid,
-        edit: DraftEdit,
-    ) -> Result<(), ClientError> {
-        self.draft_call(Method::PUT, bot, draft, "", edit).await
-    }
-
-    async fn draft_call(
-        self: Arc<Self>,
-        method: Method,
-        bot: Uuid,
-        draft: Uuid,
-        action: &str,
-        edit: DraftEdit,
-    ) -> Result<(), ClientError> {
-        let path = format!("/v1/bots/{bot}/outgoing-drafts/{draft}{action}");
-        let body = serde_json::to_value(edit).expect("an edit serializes");
-        run(async move {
-            self.call::<serde::de::IgnoredAny>(method, &path, Some(body))
-                .await
-                .map(drop)
-        })
-        .await
-    }
-
-    /// Saves the values a bot asked for (`Some`) to the server's vault, or
-    /// declines its request (`None`). The values travel only in this body.
-    pub async fn answer_secret(
-        self: Arc<Self>,
-        bot: Uuid,
-        request: Uuid,
-        env: Option<std::collections::BTreeMap<String, String>>,
-    ) -> Result<(), ClientError> {
-        let (action, body) = match env {
-            Some(env) => ("fulfill", Some(json!({ "env": env }))),
-            None => ("cancel", None),
-        };
-        let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
-        run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, body)
-                .await
-                .map(drop)
-        })
-        .await
-    }
-
-    pub async fn discard_draft(self: Arc<Self>, bot: Uuid, draft: Uuid) -> Result<(), ClientError> {
-        let path = format!("/v1/bots/{bot}/outgoing-drafts/{draft}/discard");
-        run(async move {
-            self.call::<serde::de::IgnoredAny>(Method::POST, &path, None)
-                .await
-                .map(drop)
-        })
-        .await
-    }
-
-    /// Moves the read position up to `position`, the newest reply the
-    /// owner has seen; returns the bot as the server now has it.
-    pub async fn read_through(
-        self: Arc<Self>,
-        bot: Uuid,
-        position: ReplyPosition,
-    ) -> Result<Bot, ClientError> {
-        let body = json!({ "action": "through", "position": position });
-        let path = format!("/v1/bots/{bot}/read");
-        run(async move {
-            self.call::<BotEnvelope>(Method::POST, &path, Some(body))
-                .await
-                .map(|envelope| envelope.bot)
-        })
-        .await
     }
 }
 
 /// A message the owner sends: its text, then its files.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub text: String,
     pub files: Vec<Attachment>,
     /// The draft this message answers, so the bot can send it; the server
     /// closes it if the reply moves on without sending it.
-    pub draft: Option<OpenDraft>,
+    pub draft: Option<DraftAttachment>,
 }
 
 impl Message {
-    /// The `POST /turns` body. The server refuses fields it does not know.
-    fn body(&self, request_id: Uuid) -> serde_json::Value {
-        let (text, parts) = self.wire();
-        let mut body = json!({ "request_id": request_id, "text": text, "provider_id": null });
-        if !parts.is_empty() {
-            body["parts"] = json!(parts);
-        }
-        if let Some(draft) = &self.draft {
-            body["open_draft"] = json!(draft);
-        }
-        body
-    }
-
-    /// The text and parts the server takes. A message without files is
-    /// plain text with no parts.
-    pub fn wire(&self) -> (String, Vec<MessagePart>) {
-        if self.files.is_empty() {
-            return (self.text.clone(), Vec::new());
-        }
-        let mut parts = Vec::new();
-        if !self.text.is_empty() {
-            parts.push(MessagePart::Text {
-                text: format!("{}\n", self.text),
-            });
-        }
-        parts.extend(
-            self.files
-                .iter()
-                .map(|file| MessagePart::File { file: file.clone() }),
-        );
-        let text = parts
-            .iter()
-            .map(|part| match part {
-                MessagePart::Text { text } => text.clone(),
-                MessagePart::File { file } => file.fallback(),
-            })
-            .collect();
-        (text, parts)
-    }
-}
-
-/// A draft's text at the version the owner saw. Its files are kept as
-/// they are: approving a draft with files must name the ones the owner saw.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct DraftEdit {
-    pub version: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
-    pub body: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<Uuid>>,
-}
-
-impl DraftEdit {
-    pub fn of(draft: &OutgoingDraft) -> Self {
-        Self {
-            version: draft.version,
-            subject: draft.content.subject().map(str::to_owned),
-            body: draft.content.body().to_owned(),
-            attachments: draft.content.attachment_ids(),
-        }
-    }
-}
-
-/// A draft as a message carries it: its ID and the text the owner saw.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct OpenDraft {
-    pub id: Uuid,
-    #[serde(flatten)]
-    pub edit: DraftEdit,
-}
-
-impl OpenDraft {
-    pub fn of(draft: &OutgoingDraft) -> Self {
-        Self {
-            id: draft.id,
-            edit: DraftEdit::of(draft),
-        }
-    }
-}
-
-fn root_cause(err: &reqwest::Error) -> String {
-    let mut cause: &dyn std::error::Error = err;
-    while let Some(source) = cause.source() {
-        cause = source;
-    }
-    let text = cause.to_string();
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => format!(
-            "{}{}.",
-            first.to_uppercase(),
-            chars.as_str().trim_end_matches('.')
-        ),
-        None => String::new(),
-    }
-}
-
-/// Events from the live connection.
-#[derive(Debug, Clone)]
-pub enum LiveEvent {
-    Connected,
-    /// Retrying after this problem; loaded data stays visible.
-    Disconnected(String),
-    Unauthorized,
-    /// The `bots` channel: the current list.
-    Bots(BotList),
-    /// One event of a `bot:<id>` channel, with its cursor.
-    Bot {
-        bot: Uuid,
-        id: String,
-        message: serde_json::Value,
-    },
-    /// The bot's cursor is no longer valid, or it was deleted.
-    BotReset {
-        bot: Uuid,
-    },
-}
-
-/// Handles to the live connection; dropping `events` ends it.
-pub struct Live {
-    /// The `bot:<id>` channels wanted, each from its cursor.
-    pub wanted: tokio::sync::watch::Sender<HashMap<Uuid, String>>,
-    pub wake: Arc<tokio::sync::Notify>,
-    pub events: tokio::sync::mpsc::Receiver<LiveEvent>,
-}
-
-fn route(message: &serde_json::Value, wanted: &mut HashMap<Uuid, String>) -> Option<LiveEvent> {
-    let channel = message["channel"].as_str()?;
-    if channel == "bots" {
-        return serde_json::from_value(message["data"].clone())
-            .ok()
-            .map(LiveEvent::Bots);
-    }
-    let bot: Uuid = channel.strip_prefix("bot:")?.parse().ok()?;
-    if message["error"]["code"].as_str().is_some() {
-        wanted.remove(&bot);
-        return Some(LiveEvent::BotReset { bot });
-    }
-    let id = message["id"].as_str()?.to_owned();
-    if let Some(cursor) = wanted.get_mut(&bot) {
-        *cursor = id.clone();
-    }
-    Some(LiveEvent::Bot {
-        bot,
-        id,
-        message: message.clone(),
-    })
-}
-
-impl Client {
-    /// Opens the live connection: one WebSocket carrying the `bots` channel
-    /// and the `bot:<id>` channels in `wanted`. It reconnects with backoff
-    /// and resubscribes each channel from its last delivered cursor.
-    pub fn live(self: Arc<Self>) -> Live {
-        let (wanted, wanted_rx) = tokio::sync::watch::channel(HashMap::new());
-        let (event_tx, events) = tokio::sync::mpsc::channel(256);
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let woken = wake.clone();
-        runtime().spawn(async move { self.run_live(wanted_rx, event_tx, woken).await });
-        Live {
-            wanted,
-            wake,
-            events,
-        }
-    }
-
-    fn ws_request(&self) -> tokio_tungstenite::tungstenite::handshake::client::Request {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let mut request = self
-            .origin
-            .ws_url()
-            .into_client_request()
-            .expect("valid ws URL");
-        request
-            .headers_mut()
-            .insert(AUTHORIZATION, self.auth.clone());
-        request
-    }
-
-    async fn run_live(
-        &self,
-        mut desired: tokio::sync::watch::Receiver<HashMap<Uuid, String>>,
-        events: tokio::sync::mpsc::Sender<LiveEvent>,
-        wake: Arc<tokio::sync::Notify>,
-    ) {
-        use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-        const INACTIVITY: Duration = Duration::from_secs(45);
-        const HANDSHAKE: Duration = Duration::from_secs(10);
-        const STABLE: Duration = Duration::from_secs(30);
-        let mut wanted: HashMap<Uuid, String> = HashMap::new();
-        let mut requested: HashMap<Uuid, String> = HashMap::new();
-        let mut backoff = Duration::from_millis(500);
-        macro_rules! deliver {
-            ($event:expr) => {
-                tokio::select! {
-                    _ = events.closed() => return,
-                    sent = events.send($event) => if sent.is_err() { return },
-                }
-            };
-        }
-        macro_rules! pause {
-            () => {
-                backoff = tokio::select! {
-                    _ = events.closed() => return,
-                    _ = wake.notified() => Duration::from_millis(500),
-                    _ = tokio::time::sleep(backoff) => (backoff * 2).min(Duration::from_secs(15)),
-                };
-            };
-        }
-        let subscribe = |channel: String, cursor: Option<&String>| {
-            Message::Text(
-                json!({ "op": "subscribe", "channel": channel, "cursor": cursor })
-                    .to_string()
-                    .into(),
-            )
+    /// The request that sends it under `request_id`.
+    pub fn request(&self, request_id: Uuid) -> SendRequest {
+        let parts = self.parts();
+        let text = if parts.is_empty() {
+            self.text.clone()
+        } else {
+            MessagePart::flatten(&parts)
         };
-        loop {
-            if let Err(err) = self.verify_transport() {
-                deliver!(LiveEvent::Disconnected(err.to_string()));
-                pause!();
-                continue;
-            }
-            let connected = tokio::select! {
-                _ = events.closed() => return,
-                result = tokio::time::timeout(
-                    HANDSHAKE,
-                    tokio_tungstenite::connect_async_tls_with_config(
-                        self.ws_request(),
-                        None,
-                        false,
-                        Some(tokio_tungstenite::Connector::Rustls(self.tls.clone())),
-                    ),
-                ) => result,
-            };
-            let mut socket = match connected {
-                Ok(Ok((socket, _))) => socket,
-                Ok(Err(WsError::Http(response)))
-                    if response.status() == StatusCode::UNAUTHORIZED =>
-                {
-                    deliver!(LiveEvent::Unauthorized);
-                    tokio::select! {
-                        _ = events.closed() => return,
-                        _ = wake.notified() => {}
-                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-                    }
-                    continue;
-                }
-                Ok(Err(_)) | Err(_) => {
-                    deliver!(LiveEvent::Disconnected(format!(
-                        "Cannot reach {}.",
-                        self.origin.display()
-                    )));
-                    pause!();
-                    continue;
-                }
-            };
-            let connected_at = tokio::time::Instant::now();
-            // Channels already live keep their newest delivered cursor.
-            let latest = desired.borrow_and_update().clone();
-            wanted = latest
-                .iter()
-                .map(|(bot, cursor)| {
-                    let cursor = match requested.get(bot) {
-                        Some(asked) if asked == cursor => {
-                            wanted.get(bot).cloned().unwrap_or_else(|| cursor.clone())
-                        }
-                        _ => cursor.clone(),
-                    };
-                    (*bot, cursor)
-                })
-                .collect();
-            requested = latest;
-            let mut ok = socket.send(subscribe("bots".into(), None)).await.is_ok();
-            for (bot, cursor) in &wanted {
-                ok = ok
-                    && socket
-                        .send(subscribe(format!("bot:{bot}"), Some(cursor)))
-                        .await
-                        .is_ok();
-            }
-            if ok {
-                deliver!(LiveEvent::Connected);
-            }
-            let reason = loop {
-                if !ok {
-                    break "The live connection failed.";
-                }
-                tokio::select! {
-                    _ = events.closed() => return,
-                    changed = desired.changed() => {
-                        if changed.is_err() { return; }
-                        let next = desired.borrow_and_update().clone();
-                        let mut messages = Vec::new();
-                        wanted.retain(|bot, _| {
-                            let keep = next.contains_key(bot);
-                            if !keep {
-                                messages.push(Message::Text(
-                                    json!({ "op": "unsubscribe", "channel": format!("bot:{bot}") })
-                                        .to_string()
-                                        .into(),
-                                ));
-                            }
-                            keep
-                        });
-                        for (bot, cursor) in &next {
-                            if requested.get(bot) != Some(cursor) || !wanted.contains_key(bot) {
-                                messages.push(subscribe(format!("bot:{bot}"), Some(cursor)));
-                                wanted.insert(*bot, cursor.clone());
-                            }
-                        }
-                        requested = next;
-                        for message in messages {
-                            if socket.send(message).await.is_err() {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    incoming = tokio::time::timeout(INACTIVITY, socket.next()) => {
-                        let text = match incoming {
-                            Err(_) => break "The live connection went silent.",
-                            Ok(None) | Ok(Some(Err(_))) => break "The live connection closed.",
-                            Ok(Some(Ok(Message::Text(text)))) => text,
-                            Ok(Some(Ok(Message::Close(_)))) => break "The live connection closed.",
-                            Ok(Some(Ok(_))) => continue,
-                        };
-                        let Ok(message) = serde_json::from_str::<serde_json::Value>(&text) else {
-                            continue;
-                        };
-                        if let Some(event) = route(&message, &mut wanted) {
-                            deliver!(event);
-                        }
-                    }
-                }
-            };
-            deliver!(LiveEvent::Disconnected(reason.into()));
-            if connected_at.elapsed() >= STABLE {
-                backoff = Duration::from_millis(500);
-            }
-            pause!();
+        SendRequest {
+            request_id,
+            text,
+            provider_id: None,
+            reaction: None,
+            parts,
+            open_draft: self.draft.clone(),
+            answers_notice: None,
         }
+    }
+
+    /// Its text then its files; none for a message without files, which is
+    /// plain text.
+    fn parts(&self) -> Vec<MessagePart> {
+        if self.files.is_empty() {
+            return Vec::new();
+        }
+        let text = (!self.text.is_empty()).then(|| MessagePart::Text {
+            text: format!("{}\n", self.text),
+        });
+        text.into_iter()
+            .chain(
+                self.files
+                    .iter()
+                    .map(|file| MessagePart::File { file: file.clone() }),
+            )
+            .collect()
     }
 }
 
@@ -855,10 +125,10 @@ mod tests {
             files: vec![file.clone()],
             draft: None,
         };
-        let (text, parts) = message.wire();
-        assert_eq!(text, "For March\n[File: receipt.pdf]");
+        let request = message.request(Uuid::nil());
+        assert_eq!(request.text, "For March\n[File: receipt.pdf]");
         assert_eq!(
-            parts,
+            request.parts,
             vec![
                 MessagePart::Text {
                     text: "For March\n".into()
@@ -871,34 +141,7 @@ mod tests {
             files: vec![],
             draft: None,
         };
-        assert_eq!(plain.wire(), ("hi".into(), vec![]));
-    }
-
-    #[test]
-    fn a_reply_carries_its_open_draft_as_the_server_reads_it() {
-        let message = Message {
-            text: "Send it as it is.".into(),
-            files: vec![],
-            draft: Some(OpenDraft {
-                id: Uuid::nil(),
-                edit: DraftEdit {
-                    version: 3,
-                    subject: Some("Lunch".into()),
-                    body: "Noon works.".into(),
-                    attachments: None,
-                },
-            }),
-        };
-        assert_eq!(
-            message.body(Uuid::nil()),
-            json!({
-                "request_id": Uuid::nil(),
-                "text": "Send it as it is.",
-                "provider_id": null,
-                "open_draft": {
-                    "id": Uuid::nil(), "version": 3, "subject": "Lunch", "body": "Noon works.",
-                },
-            })
-        );
+        let request = plain.request(Uuid::nil());
+        assert_eq!((request.text.as_str(), request.parts.len()), ("hi", 0));
     }
 }

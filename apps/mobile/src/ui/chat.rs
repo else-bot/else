@@ -13,8 +13,10 @@ use uuid::Uuid;
 
 use super::parts::{ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
+use else_client::api::ReadCommand;
+
 use crate::api::{ClientError, Message};
-use crate::conversation::{Ask, Conversation, Outcome, Row};
+use crate::conversation::{self, Ask, Outcome, Row};
 
 /// The composer's message on its way to the server. A send whose outcome
 /// is unknown keeps its request ID and the message it carried: sending the
@@ -48,11 +50,11 @@ impl Outbox {
 pub fn screen(bot: Uuid, name: String) -> Screen {
     let chat = session::open_chat(bot);
     let rows = computed(move || {
-        chat.with(|c| c.conversation().map(Conversation::rows).unwrap_or_default())
+        chat.with(|c| c.conversation().map(conversation::rows).unwrap_or_default())
     });
     let thinking =
-        computed(move || chat.with(|c| c.conversation().is_some_and(Conversation::thinking)));
-    let busy = computed(move || chat.with(|c| c.conversation().is_some_and(Conversation::busy)));
+        computed(move || chat.with(|c| c.conversation().is_some_and(conversation::thinking)));
+    let busy = computed(move || chat.with(|c| c.conversation().is_some_and(conversation::busy)));
     keep_read(bot, chat);
 
     let transcript = dynamic(move || {
@@ -112,9 +114,8 @@ fn keep_read(bot: Uuid, chat: Signal<Chat>) {
         };
         let client = session::server().client.clone();
         spawn(async move {
-            if let Ok(updated) = client.read_through(bot, position).await {
-                session::update_bot(updated);
-            }
+            // The bots channel brings the updated read state.
+            let _ = client.read(bot, ReadCommand::Through { position }).await;
         });
     });
 }
@@ -148,7 +149,7 @@ fn transcript(
     thinking: Memo<bool>,
 ) -> impl IntoElement {
     let asks = computed(move || {
-        chat.with(|c| c.conversation().map(Conversation::asks).unwrap_or_default())
+        chat.with(|c| c.conversation().map(conversation::asks).unwrap_or_default())
     });
     let lines = computed(move || {
         let mut lines: Vec<Line> = rows.get().into_iter().map(Line::Row).collect();
@@ -393,7 +394,7 @@ enum Upload {
     /// it under the same ID, which the server takes once.
     Failed {
         message: String,
-        data: std::rc::Rc<Vec<u8>>,
+        data: std::sync::Arc<Vec<u8>>,
     },
 }
 
@@ -408,7 +409,12 @@ impl PartialEq for Upload {
 }
 
 /// Uploads one picked file and records how it went.
-fn upload(bot: Uuid, pending: Signal<Vec<Pending>>, file: Attachment, data: std::rc::Rc<Vec<u8>>) {
+fn upload(
+    bot: Uuid,
+    pending: Signal<Vec<Pending>>,
+    file: Attachment,
+    data: std::sync::Arc<Vec<u8>>,
+) {
     let id = file.id;
     pending.update(|p| {
         if let Some(item) = p.iter_mut().find(|item| item.file.id == id) {
@@ -417,7 +423,7 @@ fn upload(bot: Uuid, pending: Signal<Vec<Pending>>, file: Attachment, data: std:
     });
     let client = session::server().client.clone();
     spawn(async move {
-        let result = client.upload(bot, file, data.as_ref().clone()).await;
+        let result = client.upload_attachment(bot, file, data.clone()).await;
         session::try_update(pending, |p| {
             let Some(item) = p.iter_mut().find(|item| item.file.id == id) else {
                 return;
@@ -480,7 +486,7 @@ fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, notice: Signal<Option<String
                 notice.try_set(Some(format!("{} is larger than 10 MB.", picked.name)));
                 continue;
             }
-            let data = std::rc::Rc::new(picked.data.bytes().to_vec());
+            let data = std::sync::Arc::new(picked.data.bytes().to_vec());
             let file = Attachment {
                 id: Uuid::new_v4(),
                 name: picked.name,
@@ -591,7 +597,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
         // Held by the server, not by the Send button: clearing the text
         // swaps that button for Stop, which would cancel a send under way.
         session::spawn_held(async move {
-            match client.send(bot, request_id, message.clone()).await {
+            match client.send(bot, message.request(request_id)).await {
                 Ok(sent) => {
                     batch(|| {
                         if !outbox.try_set(Outbox::Idle) {
@@ -605,7 +611,8 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
                         pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
                         chat.update(|c| {
                             if let Some(conversation) = c.conversation_mut() {
-                                conversation.insert_sent(sent.item, sent.turn);
+                                conversation.insert_item(sent.item);
+                                conversation.insert_turn(sent.turn);
                             }
                         });
                     });
@@ -632,7 +639,7 @@ fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement
     let stop = move || {
         let Some(request) = chat.with_untracked(|c| match c {
             Chat::Ready(conversation) | Chat::Recovering(conversation) => {
-                conversation.active_request()
+                conversation::active_request(conversation)
             }
             _ => None,
         }) else {

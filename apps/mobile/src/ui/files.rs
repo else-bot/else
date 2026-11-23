@@ -57,7 +57,7 @@ async fn fetch(bot: Uuid, file: &Attachment) -> Result<PathBuf, String> {
     }
     let client = server.client.clone();
     let bytes = client
-        .attachment(bot, file.id)
+        .attachment_bytes(bot, file.id)
         .await
         .map_err(|err| err.to_string())?;
     let dir = path.parent().expect("a cached file has a folder");

@@ -12,9 +12,11 @@ use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
-use crate::api::{Client, ClientError, LiveEvent};
-use crate::conversation::Conversation;
+use else_client::api::{LiveCommand, LiveCommands};
+
+use crate::api::{Client, ClientError, LiveEvent, StreamMessage};
 use crate::server::Profile;
+use else_client::model::Conversation;
 
 /// Whether the phone has a server, and its client when it has.
 #[derive(Clone, Default)]
@@ -53,7 +55,7 @@ pub fn server() -> Rc<Server> {
 
 /// Saves a server checked by the connect form and switches to it.
 pub fn connect(profile: Profile) -> Result<(), String> {
-    let client = Client::new(&profile)?;
+    let client = crate::api::connect(&profile)?;
     profile.save()?;
     use_server(profile, client);
     Ok(())
@@ -64,7 +66,7 @@ pub fn connect(profile: Profile) -> Result<(), String> {
 pub fn switch(origin: &str) -> Result<(), String> {
     let profile = Profile::saved(origin)
         .ok_or_else(|| "This server's owner key is no longer on this iPhone.".to_owned())?;
-    let client = Client::new(&profile)?;
+    let client = crate::api::connect(&profile)?;
     profile.activate()?;
     use_server(profile, client);
     Ok(())
@@ -72,7 +74,7 @@ pub fn switch(origin: &str) -> Result<(), String> {
 
 /// Opens the saved server at launch, without saving it again.
 pub fn resume(profile: Profile) -> Result<(), String> {
-    let client = Client::new(&profile)?;
+    let client = crate::api::connect(&profile)?;
     use_server(profile, client);
     Ok(())
 }
@@ -232,7 +234,7 @@ fn chats() -> Signal<Chats> {
 
 /// The channels the live connection follows, each from its cursor.
 #[derive(Clone, Default)]
-struct Wanted(Option<tokio::sync::watch::Sender<HashMap<Uuid, String>>>);
+struct Wanted(Option<LiveCommands>);
 
 impl PartialEq for Wanted {
     fn eq(&self, _: &Self) -> bool {
@@ -246,14 +248,10 @@ fn wanted() -> Signal<Wanted> {
 
 fn follow(bot: Uuid, cursor: Option<String>) {
     wanted().with_untracked(|wanted| {
-        if let Some(sender) = &wanted.0 {
-            sender.send_modify(|channels| match cursor {
-                Some(cursor) => {
-                    channels.insert(bot, cursor);
-                }
-                None => {
-                    channels.remove(&bot);
-                }
+        if let Some(commands) = &wanted.0 {
+            let _ = commands.send(match cursor {
+                Some(cursor) => LiveCommand::Subscribe { bot, cursor },
+                None => LiveCommand::Unsubscribe { bot },
             });
         }
     });
@@ -266,24 +264,22 @@ pub fn start() {
     cleanup(|| held().set(Held::default()));
     let client = server().client.clone();
     let live = client.clone().live();
-    wanted().set(Wanted(Some(live.wanted.clone())));
+    wanted().set(Wanted(Some(live.commands.clone())));
     cleanup(move || wanted().set(Wanted(None)));
     // Back from the background, iOS has usually closed the socket: retry
     // now instead of after the backoff, and catch up on the list.
-    let wake = live.wake.clone();
+    let commands = live.commands.clone();
     let was = stored(lifecycle());
     effect(move || {
         let now = lifecycle();
         if was.replace(now) == Lifecycle::Background && now == Lifecycle::Active {
-            wake.notify_one();
+            commands.reconnect();
             refresh_bots();
         }
     });
     refresh_bots();
     let mut events = live.events;
-    let keep = live.wanted;
     spawn(async move {
-        let _keep = keep;
         while let Some(event) = events.recv().await {
             handle(event);
         }
@@ -300,23 +296,29 @@ fn handle(event: LiveEvent) {
             list: list.bots,
             default_bot_id: list.default_bot_id,
         }),
-        LiveEvent::Bot { bot, id, message } => {
+        // The phone shows no maintenance banner yet.
+        LiveEvent::ServerPause(_) => {}
+        LiveEvent::Bot { bot, message } => {
             let Some(chat) = chats().with_untracked(|c| c.0.get(&bot).copied()) else {
                 return;
             };
-            let mut reset = false;
-            chat.update(|chat| {
-                if let Chat::Ready(conversation) = chat {
-                    reset = conversation.apply(&id, &message).is_err();
+            match message {
+                StreamMessage::Frame(frame) => {
+                    let mut reset = false;
+                    chat.update(|chat| {
+                        if let Chat::Ready(conversation) = chat {
+                            reset = conversation.apply(&frame).is_err();
+                        }
+                    });
+                    if reset {
+                        recover(bot, chat);
+                    }
                 }
-            });
-            if reset {
-                recover(bot, chat);
-            }
-        }
-        LiveEvent::BotReset { bot } => {
-            if let Some(chat) = chats().with_untracked(|c| c.0.get(&bot).copied()) {
-                recover(bot, chat);
+                StreamMessage::Reset => recover(bot, chat),
+                StreamMessage::Deleted => {
+                    follow(bot, None);
+                    chat.set(Chat::Failed("This bot was deleted.".into()));
+                }
             }
         }
     }
@@ -382,7 +384,11 @@ pub fn load(bot: Uuid, chat: Signal<Chat>) {
         let mut delay = Duration::from_secs(1);
         let open = move || chats().with_untracked(|c| c.0.get(&bot) == Some(&chat));
         while open() {
-            let result = client.clone().latest(bot).await;
+            let result = client
+                .clone()
+                .latest(bot)
+                .await
+                .map(|latest| latest.snapshot);
             // The chat may have closed during the request; its signal is
             // then gone.
             if !open() {
@@ -423,7 +429,7 @@ pub fn load_older(bot: Uuid, chat: Signal<Chat>) {
     };
     let client = server().client.clone();
     spawn(async move {
-        if let Ok(page) = client.older(bot, before).await {
+        if let Ok(page) = client.snapshot(bot, Some(before)).await {
             // The chat may have closed during the request.
             try_update(chat, |c| {
                 if let Chat::Ready(conversation) = c {

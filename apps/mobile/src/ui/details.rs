@@ -62,11 +62,11 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
             Chat::Loading => Lists::Loading,
             Chat::Failed(message) => Lists::Failed(message.clone()),
             Chat::Ready(conversation) => Lists::Ready {
-                extras: conversation.extras.clone(),
+                extras: conversation.extras().as_ref().clone(),
                 stale: false,
             },
             Chat::Recovering(conversation) => Lists::Ready {
-                extras: conversation.extras.clone(),
+                extras: conversation.extras().as_ref().clone(),
                 stale: true,
             },
         })
@@ -94,7 +94,7 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
 
     // The model is read on open, after each bot.updated (another device or
     // the bot itself may have changed it), and on reconnecting.
-    let updates = computed(move || chat.with(|c| c.conversation().map_or(0, |c| c.bot_updates)));
+    let updates = computed(move || chat.with(|c| c.conversation().map_or(0, |c| c.bot_updates())));
     let client = session::server().client.clone();
     {
         let client = client.clone();

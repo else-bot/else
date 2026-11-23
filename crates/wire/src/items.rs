@@ -91,6 +91,20 @@ pub enum MessagePart {
     File { file: Attachment },
 }
 
+impl MessagePart {
+    /// A message's plain text: its text parts, with each file spelled as
+    /// [`Attachment::fallback`]. The server requires `text` to equal it.
+    pub fn flatten(parts: &[MessagePart]) -> String {
+        parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::Text { text } => text.clone(),
+                MessagePart::File { file } => file.fallback(),
+            })
+            .collect()
+    }
+}
+
 /// Reads a reaction a newer server added as none; the reacting message's
 /// text still says it. [`ReactionKind`] stays strict, so a desktop sends
 /// only the reactions it knows.

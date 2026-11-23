@@ -1,51 +1,16 @@
-//! One bot's loaded conversation: its newest pages and the live events
-//! applied on top, in cursor order, as the desktop applies them.
+//! What the phone shows of a bot's conversation: the transcript rows, the
+//! asks waiting on the owner, and whether the bot is replying. The
+//! conversation itself, its pages and the live events applied on top, is
+//! the shared `else_client::model::Conversation` the desktop uses too.
 
-use std::collections::{BTreeMap, HashMap};
-
-use else_wire::bots::{Activity, Phase};
-use else_wire::conversation::{BotExtras, BotUpdated, Event, Snapshot};
+use else_client::model::Conversation;
+use else_wire::bots::Phase;
 use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
 use else_wire::turns::{Turn, TurnStatus};
 use uuid::Uuid;
-
-/// Why the loaded conversation no longer follows the stream; the fix is
-/// always a fresh snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reset {
-    Gap,
-    BadCursor,
-    UnknownItem,
-    OffsetMismatch,
-    Undecodable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Applied {
-    /// Already applied (a replay); nothing changed.
-    Duplicate,
-    Changed,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Conversation {
-    /// `<server_instance_id>:<bot_id>`; events must carry the same prefix.
-    cursor_prefix: String,
-    applied: i64,
-    items: BTreeMap<i64, Item>,
-    seq_of: HashMap<Uuid, i64>,
-    turns: HashMap<Uuid, Turn>,
-    pub older_before_seq: Option<i64>,
-    pub activity: Activity,
-    /// The bot's routines, reminders, watchers and triggers.
-    pub extras: BotExtras,
-    /// Counts the bot's `bot.updated` events, which also mark a change of
-    /// its model: screens that show the model read it again.
-    pub bot_updates: u64,
-}
 
 /// An owner message's text and its files. A message with files keeps its
 /// text parts; the markers its plain text spells the files with are left
@@ -63,11 +28,6 @@ fn owner_parts(item: &Item) -> (String, Vec<Attachment>) {
         }
     }
     (text.trim().to_owned(), files)
-}
-
-fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
-    let (prefix, seq) = cursor.rsplit_once(':')?;
-    Some((prefix, seq.parse().ok()?))
 }
 
 /// One row of the transcript, as the phone shows it.
@@ -136,269 +96,171 @@ impl Row {
     }
 }
 
-impl Conversation {
-    pub fn from_snapshot(snapshot: Snapshot) -> Result<Self, Reset> {
-        let (prefix, applied) = split_cursor(&snapshot.event_cursor).ok_or(Reset::BadCursor)?;
-        let mut conversation = Self {
-            cursor_prefix: prefix.to_owned(),
-            applied,
-            items: BTreeMap::new(),
-            seq_of: HashMap::new(),
-            turns: HashMap::new(),
-            older_before_seq: snapshot.older_before_seq,
-            activity: snapshot.activity,
-            extras: snapshot.extras,
-            bot_updates: 0,
-        };
-        for item in snapshot.items {
-            conversation.upsert_item(item);
-        }
-        for turn in snapshot.turns {
-            conversation.turns.insert(turn.id, turn);
-        }
-        Ok(conversation)
-    }
+/// Whether the bot is replying or has replies queued.
+pub fn busy(conversation: &Conversation) -> bool {
+    conversation
+        .activity
+        .as_ref()
+        .is_some_and(|activity| !matches!(activity.phase, Phase::Idle | Phase::Unknown))
+}
 
-    /// The cursor of the last applied event.
-    pub fn cursor(&self) -> String {
-        format!("{}:{}", self.cursor_prefix, self.applied)
-    }
+/// The request of the turn the bot works on now, to stop it.
+pub fn active_request(conversation: &Conversation) -> Option<Uuid> {
+    let turn = conversation.activity.as_ref()?.active_turn_id?;
+    conversation.turn(turn).map(|turn| turn.request_id)
+}
 
-    fn upsert_item(&mut self, item: Item) {
-        if let Some(old_seq) = self.seq_of.insert(item.id, item.seq)
-            && old_seq != item.seq
-        {
-            self.items.remove(&old_seq);
+/// The transcript, oldest first.
+pub fn rows(conversation: &Conversation) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut previous: Option<Uuid> = None;
+    for item in conversation.items() {
+        if previous.is_some_and(|turn| turn != item.turn_id) {
+            receipts(conversation, previous, &mut rows);
         }
-        self.items.insert(item.seq, item);
-    }
-
-    /// Applies the next channel message. Replays at or below the applied
-    /// cursor are ignored; anything else out of order needs a snapshot.
-    pub fn apply(&mut self, id: &str, message: &serde_json::Value) -> Result<Applied, Reset> {
-        let (prefix, seq) = split_cursor(id).ok_or(Reset::BadCursor)?;
-        if prefix != self.cursor_prefix {
-            return Err(Reset::BadCursor);
-        }
-        if seq <= self.applied {
-            return Ok(Applied::Duplicate);
-        }
-        if seq != self.applied + 1 {
-            return Err(Reset::Gap);
-        }
-        let event =
-            serde_json::from_value::<Event>(message.clone()).map_err(|_| Reset::Undecodable)?;
-        match event {
-            Event::ItemUpsert(upsert) => self.upsert_item(upsert.item),
-            Event::ItemDelta(delta) => {
-                let at = *self.seq_of.get(&delta.item_id).ok_or(Reset::UnknownItem)?;
-                let item = self.items.get_mut(&at).ok_or(Reset::UnknownItem)?;
-                if item.text.len() as u64 != delta.offset_utf8 {
-                    return Err(Reset::OffsetMismatch);
-                }
-                item.text.push_str(&delta.text);
-            }
-            Event::TurnUpdated(update) => {
-                self.turns.insert(update.turn.id, update.turn);
-            }
-            Event::BotUpdated(update) => {
-                let BotUpdated { bot, extras, .. } = *update;
-                if let Some(activity) = bot.activity {
-                    self.activity = activity;
-                }
-                self.extras.update(extras);
-                self.bot_updates += 1;
-            }
-        }
-        self.applied = seq;
-        Ok(Applied::Changed)
-    }
-
-    /// Records the owner message the server accepted, before its event
-    /// arrives; the event replaces it with the same item.
-    /// A late response never replaces what the stream already delivered.
-    pub fn insert_sent(&mut self, item: Item, turn: Turn) {
-        if !self.seq_of.contains_key(&item.id) {
-            self.upsert_item(item);
-        }
-        self.turns.entry(turn.id).or_insert(turn);
-    }
-
-    /// Merges an older page; it never replaces newer loaded text.
-    pub fn merge_older(&mut self, page: Snapshot) {
-        for item in page.items {
-            if !self.seq_of.contains_key(&item.id) {
-                self.upsert_item(item);
-            }
-        }
-        for turn in page.turns {
-            self.turns.entry(turn.id).or_insert(turn);
-        }
-        self.older_before_seq = page.older_before_seq;
-    }
-
-    /// Whether the bot is replying or has replies queued.
-    pub fn busy(&self) -> bool {
-        !matches!(self.activity.phase, Phase::Idle | Phase::Unknown)
-    }
-
-    /// The request of the turn the bot works on now, to stop it.
-    pub fn active_request(&self) -> Option<Uuid> {
-        let turn = self.activity.active_turn_id?;
-        self.turns.get(&turn).map(|turn| turn.request_id)
-    }
-
-    /// The transcript, oldest first.
-    pub fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::with_capacity(self.items.len());
-        let mut previous: Option<Uuid> = None;
-        for item in self.items.values() {
-            if previous.is_some_and(|turn| turn != item.turn_id) {
-                self.receipts(previous, &mut rows);
-            }
-            previous = Some(item.turn_id);
-            let turn = self.turns.get(&item.turn_id);
-            match item.kind {
-                ItemKind::User => {
-                    if let Some(task) = &item.bot_task {
-                        let title = task.title.as_deref().unwrap_or("a task");
-                        rows.push(Row::Note {
-                            id: item.id,
-                            text: format!("{} sent {title}", task.sender_name),
-                        });
-                        continue;
-                    }
-                    let (text, files) = owner_parts(item);
-                    rows.push(Row::Owner {
+        previous = Some(item.turn_id);
+        let turn = conversation.turn(item.turn_id);
+        match item.kind {
+            ItemKind::User => {
+                if let Some(task) = &item.bot_task {
+                    let title = task.title.as_deref().unwrap_or("a task");
+                    rows.push(Row::Note {
                         id: item.id,
-                        text,
-                        files,
-                        outcome: turn.and_then(outcome),
+                        text: format!("{} sent {title}", task.sender_name),
                     });
+                    continue;
                 }
-                ItemKind::Assistant => {
-                    if item.text.trim().is_empty() {
-                        continue;
-                    }
-                    let streaming = turn.is_some_and(|turn| turn.status.is_working())
-                        && self.activity.active_turn_id == Some(item.turn_id);
-                    rows.push(Row::Bot {
-                        id: item.id,
-                        text: item.text.clone(),
-                        streaming,
-                    });
-                }
-                ItemKind::Status | ItemKind::Routine => {
-                    if let Some(reply) = &item.bot_reply {
-                        let title = reply.title.as_deref().unwrap_or("its task");
-                        rows.push(Row::Note {
-                            id: item.id,
-                            text: format!("{} finished {title}", reply.sender_name),
-                        });
-                    } else if !item.text.trim().is_empty() {
-                        rows.push(Row::Note {
-                            id: item.id,
-                            text: item.text.clone(),
-                        });
-                    }
-                }
-                ItemKind::Connector | ItemKind::Unknown => {}
-            }
-        }
-        self.receipts(previous, &mut rows);
-        rows
-    }
-
-    /// The settled questions and drafts of `turn`, after its messages.
-    fn receipts(&self, turn: Option<Uuid>, rows: &mut Vec<Row>) {
-        let Some(turn) = turn.and_then(|turn| self.turns.get(&turn)) else {
-            return;
-        };
-        for question in &turn.questions {
-            let text = match (&question.status, &question.answer) {
-                (QuestionStatus::Answered, Some(answer)) => {
-                    let labels: Vec<&str> = question
-                        .choices
-                        .iter()
-                        .filter(|choice| answer.contains(&choice.id))
-                        .map(|choice| choice.label.as_str())
-                        .collect();
-                    format!("You answered “{}”: {}", question.title, labels.join(", "))
-                }
-                (QuestionStatus::Skipped | QuestionStatus::Cancelled, _) => {
-                    format!("“{}” was closed without an answer", question.title)
-                }
-                _ => continue,
-            };
-            rows.push(Row::Note {
-                id: question.id,
-                text,
-            });
-        }
-        for request in &turn.secret_requests {
-            let text = match request.status {
-                SecretRequestStatus::Stored => format!("You saved {}", request.name),
-                // Declined by the owner or withdrawn with its turn.
-                SecretRequestStatus::Cancelled => format!("{} was not saved", request.name),
-                SecretRequestStatus::Pending | SecretRequestStatus::Unknown => continue,
-            };
-            rows.push(Row::Note {
-                id: request.id,
-                text,
-            });
-        }
-        for draft in &turn.outgoing_drafts {
-            if !draft.is_open() && draft.status != DraftStatus::Superseded {
-                rows.push(Row::Note {
-                    id: draft.id,
-                    text: format!("{}: {}", draft.content.title(), draft.label()),
+                let (text, files) = owner_parts(item);
+                rows.push(Row::Owner {
+                    id: item.id,
+                    text,
+                    files,
+                    outcome: turn.and_then(outcome),
                 });
             }
+            ItemKind::Assistant => {
+                if item.text.trim().is_empty() {
+                    continue;
+                }
+                let streaming = turn.is_some_and(|turn| turn.status.is_working())
+                    && conversation
+                        .activity
+                        .as_ref()
+                        .is_some_and(|a| a.active_turn_id == Some(item.turn_id));
+                rows.push(Row::Bot {
+                    id: item.id,
+                    text: item.text.clone(),
+                    streaming,
+                });
+            }
+            ItemKind::Status | ItemKind::Routine => {
+                if let Some(reply) = &item.bot_reply {
+                    let title = reply.title.as_deref().unwrap_or("its task");
+                    rows.push(Row::Note {
+                        id: item.id,
+                        text: format!("{} finished {title}", reply.sender_name),
+                    });
+                } else if !item.text.trim().is_empty() {
+                    rows.push(Row::Note {
+                        id: item.id,
+                        text: item.text.clone(),
+                    });
+                }
+            }
+            ItemKind::Connector | ItemKind::Unknown => {}
         }
     }
+    receipts(conversation, previous, &mut rows);
+    rows
+}
 
-    /// The open questions and drafts, oldest turn first.
-    pub fn asks(&self) -> Vec<Ask> {
-        let mut turns: Vec<&Turn> = self.turns.values().collect();
-        turns.sort_by_key(|turn| turn.turn_no);
-        let mut asks = Vec::new();
-        for turn in turns {
-            asks.extend(
-                turn.questions
+/// The settled questions and drafts of `turn`, after its messages.
+fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>) {
+    let Some(turn) = turn.and_then(|turn| conversation.turn(turn)) else {
+        return;
+    };
+    for question in &turn.questions {
+        let text = match (&question.status, &question.answer) {
+            (QuestionStatus::Answered, Some(answer)) => {
+                let labels: Vec<&str> = question
+                    .choices
                     .iter()
-                    .filter(|q| q.is_pending())
-                    .cloned()
-                    .map(|q| Ask::Question(Box::new(q))),
-            );
-            asks.extend(
-                turn.outgoing_drafts
-                    .iter()
-                    .filter(|d| d.is_open())
-                    .cloned()
-                    .map(|d| Ask::Draft(Box::new(d))),
-            );
-            asks.extend(
-                turn.secret_requests
-                    .iter()
-                    .filter(|r| r.is_pending())
-                    .cloned()
-                    .map(|r| Ask::Secret(Box::new(r))),
-            );
-        }
-        asks
+                    .filter(|choice| answer.contains(&choice.id))
+                    .map(|choice| choice.label.as_str())
+                    .collect();
+                format!("You answered “{}”: {}", question.title, labels.join(", "))
+            }
+            (QuestionStatus::Skipped | QuestionStatus::Cancelled, _) => {
+                format!("“{}” was closed without an answer", question.title)
+            }
+            _ => continue,
+        };
+        rows.push(Row::Note {
+            id: question.id,
+            text,
+        });
     }
+    for request in &turn.secret_requests {
+        let text = match request.status {
+            SecretRequestStatus::Stored => format!("You saved {}", request.name),
+            // Declined by the owner or withdrawn with its turn.
+            SecretRequestStatus::Cancelled => format!("{} was not saved", request.name),
+            SecretRequestStatus::Pending | SecretRequestStatus::Unknown => continue,
+        };
+        rows.push(Row::Note {
+            id: request.id,
+            text,
+        });
+    }
+    for draft in &turn.outgoing_drafts {
+        if !draft.is_open() && draft.status != DraftStatus::Superseded {
+            rows.push(Row::Note {
+                id: draft.id,
+                text: format!("{}: {}", draft.content.title(), draft.label()),
+            });
+        }
+    }
+}
 
-    /// Whether the newest item is the owner's and the bot has not started
-    /// writing: shown as a typing indicator.
-    pub fn thinking(&self) -> bool {
-        if !self.busy() {
-            return false;
-        }
-        self.items
-            .values()
-            .next_back()
-            .is_none_or(|item| item.kind != ItemKind::Assistant)
+/// The open questions and drafts, oldest turn first.
+pub fn asks(conversation: &Conversation) -> Vec<Ask> {
+    let mut asks = Vec::new();
+    for turn in conversation.turns_in_order() {
+        asks.extend(
+            turn.questions
+                .iter()
+                .filter(|q| q.is_pending())
+                .cloned()
+                .map(|q| Ask::Question(Box::new(q))),
+        );
+        asks.extend(
+            turn.outgoing_drafts
+                .iter()
+                .filter(|d| d.is_open())
+                .cloned()
+                .map(|d| Ask::Draft(Box::new(d))),
+        );
+        asks.extend(
+            turn.secret_requests
+                .iter()
+                .filter(|r| r.is_pending())
+                .cloned()
+                .map(|r| Ask::Secret(Box::new(r))),
+        );
     }
+    asks
+}
+
+/// Whether the newest item is the owner's and the bot has not started
+/// writing: shown as a typing indicator.
+pub fn thinking(conversation: &Conversation) -> bool {
+    if !busy(conversation) {
+        return false;
+    }
+    conversation
+        .items()
+        .next_back()
+        .is_none_or(|item| item.kind != ItemKind::Assistant)
 }
 
 fn outcome(turn: &Turn) -> Option<Outcome> {
@@ -418,19 +280,20 @@ fn outcome(turn: &Turn) -> Option<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use else_client::model::Frame;
+    use else_wire::conversation::Snapshot;
     use serde_json::json;
 
     const TURN: &str = "00000000-0000-0000-0000-000000000001";
-    const ITEM: &str = "00000000-0000-0000-0000-000000000002";
     const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
 
-    fn snapshot(cursor: &str) -> Snapshot {
-        serde_json::from_value(json!({
+    fn conversation() -> Conversation {
+        let snapshot: Snapshot = serde_json::from_value(json!({
             "selected_provider_id": null,
-            "event_cursor": cursor,
+            "event_cursor": "srv:bot:4",
             "items": [{
-                "id": ITEM, "seq": 1, "turn_id": TURN, "request_id": null,
-                "kind": "assistant", "text": "Hel", "provider_id": "codex",
+                "id": "00000000-0000-0000-0000-000000000002", "seq": 1, "turn_id": TURN,
+                "request_id": null, "kind": "assistant", "text": "Hel", "provider_id": "codex",
             }],
             "turns": [{
                 "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
@@ -439,84 +302,18 @@ mod tests {
             "activity": { "phase": "working", "active_turn_id": TURN, "queued_count": 0 },
             "older_before_seq": null,
         }))
-        .unwrap()
-    }
-
-    fn delta(offset: u64, text: &str) -> serde_json::Value {
-        json!({ "event": "item.delta", "data": { "item_id": ITEM, "offset_utf8": offset, "text": text } })
-    }
-
-    #[test]
-    fn deltas_in_cursor_order_extend_the_streaming_reply() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        assert_eq!(
-            conversation.apply("srv:bot:5", &delta(3, "lo")),
-            Ok(Applied::Changed)
-        );
-        assert_eq!(
-            conversation.rows(),
-            vec![Row::Bot {
-                id: ITEM.parse().unwrap(),
-                text: "Hello".into(),
-                streaming: true,
-            }]
-        );
-        assert_eq!(conversation.cursor(), "srv:bot:5");
-        assert_eq!(
-            conversation.active_request(),
-            Some(REQUEST.parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn a_replayed_event_changes_nothing() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        assert_eq!(
-            conversation.apply("srv:bot:4", &delta(3, "lo")),
-            Ok(Applied::Duplicate)
-        );
-        assert_eq!(conversation.cursor(), "srv:bot:4");
-    }
-
-    #[test]
-    fn a_skipped_event_or_a_wrong_offset_needs_a_snapshot() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        assert_eq!(
-            conversation.apply("srv:bot:6", &delta(3, "lo")),
-            Err(Reset::Gap)
-        );
-        assert_eq!(
-            conversation.apply("srv:bot:5", &delta(1, "lo")),
-            Err(Reset::OffsetMismatch)
-        );
-        assert_eq!(
-            conversation.apply("other:bot:5", &delta(3, "lo")),
-            Err(Reset::BadCursor)
-        );
-    }
-
-    #[test]
-    fn a_late_send_response_keeps_the_streamed_turn() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        let stale: Turn = serde_json::from_value(json!({
-            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
-            "status": "queued", "error": null, "effect_uncertain": false,
-        }))
         .unwrap();
-        let item = conversation.items.values().next().unwrap().clone();
-        conversation.insert_sent(item, stale);
-        assert!(conversation.rows().iter().any(|row| matches!(
-            row,
-            Row::Bot {
-                streaming: true,
-                ..
-            }
-        )));
+        Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    fn apply(conversation: &mut Conversation, seq: i64, message: serde_json::Value) {
+        let frame = Frame::decode(Some(format!("srv:bot:{seq}")), &message);
+        conversation.apply(&frame).unwrap();
     }
 
     #[test]
     fn a_pending_question_is_an_ask_until_answered() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let mut conversation = conversation();
         let question = |status: &str| {
             json!({ "event": "turn.updated", "data": { "turn": {
                 "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
@@ -528,17 +325,14 @@ mod tests {
                 }],
             }}})
         };
-        conversation
-            .apply("srv:bot:5", &question("pending"))
-            .unwrap();
-        assert!(matches!(&conversation.asks()[..], [Ask::Question(q)] if q.title == "Which plan?"));
-        let answered = question("answered");
-        let mut answered = answered;
+        apply(&mut conversation, 5, question("pending"));
+        assert!(matches!(&asks(&conversation)[..], [Ask::Question(q)] if q.title == "Which plan?"));
+        let mut answered = question("answered");
         answered["data"]["turn"]["questions"][0]["answer"] = json!("a");
-        conversation.apply("srv:bot:6", &answered).unwrap();
-        assert_eq!(conversation.asks(), vec![]);
+        apply(&mut conversation, 6, answered);
+        assert_eq!(asks(&conversation), vec![]);
         assert_eq!(
-            conversation.rows().last(),
+            rows(&conversation).last(),
             Some(&Row::Note {
                 id: "00000000-0000-0000-0000-00000000000a".parse().unwrap(),
                 text: "You answered “Which plan?”: A".into(),
@@ -548,7 +342,7 @@ mod tests {
 
     #[test]
     fn a_pending_secret_request_is_an_ask_until_settled() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
+        let mut conversation = conversation();
         let request = |status: &str| {
             json!({ "event": "turn.updated", "data": { "turn": {
                 "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
@@ -560,16 +354,12 @@ mod tests {
                 }],
             }}})
         };
-        conversation
-            .apply("srv:bot:5", &request("pending"))
-            .unwrap();
-        assert!(matches!(&conversation.asks()[..], [Ask::Secret(r)] if r.name == "smtp"));
-        conversation
-            .apply("srv:bot:6", &request("cancelled"))
-            .unwrap();
-        assert_eq!(conversation.asks(), vec![]);
+        apply(&mut conversation, 5, request("pending"));
+        assert!(matches!(&asks(&conversation)[..], [Ask::Secret(r)] if r.name == "smtp"));
+        apply(&mut conversation, 6, request("cancelled"));
+        assert_eq!(asks(&conversation), vec![]);
         assert_eq!(
-            conversation.rows().last(),
+            rows(&conversation).last(),
             Some(&Row::Note {
                 id: "00000000-0000-0000-0000-00000000000b".parse().unwrap(),
                 text: "smtp was not saved".into(),
@@ -579,20 +369,27 @@ mod tests {
 
     #[test]
     fn a_failed_turn_marks_the_owner_message() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        let owner = json!({ "event": "item.upsert", "data": { "item": {
-            "id": "00000000-0000-0000-0000-000000000009", "seq": 2, "turn_id": TURN,
-            "request_id": REQUEST, "kind": "user", "text": "hi", "provider_id": null,
-        }}});
-        let failed = json!({ "event": "turn.updated", "data": { "turn": {
-            "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
-            "status": "failed", "error": { "code": "provider_failed", "message": "Codex is signed out." },
-            "effect_uncertain": false,
-        }}});
-        conversation.apply("srv:bot:5", &owner).unwrap();
-        conversation.apply("srv:bot:6", &failed).unwrap();
+        let mut conversation = conversation();
+        apply(
+            &mut conversation,
+            5,
+            json!({ "event": "item.upsert", "data": { "item": {
+                "id": "00000000-0000-0000-0000-000000000009", "seq": 2, "turn_id": TURN,
+                "request_id": REQUEST, "kind": "user", "text": "hi", "provider_id": null,
+            }}}),
+        );
+        apply(
+            &mut conversation,
+            6,
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": TURN, "request_id": REQUEST, "turn_no": 1, "provider_id": "codex",
+                "status": "failed",
+                "error": { "code": "provider_failed", "message": "Codex is signed out." },
+                "effect_uncertain": false,
+            }}}),
+        );
         assert_eq!(
-            conversation.rows().last(),
+            rows(&conversation).last(),
             Some(&Row::Owner {
                 id: "00000000-0000-0000-0000-000000000009".parse().unwrap(),
                 text: "hi".into(),
@@ -600,16 +397,5 @@ mod tests {
                 outcome: Some(Outcome::Failed("Codex is signed out.".into())),
             })
         );
-    }
-
-    #[test]
-    fn a_bot_update_refreshes_its_routines() {
-        let mut conversation = Conversation::from_snapshot(snapshot("srv:bot:4")).unwrap();
-        assert_eq!(conversation.extras.routines, None);
-        let update = json!({ "event": "bot.updated", "data": {
-            "bot": { "id": Uuid::nil(), "name": "Inbox" }, "routines": [],
-        } });
-        conversation.apply("srv:bot:5", &update).unwrap();
-        assert_eq!(conversation.extras.routines, Some(vec![]));
     }
 }

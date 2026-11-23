@@ -545,6 +545,23 @@ impl Client {
             .await
     }
 
+    /// Saves the owner's edits to a draft seen at `edit.version`; a draft
+    /// changed since answers a conflict.
+    pub async fn edit_draft(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+        edit: crate::model::outgoing::DraftEdit,
+    ) -> Result<OutgoingDraft, ClientError> {
+        self.call::<DraftResponse>(
+            Method::PUT,
+            format!("/v1/bots/{bot}/outgoing-drafts/{draft}"),
+            Some(json!(edit)),
+        )
+        .await
+        .map(|response| response.draft)
+    }
+
     pub async fn stop_approving_always(
         self: Arc<Self>,
         bot: Uuid,

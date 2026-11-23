@@ -13,7 +13,11 @@ use uuid::Uuid;
 
 use super::parts::colors;
 use super::session;
-use crate::api::{ClientError, DraftEdit, Message, OpenDraft};
+use else_client::api::{SaveSecret, validate_secret_metadata};
+use else_client::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
+use else_wire::questions::QuestionAnswer;
+
+use crate::api::{ClientError, Message};
 use crate::conversation::Ask;
 
 /// A card's request to the server.
@@ -134,10 +138,18 @@ fn question_card(bot: Uuid, question: Question) -> impl IntoElement {
     let id = question.id;
     let multiple = question.multiple;
     let send = move |choices: Vec<String>| {
+        let answer = if multiple {
+            QuestionAnswer::Multiple(choices)
+        } else {
+            match choices.into_iter().next() {
+                Some(choice) => QuestionAnswer::Single(choice),
+                None => return,
+            }
+        };
         action.set(Action::Sending);
         let client = session::server().client.clone();
         session::spawn_held(async move {
-            match client.answer_question(bot, id, choices, multiple).await {
+            match client.answer_question(bot, id, answer).await {
                 Ok(()) => action.try_set(Action::Idle),
                 Err(err) => action.try_set(failed(err)),
             }
@@ -232,7 +244,7 @@ enum Mode {
 
 fn draft_card(bot: Uuid, draft: OutgoingDraft) -> impl IntoElement {
     let mode = signal(Mode::Reading);
-    let original = DraftEdit::of(&draft);
+    let original = draft.edit();
     let edit_subject = signal(original.subject.clone().unwrap_or_default());
     let edit_body = signal(original.body.clone());
     view().child(dynamic(move || match mode.get() {
@@ -283,7 +295,7 @@ fn draft_editor(
                 match client.edit_draft(bot, draft_id, edit).await {
                     // The server's live update replaces this card with the
                     // saved version a moment later.
-                    Ok(()) => action.try_set(Action::Idle) && mode.try_set(Mode::Reading),
+                    Ok(_) => action.try_set(Action::Idle) && mode.try_set(Mode::Reading),
                     Err(err) => action.try_set(failed(err)),
                 }
             });
@@ -407,7 +419,10 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
             action.try_set(Action::Sending);
             let client = session::server().client.clone();
             let result = if can_approve {
-                client.approve_draft(bot, &draft).await
+                client
+                    .approve_draft(bot, draft.id, draft.edit(), false)
+                    .await
+                    .map(drop)
             } else {
                 // The turn that drafted it has ended, so the button cannot
                 // approve it. A reply carrying the draft asks the bot to
@@ -416,11 +431,14 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 let reply = Message {
                     text: "Send it as it is.".into(),
                     files: Vec::new(),
-                    draft: Some(OpenDraft::of(&draft)),
+                    draft: Some(DraftAttachment {
+                        id: draft.id,
+                        edit: draft.edit(),
+                    }),
                 };
                 let id = format!("send-as-is:{}", draft.version);
                 let request_id = Uuid::new_v5(&draft.id, id.as_bytes());
-                client.send(bot, request_id, reply).await.map(drop)
+                client.send(bot, reply.request(request_id)).await.map(drop)
             };
             match result {
                 Ok(()) => action.try_set(Action::Idle),
@@ -433,7 +451,7 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
         let client = session::server().client.clone();
         session::spawn_held(async move {
             match client.discard_draft(bot, draft_id).await {
-                Ok(()) => action.try_set(Action::Idle),
+                Ok(_) => action.try_set(Action::Idle),
                 Err(err) => action.try_set(failed(err)),
             }
         });
@@ -540,14 +558,35 @@ fn secret_card(bot: Uuid, request: SecretRequest) -> impl IntoElement {
         })
     };
     let id = request.id;
+    // Saved with the description and website the bot gave, as the desktop
+    // saves it; the phone does not edit them.
+    let meta = stored((
+        request.description.clone().unwrap_or_default(),
+        request.website.clone().unwrap_or_default(),
+    ));
     let answer = move |env: Option<BTreeMap<String, String>>| {
+        let (description, website) = meta.get();
+        let secret = match env.map(|env| {
+            validate_secret_metadata(&description, &website).map(|website| SaveSecret {
+                env,
+                description: description.clone(),
+                website,
+            })
+        }) {
+            Some(Ok(secret)) => Some(secret),
+            Some(Err(message)) => {
+                action.set(Action::Failed(message));
+                return;
+            }
+            None => None,
+        };
         action.set(Action::Sending);
         // The values leave the phone's memory with the request: a lost
         // response never leaves them in the fields.
         values.set(BTreeMap::new());
         let client = session::server().client.clone();
         session::spawn_held(async move {
-            match client.answer_secret(bot, id, env).await {
+            match client.answer_secret(bot, id, secret).await {
                 Ok(()) => action.try_set(Action::Idle),
                 Err(err) => action.try_set(failed(err)),
             }

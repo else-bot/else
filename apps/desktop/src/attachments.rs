@@ -88,14 +88,7 @@ pub fn without_files(
         .filter(|part| !matches!(part, MessagePart::File { file } if hide(file)))
         .cloned()
         .collect();
-    let text = parts
-        .iter()
-        .map(|part| match part {
-            MessagePart::Text { text } => text.clone(),
-            MessagePart::File { file } => file.fallback(),
-        })
-        .collect();
-    Some((text, parts))
+    Some((MessagePart::flatten(&parts), parts))
 }
 
 /// Whether the message says anything besides its files.
