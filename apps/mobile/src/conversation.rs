@@ -255,6 +255,28 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
         }
     }
     receipts(conversation, previous, &mut rows);
+    // Mail that woke a turn which ended before writing anything (failed,
+    // stopped, unknown) still shows, with what became of the turn.
+    for turn in conversation.turns_in_order() {
+        if turn.mail.is_empty()
+            || rows
+                .iter()
+                .any(|row| matches!(row, Row::Mail { turn: t, .. } if *t == turn.id))
+        {
+            continue;
+        }
+        rows.push(Row::Mail {
+            turn: turn.id,
+            mails: turn.mail.clone(),
+        });
+        let (label, _) = else_client::turn_status::label(turn);
+        if !label.is_empty() {
+            rows.push(Row::Note {
+                id: turn.id,
+                text: label,
+            });
+        }
+    }
     rows
 }
 
@@ -688,6 +710,34 @@ mod tests {
         );
         assert!(matches!(&rows[1], Row::Bot { .. }));
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn mail_whose_turn_wrote_nothing_still_shows_with_its_outcome() {
+        let mut conversation = conversation();
+        apply(
+            &mut conversation,
+            5,
+            json!({ "event": "turn.updated", "data": { "turn": {
+                "id": "00000000-0000-0000-0000-0000000000f1", "request_id": REQUEST,
+                "turn_no": 2, "provider_id": "codex", "status": "failed",
+                "error": { "code": "provider_failed", "message": "Codex is signed out." },
+                "effect_uncertain": false,
+                "mail": [{
+                    "account_id": "00000000-0000-0000-0000-0000000000a1",
+                    "message": { "folder": "INBOX", "uid_validity": 1, "uid": 8 },
+                    "subject": "Late invoice",
+                }],
+            }}}),
+        );
+        let rows = rows(&conversation);
+        let n = rows.len();
+        assert!(
+            matches!(&rows[n - 2], Row::Mail { mails, .. } if mails[0].subject.as_deref() == Some("Late invoice"))
+        );
+        assert!(
+            matches!(&rows[n - 1], Row::Note { text, .. } if text == "Failed. Codex is signed out.")
+        );
     }
 
     #[test]
