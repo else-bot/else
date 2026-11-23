@@ -18,54 +18,34 @@ use super::super::parts::colors;
 use super::super::session;
 use super::{Fill, button, eyebrow, failure, frame};
 
-/// What the card asks of the server.
+/// A bot token typed for the setup. It never prints, even in a debug log.
+#[derive(Clone, PartialEq)]
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(..)")
+    }
+}
+
+/// How the card settles the setup. Both are safe to repeat: the server
+/// returns the settled setup again for the same connection.
 #[derive(Debug, Clone, PartialEq)]
 enum Step {
-    /// Connect a new bot with this token, then finish with it.
-    Token(String),
-    /// Finish with a connection the server already has.
+    /// Finish with this connection.
     Use(Uuid),
     Cancel,
 }
 
 pub(super) fn card(setup: SocialSetup) -> impl IntoElement {
+    // Creating the connection is its own request: once it exists, a retry
+    // only finishes the setup with it and never creates it twice.
+    let create = signal(Request::<Token>::Idle);
     let request = signal(Request::<Step>::Idle);
-    let idle = move || !request.with(Request::busy);
+    let idle = move || !request.with(Request::busy) && !create.with(Request::busy);
     let id = setup.id;
     let provider = setup.provider;
     let token = signal(String::new());
-    let send = move |step: Step| {
-        if let Step::Token(_) = step {
-            // The token leaves the field with the request.
-            token.set(String::new());
-        }
-        let client = session::server().client.clone();
-        session::submit(
-            request,
-            step,
-            move |step| async move {
-                match step {
-                    Step::Token(token) => {
-                        let connection = client.clone().connect_social(provider, token).await?;
-                        client.complete_social_setup(id, connection.id, None).await
-                    }
-                    Step::Use(connection) => {
-                        client.complete_social_setup(id, connection, None).await
-                    }
-                    Step::Cancel => client.cancel_social_setup(id).await,
-                }
-            },
-            // Accepted, the card keeps no copy of the token while it waits
-            // for the server's update to replace it.
-            move |()| {
-                session::try_update(request, |r| {
-                    if let Request::Accepted(Step::Token(token)) = r {
-                        token.clear();
-                    }
-                });
-            },
-        );
-    };
     let existing = resource(
         || Some(()),
         move |(), _| {
@@ -83,6 +63,48 @@ pub(super) fn card(setup: SocialSetup) -> impl IntoElement {
             }
         },
     );
+    let send = move |step: Step| {
+        let client = session::server().client.clone();
+        session::submit(
+            request,
+            step,
+            move |step| async move {
+                match step {
+                    Step::Use(connection) => {
+                        client.complete_social_setup(id, connection, None).await
+                    }
+                    Step::Cancel => client.cancel_social_setup(id).await,
+                }
+            },
+            |()| {},
+        );
+    };
+    let connect = move |typed: Token| {
+        // The token leaves the field with the request, and the request
+        // drops it once the server answered.
+        token.set(String::new());
+        let client = session::server().client.clone();
+        session::submit(
+            create,
+            typed,
+            move |Token(token)| async move {
+                match client.connect_social(provider, token).await {
+                    // An earlier try whose answer was lost may have
+                    // created it: list it so the owner can use it.
+                    Err(err) if err.code() == Some("social_conflict") => {
+                        existing.refetch();
+                        Err(err)
+                    }
+                    result => result,
+                }
+            },
+            move |connection: Connection| {
+                create.try_set(Request::Idle);
+                existing.refetch();
+                send(Step::Use(connection.id));
+            },
+        );
+    };
     let reuse = dynamic(move || {
         let connections = existing.get().filter(|c| !c.is_empty())?;
         Some(
@@ -156,7 +178,7 @@ pub(super) fn card(setup: SocialSetup) -> impl IntoElement {
                         "Connect",
                         Fill::Prominent,
                         move || idle() && token.with(|t| !t.trim().is_empty()),
-                        move || send(Step::Token(token.get_untracked().trim().to_owned())),
+                        move || connect(Token(token.get_untracked().trim().to_owned())),
                     )),
             )
             .into_element()
@@ -186,6 +208,7 @@ pub(super) fn card(setup: SocialSetup) -> impl IntoElement {
         )
         .child(entry)
         .child(reuse)
+        .child(failure(create))
         .child(failure(request))
 }
 
