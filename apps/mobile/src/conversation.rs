@@ -319,6 +319,8 @@ fn receipts(conversation: &Conversation, turn: Option<Uuid>, rows: &mut Vec<Row>
             SecretRequestStatus::Stored => format!("You saved {}", request.name),
             // Declined by the owner or withdrawn with its turn.
             SecretRequestStatus::Cancelled => format!("{} was not saved", request.name),
+            // The owner sent a message instead of answering.
+            SecretRequestStatus::Skipped => format!("{} was skipped", request.name),
             SecretRequestStatus::Pending | SecretRequestStatus::Unknown => continue,
         };
         rows.push(Row::Note {
