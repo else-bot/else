@@ -759,6 +759,27 @@ pub(crate) async fn answer_typed(
     Ok(Some(settled))
 }
 
+/// The owner sent a new message instead of answering: skip the pending
+/// questions of turn `turn_id`, which continues once nothing else holds it.
+pub(crate) async fn skip_pending_of(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let skipped: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE owner_questions SET status = 'skipped',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND status = 'pending' RETURNING bot_id",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if let Some(&bot_id) = skipped.first() {
+        turns::lifecycle::continue_waiting(&mut *conn, turn_id).await?;
+        events::turn_changed(&mut *conn, bot_id, turn_id).await?;
+    }
+    Ok(())
+}
+
 /// The Always choices a typed reply may pick: every one but the bot-wide
 /// destructive grant.
 const TYPED_CHOICES: [&str; 3] = [APPROVE_ROUTINE, APPROVE_TOOL, APPROVE_TASK];

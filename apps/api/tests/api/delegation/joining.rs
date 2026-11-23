@@ -90,7 +90,7 @@ async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
 }
 
 #[tokio::test]
-async fn joining_a_reply_leaves_another_replys_handoff_pending() {
+async fn a_message_for_another_provider_skips_the_replys_handoff() {
     let db = TestDb::migrated().await;
     let (main, root, _child, _outbound) = seed(&db).await;
     common::seed::force_status(&db.pool, root, TurnStatus::Waiting).await;
@@ -105,18 +105,16 @@ async fn joining_a_reply_leaves_another_replys_handoff_pending() {
     .await
     .unwrap();
     let open = else_api::db::turns::Admission::Open;
+
     let codex = follow_up_with(&db, main, "codex", open).await;
+
     assert_eq!(steered_into(&db, codex).await, None);
-
-    let joined = follow_up_with(&db, main, "codex", open).await;
-
-    assert_eq!(steered_into(&db, joined).await, Some(codex));
     let status: String = sqlx::query_scalar("SELECT status FROM computer_handoffs WHERE id = ?1")
         .bind(handoff)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(status, "pending", "the handoff belongs to the older reply");
+    assert_eq!(status, "skipped", "the owner typed over the request");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -221,7 +219,10 @@ async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(asked, "pending", "the task's own question still waits");
+    assert_eq!(
+        asked, "skipped",
+        "the chat shows the task's card, so the message skips it"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

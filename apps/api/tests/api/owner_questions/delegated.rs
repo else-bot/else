@@ -458,3 +458,32 @@ async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_tas
     );
     assert!(delivered.is_some(), "the reply received the outcome");
 }
+
+/// A task's card shows only in the chat of the bot doing the task: a
+/// message in the delegating chat joins the reply that delegated and
+/// leaves the card open there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_in_the_delegating_chat_leaves_the_tasks_card() {
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Release").await;
+    let (root, _, child, question, _) = delegated_card(&h, &leaf).await;
+
+    let sent = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Also tag the release notes.",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], root.to_string());
+    assert_eq!(question_row(app, question).await.0, "pending");
+    assert_eq!(
+        shown_turn(app, &leaf, child).await["questions"][0]["status"],
+        "pending"
+    );
+    assert_eq!(sidebar_status(app, &leaf).await["kind"], "needs_approval");
+}

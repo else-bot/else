@@ -228,9 +228,14 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
     app.wait_turn(manual, &["waiting"]).await;
     answer(app, &main, question, "deny").await;
     app.wait_turn(manual, &["completed"]).await;
-    // An owner message leaves the waiting run alone; it must end before the
-    // next occurrence, which would otherwise be skipped as overlapping.
-    answer(app, &main, send_question, "deny").await;
+    // The owner's message skipped the run's card, so the run ends before
+    // the next occurrence, which would otherwise be skipped as overlapping.
+    let skipped: String = sqlx::query_scalar("SELECT status FROM owner_questions WHERE id = ?1")
+        .bind(send_question)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(skipped, "skipped");
     app.wait_turn(run, &["completed"]).await;
 
     set_prompt(app, &main, prune, &format!("{GATE} Delete all branches.")).await;
