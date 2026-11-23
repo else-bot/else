@@ -294,13 +294,15 @@ pub struct OwnerChoice {
 }
 
 /// The owner's answer to a secret request: which task secret and
-/// variables, and whether it was stored or declined. Never a value.
+/// variables, and whether it was stored, declined, or skipped. Never a
+/// value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretOutcome {
     pub id: Uuid,
     pub name: String,
     pub env: Vec<String>,
-    pub stored: bool,
+    /// `Stored`, `Cancelled`, or `Skipped`.
+    pub status: crate::db::secret_requests::Status,
 }
 
 /// How a wait on an MCP job ended, with the last status result, given to

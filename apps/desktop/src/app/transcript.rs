@@ -450,11 +450,10 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, CardKey, Option<Uui
         .flat_map(|turn| {
             turn.secret_requests
                 .iter()
-                .map(move |request| {
-                    (
-                        CardKey::SecretRequest(request.id),
-                        c.question_anchor(turn.id, None),
-                    )
+                .filter_map(move |request| {
+                    let anchor = c.question_anchor(turn.id, request.settled_at);
+                    (request.is_pending() || anchor.is_some())
+                        .then_some((CardKey::SecretRequest(request.id), anchor))
                 })
                 .chain(turn.skill_installs.iter().filter_map(move |install| {
                     let anchor = c.question_anchor(turn.id, install.settled_at);
