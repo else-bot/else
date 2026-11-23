@@ -178,6 +178,71 @@ async fn an_owner_message_answers_the_notice_and_it_can_no_longer_be_dismissed()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_never_answers_the_notice() {
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let target = app.create_bot("Tech Manager").await;
+    // A message of the bot's to react to, before it takes the task.
+    let hello = app
+        .send(&target, Uuid::new_v4(), "Hello there", Some("synthetic"))
+        .await;
+    let hello_turn = hello.body["turn"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        app.wait_turn(&hello_turn, &["completed"]).await,
+        "completed"
+    );
+    let assistant: Uuid = sqlx::query_scalar(
+        "SELECT id FROM items WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq",
+    )
+    .bind(hello_turn.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    let main = app.main_bot().await;
+    let (root, root_token) = h.running(&main, GATE).await;
+    tool(
+        app,
+        &root_token,
+        "delegate",
+        json!({ "target_bot_id": target, "task": format!("{GATE} triage checkout 500s") }),
+    )
+    .await
+    .ok();
+    h.release(root).await;
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    let (_, child_token) = h.started(child).await;
+    tool(
+        app,
+        &child_token,
+        "notify_owner",
+        json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
+    )
+    .await
+    .ok();
+
+    let reacted = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{target}/turns"),
+            Some(json!({
+                "request_id": Uuid::new_v4(),
+                "text": "👍 Feedback on your earlier message",
+                "provider_id": "synthetic",
+                "reaction": { "item_id": assistant, "kind": "thumbs_up" },
+            })),
+        )
+        .await;
+    assert_eq!(reacted.status, StatusCode::ACCEPTED, "{}", reacted.body);
+    let shown = notices(app, &target, child).await;
+    assert_eq!(shown[0]["status"], "pending", "{shown:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn only_a_running_delegated_task_can_notify_the_owner() {
     let h = harness(TestApp::builder().max_active(2)).await;
     let app = &h.app;

@@ -719,15 +719,19 @@ pub async fn accept(
             crate::db::events::turn_changed(&mut tx, req.bot_id, previous).await?;
         }
         use crate::db::owner_notices::{Answer, AnswerError, answer};
-        let target = req
-            .answers_notice
-            .map_or(Answer::Untargeted, Answer::Notice);
-        answer(&mut tx, req.bot_id, target)
-            .await
-            .map_err(|err| match err {
-                AnswerError::NotThisBots => AcceptError::InvalidNotice,
-                AnswerError::Db(err) => AcceptError::Db(err),
-            })?;
+        // A reaction is feedback on one message, not the owner's answer to
+        // what the bot asked: it settles no notice.
+        if req.reaction.is_none() {
+            let target = req
+                .answers_notice
+                .map_or(Answer::Untargeted, Answer::Notice);
+            answer(&mut tx, req.bot_id, target)
+                .await
+                .map_err(|err| match err {
+                    AnswerError::NotThisBots => AcceptError::InvalidNotice,
+                    AnswerError::Db(err) => AcceptError::Db(err),
+                })?;
+        }
     }
     let placement = match admission {
         // A setup message runs only on an idle bot.
