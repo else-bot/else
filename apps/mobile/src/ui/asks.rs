@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::parts::colors;
 use super::session;
-use crate::api::{ClientError, DraftEdit};
+use crate::api::{ClientError, DraftEdit, Message, OpenDraft};
 use crate::conversation::Ask;
 
 /// A card's request to the server.
@@ -406,7 +406,23 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
             }
             action.try_set(Action::Sending);
             let client = session::server().client.clone();
-            match client.approve_draft(bot, &draft).await {
+            let result = if can_approve {
+                client.approve_draft(bot, &draft).await
+            } else {
+                // The turn that drafted it has ended, so the button cannot
+                // approve it. A reply carrying the draft asks the bot to
+                // send it, as the desktop's "Reply in chat" does. One ID
+                // per version: a repeat or a retry posts it once.
+                let reply = Message {
+                    text: "Send it as it is.".into(),
+                    files: Vec::new(),
+                    draft: Some(OpenDraft::of(&draft)),
+                };
+                let id = format!("send-as-is:{}", draft.version);
+                let request_id = Uuid::new_v5(&draft.id, id.as_bytes());
+                client.send(bot, request_id, reply).await.map(drop)
+            };
+            match result {
                 Ok(()) => action.try_set(Action::Idle),
                 Err(err) => action.try_set(failed(err)),
             }
@@ -494,17 +510,12 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 .flex_row()
                 .gap_2()
                 .child(button("Discard", false, true, idle, discard))
-                .child(button(
-                    "Send",
-                    true,
-                    false,
-                    move || idle() && can_approve,
-                    approve,
-                )),
+                .child(button("Send", true, false, idle, approve)),
         )
         .child((!can_approve).then(|| {
-            text("The server cannot send this draft as it is. Open it in the desktop app.")
+            text("The bot has finished its turn, so Send asks it in the chat to send this draft as it is.")
                 .text_size(px(13.0))
+                .line_height(px(18.0))
                 .text_color(colors::secondary())
         }))
         .child(failure(action))

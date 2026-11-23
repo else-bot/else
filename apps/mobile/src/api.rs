@@ -242,11 +242,7 @@ impl Client {
         request_id: Uuid,
         message: Message,
     ) -> Result<Sent, ClientError> {
-        let (text, parts) = message.wire();
-        let mut body = json!({ "request_id": request_id, "text": text, "provider_id": null });
-        if !parts.is_empty() {
-            body["parts"] = json!(parts);
-        }
+        let body = message.body(request_id);
         let path = format!("/v1/bots/{bot}/turns");
         run(async move { self.call(Method::POST, &path, Some(body)).await }).await
     }
@@ -443,9 +439,25 @@ impl Client {
 pub struct Message {
     pub text: String,
     pub files: Vec<Attachment>,
+    /// The draft the bot waits on, sent along so the bot can revise or
+    /// send it; the server closes it if the reply moves on without either.
+    pub draft: Option<OpenDraft>,
 }
 
 impl Message {
+    /// The `POST /turns` body. The server refuses fields it does not know.
+    fn body(&self, request_id: Uuid) -> serde_json::Value {
+        let (text, parts) = self.wire();
+        let mut body = json!({ "request_id": request_id, "text": text, "provider_id": null });
+        if !parts.is_empty() {
+            body["parts"] = json!(parts);
+        }
+        if let Some(draft) = &self.draft {
+            body["open_draft"] = json!(draft);
+        }
+        body
+    }
+
     /// The text and parts the server takes. A message without files is
     /// plain text with no parts.
     pub fn wire(&self) -> (String, Vec<MessagePart>) {
@@ -476,7 +488,7 @@ impl Message {
 
 /// A draft's text at the version the owner saw. Its files are kept as
 /// they are: approving a draft with files must name the ones the owner saw.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DraftEdit {
     pub version: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,6 +505,23 @@ impl DraftEdit {
             subject: draft.content.subject().map(str::to_owned),
             body: draft.content.body().to_owned(),
             attachments: draft.content.attachment_ids(),
+        }
+    }
+}
+
+/// A draft as a message carries it: its ID and the text the owner saw.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OpenDraft {
+    pub id: Uuid,
+    #[serde(flatten)]
+    pub edit: DraftEdit,
+}
+
+impl OpenDraft {
+    pub fn of(draft: &OutgoingDraft) -> Self {
+        Self {
+            id: draft.id,
+            edit: DraftEdit::of(draft),
         }
     }
 }
@@ -776,6 +805,7 @@ mod tests {
         let message = Message {
             text: "For March".into(),
             files: vec![file.clone()],
+            draft: None,
         };
         let (text, parts) = message.wire();
         assert_eq!(text, "For March\n[File: receipt.pdf]");
@@ -791,7 +821,36 @@ mod tests {
         let plain = Message {
             text: "hi".into(),
             files: vec![],
+            draft: None,
         };
         assert_eq!(plain.wire(), ("hi".into(), vec![]));
+    }
+
+    #[test]
+    fn a_reply_carries_its_open_draft_as_the_server_reads_it() {
+        let message = Message {
+            text: "Send it as it is.".into(),
+            files: vec![],
+            draft: Some(OpenDraft {
+                id: Uuid::nil(),
+                edit: DraftEdit {
+                    version: 3,
+                    subject: Some("Lunch".into()),
+                    body: "Noon works.".into(),
+                    attachments: None,
+                },
+            }),
+        };
+        assert_eq!(
+            message.body(Uuid::nil()),
+            json!({
+                "request_id": Uuid::nil(),
+                "text": "Send it as it is.",
+                "provider_id": null,
+                "open_draft": {
+                    "id": Uuid::nil(), "version": 3, "subject": "Lunch", "body": "Noon works.",
+                },
+            })
+        );
     }
 }

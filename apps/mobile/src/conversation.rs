@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use else_wire::bots::{Activity, Phase};
 use else_wire::conversation::{BotUpdated, Event, Snapshot};
 use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
-use else_wire::outgoing::{DraftStatus, OutgoingDraft};
+use else_wire::outgoing::{DraftContent, DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
 use else_wire::secrets::{SecretRequest, SecretRequestStatus};
 use else_wire::turns::{Turn, TurnStatus};
@@ -346,6 +346,18 @@ impl Conversation {
                 });
             }
         }
+    }
+
+    /// The newest draft the owner can still have sent, which their next
+    /// message carries to the bot (also after a failed or uncertain send).
+    pub fn open_draft(&self) -> Option<&OutgoingDraft> {
+        let mut turns: Vec<&Turn> = self.turns.values().collect();
+        turns.sort_by_key(|turn| turn.turn_no);
+        turns
+            .into_iter()
+            .flat_map(|turn| &turn.outgoing_drafts)
+            .rfind(|draft| draft.status.can_follow_up())
+            .filter(|draft| draft.content != DraftContent::Unknown)
     }
 
     /// The open questions and drafts, oldest turn first.
