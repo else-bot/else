@@ -280,6 +280,16 @@ async fn typing_always_approve_answers_a_waiting_routine_card() {
     let (card, _) = asks(app, &token, send_args()).await;
     h.release(run).await;
     app.wait_turn(run, &["waiting"]).await;
+    // A card stamped no earlier than the message (same millisecond, or a
+    // clock step back) was still open when the owner typed.
+    sqlx::query(
+        "UPDATE owner_questions
+         SET created_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 minute') WHERE id = ?1",
+    )
+    .bind(card)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
     h.send(&main, "Always approve.").await;
     assert_eq!(
         question(app, card).await,
