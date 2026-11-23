@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod connect;
+pub mod layout;
 pub mod model;
 pub mod oauth;
 pub mod origin;

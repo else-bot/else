@@ -1,0 +1,444 @@
+//! The bot list's layout, the desktop sidebar's and the phone's: the main bot pinned on top, then the bots waiting on the
+//! owner, oldest request first, then categories with their bots, then the
+//! unassigned bots. A waiting bot shows both in the tray and in its group. Pure, so the order is tested without a window.
+//!
+//! Categories keep the server's order: the owner's placed order, shared by
+//! every desktop, then unplaced ones by name. Muted bots go last in their group. Bots are
+//! otherwise ordered by recency: the newest message first, a never-messaged
+//! bot by its creation time, then the folded name and ID. A bot with no
+//! category, or with a category the client does not know (older records, a
+//! category being deleted), is unassigned. Empty categories are kept.
+
+use std::cmp::Reverse;
+
+use uuid::Uuid;
+
+use else_wire::bots::Bot;
+
+use else_wire::bots::Category;
+
+/// The comparison key the server uses for category names.
+pub fn fold(name: &str) -> String {
+    name.to_uppercase().to_lowercase()
+}
+
+/// The category order after dropping `dragged` onto `target`.
+pub fn moved(ids: &[Uuid], dragged: Uuid, target: Uuid) -> Option<Vec<Uuid>> {
+    let from = ids.iter().position(|id| *id == dragged)?;
+    let to = ids.iter().position(|id| *id == target)?;
+    let mut ids = ids.to_vec();
+    ids.remove(from);
+    ids.insert(to, dragged);
+    Some(ids)
+}
+
+/// Whether dropping `dragged` onto `target` places it below `target`:
+/// a category moving down lands after its target, one moving up before it.
+pub fn lands_below(ids: &[Uuid], dragged: Uuid, target: Uuid) -> bool {
+    let at = |id| ids.iter().position(|i| *i == id);
+    matches!((at(dragged), at(target)), (Some(from), Some(to)) if from < to)
+}
+
+/// A desktop-local order from before the server kept one: its known
+/// categories first, then the rest in the server's order.
+pub fn carried_order(categories: &[Category], local: &[Uuid]) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = local
+        .iter()
+        .copied()
+        .filter(|id| categories.iter().any(|c| c.id == *id))
+        .collect();
+    ids.extend(
+        categories
+            .iter()
+            .map(|c| c.id)
+            .filter(|id| !local.contains(id)),
+    );
+    ids
+}
+
+/// The bot's category if the client knows it; otherwise unassigned.
+pub fn known_category(categories: &[Category], category: Option<Uuid>) -> Option<Uuid> {
+    category.filter(|id| categories.iter().any(|c| c.id == *id))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group<'a> {
+    /// `None` is the unassigned group.
+    pub category: Option<&'a Category>,
+    pub bots: Vec<&'a Bot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout<'a> {
+    /// The main bot, above every group and in none of them.
+    pub pinned: Option<&'a Bot>,
+    /// Other bots waiting on the owner, muted ones included, until the
+    /// request closes. They also stay in their groups.
+    pub waiting: Vec<&'a Bot>,
+    pub groups: Vec<Group<'a>>,
+}
+
+impl<'a> Layout<'a> {
+    pub fn new(categories: &'a [Category], bots: &'a [Bot], main: Option<Uuid>) -> Self {
+        let pinned = bots.iter().find(|b| Some(b.id) == main);
+        let mut waiting: Vec<&Bot> = bots
+            .iter()
+            .filter(|b| Some(b.id) != main && b.is_active() && b.waiting().is_some())
+            .collect();
+        waiting.sort_by_key(|b| {
+            let since = b.waiting().and_then(|w| w.since);
+            (since.is_none(), since, fold(&b.name), b.id)
+        });
+        let others = || bots.iter().filter(move |b| Some(b.id) != main);
+        let mut groups: Vec<Group> = categories
+            .iter()
+            .map(|category| Group {
+                category: Some(category),
+                bots: others()
+                    .filter(|b| known_category(categories, b.category_id) == Some(category.id))
+                    .collect(),
+            })
+            .collect();
+        groups.push(Group {
+            category: None,
+            bots: others()
+                .filter(|b| known_category(categories, b.category_id).is_none())
+                .collect(),
+        });
+        for group in &mut groups {
+            group.bots.sort_by_key(|b| {
+                (
+                    b.muted,
+                    Reverse(b.last_message_at.or(b.created_at)),
+                    fold(&b.name),
+                    b.id,
+                )
+            });
+        }
+        Self {
+            pinned,
+            waiting,
+            groups,
+        }
+    }
+
+    pub fn without_empty_unassigned(mut self) -> Self {
+        self.groups
+            .retain(|g| g.category.is_some() || !g.bots.is_empty());
+        self
+    }
+
+    pub fn visible_order(&self, collapsed: &std::collections::HashSet<Option<Uuid>>) -> Vec<Uuid> {
+        let grouped = self.groups.iter().any(|group| group.category.is_some());
+        self.pinned
+            .into_iter()
+            .chain(self.waiting.iter().copied())
+            .chain(
+                self.groups
+                    .iter()
+                    .filter(|g| !grouped || !collapsed.contains(&g.category.map(|c| c.id)))
+                    .flat_map(|g| g.bots.iter().copied()),
+            )
+            .filter(|b| b.is_active())
+            .map(|b| b.id)
+            .fold(Vec::new(), |mut ids, id| {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn bot(id: u128, name: &str, category: Option<u128>) -> Bot {
+        Bot {
+            id: Uuid::from_u128(id),
+            name: name.into(),
+            metadata_revision: None,
+            avatar: Default::default(),
+            conversation_id: None,
+            selected_provider_id: None,
+            activity: None,
+            cleanup: None,
+            deleted_at: None,
+            category_id: category.map(Uuid::from_u128),
+            muted: false,
+            created_at: None,
+            last_message_at: None,
+            read_state: None,
+            sidebar_status: None,
+            watching: 0,
+        }
+    }
+
+    #[test]
+    fn server_order_collapse_and_empty_unassigned_match_navigation() {
+        let categories = vec![
+            category(2, "Beta"),
+            category(1, "Alpha"),
+            category(3, "New"),
+        ];
+        let bots = vec![
+            bot(10, "Main", None),
+            bot(11, "A", Some(1)),
+            bot(12, "B", Some(2)),
+        ];
+        let collapsed = std::collections::HashSet::from([Some(Uuid::from_u128(2))]);
+        let layout =
+            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).without_empty_unassigned();
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Beta"), vec!["B"]),
+                (Some("Alpha"), vec!["A"]),
+                (Some("New"), vec![])
+            ]
+        );
+        assert_eq!(
+            layout.visible_order(&collapsed),
+            vec![Uuid::from_u128(10), Uuid::from_u128(11)]
+        );
+    }
+
+    #[test]
+    fn removing_last_category_keeps_unassigned_bots_visible() {
+        let bots = vec![bot(10, "Main", None), bot(11, "Other", None)];
+        let layout = Layout::new(&[], &bots, Some(Uuid::from_u128(10)));
+        assert_eq!(
+            layout.visible_order(&[None].into()),
+            vec![Uuid::from_u128(10), Uuid::from_u128(11)]
+        );
+    }
+
+    #[test]
+    fn bots_waiting_on_the_owner_sit_below_the_main_bot_oldest_first() {
+        let categories = vec![category(1, "Growth")];
+        let waits = |id, name, category, minute| {
+            let mut b = bot(id, name, category);
+            b.muted = true;
+            b.sidebar_status = Some(else_wire::bots::SidebarStatus::NeedsTakeover {
+                preview: "Inspect the open X conversation.".into(),
+                since: at(minute),
+            });
+            b
+        };
+        let mut main = waits(10, "Main", None, 1);
+        main.muted = false;
+        let bots = vec![
+            main,
+            bot(11, "Atlas", Some(1)),
+            waits(12, "Scout", Some(1), 5),
+            waits(13, "Ledger", None, 2),
+        ];
+        let mut collapsed = std::collections::HashSet::from([Some(Uuid::from_u128(1))]);
+        let layout =
+            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).without_empty_unassigned();
+        assert_eq!(layout.pinned.map(|b| b.name.as_str()), Some("Main"));
+        assert_eq!(
+            layout
+                .waiting
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Ledger", "Scout"]
+        );
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Growth"), vec!["Atlas", "Scout"]),
+                (None, vec!["Ledger"])
+            ],
+            "a waiting bot stays in its category too"
+        );
+        assert_eq!(
+            layout.visible_order(&collapsed),
+            [10, 13, 12].map(Uuid::from_u128),
+            "a collapsed group does not hide a waiting bot"
+        );
+        collapsed.clear();
+        assert_eq!(
+            layout.visible_order(&collapsed),
+            [10, 13, 12, 11].map(Uuid::from_u128),
+            "navigation visits a waiting bot once"
+        );
+    }
+
+    fn at(minute: u32) -> Option<DateTime<Utc>> {
+        Some(
+            format!("2026-11-04T10:{minute:02}:00Z")
+                .parse()
+                .expect("timestamp"),
+        )
+    }
+
+    fn category(id: u128, name: &str) -> Category {
+        Category {
+            id: Uuid::from_u128(id),
+            name: name.into(),
+            position: None,
+            created_at: DateTime::UNIX_EPOCH,
+            updated_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn shape<'a>(layout: &Layout<'a>) -> Vec<(Option<&'a str>, Vec<&'a str>)> {
+        layout
+            .groups
+            .iter()
+            .map(|g| {
+                (
+                    g.category.map(|c| c.name.as_str()),
+                    g.bots.iter().map(|b| b.name.as_str()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn categories_then_unassigned_in_a_deterministic_order() {
+        let categories = vec![
+            category(3, "Empty"),
+            category(1, "Family"),
+            category(2, "work"),
+        ];
+        let bots = vec![
+            bot(10, "zeta", Some(2)),
+            bot(11, "Alpha", Some(2)),
+            bot(12, "beta", None),
+            bot(13, "Mom", Some(1)),
+            bot(14, "Orphan", Some(99)),
+            bot(15, "alpha", Some(2)),
+        ];
+        let layout = Layout::new(&categories, &bots, None);
+        assert_eq!(layout.pinned, None);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Empty"), vec![]),
+                (Some("Family"), vec!["Mom"]),
+                (Some("work"), vec!["Alpha", "alpha", "zeta"]),
+                (None, vec!["beta", "Orphan"]),
+            ]
+        );
+        assert_eq!(
+            layout.visible_order(&Default::default()),
+            [13, 11, 15, 10, 12, 14].map(Uuid::from_u128).to_vec()
+        );
+    }
+
+    #[test]
+    fn category_moves_reach_both_ends() {
+        let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
+        let last = moved(&ids, ids[0], ids[2]).unwrap();
+        assert_eq!(last, [ids[1], ids[2], ids[0]]);
+        assert_eq!(moved(&last, ids[0], ids[1]).unwrap(), ids);
+        assert_eq!(moved(&ids, ids[0], Uuid::from_u128(9)), None);
+    }
+
+    #[test]
+    fn the_drop_edge_matches_where_the_category_lands() {
+        let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
+        for (dragged, target) in [(0, 2), (2, 0), (1, 2), (1, 0)] {
+            let order = moved(&ids, ids[dragged], ids[target]).unwrap();
+            let at = |id| order.iter().position(|i| *i == id).unwrap();
+            assert_eq!(
+                lands_below(&ids, ids[dragged], ids[target]),
+                at(ids[dragged]) > at(ids[target]),
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_order_carries_known_categories_then_the_rest() {
+        let categories = vec![category(1, "A"), category(2, "B"), category(3, "C")];
+        assert_eq!(
+            carried_order(&categories, &[3, 999, 1].map(Uuid::from_u128)),
+            [3, 1, 2].map(Uuid::from_u128)
+        );
+    }
+
+    #[test]
+    fn without_categories_everything_is_unassigned() {
+        let bots = vec![bot(1, "b", None), bot(2, "a", Some(7))];
+        let layout = Layout::new(&[], &bots, None);
+        assert_eq!(shape(&layout), vec![(None, vec!["a", "b"])]);
+    }
+
+    #[test]
+    fn main_is_pinned_above_every_category_and_listed_once() {
+        let categories = vec![category(1, "Work")];
+        let mut main = bot(1, "Main", Some(1));
+        main.last_message_at = at(1);
+        let mut busy = bot(2, "Busy", Some(1));
+        busy.last_message_at = at(30);
+        let bots = vec![busy, main, bot(3, "Loose", None)];
+        let layout = Layout::new(&categories, &bots, Some(Uuid::from_u128(1)));
+        assert_eq!(layout.pinned.map(|b| b.name.as_str()), Some("Main"));
+        assert_eq!(
+            shape(&layout),
+            vec![(Some("Work"), vec!["Busy"]), (None, vec!["Loose"])]
+        );
+        assert_eq!(
+            layout.visible_order(&Default::default()),
+            [1, 2, 3].map(Uuid::from_u128).to_vec()
+        );
+    }
+
+    #[test]
+    fn newest_message_first_then_creation_time_within_a_category() {
+        let mut talked = bot(1, "Talked", None);
+        talked.created_at = at(0);
+        talked.last_message_at = at(20);
+        let mut older = bot(2, "Older", None);
+        older.created_at = at(0);
+        older.last_message_at = at(10);
+        let mut new = bot(3, "New", None);
+        new.created_at = at(40);
+        let mut stale = bot(4, "Stale", None);
+        stale.created_at = at(5);
+        let mut deleting = bot(5, "Deleting", None);
+        deleting.last_message_at = at(50);
+        deleting.cleanup = Some(else_wire::bots::Cleanup {
+            state: else_wire::bots::CleanupState::Pending,
+            error: None,
+        });
+        let bots = vec![stale, older, talked, new, deleting];
+        let layout = Layout::new(&[], &bots, None);
+        assert_eq!(
+            shape(&layout),
+            vec![(None, vec!["Deleting", "New", "Talked", "Older", "Stale"])]
+        );
+        assert_eq!(
+            layout.visible_order(&Default::default()),
+            [3, 1, 2, 4].map(Uuid::from_u128).to_vec(),
+            "navigation skips the bot being deleted"
+        );
+    }
+
+    #[test]
+    fn muted_bots_sink_below_the_rest_of_their_group() {
+        let mut quiet = bot(1, "Quiet", Some(1));
+        quiet.last_message_at = at(50);
+        quiet.muted = true;
+        let mut idle = bot(2, "Idle", Some(1));
+        idle.last_message_at = at(1);
+        let mut silent = bot(3, "Silent", Some(1));
+        silent.last_message_at = at(10);
+        silent.muted = true;
+        let bots = vec![quiet, idle, silent];
+        let categories = [category(1, "Tech")];
+        let layout = Layout::new(&categories, &bots, None);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Tech"), vec!["Idle", "Quiet", "Silent"]),
+                (None, vec![])
+            ]
+        );
+    }
+}
