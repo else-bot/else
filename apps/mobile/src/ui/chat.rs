@@ -53,7 +53,17 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
     let tray = super::waits::tray(bot, name.clone(), chat);
     nav_page()
         .key(format!("chat-{bot}"))
-        .title(name)
+        // Follows a rename; the name it opened with until the list has it.
+        .title(move || {
+            session::bots().with(|b| {
+                SharedString::from(
+                    b.list
+                        .iter()
+                        .find(|b| b.id == bot)
+                        .map_or_else(|| name.clone(), |b| b.name.clone()),
+                )
+            })
+        })
         .header_large_title(false)
         .header_right_items(move || {
             vec![
