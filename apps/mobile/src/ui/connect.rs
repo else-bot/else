@@ -17,7 +17,19 @@ enum Step {
     Failed(String),
 }
 
+/// The first screen, with no server saved yet.
 pub fn screen() -> impl IntoElement {
+    nav_stack().flex_1().child(page(true))
+}
+
+pub const ADD_KEY: &str = "add-server";
+
+/// The same form pushed over the bot list, to save another server.
+pub fn open_add() {
+    super::push(ADD_KEY, || page(false));
+}
+
+fn page(first: bool) -> Screen {
     let address = signal(String::new());
     let key = signal(String::new());
     let step = signal(Step::Editing);
@@ -182,7 +194,7 @@ pub fn screen() -> impl IntoElement {
                                 .child(image(SERVER).size(px(48.0)).tint_color(colors::on_tint())),
                         )
                         .child(
-                            text("Connect to Your Server")
+                            text(if first { "Connect to Your Server" } else { "Add a Server" })
                                 .text_size(px(28.0))
                                 .font_weight(FontWeight::BOLD)
                                 .text_center()
@@ -205,14 +217,21 @@ pub fn screen() -> impl IntoElement {
                 .child(button),
         );
 
-    nav_stack().flex_1().child(
-        nav_page().key("connect").header_visible(false).child(
-            view()
-                .flex_1()
-                .bg(colors::background())
-                .p_safe_area()
-                .pb_keyboard()
-                .child(content),
-        ),
-    )
+    let body = view()
+        .flex_1()
+        .bg(colors::background())
+        .pb_keyboard()
+        .child(content);
+    if first {
+        nav_page()
+            .key("connect")
+            .header_visible(false)
+            .child(body.p_safe_area())
+    } else {
+        nav_page()
+            .key(ADD_KEY)
+            .title("Add Server")
+            .header_large_title(false)
+            .child(body)
+    }
 }

@@ -51,15 +51,55 @@ pub fn server() -> Rc<Server> {
     }
 }
 
+/// Saves a server checked by the connect form and switches to it.
 pub fn connect(profile: Profile) -> Result<(), String> {
     let client = Client::new(&profile)?;
     profile.save()?;
-    link().set(Link::Connected(Rc::new(Server { profile, client })));
+    use_server(profile, client);
     Ok(())
 }
 
+/// Switches to another saved server. The connected screen is rebuilt for
+/// it: the old live connection and the old bot list end.
+pub fn switch(origin: &str) -> Result<(), String> {
+    let profile = Profile::saved(origin)
+        .ok_or_else(|| "This server's owner key is no longer on this iPhone.".to_owned())?;
+    let client = Client::new(&profile)?;
+    profile.activate()?;
+    use_server(profile, client);
+    Ok(())
+}
+
+/// Opens the saved server at launch, without saving it again.
+pub fn resume(profile: Profile) -> Result<(), String> {
+    let client = Client::new(&profile)?;
+    use_server(profile, client);
+    Ok(())
+}
+
+fn use_server(profile: Profile, client: Arc<Client>) {
+    batch(|| {
+        bots().set(Bots::default());
+        live_state().set(LiveState::Connecting);
+        link().set(Link::Connected(Rc::new(Server { profile, client })));
+    });
+}
+
+/// Removes the server in use and its key from the phone, then opens the
+/// next saved server, or the connect screen when none is left.
 pub fn disconnect() {
-    Profile::forget();
+    let origin = server().profile.origin.as_str().to_owned();
+    match Profile::forget(&origin).map(resume) {
+        Some(Ok(())) => {}
+        Some(Err(err)) => {
+            log::warn!("{err}");
+            clear();
+        }
+        None => clear(),
+    }
+}
+
+fn clear() {
     batch(|| {
         bots().set(Bots::default());
         live_state().set(LiveState::Connecting);

@@ -284,34 +284,129 @@ mod vault {
     }
 }
 
+/// The servers saved on this phone, by origin, in the order they were
+/// added, and the one in use. Their keys live in the vault.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Saved {
+    pub origins: Vec<String>,
+    pub active: Option<String>,
+}
+
+const SERVERS_KEY: &str = "servers";
+
+impl Saved {
+    fn load() -> Self {
+        use nsh_core::storage::Storage;
+        let active = Storage::get_item(ORIGIN_KEY);
+        let origins = match Storage::get_item(SERVERS_KEY) {
+            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+            // Builds before several servers saved only the one in use.
+            None => active.iter().cloned().collect(),
+        };
+        Self { origins, active }
+    }
+
+    fn store(&self) -> Result<(), String> {
+        use nsh_core::storage::Storage;
+        let json = serde_json::to_string(&self.origins).expect("origins serialize");
+        Storage::set_item(SERVERS_KEY, json)
+            .map_err(|err| format!("Cannot save the server list: {err}"))?;
+        match &self.active {
+            Some(origin) => Storage::set_item(ORIGIN_KEY, origin)
+                .map_err(|err| format!("Cannot save the server address: {err}")),
+            None => {
+                Storage::remove_item(ORIGIN_KEY);
+                Ok(())
+            }
+        }
+    }
+
+    /// Adds `origin` (once) and uses it.
+    fn select(&mut self, origin: &str) {
+        if !self.origins.iter().any(|o| o == origin) {
+            self.origins.push(origin.to_owned());
+        }
+        self.active = Some(origin.to_owned());
+    }
+
+    /// Removes `origin`; when it was in use, the first one left is used
+    /// instead, if any.
+    fn remove(&mut self, origin: &str) {
+        self.origins.retain(|o| o != origin);
+        if self.active.as_deref() == Some(origin) {
+            self.active = self.origins.first().cloned();
+        }
+    }
+}
+
 impl Profile {
-    /// The saved profile, if one is saved and still valid.
+    /// The server in use, if one is saved and its key is still there.
     pub fn load() -> Option<Self> {
         // Builds before the Keychain kept the key in this JSON entry.
         nsh_core::storage::Storage::remove_item("server-profile");
-        let origin = nsh_core::storage::Storage::get_item(ORIGIN_KEY)?;
-        let key = vault::read(&origin)?;
-        Self::parse(&origin, &key).ok()
+        Self::saved(&Saved::load().active?)
     }
 
+    /// The saved server at `origin`, with its key.
+    pub fn saved(origin: &str) -> Option<Self> {
+        let key = vault::read(origin)?;
+        Self::parse(origin, &key).ok()
+    }
+
+    /// Every saved server's origin, the one in use among them.
+    pub fn list() -> Saved {
+        Saved::load()
+    }
+
+    /// Saves this server's key and makes it the one in use.
     pub fn save(&self) -> Result<(), String> {
         let origin = self.origin.as_str();
         vault::write(origin, self.token.expose())?;
-        nsh_core::storage::Storage::set_item(ORIGIN_KEY, origin)
-            .map_err(|err| format!("Cannot save the server address: {err}"))
+        let mut saved = Saved::load();
+        saved.select(origin);
+        saved.store()
     }
 
-    pub fn forget() {
-        if let Some(origin) = nsh_core::storage::Storage::get_item(ORIGIN_KEY) {
-            vault::remove(&origin);
+    /// Makes this saved server the one in use.
+    pub fn activate(&self) -> Result<(), String> {
+        let mut saved = Saved::load();
+        saved.select(self.origin.as_str());
+        saved.store()
+    }
+
+    /// Removes the server at `origin` and its key; returns the server now
+    /// in use, if another one is saved.
+    pub fn forget(origin: &str) -> Option<Self> {
+        vault::remove(origin);
+        let mut saved = Saved::load();
+        saved.remove(origin);
+        if let Err(err) = saved.store() {
+            log::warn!("{err}");
         }
-        nsh_core::storage::Storage::remove_item(ORIGIN_KEY);
+        Self::saved(saved.active.as_deref()?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_the_server_in_use_moves_to_the_first_one_left() {
+        let mut saved = Saved::default();
+        saved.select("https://home.example");
+        saved.select("https://vps.example");
+        saved.select("https://home.example");
+        assert_eq!(
+            saved.origins,
+            ["https://home.example", "https://vps.example"]
+        );
+        assert_eq!(saved.active.as_deref(), Some("https://home.example"));
+        saved.remove("https://home.example");
+        assert_eq!(saved.active.as_deref(), Some("https://vps.example"));
+        saved.remove("https://vps.example");
+        assert_eq!(saved, Saved::default());
+    }
 
     #[test]
     fn bare_tailscale_and_loopback_addresses_use_http_and_others_https() {

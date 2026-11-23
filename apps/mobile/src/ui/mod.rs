@@ -55,20 +55,18 @@ pub fn push(key: impl Into<SharedString>, screen: impl Fn() -> Screen + 'static)
 #[component]
 pub fn App() -> impl IntoElement {
     if let Some(profile) = Profile::load()
-        && let Err(err) = session::connect(profile)
+        && let Err(err) = session::resume(profile)
     {
         log::warn!("{err}");
     }
-    let connected = computed(|| matches!(session::link().get(), Link::Connected(_)));
+    // Keyed by the server itself, so switching servers builds a new stack.
+    let link = computed(|| session::link().get());
     view()
         .flex_1()
         .bg(parts::colors::background())
-        .child(dynamic(move || {
-            if connected.get() {
-                untracked(connected_stack).into_element()
-            } else {
-                untracked(connect::screen).into_element()
-            }
+        .child(dynamic(move || match link.get() {
+            Link::Connected(_) => untracked(connected_stack).into_element(),
+            Link::None => untracked(connect::screen).into_element(),
         }))
 }
 

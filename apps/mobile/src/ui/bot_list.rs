@@ -18,12 +18,28 @@ pub fn screen() -> Screen {
     let server = session::server();
     let host = server.profile.origin.display().to_owned();
 
+    let saved = crate::server::Profile::list();
+    let servers = saved.origins.iter().map(|origin| {
+        let label = crate::server::Origin::parse(origin)
+            .map(|o| o.display().to_owned())
+            .unwrap_or_else(|_| origin.clone());
+        let active = saved.active.as_deref() == Some(origin.as_str());
+        let origin = origin.clone();
+        MenuItem::new(label).checked(active).on_select(move || {
+            if !active && let Err(err) = session::switch(&origin) {
+                log::warn!("{err}");
+            }
+        })
+    });
     let menu = HeaderItem::symbol("ellipsis.circle")
         .key("more")
         .label("More")
         .menu([
-            MenuItem::new(format!("Connected to {host}")).disabled(true),
-            MenuItem::new("Disconnect")
+            MenuItem::submenu("Servers", servers).inline(true),
+            MenuItem::new("Add Server…")
+                .symbol("plus")
+                .on_select(super::connect::open_add),
+            MenuItem::new(format!("Disconnect from {host}"))
                 .symbol("rectangle.portrait.and.arrow.right")
                 .destructive(true)
                 .on_select(confirm_disconnect),
@@ -189,7 +205,7 @@ fn confirm_disconnect() {
         let choice = alert_dialog()
             .title("Disconnect from this server?")
             .description(
-                "The owner key is removed from this iPhone. You can connect again with the key.",
+                "Its owner key is removed from this iPhone. You can connect again with the key.",
             )
             .cancel("cancel", "Cancel")
             .destructive("disconnect", "Disconnect")

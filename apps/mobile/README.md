@@ -27,10 +27,11 @@ with the server and the desktop app.
   server's vault.
 - Chats are marked read on the server, so the desktop's unread dots agree.
 - Light and dark mode. Reconnects when the app returns to the foreground.
-- Disconnect from the More menu, which removes the key from the phone.
+- Several servers. The More menu lists them, switches between them, and
+  adds one. Disconnect removes only the current server and its key.
 
 Not yet: the vault list, computer takeovers, a bot's settings,
-several servers, push notifications, iPad layout.
+push notifications, iPad layout.
 
 ## Addresses and the owner key
 
