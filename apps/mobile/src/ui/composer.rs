@@ -1,6 +1,8 @@
 //! The chat's composer: the text field, the files picked for the next
 //! message (uploaded as soon as they are picked), Send and Stop.
 
+use else_client::mention::MentionQuery;
+use else_wire::bots::Bot;
 use else_wire::items::{Attachment, MAX_FILE_BYTES, MAX_FILES};
 use nsh_base::{alert_dialog, input};
 use nsh_core::element::AdaptiveColor;
@@ -220,10 +222,11 @@ pub fn composer(
     quote: Signal<Option<Quote>>,
 ) -> impl IntoElement {
     let draft = signal(String::new());
-    // Where the caret is in the text (UTF-16 units), and where a picked
-    // mention puts it.
-    let caret = signal(0_u32);
-    let placed = signal((0_u32, 0_u32));
+    // The selection in the text (UTF-16 units), whether the keyboard is
+    // composing (marked text), and the field, which a picked mention edits.
+    let selection = signal((0_u32, 0_u32));
+    let composing = signal(false);
+    let field = element_ref();
     let pending = signal(Vec::<Pending>::new());
     let attach_notice = signal(None::<String>);
     let outbox = signal(Request::<Outgoing>::Idle);
@@ -377,7 +380,7 @@ pub fn composer(
         })
         .child(notice)
         .child(quote_bar(quote))
-        .child(mention_picker(draft, caret, placed))
+        .child(mention_picker(draft, selection, composing, field))
         .child(pending_strip(bot, pending))
         .child(
             view()
@@ -422,8 +425,13 @@ pub fn composer(
                                     }
                                 })
                                 .placeholder("Message")
-                                .on_selection_change(move |s: &Selection| caret.set(s.end))
-                                .selected_range(move || placed.get())
+                                .element_ref(&field)
+                                .on_selection_change(move |s: &Selection| {
+                                    selection.set((s.start, s.end))
+                                })
+                                .on_composition_change(move |c: &Composition| {
+                                    composing.set(c.composing)
+                                })
                                 .on_content_size_change(move |size: &Size<Points>| {
                                     input_height.set(size.height.0.clamp(22.0, 120.0));
                                 })
@@ -485,45 +493,80 @@ fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
     })
 }
 
-/// Byte offset of UTF-16 offset `units` in `text`, clamped to its end.
-fn byte_at(text: &str, units: u32) -> usize {
+/// Byte offset of UTF-16 offset `units` in `text`; none past its end or
+/// inside a character (half of a surrogate pair).
+fn byte_at(text: &str, units: u32) -> Option<usize> {
+    let units = units as usize;
     let mut seen = 0;
     for (at, c) in text.char_indices() {
-        if seen >= units as usize {
-            return at;
+        if seen == units {
+            return Some(at);
+        }
+        if seen > units {
+            return None;
         }
         seen += c.len_utf16();
     }
-    text.len()
+    (seen == units).then_some(text.len())
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
+}
+
+/// The mention being typed in `text` at `selection` (UTF-16 units): none
+/// for a selection that is not a caret, or one the text does not have.
+fn query_at(text: &str, selection: (u32, u32)) -> Option<MentionQuery> {
+    let start = byte_at(text, selection.0)?;
+    let end = byte_at(text, selection.1)?;
+    MentionQuery::at(text, start..end)
+}
+
+/// The bots offered for `query`, at most five.
+fn offered_bots(query: &MentionQuery, list: &[Bot]) -> Vec<Bot> {
+    query
+        .candidates(list)
+        .into_iter()
+        .filter_map(|id| list.iter().find(|bot| bot.id == id).cloned())
+        .take(5)
+        .collect()
+}
+
+/// The UTF-16 range a pick of `bot` replaces in `text` at `selection`:
+/// the mention being typed now, if it still offers that bot. The picker
+/// can lag an edit, so a tap goes by what the field holds when it lands.
+fn pick_range(text: &str, selection: (u32, u32), bot: Uuid, list: &[Bot]) -> Option<(u32, u32)> {
+    let query = query_at(text, selection)?;
+    query.candidates(list).contains(&bot).then(|| {
+        (
+            utf16_len(&text[..query.range.start]),
+            utf16_len(&text[..query.range.end]),
+        )
+    })
 }
 
 /// The bots whose name matches what follows "@" at the caret, as the
 /// desktop's picker offers them; a tap writes the bot's name in its place.
 fn mention_picker(
     draft: Signal<String>,
-    caret: Signal<u32>,
-    placed: Signal<(u32, u32)>,
+    selection: Signal<(u32, u32)>,
+    composing: Signal<bool>,
+    field: ElementRef,
 ) -> impl IntoElement {
     let offered = computed(move || {
-        let text = draft.get();
-        let at = byte_at(&text, caret.get());
-        let query = else_client::mention::MentionQuery::at(&text, at..at)?;
-        let bots = session::bots().with(|b| {
-            query
-                .candidates(&b.list)
-                .into_iter()
-                .filter_map(|id| b.list.iter().find(|bot| bot.id == id).cloned())
-                .take(5)
-                .collect::<Vec<_>>()
-        });
-        (!bots.is_empty()).then_some((query.range, bots))
+        if composing.get() {
+            return None;
+        }
+        let query = draft.with(|text| query_at(text, selection.get()))?;
+        let bots = session::bots().with(|b| offered_bots(&query, &b.list));
+        (!bots.is_empty()).then_some(bots)
     });
     dynamic(move || {
-        let (range, bots) = offered.get()?;
+        let bots = offered.get()?;
         let rows: Vec<AnyElement> = bots
             .into_iter()
             .map(|bot| {
-                let range = range.clone();
+                let id = bot.id;
                 let name = bot.name.clone();
                 let avatar = bot.avatar;
                 view()
@@ -536,20 +579,29 @@ fn mention_picker(
                     .role(AccessibilityRole::Button)
                     .label(format!("Mention {name}"))
                     .on_press(move || {
-                        let mut text = draft.get_untracked();
-                        if range.end > text.len() {
-                            return;
-                        }
-                        let inserted = format!("@{name} ");
-                        text.replace_range(range.clone(), &inserted);
-                        let end = (text[..range.start].encode_utf16().count()
-                            + inserted.encode_utf16().count())
-                            as u32;
-                        batch(|| {
-                            draft.set(text);
-                            caret.set(end);
-                            placed.set((end, end));
+                        let range = draft.with_untracked(|text| {
+                            session::bots().with_untracked(|b| {
+                                pick_range(text, selection.get_untracked(), id, &b.list)
+                            })
                         });
+                        let Some((start, end)) = range else {
+                            return;
+                        };
+                        // The text with the name in place of what was
+                        // typed, then the caret after it: a command each
+                        // time, so a pick that lands where the last one did
+                        // still moves it. (NSH's insert_text, the user's own
+                        // edit, is not carried out on iOS yet.)
+                        let inserted = format!("@{name} ");
+                        let mut text = draft.get_untracked();
+                        let (from, to) = (
+                            byte_at(&text, start).unwrap_or_default(),
+                            byte_at(&text, end).unwrap_or_default(),
+                        );
+                        text.replace_range(from..to, &inserted);
+                        draft.set(text);
+                        let caret = start + utf16_len(&inserted);
+                        field.set_selection(caret, caret);
                     })
                     .child(super::parts::avatar(move || avatar, 28.0))
                     .child(
@@ -577,15 +629,41 @@ fn mention_picker(
 
 #[cfg(test)]
 mod tests {
-    use super::byte_at;
+    use super::*;
+
+    fn bots(names: &[&str]) -> Vec<Bot> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                serde_json::from_value(serde_json::json!({
+                    "id": Uuid::from_u128(i as u128 + 1), "name": name,
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
 
     #[test]
-    fn a_caret_in_utf16_units_lands_on_the_right_byte() {
+    fn a_utf16_offset_maps_to_a_byte_only_on_a_character() {
         let text = "Hé 😀 @Sc";
-        assert_eq!(byte_at(text, 0), 0);
-        assert_eq!(byte_at(text, 2), "Hé".len());
+        assert_eq!(byte_at(text, 0), Some(0));
+        assert_eq!(byte_at(text, 2), Some("Hé".len()));
         // The emoji is two UTF-16 units and four bytes.
-        assert_eq!(byte_at(text, 5), "Hé 😀".len());
-        assert_eq!(byte_at(text, 99), text.len());
+        assert_eq!(byte_at(text, 4), None, "inside the emoji");
+        assert_eq!(byte_at(text, 5), Some("Hé 😀".len()));
+        assert_eq!(byte_at(text, 9), Some(text.len()));
+        assert_eq!(byte_at(text, 10), None, "past the end");
+    }
+
+    #[test]
+    fn a_pick_replaces_the_mention_typed_now_and_only_one_still_offered() {
+        let list = bots(&["Scout", "Ledger"]);
+        let scout = Uuid::from_u128(1);
+        // The field changed since the picker showed: the range follows it.
+        assert_eq!(pick_range("😀 @Sc", (6, 6), scout, &list), Some((3, 6)));
+        assert_eq!(pick_range("@Scz", (4, 4), scout, &list), None, "no longer offered");
+        assert_eq!(pick_range("@Sc", (1, 3), scout, &list), None, "a selection, not a caret");
+        assert_eq!(pick_range("@Sc", (9, 9), scout, &list), None, "a caret the text lacks");
     }
 }
