@@ -1,7 +1,10 @@
 //! One bot's chat: the transcript as bubbles, the bot's replies as
 //! Markdown that streams in, and the composer.
 
-use nsh_base::{MarkdownOptions, TextViewPart, TextViewParts, nav_page, text_view};
+use else_wire::items::{Reaction, ReactionKind};
+use nsh_base::{
+    MarkdownOptions, MenuButtonItem, TextViewPart, TextViewParts, context_menu, nav_page, text_view,
+};
 use nsh_core::element::header::HeaderItem;
 use nsh_core::prelude::*;
 use uuid::Uuid;
@@ -12,6 +15,7 @@ use else_client::api::ReadCommand;
 
 use else_client::request::Request;
 
+use crate::api::Message;
 use crate::conversation::{self, Ask, Outcome, Retry, Row};
 
 pub fn screen(bot: Uuid, name: String) -> Screen {
@@ -23,6 +27,8 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
         computed(move || chat.with(|c| c.conversation().is_some_and(conversation::thinking)));
     let busy = computed(move || chat.with(|c| c.conversation().is_some_and(conversation::busy)));
     keep_read(bot, chat);
+    // The message the next one replies to, picked from a message's menu.
+    let quote = signal(None::<Quote>);
 
     let transcript = dynamic(move || {
         match chat.with(|c| match c {
@@ -32,7 +38,7 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
         }) {
             Some(None) => centered("Loading…".into()).into_element(),
             Some(Some(message)) => centered(message).into_element(),
-            None => untracked(|| transcript(bot, chat, rows, thinking)).into_element(),
+            None => untracked(|| transcript(bot, chat, rows, thinking, quote)).into_element(),
         }
     });
 
@@ -56,7 +62,7 @@ pub fn screen(bot: Uuid, name: String) -> Screen {
                 .pb_keyboard()
                 .child(view().flex_1().child(transcript))
                 .child(tray)
-                .child(super::composer::composer(bot, chat, busy)),
+                .child(super::composer::composer(bot, chat, busy, quote)),
         )
 }
 
@@ -136,6 +142,7 @@ fn transcript(
     chat: Signal<Chat>,
     rows: Memo<Vec<Row>>,
     thinking: Memo<bool>,
+    quote: Signal<Option<Quote>>,
 ) -> impl IntoElement {
     let asks = computed(move || {
         chat.with(|c| c.conversation().map(conversation::asks).unwrap_or_default())
@@ -161,8 +168,10 @@ fn transcript(
                 let kind = kind.get()?;
                 untracked(|| {
                     Some(match kind {
-                        LineKind::Owner => owner_bubble(bot, line).into_element(),
-                        LineKind::Bot => bot_bubble(line).into_element(),
+                        LineKind::Owner => {
+                            with_menu(bot, chat, line, quote, owner_bubble(bot, line))
+                        }
+                        LineKind::Bot => with_menu(bot, chat, line, quote, bot_bubble(line)),
                         LineKind::Note => note(line).into_element(),
                         LineKind::Typing => typing().into_element(),
                         LineKind::Ask => dynamic(move || {
@@ -242,12 +251,35 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
                 .rounded(px(18.0))
                 .border_curve(BorderCurve::Continuous)
                 .bg(colors::bubble_owner())
+                .gap(px(6.0))
+                // A reply shows the message it quotes above the owner's words.
+                .child(dynamic(move || {
+                    let quoted = row_text(line)();
+                    let read = else_client::reply::Replying::parse(&quoted)?;
+                    Some(
+                        view()
+                            .pl_2()
+                            .border_l(px(2.0))
+                            .border_color(rgba(0xffffff99))
+                            .child(
+                                text(read.original())
+                                    .number_of_lines(3)
+                                    .text_size(px(14.0))
+                                    .line_height(px(19.0))
+                                    .text_color(rgba(0xffffffcc)),
+                            ),
+                    )
+                }))
                 .child(
-                    text(row_text(line))
-                        .selectable(true)
-                        .text_size(px(17.0))
-                        .line_height(px(22.0))
-                        .text_color(rgb(0xffffff)),
+                    text(move || {
+                        let shown = row_text(line)();
+                        else_client::reply::Replying::parse(&shown)
+                            .map_or_else(|| shown.clone(), |read| read.body.to_owned())
+                    })
+                    .selectable(true)
+                    .text_size(px(17.0))
+                    .line_height(px(22.0))
+                    .text_color(rgb(0xffffff)),
                 )
         }))
         .child(dynamic(move || {
@@ -329,20 +361,42 @@ fn bot_bubble(line: Memo<Option<Line>>) -> impl IntoElement {
         })
     });
     let markdown = row_text(line);
-    view().w_full().px_4().pt(px(6.0)).pb(px(10.0)).child(
-        text_view()
-            .markdown(move || SharedString::from(markdown()))
-            .options(move || MarkdownOptions {
-                streaming: streaming.get(),
-                ..Default::default()
+    let reaction = computed(move || {
+        line.with(|l| match l {
+            Some(Line::Row(Row::Bot { reaction, .. })) => *reaction,
+            _ => None,
+        })
+    });
+    view()
+        .w_full()
+        .px_4()
+        .pt(px(6.0))
+        .pb(px(10.0))
+        .gap_1()
+        .child(
+            text_view()
+                .markdown(move || SharedString::from(markdown()))
+                .options(move || MarkdownOptions {
+                    streaming: streaming.get(),
+                    ..Default::default()
+                })
+                .selectable(true)
+                .w_full()
+                .gap_3()
+                .text_size(px(17.0))
+                .line_height(px(24.0))
+                .text_color(colors::label()),
+        )
+        .child(dynamic(move || {
+            reaction.get().map(|kind| {
+                text(else_client::reply::mark(kind))
+                    .text_size(px(15.0))
+                    .label(match kind {
+                        ReactionKind::ThumbsUp => "You reacted thumbs up",
+                        ReactionKind::ThumbsDown => "You reacted thumbs down",
+                    })
             })
-            .selectable(true)
-            .w_full()
-            .gap_3()
-            .text_size(px(17.0))
-            .line_height(px(24.0))
-            .text_color(colors::label()),
-    )
+        }))
 }
 
 /// How Markdown parts look in replies: code and tables on a quiet fill.
@@ -403,4 +457,106 @@ fn typing() -> impl IntoElement {
                     .text_color(colors::secondary()),
             ),
     )
+}
+
+fn menu_item(id: &'static str, label: &'static str, symbol: &'static str) -> MenuButtonItem {
+    let mut item = MenuButtonItem::new(id, label);
+    item.icon = Some(symbol.into());
+    item
+}
+
+/// The message the next one replies to: who wrote it and its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quote {
+    pub owner: bool,
+    pub text: String,
+}
+
+impl Quote {
+    /// How the reply names it, as the desktop does.
+    pub fn subject(&self) -> &'static str {
+        if self.owner {
+            "my earlier message"
+        } else {
+            "your earlier message"
+        }
+    }
+}
+
+/// A message with the system's long-press menu: react to the bot's
+/// message, reply to either, or copy its text.
+fn with_menu(
+    bot: Uuid,
+    chat: Signal<Chat>,
+    line: Memo<Option<Line>>,
+    quote: Signal<Option<Quote>>,
+    bubble: impl IntoElement,
+) -> AnyElement {
+    let picked = move || {
+        line.with_untracked(|l| match l {
+            Some(Line::Row(Row::Owner { id, text, .. })) => Some((*id, true, text.clone())),
+            Some(Line::Row(Row::Bot { id, text, .. })) => Some((*id, false, text.clone())),
+            _ => None,
+        })
+    };
+    let owner = picked().is_some_and(|(_, owner, _)| owner);
+    let mut items = Vec::new();
+    if !owner {
+        items.push(menu_item("up", "Good Response", "hand.thumbsup"));
+        items.push(menu_item("down", "Bad Response", "hand.thumbsdown"));
+    }
+    items.push(menu_item("reply", "Reply", "arrowshape.turn.up.left"));
+    items.push(menu_item("copy", "Copy", "doc.on.doc"));
+    context_menu()
+        .items(items)
+        .trigger(bubble.into_element())
+        .on_select(move |action: &SharedString| {
+            let Some((id, owner, text)) = picked() else {
+                return;
+            };
+            match action.as_ref() {
+                "up" => react(bot, chat, id, text, ReactionKind::ThumbsUp),
+                "down" => react(bot, chat, id, text, ReactionKind::ThumbsDown),
+                "reply" => quote.set(Some(Quote { owner, text })),
+                "copy" => set_clipboard(text),
+                _ => {}
+            }
+        })
+        .into_element()
+}
+
+/// Reacts to a bot's message: a message carrying the reaction, which the
+/// chat shows as the mark on that message.
+fn react(bot: Uuid, chat: Signal<Chat>, item: Uuid, text: String, kind: ReactionKind) {
+    let message = Message {
+        text: else_client::reply::reaction(kind, "your earlier message", &text),
+        files: Vec::new(),
+        draft: None,
+        answers_notice: None,
+        reaction: Some(Reaction {
+            item_id: item,
+            kind,
+        }),
+    };
+    let client = session::server().client.clone();
+    session::spawn_held(async move {
+        match client.send(bot, message.request(Uuid::new_v4())).await {
+            Ok(sent) => {
+                session::try_update(chat, |c| {
+                    if let Some(conversation) = c.conversation_mut() {
+                        conversation.insert_item(sent.item);
+                        conversation.insert_turn(sent.turn);
+                    }
+                });
+            }
+            Err(err) => {
+                let _ = nsh_base::alert_dialog()
+                    .title("Couldn't send the reaction")
+                    .description(err.to_string())
+                    .cancel("ok", "OK")
+                    .show()
+                    .await;
+            }
+        }
+    });
 }

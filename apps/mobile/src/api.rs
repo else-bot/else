@@ -11,7 +11,7 @@ use else_client::api::Tailnet;
 pub use else_client::api::{
     Client, ClientError, CreateBotRequest, LiveEvent, SendRequest, StreamMessage,
 };
-use else_wire::items::{Attachment, MessagePart};
+use else_wire::items::{Attachment, MessagePart, Reaction};
 use else_wire::outgoing::DraftAttachment;
 use uuid::Uuid;
 
@@ -69,6 +69,9 @@ pub struct Message {
     pub draft: Option<DraftAttachment>,
     /// The owner notice this message answers, so sending settles it.
     pub answers_notice: Option<Uuid>,
+    /// The owner's reaction this message carries; the chat shows the mark
+    /// on the reacted message instead of this one.
+    pub reaction: Option<Reaction>,
 }
 
 impl Message {
@@ -84,7 +87,7 @@ impl Message {
             request_id,
             text,
             provider_id: None,
-            reaction: None,
+            reaction: self.reaction,
             parts,
             open_draft: self.draft.clone(),
             answers_notice: self.answers_notice,
@@ -127,6 +130,7 @@ mod tests {
             files: vec![file.clone()],
             draft: None,
             answers_notice: None,
+            reaction: None,
         };
         let request = message.request(Uuid::nil());
         assert_eq!(request.text, "For March\n[File: receipt.pdf]");
@@ -144,6 +148,7 @@ mod tests {
             files: vec![],
             draft: None,
             answers_notice: None,
+            reaction: None,
         };
         let request = plain.request(Uuid::nil());
         assert_eq!((request.text.as_str(), request.parts.len()), ("hi", 0));

@@ -5,7 +5,7 @@
 
 use else_client::model::Conversation;
 use else_wire::bots::Phase;
-use else_wire::items::{Attachment, Item, ItemKind, MessagePart};
+use else_wire::items::{Attachment, Item, ItemKind, MessagePart, ReactionKind};
 use else_wire::notices::{OwnerNotice, OwnerNoticeStatus};
 use else_wire::outgoing::{DraftStatus, OutgoingDraft};
 use else_wire::questions::{Question, QuestionStatus};
@@ -48,6 +48,8 @@ pub enum Row {
         id: Uuid,
         text: String,
         streaming: bool,
+        /// The owner's latest reaction to it.
+        reaction: Option<ReactionKind>,
     },
     /// A receipt or notice, centered and quiet.
     Note { id: Uuid, text: String },
@@ -145,6 +147,8 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
         previous = Some(item.turn_id);
         let turn = conversation.turn(item.turn_id);
         match item.kind {
+            // A reaction shows as its mark on the message it is about.
+            ItemKind::User if item.reaction.is_some() => {}
             ItemKind::User => {
                 if let Some(task) = &item.bot_task {
                     let title = task.title.as_deref().unwrap_or("a task");
@@ -163,7 +167,8 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
                 });
             }
             ItemKind::Assistant => {
-                if item.text.trim().is_empty() {
+                // The bot's "Thanks, noted" to a reaction says nothing new.
+                if item.text.trim().is_empty() || conversation.is_feedback_acknowledgement(item) {
                     continue;
                 }
                 let streaming = turn.is_some_and(|turn| turn.status.is_working())
@@ -175,6 +180,7 @@ pub fn rows(conversation: &Conversation) -> Vec<Row> {
                     id: item.id,
                     text: item.text.clone(),
                     streaming,
+                    reaction: conversation.reaction_for(item.id),
                 });
             }
             ItemKind::Status | ItemKind::Routine => {
@@ -536,6 +542,31 @@ mod tests {
                 text: "Installed Brand guidelines for this bot · key not set".into(),
             })
         );
+    }
+
+    #[test]
+    fn a_reaction_shows_on_the_message_it_is_about() {
+        let mut conversation = conversation();
+        let bot_item = "00000000-0000-0000-0000-000000000002";
+        apply(
+            &mut conversation,
+            5,
+            json!({ "event": "item.upsert", "data": { "item": {
+                "id": "00000000-0000-0000-0000-000000000010", "seq": 2, "turn_id": TURN,
+                "request_id": REQUEST, "kind": "user", "text": "👍 Feedback on …",
+                "provider_id": null,
+                "reaction": { "item_id": bot_item, "kind": "thumbs_up" },
+            }}}),
+        );
+        let rows = rows(&conversation);
+        assert_eq!(rows.len(), 1, "the reaction itself is no row");
+        assert!(matches!(
+            &rows[0],
+            Row::Bot {
+                reaction: Some(ReactionKind::ThumbsUp),
+                ..
+            }
+        ));
     }
 
     #[test]

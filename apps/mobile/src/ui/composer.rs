@@ -8,6 +8,7 @@ use nsh_core::picker::{FilePickRequest, PickRequest, PickedFile, PickedStatus};
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
+use super::chat::Quote;
 use super::parts::{ARROW_UP, PLUS, STOP, colors};
 use super::session::{self, Chat};
 
@@ -219,7 +220,12 @@ fn pending_strip(bot: Uuid, pending: Signal<Vec<Pending>>) -> impl IntoElement {
     })
 }
 
-pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoElement {
+pub fn composer(
+    bot: Uuid,
+    chat: Signal<Chat>,
+    busy: Memo<bool>,
+    quote: Signal<Option<Quote>>,
+) -> impl IntoElement {
     let draft = signal(String::new());
     let pending = signal(Vec::<Pending>::new());
     let attach_notice = signal(None::<String>);
@@ -237,13 +243,21 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
         if !can_send.get_untracked() {
             return;
         }
+        let typed = draft.get_untracked().trim().to_owned();
+        let quoted = quote.get_untracked();
+        // A reply quotes the message it answers, as the desktop writes it.
+        let text = match &quoted {
+            Some(q) => else_client::reply::replying_to(q.subject(), &q.text, &typed),
+            None => typed.clone(),
+        };
         let message = Message {
-            text: draft.get_untracked().trim().to_owned(),
+            text,
             files: pending.with_untracked(|p| p.iter().map(|item| item.file.clone()).collect()),
             // Only the draft card's Send carries a draft: a message about
             // something else must not close the draft or change its reply.
             draft: None,
             answers_notice: None,
+            reaction: None,
         };
         let op = outbox.with_untracked(|o| match o.unconfirmed_op() {
             Some(unconfirmed) if unconfirmed.message == message => unconfirmed.clone(),
@@ -266,8 +280,11 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
                     }
                     // Only what was sent leaves the composer; text or files
                     // added meanwhile stay.
-                    if draft.get_untracked().trim() == message.text {
+                    if draft.get_untracked().trim() == typed {
                         draft.set(String::new());
+                    }
+                    if quote.get_untracked() == quoted {
+                        quote.set(None);
                     }
                     pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
                     chat.update(|c| {
@@ -362,6 +379,7 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
                 })
         })
         .child(notice)
+        .child(quote_bar(quote))
         .child(pending_strip(bot, pending))
         .child(
             view()
@@ -421,4 +439,55 @@ pub fn composer(bot: Uuid, chat: Signal<Chat>, busy: Memo<bool>) -> impl IntoEle
                         .child(action),
                 ),
         )
+}
+
+/// The message the next one replies to, with a way to drop it.
+fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
+    dynamic(move || {
+        let quoted = quote.get()?;
+        let preview: String = quoted.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .mx_3()
+                .mb_2()
+                .pl_3()
+                .border_l(px(3.0))
+                .border_color(colors::tint())
+                .child(
+                    view()
+                        .flex_1()
+                        .gap(px(2.0))
+                        .child(
+                            text(if quoted.owner {
+                                "Replying to yourself"
+                            } else {
+                                "Replying to the bot"
+                            })
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors::tint()),
+                        )
+                        .child(
+                            text(preview)
+                                .number_of_lines(2)
+                                .text_size(px(13.0))
+                                .line_height(px(18.0))
+                                .text_color(colors::secondary()),
+                        ),
+                )
+                .child(
+                    text("✕")
+                        .px_2()
+                        .py_2()
+                        .text_size(px(15.0))
+                        .text_color(colors::secondary())
+                        .role(AccessibilityRole::Button)
+                        .label("Cancel reply")
+                        .on_press(move || quote.set(None)),
+                ),
+        )
+    })
 }

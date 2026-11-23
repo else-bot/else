@@ -91,6 +91,7 @@ pub(super) fn card(notice: OwnerNotice) -> impl IntoElement {
                     files: Vec::new(),
                     draft: None,
                     answers_notice: settles.then_some(id),
+                    reaction: None,
                 },
                 request_id,
             ));

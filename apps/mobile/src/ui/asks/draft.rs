@@ -218,6 +218,7 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                         edit: draft.edit(),
                     }),
                     answers_notice: None,
+                    reaction: None,
                 };
                 let id = format!("send-as-is:{}", draft.version);
                 DraftOp::SendAsIs(reply, Uuid::new_v5(&draft.id, id.as_bytes()))
