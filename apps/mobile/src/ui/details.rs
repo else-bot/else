@@ -4,6 +4,8 @@
 //! the bot's live updates.
 
 use chrono::{DateTime, Local, Utc};
+use else_client::request::Request;
+use else_wire::bots::Bot;
 use else_wire::conversation::BotExtras;
 use else_wire::email::AccountState;
 use else_wire::routines::{PausedReason, Routine, WatcherStatus};
@@ -11,7 +13,8 @@ use else_wire::rules::RulesFile;
 use else_wire::schedule::{
     last_woke, watcher_deadline, watcher_last_check, watcher_next, webhook_pace,
 };
-use nsh_base::nav_page;
+use nsh_base::{alert_dialog, nav_page};
+use nsh_core::element::header::HeaderItem;
 use nsh_core::prelude::*;
 use uuid::Uuid;
 
@@ -165,10 +168,23 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
         })
     });
 
+    let edit_item = move || {
+        bot_record
+            .get()
+            .map(|record| {
+                vec![
+                    HeaderItem::new("Edit")
+                        .key("edit")
+                        .on_press(move || super::edit_bot::open(record.clone())),
+                ]
+            })
+            .unwrap_or_default()
+    };
     nav_page()
         .key(key(bot))
         .title("Details")
         .header_large_title(false)
+        .header_right_items(edit_item)
         .child(
             scroll().flex_1().bg(colors::background()).child(
                 view()
@@ -185,9 +201,99 @@ fn screen(bot: Uuid, chat: Signal<Chat>) -> Screen {
                                 "Rules are what the bot does whenever something happens. Ask it in the chat to add or change one.",
                             )),
                     )
-                    .child(lists),
+                    .child(mute_section(bot, bot_record))
+                    .child(lists)
+                    .child(delete_section(bot, bot_record)),
             ),
         )
+}
+
+/// Mute: a muted bot is unread and announced only while it waits on the
+/// owner. The switch shows what the server saved.
+fn mute_section(bot: Uuid, record: Memo<Option<Bot>>) -> View {
+    let request = signal(Request::<bool>::Idle);
+    let muted = move || record.with(|b| b.as_ref().is_some_and(|b| b.muted));
+    let set = move |on: bool| {
+        let client = session::server().client.clone();
+        session::submit(
+            request,
+            on,
+            move |on| client.set_muted(bot, on),
+            move |saved| {
+                session::update_bot(saved);
+                request.try_set(Request::Idle);
+            },
+        );
+    };
+    view()
+        .child(list::card([list::switch_row(
+            "Mute",
+            muted,
+            move || !request.with(Request::busy),
+            set,
+        )]))
+        .child(parts::footnote(move || {
+            request
+                .with(|r| r.error().map(str::to_owned))
+                .unwrap_or_else(|| {
+                    "A muted bot shows as unread only while it waits on you.".to_owned()
+                })
+        }))
+}
+
+/// Deleting the bot, after a confirmation: its work stops and it leaves
+/// the list; its history, memory and files are kept. The server's main
+/// bot cannot be deleted.
+fn delete_section(bot: Uuid, record: Memo<Option<Bot>>) -> impl IntoElement {
+    let request = signal(Request::<()>::Idle);
+    let main = computed(move || session::bots().with(|b| b.default_bot_id == Some(bot)));
+    let delete = move || {
+        let name = record.with_untracked(|b| b.as_ref().map(|b| b.name.clone()));
+        let Some(name) = name else { return };
+        session::spawn_held(async move {
+            let choice = alert_dialog()
+                .title(format!("Delete {name}?"))
+                .description(
+                    "Any work in progress stops and the bot leaves your list. Its history, memory and files are kept.",
+                )
+                .cancel("cancel", "Cancel")
+                .destructive("delete", "Delete")
+                .show()
+                .await;
+            if !matches!(choice, Ok(r) if r.action.as_deref() == Some("delete")) {
+                return;
+            }
+            let client = session::server().client.clone();
+            session::submit(
+                request,
+                (),
+                move |()| client.delete_bot(bot),
+                move |_| {
+                    // Its chat and the screens over it close with it.
+                    let id = bot.to_string();
+                    super::routes().update(|r| r.0.retain(|route| !route.key.contains(&id)));
+                    session::refresh_bots();
+                },
+            );
+        });
+    };
+    when(
+        move || !main.get(),
+        move || {
+            view()
+                .child(list::card([list::action_row(
+                    "Delete Bot",
+                    true,
+                    move || !request.with(Request::busy),
+                    delete,
+                )]))
+                .child(dynamic(move || {
+                    request
+                        .with(|r| r.error().map(str::to_owned))
+                        .map(parts::footnote)
+                }))
+        },
+    )
 }
 
 /// One list of the screen: its title, then its rows or what to ask the

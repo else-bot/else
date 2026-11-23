@@ -136,26 +136,7 @@ fn screen() -> Screen {
         ]
     };
 
-    let shapes = picker(AvatarShape::ALL, shape, AvatarShape::label, move |choice| {
-        parts::avatar(
-            move || Avatar {
-                shape: choice,
-                color: picked.get(),
-            },
-            34.0,
-        )
-    });
-    let swatches = picker(AvatarColor::ALL, picked, AvatarColor::label, |choice| {
-        let swatch = view()
-            .size(px(28.0))
-            .rounded(px(14.0))
-            .bg(rgb(choice.rgb()));
-        if choice == AvatarColor::White {
-            swatch.border(px(0.5)).border_color(colors::separator())
-        } else {
-            swatch
-        }
-    });
+    let (shapes, swatches) = avatar_pickers(shape, picked);
 
     let message = dynamic(move || {
         let message = match step.get() {
@@ -219,6 +200,34 @@ fn screen() -> Screen {
                         .child(model_row(caps, model)),
                 ),
         )
+}
+
+/// The avatar's shape choices, drawn in its color, and its color swatches.
+pub(super) fn avatar_pickers(
+    shape: Signal<AvatarShape>,
+    color: Signal<AvatarColor>,
+) -> (View, View) {
+    let shapes = picker(AvatarShape::ALL, shape, AvatarShape::label, move |choice| {
+        parts::avatar(
+            move || Avatar {
+                shape: choice,
+                color: color.get(),
+            },
+            34.0,
+        )
+    });
+    let swatches = picker(AvatarColor::ALL, color, AvatarColor::label, |choice| {
+        let swatch = view()
+            .size(px(28.0))
+            .rounded(px(14.0))
+            .bg(rgb(choice.rgb()));
+        if choice == AvatarColor::White {
+            swatch.border(px(0.5)).border_color(colors::separator())
+        } else {
+            swatch
+        }
+    });
+    (shapes, swatches)
 }
 
 /// A wrapping row of choices, the selected one ringed.

@@ -146,3 +146,61 @@ pub fn option_row(
         }))
         .into_element()
 }
+
+/// A setting turned on or off with the system's switch. The app owns the
+/// value: a flip asks for one, and `checked` shows what the server kept.
+pub fn switch_row(
+    title: &'static str,
+    checked: impl Fn() -> bool + 'static,
+    enabled: impl Fn() -> bool + 'static,
+    on_change: impl Fn(bool) + 'static,
+) -> AnyElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .min_h(px(44.0))
+        .px_4()
+        .py(px(7.0))
+        .child(
+            text(title)
+                .flex_1()
+                .text_size(px(17.0))
+                .text_color(colors::label()),
+        )
+        .child(
+            nsh_core::mobile::switch()
+                .checked(checked)
+                .disabled(move || !enabled())
+                .accessibility_label(title)
+                .on_change(move |on: &bool| on_change(*on)),
+        )
+        .into_element()
+}
+
+/// A row that acts at once, in red when it cannot be undone.
+pub fn action_row(
+    title: impl Into<String>,
+    destructive: bool,
+    enabled: impl Fn() -> bool + 'static,
+    on_press: impl Fn() + 'static,
+) -> AnyElement {
+    let title = title.into();
+    view()
+        .min_h(px(44.0))
+        .px_4()
+        .py(px(11.0))
+        .justify_center()
+        .active(|s| s.bg(colors::fill()))
+        .disabled(move || !enabled())
+        .disabled_style(|s| s.opacity(0.45))
+        .role(AccessibilityRole::Button)
+        .label(title.clone())
+        .on_press(on_press)
+        .child(text(title).text_size(px(17.0)).text_color(if destructive {
+            colors::destructive()
+        } else {
+            colors::tint()
+        }))
+        .into_element()
+}

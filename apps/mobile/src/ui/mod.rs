@@ -7,6 +7,7 @@ mod chat;
 mod composer;
 mod connect;
 mod details;
+mod edit_bot;
 mod files;
 mod list;
 mod model;
