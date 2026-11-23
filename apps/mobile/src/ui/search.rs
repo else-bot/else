@@ -18,7 +18,8 @@ use crate::api::Client;
 
 /// The most matches listed; the count says how many there are.
 const SHOWN: usize = 30;
-/// Messages shown on each side of a match.
+/// Messages shown on each side of a match. A window's `older` counts the
+/// match itself.
 const AROUND: i64 = 6;
 
 pub fn open(bot: Uuid) {
@@ -37,7 +38,11 @@ struct Found {
 enum Results {
     Idle,
     Searching,
-    Found { total: usize, found: Vec<Found> },
+    /// `total` is how many messages match.
+    Found {
+        total: usize,
+        found: Vec<Found>,
+    },
     Failed(String),
 }
 
@@ -78,25 +83,31 @@ fn screen(bot: Uuid) -> Screen {
     let round = signal(0_u64);
     let search = move || {
         let wanted = query.get_untracked().trim().to_owned();
+        // A new search, even an empty one, makes any earlier one stale.
+        let this = round.get_untracked() + 1;
+        round.set(this);
         if wanted.is_empty() {
             results.set(Results::Idle);
             return;
         }
-        let this = round.get_untracked() + 1;
-        round.set(this);
         results.set(Results::Searching);
         let client = session::server().client.clone();
         spawn(async move {
             let outcome = match client.clone().search(bot, wanted).await {
                 Ok(hits) => {
+                    // Matching messages; `total` counts occurrences.
+                    let messages = hits.hits.len();
                     let shown: Vec<SearchHit> = hits.hits.into_iter().take(SHOWN).collect();
                     let items =
                         join_all(shown.iter().map(|hit| item_of(client.clone(), bot, hit))).await;
                     Results::Found {
-                        total: hits.total,
+                        total: messages,
+                        // A reaction shows as a mark in the chat, so its
+                        // feedback message is no match to open.
                         found: shown
                             .into_iter()
                             .zip(items)
+                            .filter(|(_, item)| !item.as_ref().is_ok_and(|i| i.reaction.is_some()))
                             .map(|(hit, item)| Found { hit, item })
                             .collect(),
                     }
@@ -207,7 +218,7 @@ fn context(bot: Uuid, hit: SearchHit) -> Screen {
             let client = session::server().client.clone();
             async move {
                 client
-                    .window(bot, hit.seq, (AROUND, AROUND), (None, None))
+                    .window(bot, hit.seq, (AROUND + 1, AROUND), (None, None))
                     .await
                     .map(|window| window.items)
                     .map_err(|err| err.to_string())
@@ -228,10 +239,14 @@ fn context(bot: Uuid, hit: SearchHit) -> Screen {
                 .into_iter()
                 .filter(|item| !item.text.trim().is_empty() && item.reaction.is_none())
                 .collect();
-            let at = items
-                .iter()
-                .position(|item| item.id == hit.item_id)
-                .unwrap_or(0);
+            let Some(at) = items.iter().position(|item| item.id == hit.item_id) else {
+                return Some(
+                    view()
+                        .py_4()
+                        .child(parts::footnote("This message is no longer shown."))
+                        .into_element(),
+                );
+            };
             let count = items.len();
             let items = std::rc::Rc::new(items);
             Some(untracked(|| {
