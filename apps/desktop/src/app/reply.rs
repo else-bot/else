@@ -369,37 +369,26 @@ pub(super) struct QuotedReply<'a> {
 
 impl<'a> QuotedReply<'a> {
     pub(super) fn parse(message: &'a str) -> Option<Self> {
-        let (author, rest) = [
-            (Author::Owner, "Replying to my earlier message:\n"),
-            (Author::Bot, "Replying to your earlier message:\n"),
-        ]
-        .into_iter()
-        .find_map(|(author, prefix)| message.strip_prefix(prefix).map(|rest| (author, rest)))?;
-        let (quote, body) = rest.split_once("\n\n")?;
-        (!quote.is_empty()
-            && !body.trim().is_empty()
-            && quote
-                .lines()
-                .all(|line| line == ">" || line.starts_with("> ")))
-        .then_some(Self {
-            author,
-            quote: &message[..message.len() - body.len() - 2],
-            body,
+        let read = else_client::reply::Replying::parse(message)?;
+        Some(Self {
+            author: if read.owner {
+                Author::Owner
+            } else {
+                Author::Bot
+            },
+            quote: read.quote,
+            body: read.body,
         })
     }
 
     /// The quoted message's text as the conversation stored it.
     pub(super) fn original(&self) -> String {
-        self.quote
-            .lines()
-            .skip(1)
-            .map(|line| {
-                line.strip_prefix("> ")
-                    .or_else(|| line.strip_prefix('>'))
-                    .unwrap_or(line)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        else_client::reply::Replying {
+            owner: self.author == Author::Owner,
+            quote: self.quote,
+            body: self.body,
+        }
+        .original()
     }
 
     pub(super) fn excerpt(&self) -> String {

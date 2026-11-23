@@ -23,6 +23,53 @@ pub fn replying_to(subject: &str, quoted: &str, body: &str) -> String {
     format!("Replying to {subject}:\n{}\n\n{body}", quote(quoted))
 }
 
+/// A reply as [`replying_to`] wrote it, read back: whose message it
+/// quotes, the quoted block (with its "Replying to …:" line), and the
+/// owner's words. `None` for any other message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Replying<'a> {
+    /// It quotes the owner's own earlier message, not the bot's.
+    pub owner: bool,
+    pub quote: &'a str,
+    pub body: &'a str,
+}
+
+impl<'a> Replying<'a> {
+    pub fn parse(message: &'a str) -> Option<Self> {
+        let (owner, rest) = [
+            (true, "Replying to my earlier message:\n"),
+            (false, "Replying to your earlier message:\n"),
+        ]
+        .into_iter()
+        .find_map(|(owner, prefix)| message.strip_prefix(prefix).map(|rest| (owner, rest)))?;
+        let (quote, body) = rest.split_once("\n\n")?;
+        (!quote.is_empty()
+            && !body.trim().is_empty()
+            && quote
+                .lines()
+                .all(|line| line == ">" || line.starts_with("> ")))
+        .then_some(Self {
+            owner,
+            quote: &message[..message.len() - body.len() - 2],
+            body,
+        })
+    }
+
+    /// The quoted message's text as the conversation stored it.
+    pub fn original(&self) -> String {
+        self.quote
+            .lines()
+            .skip(1)
+            .map(|line| {
+                line.strip_prefix("> ")
+                    .or_else(|| line.strip_prefix('>'))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// A reaction's mark.
 pub fn mark(kind: else_wire::items::ReactionKind) -> &'static str {
     match kind {
@@ -55,6 +102,23 @@ pub fn reaction(kind: else_wire::items::ReactionKind, subject: &str, quoted: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_reads_back_as_its_quote_and_words() {
+        let sent = replying_to(
+            "your earlier message",
+            "Blocked.\n\nTried: dig",
+            "Use 1.1.1.1",
+        );
+        let read = Replying::parse(&sent).unwrap();
+        assert!(!read.owner);
+        assert_eq!(read.original(), "Blocked.\n\nTried: dig");
+        assert_eq!(read.body, "Use 1.1.1.1");
+        assert_eq!(
+            Replying::parse("Replying to your earlier message:\nplain\n\nx"),
+            None
+        );
+    }
 
     #[test]
     fn a_reply_quotes_every_line_of_the_message_it_answers() {
