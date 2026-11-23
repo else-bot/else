@@ -25,61 +25,31 @@ pub(super) struct BotMention {
     avatar: Avatar,
 }
 
+impl From<else_client::mention::Mention> for BotMention {
+    fn from(found: else_client::mention::Mention) -> Self {
+        Self {
+            range: found.range,
+            id: found.id,
+            name: found.name,
+            text: found.text,
+            avatar: found.avatar,
+        }
+    }
+}
+
 impl BotMention {
     pub(super) fn find(source: &str, bots: &MentionRegistry) -> Vec<Self> {
         else_client::mention::find(source, bots)
             .into_iter()
-            .map(|found| Self {
-                range: found.range,
-                id: found.id,
-                name: found.name,
-                text: found.text,
-                avatar: found.avatar,
-            })
+            .map(Self::from)
             .collect()
     }
 
     pub(super) fn in_markdown(source: &str, bots: &MentionRegistry) -> Vec<Self> {
-        if !source.contains('@') {
-            return Vec::new();
-        }
-        fn visit(
-            node: &Node,
-            source: &str,
-            bots: &MentionRegistry,
-            mentions: &mut Vec<BotMention>,
-        ) {
-            match node {
-                Node::Link(_)
-                | Node::LinkReference(_)
-                | Node::Image(_)
-                | Node::ImageReference(_)
-                | Node::Code(_)
-                | Node::InlineCode(_)
-                | Node::Html(_) => return,
-                Node::Text(text) => {
-                    if let Some(position) = &text.position {
-                        let range = position.start.offset..position.end.offset;
-                        for mut mention in BotMention::find(&source[range.clone()], bots) {
-                            mention.range.start += range.start;
-                            mention.range.end += range.start;
-                            mentions.push(mention);
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if let Some(children) = node.children() {
-                for child in children {
-                    visit(child, source, bots, mentions);
-                }
-            }
-        }
-        let mut mentions = Vec::new();
-        if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
-            visit(&root, source, bots, &mut mentions);
-        }
-        mentions
+        else_client::mention::find_in_markdown(source, bots)
+            .into_iter()
+            .map(Self::from)
+            .collect()
     }
 
     pub(super) fn content(source: &str, mentions: &[Self]) -> InputContent {

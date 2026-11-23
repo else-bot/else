@@ -2543,6 +2543,7 @@ dependencies = [
  "futures-util",
  "iana-time-zone",
  "image",
+ "markdown",
  "reqwest 0.13.5",
  "rustls",
  "rustls-platform-verifier",

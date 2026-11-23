@@ -310,19 +310,22 @@ fn owner_bubble(bot: Uuid, line: Memo<Option<Line>>) -> impl IntoElement {
                     )
                 }))
                 // Mentions of bots show in bold, the rest exactly as typed.
-                .child(
-                    text_view()
-                        .markdown(move || {
-                            let shown = row_text(line)();
-                            let words = else_client::reply::Replying::parse(&shown)
-                                .map_or_else(|| shown.clone(), |read| read.body.to_owned());
-                            SharedString::from(crate::mentions::plain(&words, &mention_bots()))
-                        })
-                        .selectable(true)
-                        .text_size(px(17.0))
-                        .line_height(px(22.0))
-                        .text_color(rgb(0xffffff)),
-                )
+                .child(dynamic(move || {
+                    let shown = row_text(line)();
+                    let words = else_client::reply::Replying::parse(&shown)
+                        .map_or_else(|| shown.clone(), |read| read.body.to_owned());
+                    let pieces = crate::mentions::plain(&words, &mention_bots());
+                    Some(
+                        text("")
+                            .children(pieces.into_iter().map(|(piece, mention)| {
+                                text(piece).when(mention, |t| t.font_weight(FontWeight::BOLD))
+                            }))
+                            .selectable(true)
+                            .text_size(px(17.0))
+                            .line_height(px(22.0))
+                            .text_color(rgb(0xffffff)),
+                    )
+                }))
         }))
         .child(dynamic(move || {
             outcome.get().map(|outcome| {

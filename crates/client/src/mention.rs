@@ -114,6 +114,45 @@ pub struct Mention {
 
 /// The mentions in `source`: a whole name after `@` at a word boundary, the
 /// longest name winning; a name two bots share stays plain.
+/// The mentions in Markdown `source` that show as prose: none in code,
+/// links, images or HTML, which keep their text as written.
+pub fn find_in_markdown(source: &str, bots: &Registry) -> Vec<Mention> {
+    use markdown::mdast::Node;
+    fn visit(node: &Node, source: &str, bots: &Registry, mentions: &mut Vec<Mention>) {
+        match node {
+            Node::Link(_)
+            | Node::LinkReference(_)
+            | Node::Definition(_)
+            | Node::Image(_)
+            | Node::ImageReference(_)
+            | Node::Code(_)
+            | Node::InlineCode(_)
+            | Node::Html(_) => return,
+            Node::Text(text) => {
+                if let Some(position) = &text.position {
+                    let range = position.start.offset..position.end.offset;
+                    for mut mention in find(&source[range.clone()], bots) {
+                        mention.range.start += range.start;
+                        mention.range.end += range.start;
+                        mentions.push(mention);
+                    }
+                }
+            }
+            _ => {}
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, source, bots, mentions);
+        }
+    }
+    let mut mentions = Vec::new();
+    if source.contains('@')
+        && let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm())
+    {
+        visit(&root, source, bots, &mut mentions);
+    }
+    mentions
+}
+
 pub fn find(source: &str, bots: &Registry) -> Vec<Mention> {
     let mut mentions = Vec::new();
     let mut end = 0;

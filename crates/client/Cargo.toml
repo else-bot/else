@@ -16,6 +16,7 @@ base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde", "clock", "std"] }
 futures-util = { workspace = true }
 iana-time-zone = { workspace = true }
+markdown = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "ico"] }
 reqwest = { workspace = true, features = ["stream", "json", "rustls"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }

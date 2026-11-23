@@ -1,82 +1,34 @@
 //! Bot mentions in the chat's text, found as the desktop finds them
-//! (else_client::mention) and shown in bold, as Markdown: an owner's plain
-//! message is escaped first so nothing else in it turns into formatting; a
-//! bot's Markdown reply keeps its code untouched.
+//! (else_client::mention) and shown in bold: an owner's plain message as
+//! text with bold pieces, exactly as typed; a bot's Markdown reply keeps
+//! its code untouched.
 
-use else_client::mention::{Registry, find};
+use else_client::mention::{Registry, find, find_in_markdown};
 
-/// `text` as Markdown that shows exactly those characters.
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(
-            c,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '['
-                | ']'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '.'
-                | '!'
-                | '>'
-                | '|'
-                | '~'
-                | '<'
-                | '{'
-                | '}'
-        ) {
-            out.push('\\');
+/// An owner's plain message cut at its mentions: each piece with whether
+/// it is a mention, to show in bold. Nothing else in the text changes.
+pub fn plain(text: &str, bots: &Registry) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for mention in find(text, bots) {
+        if at < mention.range.start {
+            out.push((text[at..mention.range.start].to_owned(), false));
         }
-        out.push(c);
+        out.push((text[mention.range.clone()].to_owned(), true));
+        at = mention.range.end;
+    }
+    if at < text.len() {
+        out.push((text[at..].to_owned(), false));
     }
     out
 }
 
-/// An owner's plain message as Markdown, its mentions in bold. Line breaks
-/// stay line breaks.
-pub fn plain(text: &str, bots: &Registry) -> String {
-    let mut out = String::new();
-    let mut at = 0;
-    for mention in find(text, bots) {
-        out.push_str(&escape(&text[at..mention.range.start]));
-        out.push_str("**");
-        out.push_str(&escape(&mention.text));
-        out.push_str("**");
-        at = mention.range.end;
-    }
-    out.push_str(&escape(&text[at..]));
-    // A single newline is a soft break in Markdown; the owner meant a new line.
-    out.replace('\n', "  \n")
-}
-
-/// Whether byte `at` of `markdown` sits in code: a fenced block or an
-/// inline span, by the fences and backticks before it.
-fn in_code(markdown: &str, at: usize) -> bool {
-    let before = &markdown[..at];
-    let fences = before
-        .lines()
-        .filter(|l| l.trim_start().starts_with("```"))
-        .count();
-    if fences % 2 == 1 {
-        return true;
-    }
-    let line = before.rsplit('\n').next().unwrap_or(before);
-    line.matches('`').count() % 2 == 1
-}
-
-/// A bot's Markdown reply with its mentions in bold, code left as it is.
+/// A bot's Markdown reply with its mentions in bold; code, links and HTML
+/// left as they are.
 pub fn markdown(source: &str, bots: &Registry) -> String {
     let mut out = String::new();
     let mut at = 0;
-    for mention in find(source, bots) {
-        if in_code(source, mention.range.start) {
-            continue;
-        }
+    for mention in find_in_markdown(source, bots) {
         out.push_str(&source[at..mention.range.start]);
         out.push_str("**");
         out.push_str(&mention.text);
@@ -108,22 +60,25 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_message_bolds_mentions_and_nothing_else() {
+    fn an_owner_message_bolds_mentions_and_keeps_the_rest_as_typed() {
         assert_eq!(
-            plain("Ask @Scout *now*\nthanks", &bots(&["Scout"])),
-            "Ask **@Scout** \\*now\\*  \nthanks"
+            plain("Ask @Scout *now*\n  https://a.b?x&amp;y", &bots(&["Scout"])),
+            [
+                ("Ask ".to_owned(), false),
+                ("@Scout".to_owned(), true),
+                (" *now*\n  https://a.b?x&amp;y".to_owned(), false),
+            ]
         );
     }
 
     #[test]
-    fn a_reply_bolds_mentions_outside_code() {
+    fn a_reply_bolds_mentions_in_prose_only() {
         assert_eq!(
-            markdown("Ask @Scout, run `@Scout`", &bots(&["Scout"])),
-            "Ask **@Scout**, run `@Scout`"
-        );
-        assert_eq!(
-            markdown("```\n@Scout\n```\n@Scout", &bots(&["Scout"])),
-            "```\n@Scout\n```\n**@Scout**"
+            markdown(
+                "Ask @Scout, run ``@Scout`` or [him](@Scout)\n~~~\n@Scout\n~~~",
+                &bots(&["Scout"])
+            ),
+            "Ask **@Scout**, run ``@Scout`` or [him](@Scout)\n~~~\n@Scout\n~~~"
         );
     }
 }
