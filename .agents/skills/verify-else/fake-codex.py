@@ -209,6 +209,20 @@ def stream(turn, latest, packet, stopped):
             if result['status'] == 'pending':
                 finish(turn, stopped, 'completed')
                 return
+        connect = re.fullmatch(r'\[ui:mcp-connect\] (http://127\.0\.0\.1:\d+)', latest)
+        if connect:
+            try:
+                outgoing_tool('mcp_install', {
+                    'id': 'oauth-fixture', 'name': 'OAuth fixture', 'description': 'Local test MCP',
+                    'skill': 'Discover tools/list, then use fixture_read.',
+                    'documentation': 'This test MCP uses owner OAuth consent.',
+                    'config': {'type': 'http', 'url': connect.group(1) + '/mcp'}})
+            except RuntimeError:
+                pass  # installed by an earlier run; connecting again is the point
+            outgoing_tool('mcp_connect', {'id': 'oauth-fixture',
+                                          'purpose': 'Read the fixture value for the report.'})
+            finish(turn, stopped, 'completed')
+            return
         if latest == '[ui:skill]':
             outgoing_tool('skill_install', {
                 'url': 'https://github.com/anthropics/skills/tree/main/skills/brand-guidelines',

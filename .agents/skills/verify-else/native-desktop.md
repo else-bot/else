@@ -57,6 +57,11 @@ Send `[ui:skill]` for a skill install card for Anthropic's public
 `brand-guidelines` skill with one key, `BRAND_API_KEY`. The API fetches it
 from GitHub, so this one needs network. Once installed, a repeat fails with
 `ALREADY_INSTALLED` until `DELETE /v1/settings/skills/brand-guidelines`.
+For an MCP sign-in, run `python3 -u apps/api/tests/fixtures/mcp_oauth.py`
+(it prints its base URL), then send `[ui:mcp-connect] BASE_URL`: the bot
+installs that OAuth MCP and asks to connect it. The fixture's `/test` lists
+the register, authorize and token calls. To ask again after connecting,
+`DELETE /v1/bots/{id}/mcp/oauth-fixture/connection`.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
