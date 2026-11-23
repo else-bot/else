@@ -6,7 +6,7 @@ use crate::controls::{Control as _, Scale, Tier};
 use crate::model::Wait;
 use chrono::{DateTime, Utc};
 use else_wire::delegations::{Delegation, DelegationStatus};
-use else_wire::waits::{ComputerJobWait, JobStatus, McpWait};
+use else_wire::waits::{ComputerJobWait, McpWait};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -43,66 +43,6 @@ const SHOWN_RESULT: usize = 600;
 /// The first non-empty line of a task's latest message, as plain text.
 fn first_line(text: &str) -> Option<String> {
     else_plain_text::lines(text).into_iter().next()
-}
-
-fn one_line(task: &str) -> String {
-    task.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// "2 jobs and 1 reply": what the tray's header says the bot waits on.
-fn waiting_summary(waits: &[Wait<'_>]) -> String {
-    let replies = waits.iter().filter(|w| matches!(w, Wait::Task(_))).count();
-    let jobs = waits.len() - replies;
-    let count =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    match (jobs, replies) {
-        (0, replies) => count(replies, "reply", "replies"),
-        (jobs, 0) => count(jobs, "job", "jobs"),
-        (jobs, replies) => format!(
-            "{} and {}",
-            count(jobs, "job", "jobs"),
-            count(replies, "reply", "replies")
-        ),
-    }
-}
-
-/// The row's label: what the bot said it waits for.
-fn wait_title(wait: &Wait<'_>) -> String {
-    let purpose = match wait {
-        Wait::Mcp(wait) if !wait.purpose.trim().is_empty() => one_line(&wait.purpose),
-        Wait::Mcp(wait) => format!("{} job", wait.mcp_id),
-        Wait::Job(job) => job
-            .purpose
-            .as_deref()
-            .map(one_line)
-            .filter(|purpose| !purpose.is_empty())
-            .unwrap_or_else(|| "Computer job".to_owned()),
-        Wait::Task(task) => one_line(&task.task),
-    };
-    format!("Waiting: {purpose}")
-}
-
-/// Where a job stands: its checks and last readable status.
-fn job_status(wait: &Wait<'_>) -> Option<String> {
-    match wait {
-        Wait::Mcp(wait) => {
-            let checks = match wait.checks {
-                0 => None,
-                1 => Some("1 check".to_owned()),
-                n => Some(format!("{n} checks")),
-            };
-            let parts: Vec<String> = checks.into_iter().chain(wait.last_status.clone()).collect();
-            (!parts.is_empty()).then(|| parts.join(" · "))
-        }
-        Wait::Job(job) => Some(
-            job.job_status
-                .as_ref()
-                .unwrap_or(&JobStatus::Running)
-                .as_str()
-                .to_owned(),
-        ),
-        Wait::Task(_) => None,
-    }
 }
 
 /// The first web link in `text`, such as a PR or thread URL in a status.
@@ -185,7 +125,7 @@ impl ElseApp {
         let sender_name = sender.map_or_else(|| "This bot".to_owned(), |b| b.name.clone());
         let bot = view.bot_id;
         let collapsed = self.tray(bot).is_some_and(|tray| !tray.expanded);
-        let summary = format!("{sender_name} is waiting on {}", waiting_summary(&waits));
+        let summary = format!("{sender_name} is waiting on {}", Wait::summary(&waits));
         let tasks = waits.iter().filter_map(|wait| match wait {
             Wait::Task(task) => Some(task.target_bot_id),
             _ => None,
@@ -317,14 +257,14 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let id = wait.id();
         let expanded = self.tray(bot).is_some_and(|tray| tray.open.contains(&id));
-        let title = wait_title(wait);
+        let title = wait.title();
         let source = match wait {
             Wait::Mcp(wait) if wait.tool.is_empty() => wait.mcp_id.clone(),
             Wait::Mcp(wait) => format!("{} · {}", wait.mcp_id, wait.tool),
             _ => "Computer job".to_owned(),
         };
         let elapsed = elapsed_since(wait.created_at(), Utc::now());
-        let status = job_status(wait);
+        let status = wait.status();
         let details = expanded.then(|| match wait {
             Wait::Mcp(wait) => mcp_details(wait),
             Wait::Job(job) => job_details(job),
@@ -590,7 +530,7 @@ impl ElseApp {
                             .truncate()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(one_line(&d.task)),
+                            .child(else_client::waits::one_line(&d.task)),
                     )
                     .child(
                         h_flex()
@@ -679,25 +619,7 @@ fn job_details(job: &ComputerJobWait) -> Vec<Detail> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, first_link, job_status, wait_title, waiting_summary};
-    use crate::model::Wait;
-    use else_wire::waits::{ComputerJobWait, McpWait};
-    use uuid::Uuid;
-
-    fn mcp(purpose: &str, checks: i64, status: Option<&str>) -> McpWait {
-        McpWait {
-            id: Uuid::from_u128(1),
-            mcp_id: "t3-code".into(),
-            tool: "task_status".into(),
-            purpose: purpose.into(),
-            interval_seconds: 30,
-            deadline_at: None,
-            checks,
-            last_status: status.map(str::to_owned),
-            last_result: None,
-            created_at: None,
-        }
-    }
+    use super::{first_line, first_link};
 
     #[test]
     fn progress_shows_the_first_line_as_plain_text() {
@@ -709,52 +631,6 @@ mod tests {
         assert_eq!(
             first_line("~~Drafting~~ Sent https://example.com/report"),
             Some("Drafting Sent https://example.com/report".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_wait_reads_as_its_purpose_and_status() {
-        let wait = mcp("T3 thread for #465\n(else_status)", 2, Some("in_progress"));
-        assert_eq!(
-            wait_title(&Wait::Mcp(&wait)),
-            "Waiting: T3 thread for #465 (else_status)"
-        );
-        assert_eq!(
-            job_status(&Wait::Mcp(&wait)).as_deref(),
-            Some("2 checks · in_progress")
-        );
-        let job = ComputerJobWait {
-            id: Uuid::from_u128(2),
-            job_id: Uuid::from_u128(3),
-            command: "for i in $(seq 1 50); do curl -s https://api.github.com/x; done".into(),
-            purpose: Some("CI checks on PR #482".into()),
-            job_status: None,
-            created_at: None,
-        };
-        assert_eq!(
-            wait_title(&Wait::Job(&job)),
-            "Waiting: CI checks on PR #482"
-        );
-        assert_eq!(job_status(&Wait::Job(&job)).as_deref(), Some("running"));
-        let unlabeled = ComputerJobWait {
-            purpose: None,
-            ..job
-        };
-        assert_eq!(
-            wait_title(&Wait::Job(&unlabeled)),
-            "Waiting: Computer job",
-            "never the raw command"
-        );
-    }
-
-    #[test]
-    fn the_header_counts_jobs_and_replies() {
-        let one = mcp("a", 1, None);
-        let two = mcp("b", 1, None);
-        assert_eq!(waiting_summary(&[Wait::Mcp(&one)]), "1 job");
-        assert_eq!(
-            waiting_summary(&[Wait::Mcp(&one), Wait::Mcp(&two)]),
-            "2 jobs"
         );
     }
 
