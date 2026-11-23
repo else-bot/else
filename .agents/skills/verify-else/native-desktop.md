@@ -49,6 +49,8 @@ Click one option on the single-answer card to submit it immediately.
 Send `[ui:permission]` to request a scoped Tailscale approval for `SSH host omarchy-m1`.
 Choose **Always allow** and check the saved task through the permissions API.
 The fixture requests approval but never runs SSH or changes Tailscale.
+Send `[ui:secret]` for a `fixture-smtp` secret request with two fields; a
+save shows up in `GET /v1/task-secrets`.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It

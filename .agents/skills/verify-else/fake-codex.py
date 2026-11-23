@@ -201,6 +201,13 @@ def stream(turn, latest, packet, stopped):
             if result['status'] == 'pending':
                 finish(turn, stopped, 'completed')
                 return
+        if latest == '[ui:secret]':
+            outgoing_tool('request_secret', {
+                'name': 'fixture-smtp', 'reason': 'To send the weekly report by email.',
+                'env': ['SMTP_USERNAME', 'SMTP_PASSWORD'],
+                'description': 'Fixture SMTP account', 'website': 'example.com'})
+            finish(turn, stopped, 'completed')
+            return
         question_modes = {'[ui:question]': False, '[ui:single]': False, '[ui:multiple]': True}
         marker = next((marker for marker in question_modes if packet.rstrip().endswith(marker)), None)
         if marker and '[else.bot owner answers]' not in packet:
@@ -306,7 +313,9 @@ for line in sys.stdin:
     send({'jsonrpc':'2.0','id':request['id'],'result':result})
     if method == 'turn/start':
         text = '\n'.join(item.get('text', '') for item in params.get('input', []))
-        latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip()
+        # Changed context (rules, skills, registry) arrives as blocks before
+        # the owner's message, each ending in a blank line.
+        latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip().rsplit('\n\n', 1)[-1]
         threading.Thread(target=stream,args=(turn_id, latest, text, stopped),daemon=True).start()
     elif method == 'turn/steer':
         item = {'type': 'userMessage', 'id': 'steer-' + params['clientUserMessageId'],

@@ -44,7 +44,12 @@ provision a guest image or an S3 account.
 
 - A turn that may have reached its provider before a crash reopens as
   `uncertain` with code `api_restarted` and is never replayed; already
-  stopped work stays `interrupted`.
+  stopped work stays `interrupted`. A turn claimed but never sent is
+  queued again, and one still `preparing` becomes `interrupted` (code
+  `cancelled`).
+- `else-api backup` refuses to run while the API is up ("the API is
+  running; it backs up on its schedule"); stop it first or use **Back up
+  now** in Settings → Backups.
 - Fake VM/summarizer boundaries cannot prove real snapshots or model summaries.
 - S3 replication is excluded explicitly, including its outage/restart tests.
 - A local backup set shares a `chunks/` store with its siblings; copy the
