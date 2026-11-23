@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[build-dependencies]
-serde_json = { workspace = true }
-uuid = { workspace = true }
-
 [dependencies]
 else-client = { workspace = true }
 else-plain-text = { workspace = true }

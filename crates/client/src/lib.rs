@@ -4,7 +4,9 @@
 //! It holds no UI; each app draws from it.
 
 pub mod api;
+pub mod connect;
 pub mod model;
+pub mod oauth;
 pub mod origin;
 pub mod reply;
 pub mod request;

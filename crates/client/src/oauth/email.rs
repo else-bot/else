@@ -7,7 +7,7 @@ use crate::api::{Client, ClientError};
 
 use else_wire::email::EmailAccount;
 
-use crate::oauth_callback::{self, Outcome, WaitError};
+use crate::oauth::callback::{self, Outcome, WaitError};
 use else_wire::email::EmailAuthorization;
 
 const GOOGLE_REGISTRATION: Option<(&str, &str)> =
@@ -16,7 +16,7 @@ const GOOGLE_REGISTRATION: Option<(&str, &str)> =
 const MICROSOFT_CLIENT_ID: Option<&str> = include!(concat!(env!("OUT_DIR"), "/microsoft_oauth.rs"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Provider {
+pub enum Provider {
     Google,
     Microsoft,
 }
@@ -70,9 +70,9 @@ impl Provider {
     }
 }
 
-pub(crate) struct SignIn {
+pub struct SignIn {
     pub authorization: EmailAuthorization,
-    callback: oauth_callback::Pending,
+    callback: callback::Pending,
     client: Arc<Client>,
 }
 
@@ -84,7 +84,7 @@ impl Drop for SignIn {
     }
 }
 
-pub(crate) struct Callback {
+pub struct Callback {
     pub state: String,
     pub code: String,
 }
@@ -122,7 +122,7 @@ impl SignIn {
         address: String,
         (client_id, client_secret): (&str, Option<&str>),
     ) -> Result<Self, ClientError> {
-        let (listener, callback) = oauth_callback::Listener::bind().await.map_err(|_| {
+        let (listener, callback) = callback::Listener::bind().await.map_err(|_| {
             ClientError::Protocol("Cannot open the local email sign-in callback.".into())
         })?;
         let (redirect_uri, _) = provider.callback(listener.port());
@@ -264,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn abandoned_or_rejected_starts_cancel_the_api_request() {
-        use crate::config::{Origin, OwnerToken};
+        use crate::origin::{Origin, OwnerToken};
         use axum::{
             Json,
             routing::{delete, post},
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_registration_and_callback_reach_the_selected_api() {
-        use crate::config::{Origin, OwnerToken};
+        use crate::origin::{Origin, OwnerToken};
         use axum::{
             Json,
             extract::Path,

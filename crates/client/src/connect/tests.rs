@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{Origin, OwnerToken};
+use crate::origin::{Origin, OwnerToken};
 use axum::{
     Json, Router,
     http::StatusCode,

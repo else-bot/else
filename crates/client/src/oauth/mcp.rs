@@ -6,13 +6,13 @@ use uuid::Uuid;
 
 use crate::api::{Client, ClientError};
 
-use crate::oauth_callback::{self, Callback, WaitError};
+use crate::oauth::callback::{self, Callback, WaitError};
 use else_wire::mcp::McpAuthorization;
 use else_wire::questions::McpConsent;
 
 pub struct SignIn {
     pub authorization: McpAuthorization,
-    callback: oauth_callback::Pending,
+    callback: callback::Pending,
     client: Arc<Client>,
     bot: Uuid,
     id: String,
@@ -35,7 +35,7 @@ impl SignIn {
         let this = client.clone();
         let id = expected.id.clone();
         client.run(async move {
-            let (listener, callback) = oauth_callback::Listener::bind().await
+            let (listener, callback) = callback::Listener::bind().await
                 .map_err(|_| ClientError::Protocol("Cannot open the local sign-in callback.".into()))?;
             let redirect = format!("http://127.0.0.1:{}/mcp/callback", listener.port());
             let authorization = this.clone().authorize_mcp(bot, id.clone(), redirect.clone()).await?;
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_callback_completes_on_selected_api_and_rejects_changed_consent() {
-        use crate::config::{Origin, OwnerToken};
+        use crate::origin::{Origin, OwnerToken};
         use axum::{Json, routing::post};
         use std::sync::atomic::{AtomicBool, Ordering};
         let bot = Uuid::new_v4();

@@ -6,8 +6,8 @@ use crate::api::{Client, ClientError};
 
 use else_wire::mcp::McpConnectionStatus;
 
-use crate::email::oauth;
 use crate::model::{APPROVE, DENY};
+use crate::oauth::email as oauth;
 use else_wire::email::EmailProvider;
 use else_wire::email::preset_config;
 use else_wire::mcp::McpState;
@@ -17,7 +17,7 @@ use else_wire::questions::Question;
 use else_wire::questions::QuestionAnswer;
 
 #[derive(Clone)]
-pub(super) struct Flow {
+pub struct Flow {
     pub client: Arc<Client>,
     pub bot: Uuid,
     pub question: Uuid,
@@ -26,7 +26,7 @@ pub(super) struct Flow {
 
 /// The account a connection card signs in to.
 #[derive(Clone)]
-pub(super) enum Consent {
+pub enum Consent {
     Mcp(McpConsent),
     Email(EmailConsent),
 }
@@ -48,8 +48,8 @@ impl Consent {
 }
 
 /// A browser sign-in in progress for one card.
-pub(super) enum SignIn {
-    Mcp(crate::mcp_oauth::SignIn),
+pub enum SignIn {
+    Mcp(crate::oauth::mcp::SignIn),
     Email(oauth::SignIn),
 }
 
@@ -88,7 +88,7 @@ impl SignIn {
 }
 
 /// What a card waiting for the owner offers, by how it signs in.
-pub(super) struct ReadyCopy {
+pub struct ReadyCopy {
     pub action: &'static str,
     /// The action after a failed attempt.
     pub retry: &'static str,
@@ -97,7 +97,7 @@ pub(super) struct ReadyCopy {
 }
 
 #[derive(Debug, PartialEq)]
-pub(super) enum Resolution {
+pub enum Resolution {
     Disconnected,
     ConfirmationRequired(String),
     Recorded,
@@ -119,7 +119,7 @@ impl Flow {
     pub async fn sign_in(&self) -> Result<SignIn, ClientError> {
         match &self.consent {
             Consent::Mcp(consent) => {
-                crate::mcp_oauth::SignIn::start(self.client.clone(), self.bot, consent.clone())
+                crate::oauth::mcp::SignIn::start(self.client.clone(), self.bot, consent.clone())
                     .await
                     .map(SignIn::Mcp)
             }
