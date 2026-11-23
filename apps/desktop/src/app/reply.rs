@@ -42,18 +42,7 @@ impl MessageReference {
     }
 
     fn quote(&self) -> String {
-        self.text
-            .trim_end()
-            .lines()
-            .map(|line| {
-                if line.is_empty() {
-                    ">".to_owned()
-                } else {
-                    format!("> {line}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        else_client::reply::quote(&self.text)
     }
 }
 
@@ -195,10 +184,10 @@ impl Draft {
                     (false, false) => comment.to_owned(),
                     (false, true) => format!("{comment}\n\n{note}"),
                 };
-                Some(format!(
-                    "Replying to {}:\n{}\n\n{body}",
+                Some(else_client::reply::replying_to(
                     quote.source.subject(),
-                    quote.source.quote()
+                    &quote.source.text,
+                    &body,
                 ))
             }
             quotes => {
@@ -380,37 +369,26 @@ pub(super) struct QuotedReply<'a> {
 
 impl<'a> QuotedReply<'a> {
     pub(super) fn parse(message: &'a str) -> Option<Self> {
-        let (author, rest) = [
-            (Author::Owner, "Replying to my earlier message:\n"),
-            (Author::Bot, "Replying to your earlier message:\n"),
-        ]
-        .into_iter()
-        .find_map(|(author, prefix)| message.strip_prefix(prefix).map(|rest| (author, rest)))?;
-        let (quote, body) = rest.split_once("\n\n")?;
-        (!quote.is_empty()
-            && !body.trim().is_empty()
-            && quote
-                .lines()
-                .all(|line| line == ">" || line.starts_with("> ")))
-        .then_some(Self {
-            author,
-            quote: &message[..message.len() - body.len() - 2],
-            body,
+        let read = else_client::reply::Replying::parse(message)?;
+        Some(Self {
+            author: if read.owner {
+                Author::Owner
+            } else {
+                Author::Bot
+            },
+            quote: read.quote,
+            body: read.body,
         })
     }
 
     /// The quoted message's text as the conversation stored it.
     pub(super) fn original(&self) -> String {
-        self.quote
-            .lines()
-            .skip(1)
-            .map(|line| {
-                line.strip_prefix("> ")
-                    .or_else(|| line.strip_prefix('>'))
-                    .unwrap_or(line)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        else_client::reply::Replying {
+            owner: self.author == Author::Owner,
+            quote: self.quote,
+            body: self.body,
+        }
+        .original()
     }
 
     pub(super) fn excerpt(&self) -> String {
@@ -435,30 +413,11 @@ pub(super) trait Feedback {
 
 impl Feedback for ReactionKind {
     fn mark(self) -> &'static str {
-        match self {
-            ReactionKind::ThumbsUp => "👍",
-            ReactionKind::ThumbsDown => "👎",
-        }
+        else_client::reply::mark(self)
     }
 
     fn message(self, reference: &MessageReference) -> String {
-        let request = match self {
-            ReactionKind::ThumbsUp => {
-                "I reacted 👍 to this message. This is approval, not an instruction, so do not \
-                 save a rule from it. Do not send an acknowledgement. Only reply if there is \
-                 something actionable to tell me or a question that needs my answer."
-            }
-            ReactionKind::ThumbsDown => {
-                "I reacted 👎 to this message. Don't assume a cause. Reply with one short \
-                 question asking me what went wrong, then use my answer to improve."
-            }
-        };
-        format!(
-            "{} Feedback on {}:\n{}\n\n{request}",
-            self.mark(),
-            reference.subject(),
-            reference.quote()
-        )
+        else_client::reply::reaction(self, reference.subject(), &reference.text)
     }
 }
 

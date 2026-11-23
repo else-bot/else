@@ -78,6 +78,26 @@ pub struct RulesFile {
     pub history: Vec<RulesVersion>,
 }
 
+impl RulesVersion {
+    /// What changed, as the history lists it: "Added Weekly report",
+    /// "Restored v3", "Cleared all rules".
+    pub fn title(&self) -> String {
+        match (self.change, self.restored_from) {
+            (RuleChange::Restored, Some(0)) => "Cleared all rules".to_owned(),
+            (RuleChange::Restored, Some(from)) => format!("Restored v{from}"),
+            (change, _) => format!(
+                "{} {}",
+                match change {
+                    RuleChange::Added => "Added",
+                    RuleChange::Removed => "Removed",
+                    _ => "Changed",
+                },
+                self.section
+            ),
+        }
+    }
+}
+
 impl RulesFile {
     /// Titles of the rules changed after version `seen`, lowercased.
     pub fn changed_since(&self, seen: i64) -> std::collections::HashSet<String> {

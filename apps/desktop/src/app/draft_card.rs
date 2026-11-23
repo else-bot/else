@@ -1,7 +1,9 @@
 use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Control as _, Scale, Tier};
-use else_wire::outgoing::{DraftContent, DraftFile, DraftStatus, OutgoingDraft};
+use else_wire::outgoing::{
+    DraftAttachment, DraftContent, DraftEdit, DraftFile, DraftStatus, OutgoingDraft,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -11,12 +13,11 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::images::{MessageImages, is_image};
+use super::images::MessageImages;
 use super::message_row::{CardPlacement, short_stamp};
-use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::attachments::byte_size;
-use crate::model::outgoing::{DraftAttachment, DraftEdit, OutgoingDraftEdit as _};
+use else_client::request::{Request, Settle};
 use else_wire::items::Attachment;
 use else_wire::items::MessagePart;
 
@@ -47,7 +48,7 @@ fn image_parts(files: &[DraftFile]) -> Vec<MessagePart> {
             media_type: file.media_type.clone(),
             size: file.size,
         })
-        .filter(is_image)
+        .filter(Attachment::is_image)
         .map(|file| MessagePart::File { file })
         .collect()
 }

@@ -107,7 +107,12 @@ impl Shell {
         };
         let carried = write.carried;
         cx.spawn(async move |this, cx| {
-            let result = client.set_server_icon(write.icon, carried).await;
+            let picture = match &write.icon {
+                ServerIcon::Picture(image) => Some(crate::server_icon::shareable_png(&image.bytes)),
+                _ => None,
+            };
+            let stored = else_wire::settings::Stored::from(&write.icon);
+            let result = client.set_server_icon(stored, picture, carried).await;
             let _ = this.update(cx, |shell, cx| {
                 let next = shell.icon_writes.finish(id, result.is_ok());
                 match result {

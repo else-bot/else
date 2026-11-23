@@ -8,245 +8,13 @@ use std::f32::consts::{PI, TAU};
 use std::rc::Rc;
 use std::time::Instant;
 
-use else_wire::bots::{Avatar, AvatarColor, AvatarShape};
+use else_wire::avatar::{INK, SAMPLES};
+use else_wire::bots::{Avatar, AvatarColor};
 use gpui_kit::*;
 use motion::{Input, Motion, Next, Pose, Work};
 
-#[derive(Clone, Copy)]
-enum Outline {
-    Wave {
-        base: f32,
-        waves: &'static [(f32, f32, f32)],
-    },
-    Points {
-        count: f32,
-        base: f32,
-    },
-    Squircle {
-        power: f32,
-    },
-    Polygon {
-        sides: u8,
-    },
-    Ghost,
-}
-
-struct Art {
-    label: &'static str,
-    outline: Outline,
-    soften: usize,
-    stretch: (f32, f32),
-    turn: f32,
-    eyes: (f32, f32),
-}
-
-/// The name the desktop shows for each avatar shape and color.
-pub trait AvatarLook {
-    fn label(self) -> &'static str;
-}
-
-impl AvatarLook for AvatarShape {
-    fn label(self) -> &'static str {
-        art(self).label
-    }
-}
-
-fn art(shape: AvatarShape) -> Art {
-    let wave = |base, waves| Outline::Wave { base, waves };
-    let art = |label, outline, soften, stretch, turn, eyes| Art {
-        label,
-        outline,
-        soften,
-        stretch,
-        turn,
-        eyes,
-    };
-    match shape {
-        AvatarShape::Star => art(
-            "Star",
-            wave(0.37, &[(7., 0.08, 0.3), (2., 0.012, 1.)]),
-            1,
-            (1., 1.),
-            0.,
-            (0.03, -0.03),
-        ),
-        AvatarShape::Round => art(
-            "Round",
-            wave(0.43, &[(3., 0.012, 0.5)]),
-            0,
-            (1., 0.97),
-            0.,
-            (0.04, -0.04),
-        ),
-        AvatarShape::Cloud => art(
-            "Cloud",
-            wave(0.38, &[(4., 0.045, 0.6), (7., 0.022, 0.)]),
-            1,
-            (1.1, 0.94),
-            0.,
-            (0.02, -0.01),
-        ),
-        AvatarShape::Tile => art(
-            "Tile",
-            Outline::Squircle { power: 4. },
-            0,
-            (1., 1.),
-            0.3,
-            (0.02, -0.02),
-        ),
-        AvatarShape::Sparkle => art(
-            "Sparkle",
-            Outline::Points {
-                count: 4.,
-                base: 0.27,
-            },
-            0,
-            (1., 1.),
-            0.2,
-            (0., -0.01),
-        ),
-        AvatarShape::Flower => art(
-            "Flower",
-            wave(0.4, &[(8., 0.045, 0.)]),
-            1,
-            (1., 1.),
-            0.,
-            (0., -0.02),
-        ),
-        AvatarShape::Egg => art(
-            "Egg",
-            wave(0.4, &[(1., 0.07, PI / 2.), (2., 0.015, 0.)]),
-            0,
-            (0.9, 1.04),
-            -0.25,
-            (0.03, 0.),
-        ),
-        AvatarShape::Bean => art(
-            "Bean",
-            Outline::Squircle { power: 2.6 },
-            0,
-            (1.18, 0.78),
-            -0.12,
-            (0.06, -0.02),
-        ),
-        AvatarShape::Cone => art(
-            "Cone",
-            Outline::Polygon { sides: 3 },
-            3,
-            (1., 1.),
-            0.,
-            (-0.06, 0.),
-        ),
-        AvatarShape::House => art(
-            "House",
-            Outline::Polygon { sides: 5 },
-            2,
-            (1., 0.96),
-            -PI / 2. + 0.12,
-            (0., 0.03),
-        ),
-        AvatarShape::Gem => art(
-            "Gem",
-            Outline::Polygon { sides: 6 },
-            2,
-            (1., 0.94),
-            0.25,
-            (0.03, -0.02),
-        ),
-        AvatarShape::Ghost => art("Ghost", Outline::Ghost, 1, (0.96, 1.04), 0., (0.02, -0.06)),
-    }
-}
-
-impl AvatarLook for AvatarColor {
-    fn label(self) -> &'static str {
-        match self {
-            Self::White => "White",
-            Self::Brown => "Brown",
-            Self::Red => "Red",
-            Self::Orange => "Orange",
-            Self::Amber => "Amber",
-            Self::Yellow => "Yellow",
-            Self::Green => "Green",
-            Self::Teal => "Teal",
-            Self::Blue => "Blue",
-            Self::Purple => "Purple",
-            Self::Pink => "Pink",
-            Self::Gray => "Gray",
-        }
-    }
-}
-
 pub fn color_fill(color: AvatarColor) -> Hsla {
-    rgb(match color {
-        AvatarColor::White => 0xf2f2f4,
-        AvatarColor::Brown => 0xa4693f,
-        AvatarColor::Red => 0xee3b47,
-        AvatarColor::Orange => 0xf6631d,
-        AvatarColor::Amber => 0xf59e0b,
-        AvatarColor::Yellow => 0xf8cb2e,
-        AvatarColor::Green => 0x22c162,
-        AvatarColor::Teal => 0x17b3a3,
-        AvatarColor::Blue => 0x2b88fb,
-        AvatarColor::Purple => 0x8f5cf6,
-        AvatarColor::Pink => 0xec4b9a,
-        AvatarColor::Gray => 0x7d7d84,
-    })
-    .into()
-}
-
-const SAMPLES: usize = 72;
-
-fn outline(art: &Art) -> [(f32, f32); SAMPLES] {
-    const REACH: f32 = 0.455;
-    let mut radius = [0f32; SAMPLES];
-    for (i, r) in radius.iter_mut().enumerate() {
-        let a = i as f32 / SAMPLES as f32 * TAU;
-        *r = match art.outline {
-            Outline::Points { count, base } => {
-                base + 0.18 * ((1. + (count * a).cos()) / 2.).powf(1.6)
-            }
-            Outline::Wave { base, waves } => {
-                base + waves
-                    .iter()
-                    .map(|(k, amp, phase)| amp * (k * (a + phase)).cos())
-                    .sum::<f32>()
-            }
-            Outline::Squircle { power } => {
-                (a.cos().abs().powf(power) + a.sin().abs().powf(power)).powf(-1. / power)
-            }
-            Outline::Polygon { sides } => {
-                let sector = TAU / f32::from(sides);
-                let local = a.rem_euclid(sector) - sector / 2.;
-                (sector / 2.).cos() / local.cos()
-            }
-            Outline::Ghost => {
-                let below = a.sin().max(0.).powi(2);
-                0.42 + below * (0.03 + 0.035 * (6. * a).cos())
-            }
-        };
-    }
-    if art.soften > 0 {
-        let k = art.soften;
-        let raw = radius;
-        for (i, r) in radius.iter_mut().enumerate() {
-            let sum: f32 = (0..=2 * k)
-                .map(|j| raw[(i + SAMPLES + j - k) % SAMPLES])
-                .sum();
-            *r = sum / (2 * k + 1) as f32;
-        }
-    }
-    let (sin, cos) = art.turn.sin_cos();
-    let mut points = [(0f32, 0f32); SAMPLES];
-    let mut extent = 0f32;
-    for (i, point) in points.iter_mut().enumerate() {
-        let a = i as f32 / SAMPLES as f32 * TAU;
-        let x = radius[i] * a.cos() * art.stretch.0;
-        let y = radius[i] * a.sin() * art.stretch.1;
-        *point = (x * cos - y * sin, x * sin + y * cos);
-        extent = extent.max(point.0.abs()).max(point.1.abs());
-    }
-    let fit = REACH / extent;
-    points.map(|(x, y)| (x * fit, y * fit))
+    rgb(color.rgb()).into()
 }
 
 /// A bot's avatar at a fixed size.
@@ -446,7 +214,6 @@ fn paint_avatar(
     elapsed: f32,
     window: &mut Window,
 ) {
-    let art = art(avatar.shape);
     let unit = f32::from(bounds.size.width.min(bounds.size.height));
     let work = pose.work;
     let orbit = TAU * elapsed / 3.6;
@@ -470,7 +237,7 @@ fn paint_avatar(
     };
     let place = place_at(scale);
 
-    let shape = outline(&art);
+    let shape = avatar.shape.outline();
     if work > 0.01 {
         paint_halo(
             shape.map(place_at(scale * 1.26)),
@@ -513,9 +280,10 @@ fn paint_avatar(
     let height = (height * (1. - 0.95 * blink)).max(0.75);
     let spread = (0.08 * unit).max(width * 1.15);
     let look = (gx * 0.075, gy * 0.06);
-    let eyes = (art.eyes.0 + look.0, art.eyes.1 + look.1);
+    let (x, y) = avatar.shape.eyes();
+    let eyes = (x + look.0, y + look.1);
     let middle = place(eyes);
-    let ink: Hsla = rgb(0x0d1424).into();
+    let ink: Hsla = rgb(INK).into();
     for side in [-1., 1.] {
         let eye = point(middle.x + px(side * spread), middle.y);
         let rect = Bounds::centered_at(eye, size(px(width), px(height)));
@@ -593,22 +361,11 @@ fn paint_halo(
 
 #[cfg(test)]
 mod tests {
-    use super::{art, gaze_toward, outline};
+    use super::gaze_toward;
     use else_wire::bots::Avatar;
     use else_wire::bots::AvatarColor;
     use else_wire::bots::AvatarShape;
     use gpui_kit::{point, px};
-
-    #[test]
-    fn every_outline_is_finite_and_fits_its_box() {
-        for shape in AvatarShape::ALL {
-            let points = outline(&art(shape));
-            for (x, y) in points {
-                assert!(x.is_finite() && y.is_finite(), "{shape:?}");
-                assert!(x.abs() <= 0.456 && y.abs() <= 0.456, "{shape:?} {x} {y}");
-            }
-        }
-    }
 
     #[test]
     fn avatars_parse_by_name_and_tolerate_newer_presets() {

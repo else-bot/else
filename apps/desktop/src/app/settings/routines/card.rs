@@ -1,13 +1,12 @@
 use super::super::model::{model_available, model_name, provider_label};
-use super::super::schedule_text::{describe_cron, describe_hours, local_time};
 use super::super::{BotPanel, PanelEvent};
-use super::{Banner, RoutineChange, banner, last_run, retryable};
+use super::{Banner, RoutineChange, banner, retryable};
 use crate::app::panel::{alert, item_name, meta, meta_line};
-use crate::app::request::Request;
 use crate::controls::{Control as _, Scale, Tier, toggle};
-use crate::profile_picker::effort_label;
 use chrono::Utc;
+use else_client::request::Request;
 use else_wire::routines::Routine;
+use else_wire::settings::effort_label;
 use gpui_kit::base::HoverCard;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -77,13 +76,9 @@ impl BotPanel {
         // Separate tokens, so a narrow panel wraps between them. Only a
         // token wider than the row, like a long cron description, wraps
         // inside itself.
-        let when = match (routine.run_at, &routine.active_hours) {
-            (Some(at), _) => vec!["Once".to_owned(), local_time(at, &routine.timezone)],
-            (None, Some(hours)) => vec![describe_cron(&routine.cron), describe_hours(hours)],
-            (None, None) => vec![describe_cron(&routine.cron)],
-        };
-        let schedule = format!("{} · {}", when.join(" · "), routine.timezone);
-        let last = last_run(routine);
+        let when = routine.when();
+        let schedule = routine.schedule();
+        let last = routine.last_run_line();
         let choice = routine
             .model
             .as_ref()
@@ -164,12 +159,7 @@ impl BotPanel {
             .then(|| format!("{model_title} · {model_details}"));
         let name = routine.name.clone();
         let prompt = routine.prompt.clone();
-        let next = match (routine.enabled, routine.next_run_at) {
-            (false, _) => None,
-            _ if routine.run_at.is_some() => None,
-            (true, Some(at)) => Some(format!("Next run {}", local_time(at, &routine.timezone))),
-            (true, None) => Some("No further runs".to_owned()),
-        };
+        let next = routine.next_run();
         let description = HoverCard::new(ElementId::Name(format!("routine-card-{id}").into()))
             .w_full()
             .anchor(Anchor::RightCenter)

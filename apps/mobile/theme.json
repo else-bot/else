@@ -1,0 +1,41 @@
+{
+  "cssVars": {
+    "theme": {
+      "radius": "0.75rem"
+    },
+    "light": {
+      "background": "#f2f2f7",
+      "foreground": "#000000",
+      "card": "#ffffff",
+      "card-foreground": "#000000",
+      "primary": "#007aff",
+      "primary-foreground": "#ffffff",
+      "muted": "#e9e9eb",
+      "muted-foreground": "#8e8e93",
+      "border": "#c6c6c8",
+      "destructive": "#ff3b30",
+      "bubble-owner": "#007aff",
+      "bubble-bot": "#e9e9eb",
+      "success": "#34c759",
+      "warning": "#ff9500",
+      "chat": "#ffffff"
+    },
+    "dark": {
+      "background": "#000000",
+      "foreground": "#ffffff",
+      "card": "#1c1c1e",
+      "card-foreground": "#ffffff",
+      "primary": "#0a84ff",
+      "primary-foreground": "#ffffff",
+      "muted": "#262628",
+      "muted-foreground": "#8e8e93",
+      "border": "#38383a",
+      "destructive": "#ff453a",
+      "bubble-owner": "#0a84ff",
+      "bubble-bot": "#262628",
+      "success": "#30d158",
+      "warning": "#ff9f0a",
+      "chat": "#000000"
+    }
+  }
+}

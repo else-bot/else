@@ -47,9 +47,10 @@ impl RowFormat {
     // File chips are textarea tokens, so a message attaching a document
     // keeps the plain widget instead of losing its clickable chips.
     fn owner_body(parts: &[MessagePart]) -> Self {
-        if parts.iter().any(
-            |part| matches!(part, MessagePart::File { file } if !super::images::is_image(file)),
-        ) {
+        if parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::File { file } if !file.is_image()))
+        {
             Self::Plain
         } else {
             Self::OwnerMarkdown
@@ -835,7 +836,7 @@ impl RowText {
             .children(self.render_quote_preview(cx))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))
             .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::visuals::is_visual(file))), |column| column.child(self.visuals.clone()))
-            .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
+            .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if file.is_image())), |column| column.child(self.images.clone()))
             .into_any_element()
     }
 

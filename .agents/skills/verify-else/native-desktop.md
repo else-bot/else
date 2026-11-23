@@ -49,6 +49,23 @@ Click one option on the single-answer card to submit it immediately.
 Send `[ui:permission]` to request a scoped Tailscale approval for `SSH host omarchy-m1`.
 Choose **Always allow** and check the saved task through the permissions API.
 The fixture requests approval but never runs SSH or changes Tailscale.
+Send `[ui:secret]` for a `fixture-smtp` secret request with two fields; a
+save shows up in `GET /v1/task-secrets`.
+Send `[ui:delegate-blocked] BOT_ID` to hand that bot a task it reports as
+blocked: a pending owner notice on its turn, with **Mark handled** and **Reply**.
+Send `[ui:skill]` for a skill install card for Anthropic's public
+`brand-guidelines` skill with one key, `BRAND_API_KEY`. The API fetches it
+from GitHub, so this one needs network. Once installed, a repeat fails with
+`ALREADY_INSTALLED` until `DELETE /v1/settings/skills/brand-guidelines`.
+For an MCP sign-in, run `python3 -u apps/api/tests/fixtures/mcp_oauth.py`
+(it prints its base URL), then send `[ui:mcp-connect] BASE_URL`: the bot
+installs that OAuth MCP and asks to connect it. The fixture's `/test` lists
+the register, authorize and token calls. To ask again after connecting,
+`DELETE /v1/bots/{id}/mcp/oauth-fixture/connection`.
+Send `[ui:social-telegram]`, `[ui:social-discord]` or `[ui:social-whatsapp]`
+for a social setup card. A made-up token is refused by the platform, and
+WhatsApp shows a live pairing code that only a real account can scan.
+Send `[ui:webhook]` for a webhook trigger named Deploy finished.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It

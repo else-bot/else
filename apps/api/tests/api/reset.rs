@@ -411,14 +411,16 @@ fn reset_terminates_orphaned_provider_processes() {
         &installation.home.join("data"),
         &installation.home.join("bots"),
     );
-    let mut child = Command::new("sleep")
-        .arg("30")
-        .env(
-            else_api::providers::host::MARKER_VAR,
-            format!("{}:{}", host.marker_prefix(), uuid::Uuid::new_v4()),
-        )
-        .spawn()
-        .unwrap();
+    // Launched as provider runs are, so it carries this installation's
+    // marker on every platform.
+    let spec = else_api::providers::host::LaunchSpec {
+        turn_id: uuid::Uuid::new_v4(),
+        dirs: host.bot_dirs(uuid::Uuid::new_v4(), "test").unwrap(),
+        program: "sleep".into(),
+        args: vec!["30".into()],
+        env: Vec::new(),
+    };
+    let mut child = host.command(&spec).into_std().spawn().unwrap();
     let result = installation
         .command()
         .args(["reset", "--yes"])

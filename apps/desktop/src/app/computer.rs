@@ -210,7 +210,7 @@ impl ComputerView {
                     }
                 };
                 if running {
-                    let mut stream = client.clone().desktop(bot, wake);
+                    let mut stream = crate::api::desktop(client.clone(), bot, wake);
                     if this
                         .update(cx, |view, cx| {
                             view.commands = Some(stream.commands.clone());

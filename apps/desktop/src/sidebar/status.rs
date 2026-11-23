@@ -23,25 +23,7 @@ pub fn waited(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// `Waiting for 2 bots · 4 tasks`, `Waiting on a job`, `Waiting on 2 jobs`,
 /// `Waiting for Dev and a job`. The task count appears only when it adds to
 /// the names.
-pub fn waiting_for(names: &[&str], tasks: usize, jobs: usize) -> String {
-    let jobs_text = match jobs {
-        1 => "a job".to_owned(),
-        jobs => format!("{jobs} jobs"),
-    };
-    let who = match names {
-        [] if jobs > 0 && tasks == 0 => return format!("Waiting on {jobs_text}"),
-        [] => "another bot".to_owned(),
-        [name] => (*name).to_owned(),
-        many => format!("{} bots", many.len()),
-    };
-    if jobs > 0 {
-        format!("Waiting for {who} and {jobs_text}")
-    } else if tasks > names.len().max(1) {
-        format!("Waiting for {who} · {tasks} tasks")
-    } else {
-        format!("Waiting for {who}")
-    }
-}
+pub use else_client::turn_status::waiting_for;
 
 pub fn waiting_label(waiting: &WaitingOn) -> String {
     let names: Vec<&str> = waiting.bots.iter().map(|b| b.name.as_str()).collect();

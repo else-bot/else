@@ -18,7 +18,13 @@ wire_state! {
     _ => Unknown
 }
 
+/// The largest file a message may carry, in bytes.
+pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+/// The most files one message may carry.
+pub const MAX_FILES: usize = 8;
+
 /// One conversation message: the owner's, the bot's, or a receipt.
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: Uuid,
@@ -75,6 +81,14 @@ impl Attachment {
     pub fn fallback(&self) -> String {
         format!("[File: {}]", self.name)
     }
+
+    /// Whether the apps draw it as a picture: the formats both can decode.
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    }
 }
 
 /// Ordered text or a stored file in a conversation message.
@@ -83,6 +97,20 @@ impl Attachment {
 pub enum MessagePart {
     Text { text: String },
     File { file: Attachment },
+}
+
+impl MessagePart {
+    /// A message's plain text: its text parts, with each file spelled as
+    /// [`Attachment::fallback`]. The server requires `text` to equal it.
+    pub fn flatten(parts: &[MessagePart]) -> String {
+        parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::Text { text } => text.clone(),
+                MessagePart::File { file } => file.fallback(),
+            })
+            .collect()
+    }
 }
 
 /// Reads a reaction a newer server added as none; the reacting message's

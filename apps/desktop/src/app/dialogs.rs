@@ -1,8 +1,8 @@
 use super::delete_dialog::{DeleteTarget, open_delete_confirmation};
-use super::request::{Request, Settle};
 use super::{Connection, ElseApp};
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::profile_picker::ProfilePicker;
+use else_client::request::{Request, Settle};
 use else_wire::bots::Bot;
 use else_wire::settings::Capabilities;
 use gpui_kit::component::button::Button;

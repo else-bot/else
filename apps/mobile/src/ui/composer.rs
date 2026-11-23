@@ -1,0 +1,680 @@
+//! The chat's composer: the text field, the files picked for the next
+//! message (uploaded as soon as they are picked), Send and Stop.
+
+use else_client::mention::MentionQuery;
+use else_wire::bots::Bot;
+use else_wire::items::{Attachment, MAX_FILE_BYTES, MAX_FILES};
+use nsh_base::{alert_dialog, input};
+use nsh_core::element::AdaptiveColor;
+use nsh_core::picker::{FilePickRequest, PickRequest, PickedFile, PickedStatus};
+use nsh_core::prelude::*;
+use uuid::Uuid;
+
+use super::chat::Quote;
+use super::parts::{self, ARROW_UP, PLUS, STOP, colors};
+use super::session::{self, Chat};
+
+use else_client::request::Request;
+
+use crate::api::{ClientError, Message};
+use crate::conversation::{self};
+
+/// The composer's message and the request ID it is sent under. A send
+/// whose outcome is unknown keeps both: sending the same text and files
+/// again repeats it under that ID, so the server cannot post it twice; any
+/// change makes a new message.
+#[derive(Debug, Clone, PartialEq)]
+struct Outgoing {
+    request_id: Uuid,
+    message: Message,
+}
+
+/// A file the composer holds for the next message: uploaded as soon as it
+/// is picked, so Send only names it.
+#[derive(Clone)]
+struct Pending {
+    file: Attachment,
+    upload: Upload,
+}
+
+impl PartialEq for Pending {
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file && self.upload == other.upload
+    }
+}
+
+#[derive(Clone)]
+enum Upload {
+    Uploading,
+    Done,
+    /// Not stored, or not known to be: its bytes stay so a tap retries
+    /// it under the same ID, which the server takes once.
+    Failed {
+        message: String,
+        data: std::sync::Arc<Vec<u8>>,
+    },
+}
+
+impl PartialEq for Upload {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Uploading, Self::Uploading) | (Self::Done, Self::Done) => true,
+            (Self::Failed { message: a, .. }, Self::Failed { message: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Uploads one picked file and records how it went.
+fn upload(
+    bot: Uuid,
+    pending: Signal<Vec<Pending>>,
+    file: Attachment,
+    data: std::sync::Arc<Vec<u8>>,
+) {
+    let id = file.id;
+    pending.update(|p| {
+        if let Some(item) = p.iter_mut().find(|item| item.file.id == id) {
+            item.upload = Upload::Uploading;
+        }
+    });
+    let client = session::server().client.clone();
+    spawn(async move {
+        let result = client.upload_attachment(bot, file, data.clone()).await;
+        session::try_update(pending, |p| {
+            let Some(item) = p.iter_mut().find(|item| item.file.id == id) else {
+                return;
+            };
+            item.upload = match result {
+                Ok(stored) => {
+                    item.file = stored;
+                    Upload::Done
+                }
+                Err(err) => Upload::Failed {
+                    message: match err {
+                        ClientError::Api { message, .. } => message,
+                        err if err.outcome_unknown() => format!("{err} Tap to try again."),
+                        err => err.to_string(),
+                    },
+                    data,
+                },
+            };
+        });
+    });
+}
+
+/// Asks where to pick from, picks, and uploads what was picked. Problems
+/// with the picked files show in `notice`, apart from the send's state.
+fn attach(bot: Uuid, pending: Signal<Vec<Pending>>, notice: Signal<Option<String>>) {
+    let room = MAX_FILES.saturating_sub(pending.with_untracked(Vec::len)) as u32;
+    if room == 0 {
+        notice.set(Some(format!(
+            "A message carries at most {MAX_FILES} files."
+        )));
+        return;
+    }
+    notice.set(None);
+    spawn(async move {
+        let choice = alert_dialog()
+            .action_sheet()
+            .action("photos", "Photo Library")
+            .action("files", "Choose File")
+            .cancel("cancel", "Cancel")
+            .show()
+            .await;
+        let picked: Vec<PickedFile> = match choice.ok().and_then(|r| r.action) {
+            Some(action) if action == "photos" => {
+                let mut request = PickRequest::new(true, room);
+                request.max_dimension = Some(DevicePixels(2048));
+                pick_images(request).await
+            }
+            Some(action) if action == "files" => {
+                pick_files(FilePickRequest::new(true, room).max_size(MAX_FILE_BYTES as u64)).await
+            }
+            _ => return,
+        };
+        for picked in picked {
+            if picked.status == PickedStatus::TooLarge || picked.len > MAX_FILE_BYTES as u64 {
+                notice.try_set(Some(format!(
+                    "{} is larger than {} MB.",
+                    picked.name,
+                    MAX_FILE_BYTES / (1024 * 1024)
+                )));
+                continue;
+            }
+            let data = std::sync::Arc::new(picked.data.bytes().to_vec());
+            let file = Attachment {
+                id: Uuid::new_v4(),
+                name: picked.name,
+                media_type: picked.mime,
+                size: data.len() as u64,
+            };
+            session::try_update(pending, |p| {
+                p.push(Pending {
+                    file: file.clone(),
+                    upload: Upload::Uploading,
+                })
+            });
+            upload(bot, pending, file, data);
+        }
+    });
+}
+
+/// The picked files above the text field, each with its state and a way
+/// to take it out.
+fn pending_strip(bot: Uuid, pending: Signal<Vec<Pending>>) -> impl IntoElement {
+    dynamic(move || {
+        let items = pending.get();
+        (!items.is_empty()).then(|| {
+            scroll().horizontal().scrollbar(false).pb_2().child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .px_3()
+                    .children(items.into_iter().map(move |item| {
+                        let id = item.file.id;
+                        let detail = match &item.upload {
+                            Upload::Uploading => "Uploading…".to_owned(),
+                            Upload::Done => super::files::size_label(item.file.size),
+                            Upload::Failed { message, .. } => message.clone(),
+                        };
+                        let retry = match &item.upload {
+                            Upload::Failed { data, .. } => Some(data.clone()),
+                            Upload::Uploading | Upload::Done => None,
+                        };
+                        let failed = retry.is_some();
+                        let file = item.file.clone();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .child(
+                                super::files::chip(item.file.name.clone(), detail)
+                                    .on_press(move || {
+                                        if let Some(data) = retry.clone() {
+                                            upload(bot, pending, file.clone(), data);
+                                        }
+                                    })
+                                    .border_1()
+                                    .border_color(move || {
+                                        if failed {
+                                            colors::destructive()
+                                        } else {
+                                            colors::separator()
+                                        }
+                                    }),
+                            )
+                            .child(parts::remove_button(
+                                format!("Remove {}", item.file.name),
+                                move || pending.update(|p| p.retain(|item| item.file.id != id)),
+                            ))
+                            .into_element()
+                    })),
+            )
+        })
+    })
+}
+
+pub fn composer(
+    bot: Uuid,
+    chat: Signal<Chat>,
+    busy: Memo<bool>,
+    quote: Signal<Option<Quote>>,
+) -> impl IntoElement {
+    let draft = signal(String::new());
+    // The selection in the text (UTF-16 units), whether the keyboard is
+    // composing (marked text), and the field, which a picked mention edits.
+    let selection = signal((0_u32, 0_u32));
+    let composing = signal(false);
+    let field = element_ref();
+    let pending = signal(Vec::<Pending>::new());
+    let attach_notice = signal(None::<String>);
+    let outbox = signal(Request::<Outgoing>::Idle);
+    let input_height = signal(22.0_f32);
+    let sending = computed(move || outbox.with(Request::busy));
+    let empty =
+        computed(move || draft.with(|d| d.trim().is_empty()) && pending.with(Vec::is_empty));
+    let uploaded =
+        computed(move || pending.with(|p| p.iter().all(|item| item.upload == Upload::Done)));
+    let can_send = computed(move || !empty.get() && uploaded.get() && !sending.get());
+    let show_stop = computed(move || busy.get() && empty.get());
+
+    let send = move || {
+        if !can_send.get_untracked() {
+            return;
+        }
+        let typed = draft.get_untracked().trim().to_owned();
+        let quoted = quote.get_untracked();
+        // A reply quotes the message it answers, as the desktop writes it.
+        let text = match &quoted {
+            Some(q) => else_client::reply::replying_to(q.subject(), &q.text, &typed),
+            None => typed.clone(),
+        };
+        let message = Message {
+            text,
+            files: pending.with_untracked(|p| p.iter().map(|item| item.file.clone()).collect()),
+            // Only the draft card's Send carries a draft: a message about
+            // something else must not close the draft or change its reply.
+            draft: None,
+            answers_notice: None,
+            reaction: None,
+        };
+        let op = outbox.with_untracked(|o| match o.unconfirmed_op() {
+            Some(unconfirmed) if unconfirmed.message == message => unconfirmed.clone(),
+            _ => Outgoing {
+                request_id: Uuid::new_v4(),
+                message: message.clone(),
+            },
+        });
+        let client = session::server().client.clone();
+        // Held by the server, not by the Send button: clearing the text
+        // swaps that button for Stop, which would cancel a send under way.
+        session::submit(
+            outbox,
+            op,
+            move |op| client.send(bot, op.message.request(op.request_id)),
+            move |sent| {
+                batch(|| {
+                    if !outbox.try_set(Request::Idle) {
+                        return;
+                    }
+                    // Only what was sent leaves the composer; text or files
+                    // added meanwhile stay.
+                    // The words and the quote they answer leave together,
+                    // or neither does: edited words keep their quote.
+                    if draft.get_untracked().trim() == typed && quote.get_untracked() == quoted {
+                        draft.set(String::new());
+                        quote.set(None);
+                    }
+                    pending.update(|p| p.retain(|item| !message.files.contains(&item.file)));
+                    chat.update(|c| {
+                        // A late answer to a retry can name a message older
+                        // than the loaded page, which the phone pages back
+                        // to on its own; inserting it would open a gap below.
+                        if let Some(conversation) = c.conversation_mut()
+                            && conversation
+                                .items()
+                                .next()
+                                .is_none_or(|oldest| sent.item.seq >= oldest.seq)
+                        {
+                            conversation.insert_item(sent.item);
+                            conversation.insert_turn(sent.turn);
+                        }
+                    });
+                });
+            },
+        );
+    };
+
+    let stop = move || {
+        let Some(request) = chat.with_untracked(|c| match c {
+            Chat::Ready(conversation) | Chat::Recovering(conversation) => {
+                conversation::active_request(conversation)
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let client = session::server().client.clone();
+        spawn(async move {
+            let _ = client.cancel(bot, request).await;
+        });
+    };
+
+    let notice = dynamic(move || {
+        let message = match outbox.get() {
+            Request::Unconfirmed { error, .. } => format!(
+                "{error} It may have been sent. Sending it again unchanged cannot post it twice."
+            ),
+            Request::Failed(error) => error,
+            _ => attach_notice.get()?,
+        };
+        Some(
+            text(message)
+                .px_4()
+                .pb_2()
+                .text_size(px(13.0))
+                .line_height(px(18.0))
+                .text_color(colors::destructive()),
+        )
+    });
+
+    let round_button = |icon: nsh_core::element::ImageAsset, size: f32, tint: AdaptiveColor| {
+        view()
+            .size(px(32.0))
+            .rounded(px(16.0))
+            .items_center()
+            .justify_center()
+            .active(|s| s.opacity(0.6))
+            .child(image(icon).size(px(size)).tint_color(tint))
+    };
+
+    let action = when(show_stop, move || {
+        round_button(STOP, 12.0, colors::chat())
+            .bg(colors::label())
+            .role(AccessibilityRole::Button)
+            .label("Stop")
+            .on_press(stop)
+    })
+    .otherwise(move || {
+        round_button(ARROW_UP, 16.0, colors::on_tint())
+            .bg(colors::tint())
+            .opacity(move || if can_send.get() { 1.0_f32 } else { 0.35 })
+            .role(AccessibilityRole::Button)
+            .label("Send message")
+            .on_press(send)
+    });
+
+    view()
+        .bg(colors::chat())
+        .border_t(px(0.5))
+        .border_color(colors::separator())
+        .pt_2()
+        .pb(move || {
+            px(8.0
+                + if keyboard_height() > px(0.0) {
+                    0.0
+                } else {
+                    safe_area().bottom.0
+                })
+        })
+        .child(notice)
+        .child(quote_bar(quote))
+        .child(mention_picker(draft, selection, composing, field))
+        .child(pending_strip(bot, pending))
+        .child(
+            view()
+                .flex_row()
+                .items_end()
+                .gap_2()
+                .px_3()
+                .child(
+                    view()
+                        .size(px(40.0))
+                        .rounded(px(20.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(colors::fill())
+                        .active(|s| s.opacity(0.6))
+                        .role(AccessibilityRole::Button)
+                        .label("Attach")
+                        .on_press(move || attach(bot, pending, attach_notice))
+                        .child(image(PLUS).size(px(18.0)).tint_color(colors::secondary())),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .flex_row()
+                        .items_end()
+                        .pl(px(14.0))
+                        .pr(px(4.0))
+                        .py(px(4.0))
+                        .gap_2()
+                        .rounded(px(20.0))
+                        .border_1()
+                        .border_color(colors::separator())
+                        .child(
+                            input()
+                                .flex_1()
+                                .multiline(true)
+                                .value(draft)
+                                .on_change(move |t: &str| {
+                                    draft.set(t.to_owned());
+                                    if matches!(outbox.get_untracked(), Request::Failed(_)) {
+                                        outbox.set(Request::Idle);
+                                    }
+                                })
+                                .placeholder("Message")
+                                .element_ref(&field)
+                                .on_selection_change(move |s: &Selection| {
+                                    selection.set((s.start, s.end))
+                                })
+                                .on_composition_change(move |c: &Composition| {
+                                    composing.set(c.composing)
+                                })
+                                .on_content_size_change(move |size: &Size<Points>| {
+                                    input_height.set(size.height.0.clamp(22.0, 120.0));
+                                })
+                                .h(move || px(input_height.get() + 8.0))
+                                .py(px(4.0))
+                                .text_size(px(17.0))
+                                .line_height(px(22.0))
+                                .text_color(colors::label())
+                                .placeholder_color(|| color(colors::secondary()))
+                                .caret_color(|| color(colors::tint()))
+                                .label("Message"),
+                        )
+                        .child(action),
+                ),
+        )
+}
+
+/// The message the next one replies to, with a way to drop it.
+fn quote_bar(quote: Signal<Option<Quote>>) -> impl IntoElement {
+    dynamic(move || {
+        let quoted = quote.get()?;
+        let preview: String = quoted.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .mx_3()
+                .mb_2()
+                .pl_3()
+                .border_l(px(3.0))
+                .border_color(colors::tint())
+                .child(
+                    view()
+                        .flex_1()
+                        .gap(px(2.0))
+                        .child(
+                            text(if quoted.owner {
+                                "Replying to yourself"
+                            } else {
+                                "Replying to the bot"
+                            })
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors::tint()),
+                        )
+                        .child(
+                            text(preview)
+                                .number_of_lines(2)
+                                .text_size(px(13.0))
+                                .line_height(px(18.0))
+                                .text_color(colors::secondary()),
+                        ),
+                )
+                .child(parts::remove_button("Cancel reply", move || {
+                    quote.set(None)
+                })),
+        )
+    })
+}
+
+/// Byte offset of UTF-16 offset `units` in `text`; none past its end or
+/// inside a character (half of a surrogate pair).
+fn byte_at(text: &str, units: u32) -> Option<usize> {
+    let units = units as usize;
+    let mut seen = 0;
+    for (at, c) in text.char_indices() {
+        if seen == units {
+            return Some(at);
+        }
+        if seen > units {
+            return None;
+        }
+        seen += c.len_utf16();
+    }
+    (seen == units).then_some(text.len())
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
+}
+
+/// The mention being typed in `text` at `selection` (UTF-16 units): none
+/// for a selection that is not a caret, or one the text does not have.
+fn query_at(text: &str, selection: (u32, u32)) -> Option<MentionQuery> {
+    let start = byte_at(text, selection.0)?;
+    let end = byte_at(text, selection.1)?;
+    MentionQuery::at(text, start..end)
+}
+
+/// The bots offered for `query`, at most five.
+fn offered_bots(query: &MentionQuery, list: &[Bot]) -> Vec<Bot> {
+    query
+        .candidates(list)
+        .into_iter()
+        .filter_map(|id| list.iter().find(|bot| bot.id == id).cloned())
+        .take(5)
+        .collect()
+}
+
+/// The UTF-16 range a pick of `bot` replaces in `text` at `selection`:
+/// the mention being typed now, if it still offers that bot. The picker
+/// can lag an edit, so a tap goes by what the field holds when it lands.
+fn pick_range(text: &str, selection: (u32, u32), bot: Uuid, list: &[Bot]) -> Option<(u32, u32)> {
+    let query = query_at(text, selection)?;
+    query.candidates(list).contains(&bot).then(|| {
+        (
+            utf16_len(&text[..query.range.start]),
+            utf16_len(&text[..query.range.end]),
+        )
+    })
+}
+
+/// The bots whose name matches what follows "@" at the caret, as the
+/// desktop's picker offers them; a tap writes the bot's name in its place.
+fn mention_picker(
+    draft: Signal<String>,
+    selection: Signal<(u32, u32)>,
+    composing: Signal<bool>,
+    field: ElementRef,
+) -> impl IntoElement {
+    let offered = computed(move || {
+        if composing.get() {
+            return None;
+        }
+        let query = draft.with(|text| query_at(text, selection.get()))?;
+        let bots = session::bots().with(|b| offered_bots(&query, &b.list));
+        (!bots.is_empty()).then_some(bots)
+    });
+    dynamic(move || {
+        let bots = offered.get()?;
+        let rows: Vec<AnyElement> = bots
+            .into_iter()
+            .map(|bot| {
+                let id = bot.id;
+                let name = bot.name.clone();
+                let avatar = bot.avatar;
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py(px(8.0))
+                    .active(|s| s.bg(colors::fill()))
+                    .role(AccessibilityRole::Button)
+                    .label(format!("Mention {name}"))
+                    .on_press(move || {
+                        let range = draft.with_untracked(|text| {
+                            session::bots().with_untracked(|b| {
+                                pick_range(text, selection.get_untracked(), id, &b.list)
+                            })
+                        });
+                        let Some((start, end)) = range else {
+                            return;
+                        };
+                        // The text with the name in place of what was
+                        // typed, then the caret after it: a command each
+                        // time, so a pick that lands where the last one did
+                        // still moves it. (NSH's insert_text, the user's own
+                        // edit, is not carried out on iOS yet.)
+                        let inserted = format!("@{name} ");
+                        let mut text = draft.get_untracked();
+                        let (from, to) = (
+                            byte_at(&text, start).unwrap_or_default(),
+                            byte_at(&text, end).unwrap_or_default(),
+                        );
+                        text.replace_range(from..to, &inserted);
+                        draft.set(text);
+                        let caret = start + utf16_len(&inserted);
+                        field.set_selection(caret, caret);
+                    })
+                    .child(super::parts::avatar(move || avatar, 28.0))
+                    .child(
+                        text(bot.name.clone())
+                            .text_size(px(17.0))
+                            .text_color(colors::label()),
+                    )
+                    .into_element()
+            })
+            .collect();
+        Some(
+            view()
+                .mx_3()
+                .mb_2()
+                .rounded(px(12.0))
+                .border_curve(BorderCurve::Continuous)
+                .bg(colors::card())
+                .border_1()
+                .border_color(colors::separator())
+                .overflow_hidden()
+                .children(rows),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bots(names: &[&str]) -> Vec<Bot> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                serde_json::from_value(serde_json::json!({
+                    "id": Uuid::from_u128(i as u128 + 1), "name": name,
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_utf16_offset_maps_to_a_byte_only_on_a_character() {
+        let text = "Hé 😀 @Sc";
+        assert_eq!(byte_at(text, 0), Some(0));
+        assert_eq!(byte_at(text, 2), Some("Hé".len()));
+        // The emoji is two UTF-16 units and four bytes.
+        assert_eq!(byte_at(text, 4), None, "inside the emoji");
+        assert_eq!(byte_at(text, 5), Some("Hé 😀".len()));
+        assert_eq!(byte_at(text, 9), Some(text.len()));
+        assert_eq!(byte_at(text, 10), None, "past the end");
+    }
+
+    #[test]
+    fn a_pick_replaces_the_mention_typed_now_and_only_one_still_offered() {
+        let list = bots(&["Scout", "Ledger"]);
+        let scout = Uuid::from_u128(1);
+        // The field changed since the picker showed: the range follows it.
+        assert_eq!(pick_range("😀 @Sc", (6, 6), scout, &list), Some((3, 6)));
+        assert_eq!(
+            pick_range("@Scz", (4, 4), scout, &list),
+            None,
+            "no longer offered"
+        );
+        assert_eq!(
+            pick_range("@Sc", (1, 3), scout, &list),
+            None,
+            "a selection, not a caret"
+        );
+        assert_eq!(
+            pick_range("@Sc", (9, 9), scout, &list),
+            None,
+            "a caret the text lacks"
+        );
+    }
+}

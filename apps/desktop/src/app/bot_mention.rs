@@ -13,46 +13,8 @@ use uuid::Uuid;
 
 use super::ElseApp;
 use crate::avatar::bot_avatar;
-use else_wire::bots::Bot;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MentionBot {
-    id: Uuid,
-    name: String,
-    avatar: Avatar,
-}
-
-#[derive(Default, PartialEq, Eq)]
-pub(super) struct MentionRegistry(Vec<MentionBot>);
-
-impl MentionRegistry {
-    pub(super) fn name(&self, id: Uuid) -> Option<&str> {
-        self.0
-            .iter()
-            .find(|bot| bot.id == id)
-            .map(|bot| bot.name.as_str())
-    }
-
-    pub(super) fn new(bots: &[Bot]) -> Self {
-        let mut entries: Vec<_> = bots
-            .iter()
-            .filter(|bot| {
-                bot.is_active()
-                    && !bot
-                        .name
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
-            })
-            .map(|bot| MentionBot {
-                id: bot.id,
-                name: bot.name.clone(),
-                avatar: bot.avatar,
-            })
-            .collect();
-        entries.sort_by_key(|bot| bot.id);
-        Self(entries)
-    }
-}
+pub(super) use else_client::mention::Registry as MentionRegistry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BotMention {
@@ -63,107 +25,31 @@ pub(super) struct BotMention {
     avatar: Avatar,
 }
 
+impl From<else_client::mention::Mention> for BotMention {
+    fn from(found: else_client::mention::Mention) -> Self {
+        Self {
+            range: found.range,
+            id: found.id,
+            name: found.name,
+            text: found.text,
+            avatar: found.avatar,
+        }
+    }
+}
+
 impl BotMention {
     pub(super) fn find(source: &str, bots: &MentionRegistry) -> Vec<Self> {
-        let mut mentions = Vec::new();
-        let mut end = 0;
-        for (start, _) in source.match_indices('@') {
-            if start < end || !super::mentions::mention_boundary(&source[..start]) {
-                continue;
-            }
-            let suffix = &source[start + 1..];
-            let matched = bots
-                .0
-                .iter()
-                .filter_map(|bot| {
-                    let len = suffix
-                        .char_indices()
-                        .nth(bot.name.chars().count())
-                        .map_or(suffix.len(), |(ix, _)| ix);
-                    (suffix[..len].to_lowercase() == bot.name.to_lowercase()
-                        && suffix[len..].chars().next().is_none_or(|c| {
-                            c.is_whitespace()
-                                || matches!(
-                                    c,
-                                    '.' | ','
-                                        | '!'
-                                        | '?'
-                                        | ':'
-                                        | ';'
-                                        | ')'
-                                        | ']'
-                                        | '}'
-                                        | '"'
-                                        | '\''
-                                )
-                        }))
-                    .then_some((bot, start + 1 + len))
-                })
-                .max_by_key(|(_, end)| *end);
-            if let Some((bot, matched_end)) = matched {
-                if bots
-                    .0
-                    .iter()
-                    .filter(|candidate| candidate.name.to_lowercase() == bot.name.to_lowercase())
-                    .count()
-                    > 1
-                {
-                    continue;
-                }
-                end = matched_end;
-                mentions.push(Self {
-                    range: start..end,
-                    id: bot.id,
-                    name: bot.name.clone(),
-                    text: source[start..end].to_owned(),
-                    avatar: bot.avatar,
-                });
-            }
-        }
-        mentions
+        else_client::mention::find(source, bots)
+            .into_iter()
+            .map(Self::from)
+            .collect()
     }
 
     pub(super) fn in_markdown(source: &str, bots: &MentionRegistry) -> Vec<Self> {
-        if !source.contains('@') {
-            return Vec::new();
-        }
-        fn visit(
-            node: &Node,
-            source: &str,
-            bots: &MentionRegistry,
-            mentions: &mut Vec<BotMention>,
-        ) {
-            match node {
-                Node::Link(_)
-                | Node::LinkReference(_)
-                | Node::Image(_)
-                | Node::ImageReference(_)
-                | Node::Code(_)
-                | Node::InlineCode(_)
-                | Node::Html(_) => return,
-                Node::Text(text) => {
-                    if let Some(position) = &text.position {
-                        let range = position.start.offset..position.end.offset;
-                        for mut mention in BotMention::find(&source[range.clone()], bots) {
-                            mention.range.start += range.start;
-                            mention.range.end += range.start;
-                            mentions.push(mention);
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if let Some(children) = node.children() {
-                for child in children {
-                    visit(child, source, bots, mentions);
-                }
-            }
-        }
-        let mut mentions = Vec::new();
-        if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
-            visit(&root, source, bots, &mut mentions);
-        }
-        mentions
+        else_client::mention::find_in_markdown(source, bots)
+            .into_iter()
+            .map(Self::from)
+            .collect()
     }
 
     pub(super) fn content(source: &str, mentions: &[Self]) -> InputContent {

@@ -12,8 +12,9 @@
 ## How to get to it (user POV)
 
 A new desktop opens on **Start on this machine** with the local address and
-owner key loaded. **Connect locally** (or Enter) verifies and saves the
-connection; it does not onboard. While onboarding is required, the window
+owner key loaded. **Connect locally** (or Enter; **Start local** when the
+desktop manages the local service) verifies and saves the connection; it
+does not onboard. While onboarding is required, the window
 shows **Welcome to else.bot**: a **Name** field, the provider/model picker
 and **Get started**, which stays disabled until some provider is available.
 For an existing bot, open Bot details (Ctrl+Shift+B), click the **Model**

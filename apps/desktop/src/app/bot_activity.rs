@@ -215,7 +215,7 @@ pub(super) fn excerpt_message(
             }
             MessagePart::File { file } => {
                 let len = file.fallback().len();
-                let drawn = super::images::is_image(file) || super::visuals::is_visual(file);
+                let drawn = file.is_image() || super::visuals::is_visual(file);
                 if offset + len <= end {
                     cut.push(part.clone());
                 } else if offset >= end && drawn {

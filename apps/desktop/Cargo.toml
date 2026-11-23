@@ -4,11 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[build-dependencies]
-serde_json = { workspace = true }
-uuid = { workspace = true }
-
 [dependencies]
+else-client = { workspace = true }
 else-plain-text = { workspace = true }
 else-tailnet = { workspace = true }
 else-visual = { workspace = true }
@@ -53,6 +50,7 @@ toml = { workspace = true }
 wl-clipboard-rs = "0.9.5"
 
 [dev-dependencies]
+else-client = { workspace = true, features = ["testing"] }
 axum = { workspace = true, features = ["json"] }
 futures-util = { workspace = true }
 proc-macro2 = "1.0.107"

@@ -1,13 +1,9 @@
 mod card;
 
-use super::schedule_text::local_time;
 use super::{BotPanel, PanelEvent, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
-use crate::app::request::{Request, Settle};
-use else_wire::routines::PausedReason;
-use else_wire::routines::RunStatus;
-use else_wire::routines::SkipReason;
-use else_wire::routines::{LastRun, Routine};
+use else_client::request::{Request, Settle};
+use else_wire::routines::Routine;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -331,7 +327,7 @@ fn banner(routine: &Routine, save: Option<&Request<RoutineChange>>) -> Option<Ba
     if let Some(err) = save.and_then(Request::error) {
         return Some(Banner::Problem(err.to_owned()));
     }
-    let (text, attention) = last_run(routine)?;
+    let (text, attention) = routine.last_run_line()?;
     if routine.retrying {
         Some(Banner::Progress(text))
     } else {
@@ -339,64 +335,9 @@ fn banner(routine: &Routine, save: Option<&Request<RoutineChange>>) -> Option<Ba
     }
 }
 
-fn last_run(routine: &Routine) -> Option<(String, bool)> {
-    let run = routine.last_run.as_ref()?;
-    let when = local_time(run.due_at, &routine.timezone);
-    let error = run.error.as_ref().and_then(|e| e.message.clone());
-    if routine.retrying {
-        let progress = match run.status {
-            RunStatus::Queued => "Retrying: waiting to start",
-            RunStatus::Checking | RunStatus::Running => "Retrying: running now",
-            _ => "Retrying: checking the result",
-        };
-        return Some((progress.to_owned(), false));
-    }
-    if !routine.enabled
-        && let Some(reason) = &routine.paused_reason
-    {
-        let why = match reason {
-            PausedReason::Repeated => format!("Paused after {} failed runs", routine.failed_runs),
-            _ => "Paused: retrying won't fix the last failure".to_owned(),
-        };
-        let detail = error.map_or_else(String::new, |e| format!(" ({e})"));
-        return Some((format!("{why}{detail}"), true));
-    }
-    let (text, attention) = last_run_status(run, &when, error);
-    Some((
-        text,
-        attention && (routine.failed_runs > 0 || run.status == RunStatus::Skipped),
-    ))
-}
-
-fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String, bool) {
-    let reason = |skip: Option<SkipReason>| match skip {
-        Some(SkipReason::Overlap) => "the previous run was still going",
-        Some(SkipReason::QueueFull) => "too many messages were waiting",
-        Some(SkipReason::ProviderUnavailable) => "no provider was available",
-        Some(SkipReason::CheckCancelled) => "its check was stopped",
-        Some(SkipReason::CheckUnavailable) => "its check could not start",
-        Some(SkipReason::NothingNew | SkipReason::Unknown) | None => "it could not start",
-    };
-    let status = run.status.as_str();
-    match run.status {
-        RunStatus::Skipped if run.skip_reason == Some(SkipReason::NothingNew) => {
-            (format!("Last run {when}: nothing new"), false)
-        }
-        RunStatus::NoNews => (format!("Last run {when}: no news"), false),
-        RunStatus::Failed | RunStatus::Uncertain | RunStatus::Interrupted => {
-            let detail = error.unwrap_or_else(|| status.to_owned());
-            (format!("Last run {when} {status}: {detail}"), true)
-        }
-        RunStatus::Skipped => (format!("Skipped {when}: {}", reason(run.skip_reason)), true),
-        RunStatus::Checking => (format!("Checking for new work (due {when})"), false),
-        RunStatus::Queued | RunStatus::Running => (format!("Running now (due {when})"), false),
-        RunStatus::Completed | RunStatus::Other(_) => (format!("Last run {when}: {status}"), false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Banner, Request, banner, last_run, retryable};
+    use super::{Banner, Request, banner, retryable};
     use else_wire::routines::Routine;
 
     #[test]
@@ -443,71 +384,5 @@ mod tests {
             !retryable(&routine(false, 0, None)),
             "the owner switched it off"
         );
-    }
-
-    #[test]
-    fn a_routine_card_flags_pauses_and_undismissed_failures_only() {
-        let routine = |extra: serde_json::Value| -> Routine {
-            let mut value = serde_json::json!({
-                "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
-                "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": true,
-                "next_run_at": null, "updated_at": "2026-11-08T03:00:00Z",
-                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "failed",
-                              "skip_reason": null,
-                              "error": { "code": "provider_unavailable",
-                                         "message": "the provider process exited" } },
-            });
-            for (key, field) in extra.as_object().unwrap() {
-                value[key] = field.clone();
-            }
-            serde_json::from_value(value).unwrap()
-        };
-        let (text, attention) =
-            last_run(&routine(serde_json::json!({ "failed_runs": 1 }))).unwrap();
-        assert!(attention);
-        assert!(
-            text.ends_with("failed: the provider process exited"),
-            "{text}"
-        );
-        let (_, attention) = last_run(&routine(serde_json::json!({}))).unwrap();
-        assert!(!attention, "dismissed failures stay visible but quiet");
-        let (text, attention) = last_run(&routine(serde_json::json!({
-            "enabled": false, "failed_runs": 3, "paused_reason": "repeated",
-        })))
-        .unwrap();
-        assert!(attention);
-        assert_eq!(
-            text,
-            "Paused after 3 failed runs (the provider process exited)"
-        );
-        let (text, attention) = last_run(&routine(serde_json::json!({
-            "enabled": false, "failed_runs": 1, "paused_reason": "needs_action", "retrying": true,
-            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "running",
-                          "skip_reason": null, "error": null },
-        })))
-        .unwrap();
-        assert!(!attention, "a retry in progress hides the old failure");
-        assert_eq!(text, "Retrying: running now");
-        let skipped = |reason: &str| {
-            last_run(&routine(serde_json::json!({
-                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "skipped",
-                              "skip_reason": reason, "error": null },
-            })))
-            .unwrap()
-        };
-        let (text, attention) = skipped("nothing_new");
-        assert!(!attention, "a check that found nothing is a normal run");
-        assert!(text.ends_with(": nothing new"), "{text}");
-        let (text, attention) = skipped("check_unavailable");
-        assert!(attention);
-        assert!(text.ends_with(": its check could not start"), "{text}");
-        let (text, attention) = last_run(&routine(serde_json::json!({
-            "quiet": true,
-            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "no_news",
-                          "skip_reason": null, "error": null },
-        })))
-        .unwrap();
-        assert!(!attention, "a run with no news is a normal run");
-        assert_eq!(text, "Last run Sun 8 Nov, 03:00: no news");
     }
 }

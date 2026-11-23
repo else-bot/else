@@ -2,8 +2,9 @@ use super::BotPanel;
 use crate::app::computer::DetailsTab;
 use crate::app::panel::{alert, item_name, list_rows, meta, meta_line, section};
 use crate::controls::{Control as _, Scale, Tier};
-use chrono::{DateTime, Utc};
-use else_wire::routines::{Watcher, WatcherStatus};
+use chrono::Utc;
+use else_wire::routines::Watcher;
+use else_wire::schedule::{watcher_deadline, watcher_last_check, watcher_next};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -178,120 +179,10 @@ impl BotPanel {
 }
 
 /// A watcher's deadline: its time when it falls on `today`, else its date.
-fn watcher_deadline<Tz: chrono::TimeZone>(until: DateTime<Tz>, today: chrono::NaiveDate) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    if until.date_naive() == today {
-        until.format("%H:%M").to_string()
-    } else {
-        until.format("%b %-d").to_string()
-    }
-}
-
-fn watcher_duration(minutes: i64) -> String {
-    match minutes {
-        ..=59 => format!("{minutes} min"),
-        60..1440 => format!("{} hr", minutes / 60),
-        1440..2880 => "1 day".to_owned(),
-        _ => format!("{} days", minutes / 1440),
-    }
-}
-
-fn watcher_last_check(watcher: &Watcher, now: DateTime<Utc>) -> String {
-    let Some(at) = watcher.last_checked_at else {
-        return match &watcher.last_status {
-            Some(status) => format!("not checked yet: {status}"),
-            None => "not checked yet".to_owned(),
-        };
-    };
-    let minutes = (now - at).num_minutes();
-    let when = if minutes <= 0 {
-        "just now".to_owned()
-    } else {
-        format!("{} ago", watcher_duration(minutes))
-    };
-    match &watcher.last_status {
-        Some(status) => format!("checked {when}: {status}"),
-        None => format!("checked {when}"),
-    }
-}
-
-fn watcher_next(watcher: &Watcher, now: DateTime<Utc>) -> Option<String> {
-    let at = match watcher.status {
-        WatcherStatus::Checking => return Some("checking now".to_owned()),
-        WatcherStatus::Waiting => watcher.next_check_at?,
-        WatcherStatus::Waking | WatcherStatus::Ended | WatcherStatus::Unknown => return None,
-    };
-    Some(match (at - now).num_minutes() {
-        _ if at <= now => "next check due now".to_owned(),
-        0 => "next check in <1 min".to_owned(),
-        minutes => format!("next check in {}", watcher_duration(minutes)),
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{WatcherStop, stop_result, watcher_deadline, watcher_last_check, watcher_next};
+    use super::{WatcherStop, stop_result};
     use crate::api::ClientError;
-    use else_wire::routines::Watcher;
-    use serde_json::json;
-
-    #[test]
-    fn watcher_labels_show_the_deadline_and_check_times() {
-        let now = "2026-11-20T08:00:00Z".parse().unwrap();
-        let watcher: Watcher = serde_json::from_value(json!({
-            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
-            "until": "2026-12-04T10:00:00Z", "status": "waiting",
-            "last_status": "unavailable", "last_checked_at": "2026-11-20T07:58:00Z",
-            "next_check_at": "2026-11-20T08:13:00Z", "last_output": null,
-        }))
-        .unwrap();
-        let today = "2026-11-20".parse().unwrap();
-        assert_eq!(watcher_deadline(watcher.until, today), "Dec 4");
-        let tonight: chrono::DateTime<chrono::Utc> = "2026-11-20T18:30:00Z".parse().unwrap();
-        assert_eq!(watcher_deadline(tonight, today), "18:30");
-        assert_eq!(
-            watcher_last_check(&watcher, now),
-            "checked 2 min ago: unavailable"
-        );
-        assert_eq!(
-            watcher_next(&watcher, now).as_deref(),
-            Some("next check in 13 min")
-        );
-        assert_eq!(
-            watcher_next(&watcher, "2026-11-20T08:13:01Z".parse().unwrap()).as_deref(),
-            Some("next check due now")
-        );
-    }
-
-    #[test]
-    fn watcher_labels_show_a_first_check_in_progress() {
-        let now = "2026-11-20T08:00:00Z".parse().unwrap();
-        let watcher: Watcher = serde_json::from_value(json!({
-            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
-            "until": "2026-12-04T10:00:00Z", "status": "checking",
-            "last_status": null, "last_checked_at": null, "next_check_at": null, "last_output": null,
-        })).unwrap();
-        assert_eq!(watcher_last_check(&watcher, now), "not checked yet");
-        assert_eq!(watcher_next(&watcher, now).as_deref(), Some("checking now"));
-    }
-
-    #[test]
-    fn a_watcher_that_never_ran_says_why() {
-        let now = "2026-11-20T08:00:00Z".parse().unwrap();
-        let watcher: Watcher = serde_json::from_value(json!({
-            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
-            "until": "2026-12-04T10:00:00Z", "status": "waiting",
-            "last_status": "check did not run: the computer was not available",
-            "last_checked_at": null, "next_check_at": "2026-11-20T08:01:00Z", "last_output": null,
-        }))
-        .unwrap();
-        assert_eq!(
-            watcher_last_check(&watcher, now),
-            "not checked yet: check did not run: the computer was not available"
-        );
-    }
 
     #[test]
     fn a_stop_settles_on_its_result() {

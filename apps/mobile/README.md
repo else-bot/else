@@ -1,0 +1,98 @@
+# else.bot for iOS (alpha)
+
+A phone client for an else.bot server that runs elsewhere: a home machine,
+a VPS, or the laptop next to you. It never runs a server or bots itself.
+
+Built in Rust with [Native Shell](https://nsh.dev) (NSH). The screens are
+UIKit views drawn by NSH. The API types come from `crates/wire`, shared
+with the server and the desktop app.
+
+## What works
+
+- Connect with the server's address and owner key, checked before they
+  are saved.
+- The bot list, ordered like Messages. Bots waiting on you come first,
+  then newest first. Shows unread dots, "Working…", and previews.
+  Pull to refresh.
+- Create a bot with Compose: a name, its avatar's shape and color, and
+  its provider and model. Avatars are drawn from the same shapes as the
+  desktop's. Left at the server's defaults, the bot keeps following them.
+- Tap the info button in a chat for the bot's details, as the desktop's
+  right panel shows them: its model, rules, routines, reminders, what it
+  is watching, and what wakes it. They follow the bot's live updates.
+  Model there changes its provider, model, reasoning and speed; a
+  provider the server cannot run shows why instead of its models.
+- A chat per bot. Replies render as Markdown and stream in live over the
+  WebSocket. Older pages load as you scroll up. Send a message, or stop a
+  reply that is running.
+- Send photos and files with a message, up to 8 of 10 MB each. Photos you
+  sent show in the chat; tap a file to open or save it.
+- Answer a bot’s question with one tap. Review a draft, edit its text, then Discard it
+  or Send it after a confirmation. Settled ones leave a receipt in the chat.
+  Once the bot's turn has ended, Send replies in the chat with the draft
+  attached, asking the bot to send it as it is. Other messages leave the
+  draft alone.
+- Give a bot the secret it asks for, or decline. It is saved in the
+  server's vault.
+- Chats are marked read on the server, so the desktop's unread dots agree.
+- Light and dark mode. Reconnects when the app returns to the foreground.
+- Several servers. The More menu lists them, switches between them, and
+  adds one. Disconnect removes only the current server and its key.
+
+Not yet: the vault list, computer takeovers, a bot's settings,
+push notifications, iPad layout.
+
+## Addresses and the owner key
+
+Like the desktop, the app sends the key only to the one saved origin and
+never follows redirects.
+
+- `https://…` works for any host and verifies the certificate.
+- `http://` works only for a Tailscale IP (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`),
+  and only while this phone has a Tailscale address. With Tailscale off, a
+  `100.x` address could reach a carrier's network instead.
+- `http://127.0.0.1` also works, which is only useful in the simulator.
+
+Read the key on the server with `cat ~/.else/data/owner-token`.
+
+The key is kept in the iOS Keychain. A build signed without a Keychain
+group, such as a simulator package, keeps it in the app's own storage instead.
+Device builds get the group from their provisioning profile.
+
+## Build and run
+
+Install NSH (`curl -fsSL https://nsh.dev/install.sh | sh`), the iOS Rust
+targets (`rustup target add aarch64-apple-ios-sim aarch64-apple-ios`) and Xcode.
+Use rustup's cargo, not Homebrew's: `export PATH=$HOME/.cargo/bin:$PATH`.
+
+```sh
+cd apps/mobile
+nsh run --target ios                  # simulator, rebuilds on change
+nsh package --target ios-simulator    # .nsh/out/else.bot.app
+cargo test --lib                      # model and parsing tests on the Mac
+cargo run                             # the same UI in a macOS window
+```
+
+For a test server, run `scripts/dev.py api --session mobile` from the
+repository root. Point the real provider CLIs at missing paths
+(`ELSE_CODEX_BIN=/nonexistent/codex`, and the same for `CLAUDE`, `GROK`,
+`CURSOR`), so only the synthetic provider answers. In the simulator, connect
+to the printed `http://127.0.0.1:PORT` with `.else-dev/mobile/data/owner-token`.
+
+## Layout
+
+The client side is shared with the desktop: `crates/client` (`else-client`)
+holds the HTTP and WebSocket client, the endpoints, the server origin and
+owner key, and the conversation model live events build. `crates/wire`
+holds the wire types and the wording both apps show (avatars, schedules).
+A fix or a new endpoint there reaches both apps.
+
+- `src/server.rs` saves servers and their keys (Keychain) and checks that
+  Tailscale is connected.
+- `src/api.rs` runs the shared client on the phone's own Tokio runtime and
+  builds the messages the composer sends.
+- `src/conversation.rs` turns the shared conversation into what the phone
+  shows: transcript rows, asks, and whether the bot is replying.
+- `src/bots.rs` decides each bot list row from the server's bot record.
+- `src/ui/` holds the screens. `session.rs` holds the connected server's
+  state as signals.

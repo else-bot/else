@@ -162,13 +162,16 @@ def draft_reply(turn, latest, packet, stopped):
 
 
 def handoff(turn, packet, stopped):
-    found = re.search(r'\[ui:(delegate|council)\]((?:\s+[0-9a-f-]{36})+)\s*$', packet)
+    found = re.search(r'\[ui:(delegate|delegate-blocked|council)\]((?:\s+[0-9a-f-]{36})+)\s*$', packet)
     if not found:
         return False
     targets = found.group(2).split()
     if found.group(1) == 'delegate':
         result = outgoing_tool('delegate', {'target_bot_id': targets[0],
             'task': 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'})
+    elif found.group(1) == 'delegate-blocked':
+        result = outgoing_tool('delegate', {'target_bot_id': targets[0],
+            'task': 'Renew the studio.example domain before Friday. [ui:notice]'})
     else:
         result = outgoing_tool('council', {'target_bot_ids': targets,
             'task': 'Should the studio plan move from 29 to 39 EUR a month? [ui:slow]'})
@@ -184,6 +187,11 @@ def stream(turn, latest, packet, stopped):
     try:
         if handoff(turn, packet, stopped):
             return
+        if latest.endswith('[ui:notice]'):
+            outgoing_tool('notify_owner', {
+                'kind': 'blocked',
+                'summary': 'The registrar wants a card on file before it renews studio.example.',
+                'tried': 'Checked the registrar account; renewal needs a payment method.'})
         if latest == '[ui:handoff]':
             outgoing_tool('computer_handoff', {'reason': 'X Chat is blank at x.com/messages.'})
             event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
@@ -201,6 +209,45 @@ def stream(turn, latest, packet, stopped):
             if result['status'] == 'pending':
                 finish(turn, stopped, 'completed')
                 return
+        connect = re.fullmatch(r'\[ui:mcp-connect\] (http://127\.0\.0\.1:\d+)', latest)
+        if connect:
+            try:
+                outgoing_tool('mcp_install', {
+                    'id': 'oauth-fixture', 'name': 'OAuth fixture', 'description': 'Local test MCP',
+                    'skill': 'Discover tools/list, then use fixture_read.',
+                    'documentation': 'This test MCP uses owner OAuth consent.',
+                    'config': {'type': 'http', 'url': connect.group(1) + '/mcp'}})
+            except RuntimeError:
+                pass  # installed by an earlier run; connecting again is the point
+            outgoing_tool('mcp_connect', {'id': 'oauth-fixture',
+                                          'purpose': 'Read the fixture value for the report.'})
+            finish(turn, stopped, 'completed')
+            return
+        social = re.fullmatch(r'\[ui:social-(telegram|discord|whatsapp)\]', latest)
+        if social:
+            outgoing_tool('social_connect', {
+                'provider': social.group(1),
+                'reason': 'To post the weekly report in the team chat.'})
+            finish(turn, stopped, 'completed')
+            return
+        if latest == '[ui:webhook]':
+            outgoing_tool('webhook_create', {
+                'name': 'Deploy finished', 'prompt': 'Summarize the deploy and flag failures.'})
+            finish(turn, stopped, 'completed')
+            return
+        if latest == '[ui:skill]':
+            outgoing_tool('skill_install', {
+                'url': 'https://github.com/anthropics/skills/tree/main/skills/brand-guidelines',
+                'reason': 'To keep the weekly report on brand.', 'env': ['BRAND_API_KEY']})
+            finish(turn, stopped, 'completed')
+            return
+        if latest == '[ui:secret]':
+            outgoing_tool('request_secret', {
+                'name': 'fixture-smtp', 'reason': 'To send the weekly report by email.',
+                'env': ['SMTP_USERNAME', 'SMTP_PASSWORD'],
+                'description': 'Fixture SMTP account', 'website': 'example.com'})
+            finish(turn, stopped, 'completed')
+            return
         question_modes = {'[ui:question]': False, '[ui:single]': False, '[ui:multiple]': True}
         marker = next((marker for marker in question_modes if packet.rstrip().endswith(marker)), None)
         if marker and '[else.bot owner answers]' not in packet:
@@ -306,7 +353,9 @@ for line in sys.stdin:
     send({'jsonrpc':'2.0','id':request['id'],'result':result})
     if method == 'turn/start':
         text = '\n'.join(item.get('text', '') for item in params.get('input', []))
-        latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip()
+        # Changed context (rules, skills, registry) arrives as blocks before
+        # the owner's message, each ending in a blank line.
+        latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip().rsplit('\n\n', 1)[-1]
         threading.Thread(target=stream,args=(turn_id, latest, text, stopped),daemon=True).start()
     elif method == 'turn/steer':
         item = {'type': 'userMessage', 'id': 'steer-' + params['clientUserMessageId'],

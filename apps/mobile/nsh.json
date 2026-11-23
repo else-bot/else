@@ -1,0 +1,11 @@
+{
+  "name": "else.bot",
+  "id": "bot.else.mobile",
+  "version": "0.0.30",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "icon": "icon.png",
+  "appearance": "system",
+  "theme": "theme.json"
+}

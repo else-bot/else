@@ -10,9 +10,9 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::request::{Request, Settle};
 use crate::api::ClientError;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
+use else_client::request::{Request, Settle};
 use else_wire::skills::{SkillInstall, SkillInstallStatus, SkillScope};
 
 pub(super) struct SkillCard {

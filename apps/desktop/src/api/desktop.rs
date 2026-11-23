@@ -1,10 +1,9 @@
 use super::{Client, ClientError};
-use else_wire::computers::{ComputerState, DesktopMode, ServerEvent};
+use else_wire::computers::{DesktopMode, ServerEvent};
 use futures_util::{SinkExt as _, StreamExt as _};
 use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
-use reqwest::header::AUTHORIZATION;
-use reqwest::{Method, StatusCode};
+use reqwest::StatusCode;
 use serde::Serialize;
 use std::io::Cursor;
 use std::sync::{
@@ -200,316 +199,246 @@ async fn decoded(task: &mut Option<Decoding>) -> Result<Arc<RenderImage>, String
     frame?
 }
 
-impl Client {
-    pub async fn computer(self: Arc<Self>, bot: Uuid) -> Result<ComputerState, ClientError> {
-        let this = self.clone();
-        self.run(async move {
-            let request = this.request(Method::GET, &format!("/v1/bots/{bot}/computer"));
-            this.send_json(request).await
-        })
-        .await
-    }
-
-    pub async fn resume_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        self.post_computer(bot, "resume", None).await
-    }
-
-    /// Starts moving the computer to the server's latest image; the
-    /// computer state reports its progress.
-    pub async fn upgrade_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        self.post_computer(bot, "upgrade", None).await
-    }
-
-    /// Return the computer to its configured memory; it restarts if running.
-    pub async fn reset_computer_memory(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        self.post_computer(
-            bot,
-            "memory",
-            Some(serde_json::json!({ "memory_mib": null })),
-        )
-        .await
-    }
-
-    async fn post_computer(
-        self: Arc<Self>,
-        bot: Uuid,
-        action: &'static str,
-        body: Option<serde_json::Value>,
-    ) -> Result<(), ClientError> {
-        let this = self.clone();
-        self.run(async move {
-            let mut request = this
-                .request(Method::POST, &format!("/v1/bots/{bot}/computer/{action}"))
-                .timeout(Duration::from_secs(if body.is_some() { 120 } else { 15 }));
-            if let Some(body) = body {
-                request = request.json(&body);
+/// Opens a bot's desktop: frames, cursor and notices come in, input goes out.
+pub fn desktop(client: Arc<Client>, bot: Uuid, wake: bool) -> DesktopStream {
+    let (queue, command_rx) = mpsc::channel(64);
+    let (motion, motion_rx) = watch::channel(None);
+    let sequence = Arc::new(AtomicU64::new(1));
+    let (cancel, cancel_rx) = watch::channel(false);
+    let (event_tx, events) = mpsc::channel(2);
+    client.runtime().spawn({
+        let this = client.clone();
+        async move {
+            let result = run_desktop(
+                &this, bot, wake, command_rx, motion_rx, cancel_rx, &event_tx,
+            )
+            .await;
+            if let Err(error) = result {
+                let _ =
+                    tokio::time::timeout(WRITE_TIMEOUT, event_tx.send(DesktopEvent::Error(error)))
+                        .await;
             }
-            let response = this.send_request(request).await?;
-            let status = response.status();
-            if status == StatusCode::UNAUTHORIZED {
-                return Err(ClientError::Unauthorized);
-            }
-            if status.is_success() {
-                return Ok(());
-            }
-            if status.is_redirection() {
-                return Err(ClientError::Protocol(format!(
-                    "redirect ({status}) refused"
-                )));
-            }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
-            Err(ClientError::from_http(status, &bytes))
-        })
-        .await
-    }
-
-    pub fn desktop(self: Arc<Self>, bot: Uuid, wake: bool) -> DesktopStream {
-        let (queue, command_rx) = mpsc::channel(64);
-        let (motion, motion_rx) = watch::channel(None);
-        let sequence = Arc::new(AtomicU64::new(1));
-        let (cancel, cancel_rx) = watch::channel(false);
-        let (event_tx, events) = mpsc::channel(2);
-        self.runtime.spawn({
-            let this = self.clone();
-            async move {
-                let result = this
-                    .run_desktop(bot, wake, command_rx, motion_rx, cancel_rx, &event_tx)
-                    .await;
-                if let Err(error) = result {
-                    let _ = tokio::time::timeout(
-                        WRITE_TIMEOUT,
-                        event_tx.send(DesktopEvent::Error(error)),
-                    )
-                    .await;
-                }
-            }
-        });
-        DesktopStream {
-            commands: DesktopCommands {
-                queue,
-                motion,
-                sequence,
-                cancel,
-            },
-            events,
         }
+    });
+    DesktopStream {
+        commands: DesktopCommands {
+            queue,
+            motion,
+            sequence,
+            cancel,
+        },
+        events,
     }
+}
 
-    async fn run_desktop(
-        &self,
-        bot: Uuid,
-        wake: bool,
-        mut commands: mpsc::Receiver<(u64, Input)>,
-        mut motion: watch::Receiver<Option<(u64, DesktopCommand)>>,
-        mut cancel: watch::Receiver<bool>,
-        events: &mpsc::Sender<DesktopEvent>,
-    ) -> Result<(), String> {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-        self.verify_transport()
-            .await
-            .map_err(|err| err.to_string())?;
-        let mut url = url::Url::parse(&self.origin.ws_url()).expect("validated API origin");
-        url.set_path(&format!("/v1/bots/{bot}/desktop/stream"));
-        url.set_query(Some(if wake {
-            "mode=watch&wake=true&cursor=native"
-        } else {
-            "mode=watch&cursor=native"
-        }));
-        let mut request = url.as_str().into_client_request().expect("valid WS URL");
-        request
-            .headers_mut()
-            .insert(AUTHORIZATION, self.auth.clone());
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(MAX_PNG_BYTES))
-            .max_frame_size(Some(MAX_PNG_BYTES));
-        let connected = tokio::select! {
-            biased;
-            _ = events.closed() => return Ok(()),
-            _ = cancel.changed() => return Ok(()),
-            result = tokio::time::timeout(
-                Duration::from_secs(90),
-                tokio_tungstenite::connect_async_tls_with_config(
-                    request,
-                    Some(config),
-                    false,
-                    Some(tokio_tungstenite::Connector::Rustls(self.tls.clone())),
-                ),
-            ) => result,
-        };
-        let mut socket = match connected {
-            Ok(Ok((socket, _))) => socket,
-            Ok(Err(WsError::Http(response))) => {
-                if response.status() == StatusCode::UNAUTHORIZED {
-                    return Err(ClientError::Unauthorized.to_string());
-                }
-                return Err(format!(
-                    "Cannot open the desktop (HTTP {}).",
-                    response.status()
-                ));
+async fn run_desktop(
+    client: &Client,
+    bot: Uuid,
+    wake: bool,
+    mut commands: mpsc::Receiver<(u64, Input)>,
+    mut motion: watch::Receiver<Option<(u64, DesktopCommand)>>,
+    mut cancel: watch::Receiver<bool>,
+    events: &mpsc::Sender<DesktopEvent>,
+) -> Result<(), String> {
+    client
+        .verify_transport()
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut url = url::Url::parse(&client.origin().ws_url()).expect("validated API origin");
+    url.set_path(&format!("/v1/bots/{bot}/desktop/stream"));
+    url.set_query(Some(if wake {
+        "mode=watch&wake=true&cursor=native"
+    } else {
+        "mode=watch&cursor=native"
+    }));
+    let request = client.ws_request(url.as_str());
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_PNG_BYTES))
+        .max_frame_size(Some(MAX_PNG_BYTES));
+    let connected = tokio::select! {
+        biased;
+        _ = events.closed() => return Ok(()),
+        _ = cancel.changed() => return Ok(()),
+        result = tokio::time::timeout(
+            Duration::from_secs(90),
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                Some(config),
+                false,
+                Some(client.ws_connector()),
+            ),
+        ) => result,
+    };
+    let mut socket = match connected {
+        Ok(Ok((socket, _))) => socket,
+        Ok(Err(WsError::Http(response))) => {
+            if response.status() == StatusCode::UNAUTHORIZED {
+                return Err(ClientError::Unauthorized.to_string());
             }
-            Ok(Err(_)) => return Err("Cannot connect to the bot's desktop.".into()),
-            Err(_) => return Err("The bot's desktop did not wake in time. Try again.".into()),
-        };
-        let mut dimensions = None;
-        let mut mode = DesktopMode::Watch;
-        macro_rules! deliver {
-            ($event:expr) => {
-                tokio::select! {
-                    biased;
-                    _ = events.closed() => return Ok(()),
-                    _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
-                    result = events.send($event) => if result.is_err() { return Ok(()) },
-                }
-            };
+            return Err(format!(
+                "Cannot open the desktop (HTTP {}).",
+                response.status()
+            ));
         }
-        macro_rules! send {
-            ($message:expr) => {
-                tokio::select! {
-                    biased;
-                    _ = events.closed() => return Ok(()),
-                    _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
-                    result = tokio::time::timeout(WRITE_TIMEOUT, socket.send($message)) => {
-                        if !matches!(result, Ok(Ok(()))) {
-                            return Err("The desktop connection stopped responding.".into());
-                        }
-                    },
-                }
-            };
-        }
-        let mut last_sequence = 0;
-        let mut typing: Option<std::vec::IntoIter<u32>> = None;
-        // The socket keeps being read while a frame decodes; only the newest
-        // frame that arrived meanwhile is decoded next, so a slow decode skips
-        // stale frames instead of falling behind the screen.
-        let mut decoding: Option<Decoding> = None;
-        let mut newest = None;
-        loop {
+        Ok(Err(_)) => return Err("Cannot connect to the bot's desktop.".into()),
+        Err(_) => return Err("The bot's desktop did not wake in time. Try again.".into()),
+    };
+    let mut dimensions = None;
+    let mut mode = DesktopMode::Watch;
+    macro_rules! deliver {
+        ($event:expr) => {
             tokio::select! {
                 biased;
                 _ = events.closed() => return Ok(()),
                 _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
-                command = commands.recv(), if typing.is_none() => {
-                    let Some((sequence, input)) = command else { return Ok(()) };
-                    last_sequence = sequence;
-                    #[cfg(not(any(target_os = "macos", test)))]
-                    let Input::Command(command) = input;
-                    #[cfg(any(target_os = "macos", test))]
-                    let command = match input {
-                        Input::Command(command) => command,
-                        Input::Text(text) => {
-                            if mode == DesktopMode::Control {
-                                let keys: Vec<u32> = text.chars().filter_map(text_keysym).collect();
-                                typing = Some(keys.into_iter());
-                            }
-                            continue;
-                        },
-                    };
-                    match &command {
-                        DesktopCommand::Pointer { .. }
-                        | DesktopCommand::Key { .. }
-                        | DesktopCommand::Clipboard { .. }
-                            if mode != DesktopMode::Control => continue,
-                        _ => {},
-                    }
-                    let text = serde_json::to_string(&command).expect("desktop command serializes");
-                    send!(Message::Text(text.into()));
-                },
-                changed = motion.changed(), if typing.is_none() => {
-                    if changed.is_err() { return Ok(()); }
-                    let pending = motion.borrow_and_update().clone();
-                    if let Some((sequence, command)) = pending.filter(|(sequence, _)| *sequence > last_sequence) {
-                        last_sequence = sequence;
-                        if mode == DesktopMode::Control {
-                            let text = serde_json::to_string(&command).expect("desktop command serializes");
-                            send!(Message::Text(text.into()));
-                        }
-                    }
-                },
-                message = tokio::time::timeout(if dimensions.is_none() { Duration::from_secs(210) } else { Duration::from_secs(45) }, socket.next()) => {
-                    match message {
-                        Ok(Some(Ok(Message::Text(text)))) => {
-                            if text.len() > 64 * 1024 {
-                                return Err("The desktop sent an oversized status message.".into());
-                            }
-                            let event: ServerEvent = serde_json::from_str(&text)
-                                .map_err(|_| "The desktop sent an invalid status message.")?;
-                            match event {
-                                ServerEvent::Size { width, height } => {
-                                    if !valid_dimensions(u32::from(width), u32::from(height)) {
-                                        return Err("The desktop size exceeds the image limit.".into());
-                                    }
-                                    if dimensions != Some((width, height)) {
-                                        if let Some(stale) = decoding.take() {
-                                            stale.abort();
-                                        }
-                                        newest = None;
-                                    }
-                                    dimensions = Some((width, height));
-                                    deliver!(DesktopEvent::Size { width, height });
-                                },
-                                ServerEvent::Mode { mode: acknowledged } => {
-                                    mode = acknowledged;
-                                    deliver!(DesktopEvent::Mode(mode));
-                                },
-                                ServerEvent::Cursor { style } => {
-                                    deliver!(DesktopEvent::Cursor(native_cursor(&style)));
-                                },
-                                ServerEvent::Error { code, message } => {
-                                    if matches!(code.as_str(), "computer_stopped" | "computer_not_running") {
-                                        deliver!(DesktopEvent::Asleep);
-                                        return Ok(());
-                                    }
-                                    if matches!(code.as_str(), "control_in_use" | "control_failed" | "invalid_message" | "clipboard_too_large" | "clipboard_unsupported") {
-                                        deliver!(DesktopEvent::Notice(message));
-                                    } else {
-                                        return Err(message);
-                                    }
-                                },
-                                ServerEvent::Unknown => {},
-                            }
-                        },
-                        Ok(Some(Ok(Message::Binary(bytes)))) => {
-                            if decoding.is_some() {
-                                newest = Some((bytes, dimensions));
-                            } else {
-                                decoding = Some(decode_later(bytes, dimensions));
-                            }
-                        },
-                        Ok(Some(Ok(Message::Ping(bytes)))) => send!(Message::Pong(bytes)),
-                        Ok(Some(Ok(Message::Pong(_)))) => {},
-                        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                            return Err("The desktop connection closed. Click to reconnect.".into());
-                        },
-                        Ok(Some(Err(_))) | Err(_) => {
-                            return Err("The desktop connection stopped responding.".into());
-                        },
-                        Ok(Some(Ok(_))) => {},
-                    }
-                },
-                frame = decoded(&mut decoding) => {
-                    let frame = frame?;
-                    decoding = newest.take().map(|(bytes, expected)| decode_later(bytes, expected));
-                    deliver!(DesktopEvent::Frame(frame));
-                },
-                () = std::future::ready(()), if typing.is_some() => {
-                    let next = typing.as_mut().and_then(Iterator::next);
-                    let Some(key) = next.filter(|_| mode == DesktopMode::Control) else {
-                        typing = None;
-                        continue;
-                    };
-                    if typing.as_ref().is_some_and(|keys| keys.len() == 0) {
-                        typing = None;
-                    }
-                    for down in [true, false] {
-                        let text = serde_json::to_string(&DesktopCommand::Key { key, down })
-                            .expect("desktop command serializes");
-                        send!(Message::Text(text.into()));
+                result = events.send($event) => if result.is_err() { return Ok(()) },
+            }
+        };
+    }
+    macro_rules! send {
+        ($message:expr) => {
+            tokio::select! {
+                biased;
+                _ = events.closed() => return Ok(()),
+                _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
+                result = tokio::time::timeout(WRITE_TIMEOUT, socket.send($message)) => {
+                    if !matches!(result, Ok(Ok(()))) {
+                        return Err("The desktop connection stopped responding.".into());
                     }
                 },
             }
+        };
+    }
+    let mut last_sequence = 0;
+    let mut typing: Option<std::vec::IntoIter<u32>> = None;
+    // The socket keeps being read while a frame decodes; only the newest
+    // frame that arrived meanwhile is decoded next, so a slow decode skips
+    // stale frames instead of falling behind the screen.
+    let mut decoding: Option<Decoding> = None;
+    let mut newest = None;
+    loop {
+        tokio::select! {
+            biased;
+            _ = events.closed() => return Ok(()),
+            _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
+            command = commands.recv(), if typing.is_none() => {
+                let Some((sequence, input)) = command else { return Ok(()) };
+                last_sequence = sequence;
+                #[cfg(not(any(target_os = "macos", test)))]
+                let Input::Command(command) = input;
+                #[cfg(any(target_os = "macos", test))]
+                let command = match input {
+                    Input::Command(command) => command,
+                    Input::Text(text) => {
+                        if mode == DesktopMode::Control {
+                            let keys: Vec<u32> = text.chars().filter_map(text_keysym).collect();
+                            typing = Some(keys.into_iter());
+                        }
+                        continue;
+                    },
+                };
+                match &command {
+                    DesktopCommand::Pointer { .. }
+                    | DesktopCommand::Key { .. }
+                    | DesktopCommand::Clipboard { .. }
+                        if mode != DesktopMode::Control => continue,
+                    _ => {},
+                }
+                let text = serde_json::to_string(&command).expect("desktop command serializes");
+                send!(Message::Text(text.into()));
+            },
+            changed = motion.changed(), if typing.is_none() => {
+                if changed.is_err() { return Ok(()); }
+                let pending = motion.borrow_and_update().clone();
+                if let Some((sequence, command)) = pending.filter(|(sequence, _)| *sequence > last_sequence) {
+                    last_sequence = sequence;
+                    if mode == DesktopMode::Control {
+                        let text = serde_json::to_string(&command).expect("desktop command serializes");
+                        send!(Message::Text(text.into()));
+                    }
+                }
+            },
+            message = tokio::time::timeout(if dimensions.is_none() { Duration::from_secs(210) } else { Duration::from_secs(45) }, socket.next()) => {
+                match message {
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        if text.len() > 64 * 1024 {
+                            return Err("The desktop sent an oversized status message.".into());
+                        }
+                        let event: ServerEvent = serde_json::from_str(&text)
+                            .map_err(|_| "The desktop sent an invalid status message.")?;
+                        match event {
+                            ServerEvent::Size { width, height } => {
+                                if !valid_dimensions(u32::from(width), u32::from(height)) {
+                                    return Err("The desktop size exceeds the image limit.".into());
+                                }
+                                if dimensions != Some((width, height)) {
+                                    if let Some(stale) = decoding.take() {
+                                        stale.abort();
+                                    }
+                                    newest = None;
+                                }
+                                dimensions = Some((width, height));
+                                deliver!(DesktopEvent::Size { width, height });
+                            },
+                            ServerEvent::Mode { mode: acknowledged } => {
+                                mode = acknowledged;
+                                deliver!(DesktopEvent::Mode(mode));
+                            },
+                            ServerEvent::Cursor { style } => {
+                                deliver!(DesktopEvent::Cursor(native_cursor(&style)));
+                            },
+                            ServerEvent::Error { code, message } => {
+                                if matches!(code.as_str(), "computer_stopped" | "computer_not_running") {
+                                    deliver!(DesktopEvent::Asleep);
+                                    return Ok(());
+                                }
+                                if matches!(code.as_str(), "control_in_use" | "control_failed" | "invalid_message" | "clipboard_too_large" | "clipboard_unsupported") {
+                                    deliver!(DesktopEvent::Notice(message));
+                                } else {
+                                    return Err(message);
+                                }
+                            },
+                            ServerEvent::Unknown => {},
+                        }
+                    },
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        if decoding.is_some() {
+                            newest = Some((bytes, dimensions));
+                        } else {
+                            decoding = Some(decode_later(bytes, dimensions));
+                        }
+                    },
+                    Ok(Some(Ok(Message::Ping(bytes)))) => send!(Message::Pong(bytes)),
+                    Ok(Some(Ok(Message::Pong(_)))) => {},
+                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                        return Err("The desktop connection closed. Click to reconnect.".into());
+                    },
+                    Ok(Some(Err(_))) | Err(_) => {
+                        return Err("The desktop connection stopped responding.".into());
+                    },
+                    Ok(Some(Ok(_))) => {},
+                }
+            },
+            frame = decoded(&mut decoding) => {
+                let frame = frame?;
+                decoding = newest.take().map(|(bytes, expected)| decode_later(bytes, expected));
+                deliver!(DesktopEvent::Frame(frame));
+            },
+            () = std::future::ready(()), if typing.is_some() => {
+                let next = typing.as_mut().and_then(Iterator::next);
+                let Some(key) = next.filter(|_| mode == DesktopMode::Control) else {
+                    typing = None;
+                    continue;
+                };
+                if typing.as_ref().is_some_and(|keys| keys.len() == 0) {
+                    typing = None;
+                }
+                for down in [true, false] {
+                    let text = serde_json::to_string(&DesktopCommand::Key { key, down })
+                        .expect("desktop command serializes");
+                    send!(Message::Text(text.into()));
+                }
+            },
         }
     }
 }
@@ -518,7 +447,6 @@ impl Client {
 mod tests {
     use super::*;
     use crate::config::{Origin, OwnerToken};
-    use else_wire::computers::ComputerUpgrade;
 
     #[tokio::test]
     async fn a_newer_servers_status_message_is_skipped_and_the_stream_continues() {
@@ -536,7 +464,7 @@ mod tests {
             }
             let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), false);
         assert!(matches!(
             stream.events.recv().await,
             Some(DesktopEvent::Size { .. })
@@ -570,47 +498,6 @@ mod tests {
     }
 
     #[test]
-    fn computer_state_reports_an_outdated_image_and_upgrade_progress() {
-        let parse =
-            |json: serde_json::Value| -> ComputerState { serde_json::from_value(json).unwrap() };
-        let base = serde_json::json!({ "state": "stopped", "desired_state": "auto" });
-        assert!(
-            !parse(base.clone()).outdated(),
-            "an older server sends no images"
-        );
-        let outdated = parse(serde_json::json!({
-            "state": "stopped", "desired_state": "auto",
-            "image": "img:old", "latest_image": "img:new", "upgrade": null,
-        }));
-        assert!(outdated.outdated());
-        assert_eq!(outdated.upgrade, None);
-        let running = parse(serde_json::json!({
-            "state": "stopped", "desired_state": "auto", "upgrade": { "state": "running" },
-        }));
-        assert_eq!(running.upgrade, Some(ComputerUpgrade::Running));
-        let failed = parse(serde_json::json!({
-            "state": "stopped", "desired_state": "auto",
-            "upgrade": { "state": "failed", "error": "busy" },
-        }));
-        assert_eq!(
-            failed.upgrade,
-            Some(ComputerUpgrade::Failed {
-                error: "busy".into()
-            })
-        );
-        let partial = parse(serde_json::json!({
-            "state": "stopped", "desired_state": "auto",
-            "upgrade": { "state": "completed", "unrestored_packages": ["ffmpeg"] },
-        }));
-        assert_eq!(
-            partial.upgrade,
-            Some(ComputerUpgrade::Completed {
-                unrestored_packages: vec!["ffmpeg".into()]
-            })
-        );
-    }
-
-    #[test]
     fn guest_cursor_names_map_to_native_cursors_and_unknown_ones_to_an_arrow() {
         assert_eq!(native_cursor("pointer"), CursorStyle::PointingHand);
         assert_eq!(
@@ -630,19 +517,6 @@ mod tests {
         assert!(decode_frame(&bytes, None).is_err());
         assert!(decode_frame(b"invalid PNG", Some((1, 1))).is_err());
         assert!(decode_frame(&vec![0; MAX_PNG_BYTES + 1], Some((1, 1))).is_err());
-    }
-
-    #[tokio::test]
-    async fn resume_accepts_no_content_and_keeps_the_token_in_its_header() {
-        let (origin, server) =
-            super::super::tests::serve_once("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                .await;
-        let bot = Uuid::new_v4();
-        client(origin).resume_computer(bot).await.unwrap();
-        let request = server.await.unwrap();
-        assert!(request.starts_with(&format!("POST /v1/bots/{bot}/computer/resume ")));
-        assert!(request.contains(&format!("Bearer {}", "T".repeat(43))));
-        assert!(!request.lines().next().unwrap().contains(&"T".repeat(43)));
     }
 
     #[tokio::test]
@@ -726,7 +600,7 @@ mod tests {
                 }
             }
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), false);
         let clipboard = |text: &str| DesktopCommand::Clipboard { text: text.into() };
         assert!(stream.commands.send_or_disconnect(clipboard("watching")));
         assert!(stream.commands.send_or_disconnect(DesktopCommand::Mode {
@@ -772,7 +646,7 @@ mod tests {
                 }
             }
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), false);
         let control = || DesktopCommand::Mode {
             mode: DesktopMode::Control,
         };
@@ -843,7 +717,7 @@ mod tests {
             .unwrap();
             let _ = ws.close(None).await;
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), true);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), true);
         assert!(matches!(
             stream.events.recv().await,
             Some(DesktopEvent::Error(message)) if message == "The runtime is unavailable."
@@ -872,7 +746,7 @@ mod tests {
                 .unwrap();
             let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), false);
         assert!(matches!(
             stream.events.recv().await,
             Some(DesktopEvent::Size { .. })
@@ -918,7 +792,7 @@ mod tests {
                 .unwrap();
             let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
         });
-        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut stream = super::desktop(client(origin), Uuid::new_v4(), false);
         let mut shades = Vec::new();
         let mut mode = false;
         while !(mode && shades.last() == Some(&39)) {
@@ -955,7 +829,7 @@ mod tests {
                     );
                     assert_eq!(request.uri().query(), Some("mode=watch&cursor=native"));
                     assert_eq!(
-                        request.headers()[AUTHORIZATION],
+                        request.headers()[reqwest::header::AUTHORIZATION],
                         format!("Bearer {}", "T".repeat(43))
                     );
                     assert!(request.headers().get("origin").is_none());
@@ -992,7 +866,7 @@ mod tests {
                     .is_ok()
             );
         });
-        let mut stream = client(origin).desktop(bot, false);
+        let mut stream = super::desktop(client(origin), bot, false);
         assert!(matches!(
             stream.events.recv().await,
             Some(DesktopEvent::Size {

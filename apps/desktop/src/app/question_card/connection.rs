@@ -2,12 +2,11 @@ use super::*;
 use crate::app::conversation::ConversationView;
 use crate::app::transcript::CardKey;
 use crate::controls::{Scale, Tier, text_field};
+use else_client::connect as flow;
 use else_wire::email::EmailProvider;
 use else_wire::questions::QuestionStatus;
 use flow::{Consent, Flow, Resolution};
 use gpui_kit::component::input::{Input, InputState};
-
-mod flow;
 
 pub(in crate::app) struct Form {
     flow: Flow,
@@ -57,6 +56,7 @@ impl ConversationView {
                 bot: self.bot_id,
                 question,
                 consent,
+                finish: Default::default(),
             };
             let password = flow.takes_password().then(|| {
                 cx.new(|cx| {

@@ -4,7 +4,7 @@ use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 
 use super::{dot, when};
 use crate::app::ElseApp;
-use else_wire::rules::{DiffLine, DiffOp, RuleAuthor, RuleChange, RulesFile, RulesVersion};
+use else_wire::rules::{DiffLine, DiffOp, RuleAuthor, RulesFile, RulesVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -558,19 +558,7 @@ impl ElseApp {
             .find(|b| b.id == bot)
             .map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
         let describe = |v: &RulesVersion| -> (String, String, String) {
-            let title = match (v.change, v.restored_from) {
-                (RuleChange::Restored, Some(0)) => "Cleared all rules".to_owned(),
-                (RuleChange::Restored, Some(from)) => format!("Restored v{from}"),
-                (change, _) => format!(
-                    "{} {}",
-                    match change {
-                        RuleChange::Added => "Added",
-                        RuleChange::Removed => "Removed",
-                        _ => "Changed",
-                    },
-                    v.section
-                ),
-            };
+            let title = v.title();
             let by = if v.author == RuleAuthor::Owner {
                 "You"
             } else {

@@ -1,5 +1,5 @@
 mod form;
-pub(crate) mod oauth;
+pub(crate) use else_client::oauth::email as oauth;
 
 use else_wire::email::{AccountHealth, AccountState, EmailAccount, EmailPreset};
 

@@ -5,8 +5,7 @@ use uuid::Uuid;
 #[cfg(target_os = "linux")]
 pub mod clipboard;
 
-pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_FILES: usize = 8;
+pub use else_wire::items::{MAX_FILE_BYTES, MAX_FILES};
 
 pub fn token(file: &Attachment) -> InlineToken {
     InlineToken::new(format!("file:{}", file.id), file.fallback()).with_label(file.name.clone())
@@ -89,14 +88,7 @@ pub fn without_files(
         .filter(|part| !matches!(part, MessagePart::File { file } if hide(file)))
         .cloned()
         .collect();
-    let text = parts
-        .iter()
-        .map(|part| match part {
-            MessagePart::Text { text } => text.clone(),
-            MessagePart::File { file } => file.fallback(),
-        })
-        .collect();
-    Some((text, parts))
+    Some((MessagePart::flatten(&parts), parts))
 }
 
 /// Whether the message says anything besides its files.

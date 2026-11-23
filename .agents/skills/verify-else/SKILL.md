@@ -9,7 +9,8 @@ Read [the runtime rules](../../rules/plugin-compatibility.md) and the
 [feature map](features/README.md). Supported native hosts are macOS arm64,
 Linux aarch64, and Linux x86_64. Never emulate another architecture to claim
 coverage. Linux hosts use omabox by default. macOS API checks use the process
-backend. macOS desktop automation uses a headless [Lume guest](lume.md).
+backend. macOS desktop automation uses a headless [Lume guest](lume.md). The iPhone
+app runs in the iOS Simulator against a loopback session ([iOS guide](ios.md)).
 Use `--backend process` inside an owned Linux container or VM.
 
 The desktop is the primary user interface. The fast automated driver uses the
@@ -262,6 +263,7 @@ logs and remove that exact box; never use `omabox down --all`.
 API helper modes are in executable [verify.py](verify.py). Run `--help` for
 the flags. The API helper uses only the Python standard library. The separate
 [Lume helper](lume.py) uses a private Python environment with a pinned guest
-shell client, as described in [the Lume workflow](lume.md).
+shell client, as described in [the Lume workflow](lume.md). The iPhone app
+needs no helper beyond `--session` and `--probe`; see [the iOS guide](ios.md).
 Use `/maintain-verification-skill` after app behavior or entry points change
 to reconcile the feature map with the implementation.

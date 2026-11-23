@@ -368,15 +368,22 @@ async fn permissions(
 #[serde(deny_unknown_fields)]
 struct Wake {
     wake: bool,
+    /// Turn on only an existing trigger on an inbox the bot can still
+    /// read: never grant read, never create a trigger.
+    #[serde(default)]
+    resume: bool,
 }
 async fn wake(
     State(state): State<Arc<AppState>>,
     ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
     ApiJson(request): ApiJson<Wake>,
 ) -> Result<Json<Value>, ApiError> {
-    store::set_wake(&state.db, id, bot, request.wake)
-        .await
-        .map_err(unavailable)?;
+    if request.wake && request.resume {
+        store::resume_trigger(&state.db, id, bot).await
+    } else {
+        store::set_wake(&state.db, id, bot, request.wake).await
+    }
+    .map_err(unavailable)?;
     Ok(Json(json!({"wake":request.wake})))
 }
 async fn delete_trigger(

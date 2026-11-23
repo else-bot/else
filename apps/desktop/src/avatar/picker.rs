@@ -1,4 +1,3 @@
-use super::AvatarLook;
 use super::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
 use else_wire::bots::Avatar;

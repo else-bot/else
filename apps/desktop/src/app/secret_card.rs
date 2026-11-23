@@ -19,8 +19,8 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::RowKey;
-use super::request::{Request, Settle};
 use crate::api::ClientError;
+use else_client::request::{Request, Settle};
 
 pub(super) struct SecretForm {
     fields: Entity<CredentialFields>,

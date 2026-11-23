@@ -1,10 +1,11 @@
 use super::{BotPanel, automation_section};
 use crate::app::delete_dialog::{DeleteTarget, open_delete_confirmation};
 use crate::app::panel::{alert, item_name, meta, meta_line};
-use crate::app::request::{Request, Settle};
 use crate::controls::toggle;
 use chrono::{DateTime, Utc};
+use else_client::request::{Request, Settle};
 use else_wire::conversation::BotExtras;
+use else_wire::schedule::webhook_pace as pace;
 use else_wire::socials::Provider;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -68,8 +69,13 @@ impl BotPanel {
         let app = self.app.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match (source, enabled) {
-                (TriggerSource::Mail { account }, Some(wake)) => {
-                    client.set_email_wake(account, bot, wake).await
+                // Turning a trigger back on never grants read the owner
+                // withdrew, nor brings back a trigger deleted meanwhile.
+                (TriggerSource::Mail { account }, Some(true)) => {
+                    client.resume_email_trigger(account, bot).await
+                }
+                (TriggerSource::Mail { account }, Some(false)) => {
+                    client.set_email_wake(account, bot, false).await
                 }
                 (TriggerSource::Mail { account }, None) => {
                     client.delete_email_trigger(account, bot).await
@@ -196,10 +202,7 @@ impl BotPanel {
             facts.push("Paused".to_owned());
         }
         if let Some(at) = card.last_woke {
-            facts.push(format!(
-                "Last woke {}",
-                at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
-            ));
+            facts.push(else_wire::schedule::last_woke(at));
         }
         // Same anatomy as a routine: the name over one meta line, beside a
         // centred switch. What the trigger asks for follows as its body.
@@ -353,16 +356,6 @@ fn trigger_cards(automations: &BotExtras) -> Vec<TriggerCard> {
         last_woke: webhook.last_wake.as_ref().map(|wake| wake.woke_at),
     });
     mail.chain(social).chain(webhooks).collect()
-}
-
-/// How often a webhook may wake the bot, at most.
-fn pace(minutes: i64) -> String {
-    match minutes {
-        1 => "at most every minute".to_owned(),
-        m if m % 60 == 0 && m > 60 => format!("at most every {} hours", m / 60),
-        60 => "at most hourly".to_owned(),
-        m => format!("at most every {m} min"),
-    }
 }
 
 /// Whether a trigger's local change still waits for the server: a save until

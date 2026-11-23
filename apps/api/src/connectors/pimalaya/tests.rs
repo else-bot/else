@@ -1381,15 +1381,21 @@ async fn locate_finds_the_exact_message_id_after_archive_and_trash() {
 
 #[tokio::test]
 async fn imap_and_smtp_name_the_same_cause_for_a_refused_connection() {
-    // Bound but never listening, so the port refuses connections and no
-    // other process can take it.
-    let closed = tokio::net::TcpSocket::new_v4().unwrap();
-    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    // Bound but never listening, so on Linux the port refuses connections
+    // and no other process can take it. macOS drops connections to such a
+    // port instead of refusing them, so there the port is released first:
+    // a process taking it meanwhile could only fail this test.
+    let mut closed = Some(tokio::net::TcpSocket::new_v4().unwrap());
+    let socket = closed.as_ref().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = Endpoint {
         host: "127.0.0.1".into(),
-        port: closed.local_addr().unwrap().port(),
+        port: socket.local_addr().unwrap().port(),
         start_tls: true,
     };
+    if cfg!(target_os = "macos") {
+        closed = None;
+    }
     let (_, connector) = tls();
     let imap = Imap::connect(&endpoint, &auth(), &connector).await.err();
     let smtp = Smtp::connect(&endpoint, &auth(), &connector).await.err();

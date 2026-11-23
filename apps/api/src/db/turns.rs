@@ -462,6 +462,8 @@ pub enum AcceptError {
     RequestConflict,
     #[error("reaction target is not an assistant message of this conversation")]
     InvalidReaction,
+    #[error("a reaction named a notice it would answer")]
+    ReactionAnswersNotice,
     #[error("a file part is not one of this bot's attachments as stored")]
     InvalidAttachment,
     #[error("work is still stopping")]
@@ -601,6 +603,12 @@ pub async fn accept(
             placement: None,
         });
     }
+    // A reaction answers no notice, so a new request naming one with a
+    // reaction is refused rather than dropping its reply. A request already
+    // accepted under its ID replays above.
+    if req.reaction.is_some() && req.answers_notice.is_some() {
+        return Err(AcceptError::ReactionAnswersNotice);
+    }
     if let Some(reaction) = req.reaction {
         let target: Option<ItemKind> =
             sqlx::query_scalar("SELECT kind FROM items WHERE id = ?1 AND conversation_id = ?2")
@@ -719,15 +727,19 @@ pub async fn accept(
             crate::db::events::turn_changed(&mut tx, req.bot_id, previous).await?;
         }
         use crate::db::owner_notices::{Answer, AnswerError, answer};
-        let target = req
-            .answers_notice
-            .map_or(Answer::Untargeted, Answer::Notice);
-        answer(&mut tx, req.bot_id, target)
-            .await
-            .map_err(|err| match err {
-                AnswerError::NotThisBots => AcceptError::InvalidNotice,
-                AnswerError::Db(err) => AcceptError::Db(err),
-            })?;
+        // A reaction is feedback on one message, not the owner's answer to
+        // what the bot asked: it settles no notice.
+        if req.reaction.is_none() {
+            let target = req
+                .answers_notice
+                .map_or(Answer::Untargeted, Answer::Notice);
+            answer(&mut tx, req.bot_id, target)
+                .await
+                .map_err(|err| match err {
+                    AnswerError::NotThisBots => AcceptError::InvalidNotice,
+                    AnswerError::Db(err) => AcceptError::Db(err),
+                })?;
+        }
     }
     let placement = match admission {
         // A setup message runs only on an idle bot.

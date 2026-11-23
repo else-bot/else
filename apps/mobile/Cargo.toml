@@ -1,0 +1,35 @@
+[package]
+name = "else-mobile"
+version = "0.0.30"
+edition = "2024"
+publish = false
+
+# NSH builds its own runners around this crate, so it stays out of the root
+# workspace and keeps its own lockfile.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+else-client = { path = "../../crates/client" }
+else-tailnet = { path = "../../crates/tailnet" }
+else-wire = { path = "../../crates/wire" }
+nsh-core = "0.6.1"
+nsh-base = "0.6.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = "0.3.34"
+log = "0.4"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+uuid = { version = "1.29.0", features = ["v4", "v5", "serde"] }
+libc = "0.2.191"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+security-framework = "3.7.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+env_logger = "0.11"
+nsh-platform-macos = { version = "0.6.1", default-features = false, features = ["svg"] }

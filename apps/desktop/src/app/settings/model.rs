@@ -9,11 +9,12 @@ use else_wire::settings::Capabilities;
 use super::{BotPanel, PanelEvent};
 use crate::app::ElseApp;
 use crate::app::panel::{alert, item_name, meta, muted, note, section};
-use crate::app::request::Request;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::profile_picker::{ProfilePicker, effort_label};
+use crate::profile_picker::ProfilePicker;
+use else_client::request::Request;
 use else_wire::settings::ModelInfo;
 use else_wire::settings::ProfileChoice;
+use else_wire::settings::effort_label;
 use else_wire::settings::model_label;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -302,7 +303,7 @@ impl BotPanel {
         }) else {
             return;
         };
-        let Some(choice) = crate::profile_picker::catalog_choice(provider, Some(&target)) else {
+        let Some(choice) = provider.choice(Some(&target)) else {
             return;
         };
         let Some(attempt) = self.model_upgrade.begin(()) else {

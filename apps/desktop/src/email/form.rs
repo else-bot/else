@@ -63,11 +63,14 @@ impl Request {
                 .connect_email(*config, password)
                 .await
                 .map(|account| Connected::Account(Box::new(account))),
-            Self::Authorize(provider, address) => {
-                super::oauth::SignIn::start(client, provider, address)
-                    .await
-                    .map(Connected::Authorization)
-            }
+            Self::Authorize(provider, address) => super::oauth::SignIn::start(
+                client,
+                provider,
+                address,
+                else_client::oauth::callback::Finish::Page,
+            )
+            .await
+            .map(Connected::Authorization),
         }
     }
 }

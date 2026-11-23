@@ -586,7 +586,7 @@ fn prefill_origin_changed(bound: Option<&Origin>, raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::tests::serve_once;
+    use else_client::testing::serve_once;
 
     const TOKEN: &str = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
     const CAPABILITIES: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 50\r\n\r\n{\"providers\":[],\"limits\":{\"max_text_bytes\":32768}}";

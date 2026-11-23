@@ -196,6 +196,78 @@ impl From<WireCatalog> for Catalog {
     }
 }
 
+impl Capabilities {
+    /// The providers a profile can name: those listing models.
+    pub fn offered(&self) -> Vec<ProviderInfo> {
+        self.providers
+            .iter()
+            .filter(|p| !p.catalog.models.is_empty())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Where a model picker over `providers` opens: `saved` as the catalog
+/// applies it now, else the first runnable provider's default choice.
+pub fn initial_choice(
+    providers: &[ProviderInfo],
+    saved: Option<&ProfileChoice>,
+) -> Option<ProfileChoice> {
+    saved
+        .and_then(|c| providers.iter().find(|p| p.state.id == c.provider_id))
+        .and_then(|p| p.choice(saved))
+        .or_else(|| {
+            providers
+                .iter()
+                .filter(|p| p.state.cli_available)
+                .find_map(|p| p.choice(None))
+        })
+}
+
+/// The service tier that runs a model faster where the provider offers it.
+pub const FAST_TIER: &str = "priority";
+
+impl ProviderInfo {
+    /// A profile this provider applies exactly, kept as close to
+    /// `previous` as its catalog allows: the same model, effort and speed
+    /// when they are still offered, else its first model at medium effort
+    /// and standard speed. `previous` from another provider counts as none.
+    /// `None` when the catalog has no model or the model no effort.
+    pub fn choice(&self, previous: Option<&ProfileChoice>) -> Option<ProfileChoice> {
+        let previous = previous.filter(|choice| choice.provider_id == self.state.id);
+        let model = previous
+            .and_then(|choice| self.catalog.model(&choice.model))
+            .or(self.catalog.models.first())?;
+        let wanted = previous.map_or("medium", |choice| choice.reasoning_effort.as_str());
+        let effort = model
+            .efforts
+            .iter()
+            .find(|effort| *effort == wanted)
+            .or(model.efforts.first())?;
+        let fast = previous.is_some_and(|choice| choice.service_tier == FAST_TIER)
+            && model.tiers.iter().any(|tier| tier == FAST_TIER);
+        Some(ProfileChoice {
+            provider_id: self.state.id.clone(),
+            model: model.id.clone(),
+            reasoning_effort: effort.clone(),
+            service_tier: if fast { FAST_TIER } else { "default" }.to_owned(),
+        })
+    }
+}
+
+/// A reasoning effort as people read it.
+pub fn effort_label(id: &str) -> &str {
+    match id {
+        "default" => "Default",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra high",
+        "max" => "Max",
+        other => other,
+    }
+}
+
 /// A provider and an exact profile for it, as the API takes and reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileChoice {
@@ -378,4 +450,99 @@ pub fn model_label(id: &str) -> String {
         }
     }
     words.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Catalog, FAST_TIER, ModelInfo, ProviderInfo, ProviderState, model_label};
+
+    fn model(id: &str, fast: bool) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            label: model_label(id),
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
+            tiers: if fast {
+                vec!["default".into(), FAST_TIER.into()]
+            } else {
+                vec!["default".into()]
+            },
+            featured: true,
+            upgrade: None,
+        }
+    }
+
+    fn provider(id: &str, fast: bool) -> ProviderInfo {
+        ProviderInfo {
+            state: ProviderState {
+                id: id.into(),
+                label: id.into(),
+                available: true,
+                cli_available: true,
+                cli_unavailable_reason: None,
+                requires_profile: true,
+                profile_configured: Some(true),
+                unavailable_reason: None,
+            },
+            catalog: Catalog {
+                models: vec![model("first", fast), model("second", fast)],
+                ..Catalog::default()
+            },
+        }
+    }
+
+    #[test]
+    fn saved_profile_keeps_its_model_reasoning_and_speed() {
+        let provider = provider("codex", true);
+        let mut saved = provider.choice(None).unwrap();
+        saved.model = "second".into();
+        saved.reasoning_effort = "high".into();
+        saved.service_tier = FAST_TIER.into();
+        assert_eq!(provider.choice(Some(&saved)), Some(saved));
+    }
+
+    #[test]
+    fn efforts_and_speed_follow_the_chosen_model() {
+        let mut provider = provider("codex", true);
+        provider.catalog.models[1].efforts = vec!["xhigh".into()];
+        provider.catalog.models[1].tiers = vec!["default".into()];
+        let mut saved = provider.choice(None).unwrap();
+        saved.service_tier = FAST_TIER.into();
+        saved.model = "second".into();
+        let choice = provider.choice(Some(&saved)).unwrap();
+        assert_eq!(choice.reasoning_effort, "xhigh");
+        assert_eq!(choice.service_tier, "default");
+    }
+
+    #[test]
+    fn switching_provider_starts_at_medium_and_standard_speed() {
+        let mut saved = provider("codex", true).choice(None).unwrap();
+        saved.reasoning_effort = "high".into();
+        saved.service_tier = FAST_TIER.into();
+        let choice = provider("claude", false).choice(Some(&saved)).unwrap();
+        assert_eq!(choice.provider_id, "claude");
+        assert_eq!(choice.reasoning_effort, "medium");
+        assert_eq!(choice.service_tier, "default");
+    }
+
+    #[test]
+    fn removed_catalog_values_fall_back_to_supported_values() {
+        let mut saved = provider("codex", true).choice(None).unwrap();
+        saved.model = "removed".into();
+        saved.reasoning_effort = "removed".into();
+        saved.service_tier = FAST_TIER.into();
+        let choice = provider("codex", false).choice(Some(&saved)).unwrap();
+        assert_eq!(choice.model, "first");
+        assert_eq!(choice.reasoning_effort, "low");
+        assert_eq!(choice.service_tier, "default");
+    }
+
+    #[test]
+    fn incomplete_catalog_cannot_produce_a_profile() {
+        let mut provider = provider("codex", true);
+        provider.catalog.models.clear();
+        assert!(provider.choice(None).is_none());
+        provider.catalog.models.push(model("first", false));
+        provider.catalog.models[0].efforts.clear();
+        assert!(provider.choice(None).is_none());
+    }
 }

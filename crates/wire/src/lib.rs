@@ -12,6 +12,7 @@
 #[macro_use]
 mod state;
 
+pub mod avatar;
 pub mod backups;
 pub mod bots;
 pub mod computers;
@@ -26,6 +27,7 @@ pub mod outgoing;
 pub mod questions;
 pub mod routines;
 pub mod rules;
+pub mod schedule;
 pub mod secrets;
 pub mod settings;
 pub mod skills;

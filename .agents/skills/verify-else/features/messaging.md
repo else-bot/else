@@ -4,9 +4,16 @@
 
 - Send once and stream the assistant's UTF-8 reply.
 - Join a follow-up to an unfinished reply (`turn.steered_into`) instead of
-  stopping it; pending owner questions and computer handoffs are skipped,
-  but secret forms stay pending.
+  stopping it.
+- A typed owner message skips every pending question and computer handoff
+  the bot asked before it, whether it joins a reply or queues; secret forms
+  and drafts stay pending. Reactions, notice answers and draft replies skip
+  only the cards of the reply they join.
 - Retry an unconfirmed send using its original request UUID.
+- Retry a failed owner message from its **Failed** footer:
+  `POST /v1/bots/{id}/turns/{turn}/retry` with `{"attempt": N}` queues a new
+  attempt of the same turn (202); repeating it answers 200, and a turn that
+  cannot be retried answers 409 `not_retryable`.
 - Stop a running turn and wait for the cancellation receipt to finish.
 - Reconnect or restart without duplicated history.
 
@@ -30,7 +37,15 @@ the turn is `interrupted`. It restarts the real API against the same data and
 compares saved items/turns, including a changed process-bound event cursor.
 
 Run `verify.py --tests turns steering cancel ws` for joining, replay, stop
-receipts and socket behavior. The `ws` target starts real loopback
+receipts, failed-turn retries (`turns::retries`) and socket behavior.
+
+To drive a failed-turn retry through a session, send
+`[synthetic:fail] x` with `"provider_id":"synthetic"` through `--probe NAME
+--method POST --path /v1/bots/{id}/turns --expected 202`, wait for the turn
+to read `failed`, then POST `{"attempt":1}` to `.../turns/{turn}/retry`
+(`--expected 202`, then `200` for the repeat). The fixture has no failing
+marker, so natively send the failing turn through the probe and click the
+footer's **Retry**. The `ws` target starts real loopback
 WebSockets, but does not render GPUI.
 
 For native proof, use `--fixture-provider` with the private session in the
