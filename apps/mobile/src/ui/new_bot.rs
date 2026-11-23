@@ -1,6 +1,7 @@
 //! Creating a bot: its name, its avatar's shape and color, and its
 //! provider and model, which start at the server's defaults.
 
+use super::sheet::{Form, Handle};
 use else_wire::bots::{Avatar, AvatarColor, AvatarShape};
 use else_wire::settings::{Capabilities, ProfileChoice, ProviderInfo};
 use nsh_base::{input, nav_page};
@@ -46,13 +47,17 @@ fn create_request(
 }
 
 pub fn open() {
-    super::sheet::present(KEY, || super::sheet::page(screen()));
+    super::sheet::present(KEY, || super::sheet::page(screen(Handle::current())));
 }
 
-fn screen() -> Screen {
+fn screen(sheet: Handle) -> Screen {
     let name = signal(String::new());
-    let picked = signal(AvatarColor::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12]);
-    let shape = signal(AvatarShape::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12]);
+    let start = Avatar {
+        shape: AvatarShape::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12],
+        color: AvatarColor::ALL[usize::from(Uuid::new_v4().as_bytes()[0]) % 12],
+    };
+    let picked = signal(start.color);
+    let shape = signal(start.shape);
     let look = move || Avatar {
         shape: shape.get(),
         color: picked.get(),
@@ -68,17 +73,21 @@ fn screen() -> Screen {
         },
     );
     let model = signal(None::<ProfileChoice>);
+    // The model shown before the owner picks one.
+    let first_model = signal(None::<ProfileChoice>);
     // Shown as the catalog applies the defaults now. When that differs
     // from the raw defaults, the shown one is sent.
     effect(move || {
         if let Some(caps) = caps.get() {
             let providers = caps.offered();
-            model.set(caps.defaults.as_ref().and_then(|wanted| {
+            let shown = caps.defaults.as_ref().and_then(|wanted| {
                 providers
                     .iter()
                     .find(|p| p.state.id == wanted.provider_id)
                     .and_then(|p| p.choice(Some(wanted)))
-            }));
+            });
+            first_model.set(shown.clone());
+            model.set(shown);
         }
     });
     // Only a change from the defaults is sent: a bot without its own
@@ -90,7 +99,18 @@ fn screen() -> Screen {
             .filter(|m| Some(m) != defaults.as_ref())
     };
     let ready = computed(move || !name.with(|n| n.trim().is_empty()) && !step.with(Request::busy));
-    super::sheet::guard(move || !name.with(|n| n.trim().is_empty()));
+    sheet.track(move || {
+        if step.with(Request::busy) {
+            Form::Saving
+        } else if name.with(|n| !n.trim().is_empty())
+            || look() != start
+            || model.get() != first_model.get()
+        {
+            Form::Unsaved
+        } else {
+            Form::Clean
+        }
+    });
 
     let create = move || {
         if !ready.get_untracked() {
@@ -113,9 +133,9 @@ fn screen() -> Screen {
             move |request| client.create_bot(request),
             move |bot| {
                 let (id, title) = (bot.id, bot.name.clone());
-                session::update_bot(bot);
+                session::add_bot(bot);
                 if step.try_set(Request::Idle) {
-                    super::sheet::close();
+                    sheet.close();
                     super::push(format!("chat-{id}"), move || {
                         super::chat::screen(id, title.clone())
                     });
@@ -293,7 +313,7 @@ fn model_row(
         let open = providers.map(|providers| {
             move || {
                 let providers = providers.clone();
-                super::sheet::push(format!("{KEY}-model"), move || {
+                Handle::current().push(format!("{KEY}-model"), move || {
                     picker_screen(providers.clone(), model)
                 });
             }

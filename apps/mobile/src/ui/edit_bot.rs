@@ -1,6 +1,7 @@
 //! Renaming a bot and changing its avatar. Saving the same name and avatar
 //! again leaves the bot as it is, so a resend after a lost answer is safe.
 
+use super::sheet::{Form, Handle};
 use else_wire::bots::{Avatar, Bot};
 use nsh_base::{input, nav_page};
 use nsh_core::element::header::HeaderItem;
@@ -17,10 +18,12 @@ fn key(bot: Uuid) -> String {
 
 pub fn open(bot: Bot) {
     let id = bot.id;
-    super::sheet::present(key(id), move || super::sheet::page(screen(bot.clone())));
+    super::sheet::present(key(id), move || {
+        super::sheet::page(screen(bot.clone(), Handle::current()))
+    });
 }
 
-fn screen(bot: Bot) -> Screen {
+fn screen(bot: Bot, sheet: Handle) -> Screen {
     let id = bot.id;
     let name = signal(bot.name.clone());
     let shape = signal(bot.avatar.shape);
@@ -36,7 +39,16 @@ fn screen(bot: Bot) -> Screen {
         !now.0.is_empty() && now != saved.get()
     });
     let ready = computed(move || changed.get() && !save.with(Request::busy));
-    super::sheet::guard(move || changed.get());
+    // Any change counts, an emptied name too, though it cannot be saved.
+    sheet.track(move || {
+        if save.with(Request::busy) {
+            Form::Saving
+        } else if (name.get().trim().to_owned(), look()) != saved.get() {
+            Form::Unsaved
+        } else {
+            Form::Clean
+        }
+    });
     let submit = move || {
         if !ready.get_untracked() {
             return;
@@ -58,7 +70,7 @@ fn screen(bot: Bot) -> Screen {
             move |bot| {
                 session::update_bot(bot);
                 if save.try_set(Request::Idle) {
-                    super::sheet::close();
+                    sheet.close();
                 }
             },
         );

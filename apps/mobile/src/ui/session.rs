@@ -372,6 +372,19 @@ fn handle(server: &Rc<Server>, event: LiveEvent) {
 
 /// Replaces one bot of the list with the server's newer copy.
 /// An older copy, such as a slow answer after a live update, is ignored.
+/// A bot the owner just created: in the list at once, whether or not the
+/// live connection has brought it yet.
+pub fn add_bot(bot: Bot) {
+    bots().update(|bots| match bots.list.iter_mut().find(|b| b.id == bot.id) {
+        Some(slot) => {
+            if crate::bots::is_newer(slot, &bot) {
+                *slot = bot;
+            }
+        }
+        None => bots.list.push(bot),
+    });
+}
+
 pub fn update_bot(bot: Bot) {
     bots().update(|bots| {
         if let Some(slot) = bots.list.iter_mut().find(|b| b.id == bot.id)
