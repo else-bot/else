@@ -384,6 +384,8 @@ pub struct ElseApp {
     _alerts: Option<Task<()>>,
     deleting: HashSet<Uuid>,
     notice: Option<String>,
+    /// Each bot's latest refused Retry; only its latest message offers one.
+    refused_retries: HashMap<Uuid, message_row::RefusedRetry>,
     create: Option<Entity<CreateFormHolder>>,
     /// The latest Create bot attempt. Only its failure may drop the pending
     /// create, so a stale attempt from a closed dialog cannot.
@@ -505,6 +507,7 @@ impl ElseApp {
             _alerts: None,
             deleting: HashSet::new(),
             notice: None,
+            refused_retries: HashMap::new(),
             create: None,
             create_attempt: None,
             welcome: None,
@@ -1091,7 +1094,14 @@ impl ElseApp {
                 match result {
                     Ok(_) => {}
                     Err(err) if app.unauthorized(&err, cx) => {}
-                    Err(err) => app.notice = Some(err.to_string()),
+                    Err(err) => {
+                        let refused = message_row::RefusedRetry {
+                            turn,
+                            attempt,
+                            reason: err.to_string(),
+                        };
+                        app.refused_retries.insert(bot, refused);
+                    }
                 }
                 cx.notify();
             });

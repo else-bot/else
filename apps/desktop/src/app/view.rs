@@ -822,6 +822,18 @@ impl ElseApp {
                     .child(notice.clone()),
             );
         }
+        if let Some(reason) = view
+            .and_then(|v| v.conversation.as_ref())
+            .zip(self.refused_retries.get(&bot.id))
+            .and_then(|(conversation, refused)| refused.reason_in(conversation))
+        {
+            notices = notices.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(reason.to_owned()),
+            );
+        }
         if let Some(text) = self.pause.text(std::time::Instant::now()) {
             notices = notices.child(div().text_xs().text_color(theme.warning).child(text));
         }
