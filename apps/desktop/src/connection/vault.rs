@@ -8,12 +8,14 @@ use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::credential_fields::{CredentialFields, Form};
 use else_wire::secrets::VaultEntry;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{
     Disableable as _, FocusableExt as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex,
 };
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::loaded::{Guard, Loaded};
 
@@ -40,12 +42,32 @@ enum Phase {
     Revealed {
         name: String,
         env: BTreeMap<String, String>,
+        /// The timer lives with its label, so another copy or a hide drops a
+        /// stale reset.
+        copied: Option<(String, Task<()>)>,
     },
     Deleting {
         name: String,
         _operation: Guard,
     },
     Unconfirmed(String),
+}
+
+impl Phase {
+    /// The one lookup rows and Copy read, so a hidden entry exposes neither
+    /// values nor a Copy action.
+    fn revealed(&self, entry: &str) -> Option<(&BTreeMap<String, String>, Option<&str>)> {
+        match self {
+            Phase::Revealed { name, env, copied } if name == entry => {
+                Some((env, copied.as_ref().map(|(field, _)| field.as_str())))
+            }
+            _ => None,
+        }
+    }
+
+    fn copyable(&self, entry: &str, field: &str) -> Option<&str> {
+        self.revealed(entry)?.0.get(field).map(String::as_str)
+    }
 }
 
 struct Editor {
@@ -347,7 +369,13 @@ impl View {
                 }
                 this.phase = Phase::Browsing;
                 match result {
-                    Ok(Some(env)) => this.phase = Phase::Revealed { name, env },
+                    Ok(Some(env)) => {
+                        this.phase = Phase::Revealed {
+                            name,
+                            env,
+                            copied: None,
+                        }
+                    }
                     Ok(None) => {
                         this.notice = Some("Deleted from the Vault.".into());
                         this.refresh(window, cx);
@@ -364,7 +392,29 @@ impl View {
         }));
         cx.notify();
     }
+
+    fn copy(&mut self, entry: &str, field: &str, cx: &mut Context<Self>) {
+        let Some(value) = self.phase.copyable(entry, field) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(value.to_owned()));
+        let reset = cx.spawn(async |this, cx| {
+            cx.background_executor().timer(COPIED_LABEL).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Phase::Revealed { copied, .. } = &mut this.phase {
+                    *copied = None;
+                    cx.notify();
+                }
+            });
+        });
+        if let Phase::Revealed { copied, .. } = &mut self.phase {
+            *copied = Some((field.to_owned(), reset));
+        }
+        cx.notify();
+    }
 }
+
+const COPIED_LABEL: Duration = Duration::from_secs(2);
 
 impl Render for View {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -529,10 +579,7 @@ impl View {
     /// One entry on one line. Its actions appear on hover and stay shown
     /// while its values are revealed.
     fn row(&self, entry: &VaultEntry, blocked: bool, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let revealed = match &self.phase {
-            Phase::Revealed { name, env } if name == &entry.name => Some(env),
-            _ => None,
-        };
+        let revealed = self.phase.revealed(&entry.name);
         let edit = entry.clone();
         let reveal = entry.name.clone();
         let delete = entry.name.clone();
@@ -649,7 +696,7 @@ impl View {
                 )
                 .child(actions),
         );
-        if let Some(env) = revealed {
+        if let Some((env, copied)) = revealed {
             row = row.child(
                 div()
                     .pb_2()
@@ -666,12 +713,45 @@ impl View {
                     )),
             );
             for (var, value) in env {
+                let done = copied == Some(var.as_str());
+                let (name, field) = (entry.name.clone(), var.clone());
                 row = row.child(
                     v_flex()
                         .gap_1()
                         .pb_2()
                         .child(div().text_xs().child(var.clone()))
-                        .child(div().text_sm().whitespace_normal().child(value.clone())),
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().flex_1().min_w_0().text_sm().child(
+                                    SelectableText::new(
+                                        SharedString::from(format!(
+                                            "vault-value-{}-{var}",
+                                            entry.name
+                                        )),
+                                        value.clone(),
+                                    ),
+                                ))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "vault-copy-{}-{var}",
+                                        entry.name
+                                    )))
+                                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                                    .flex_none()
+                                    .icon(if done {
+                                        IconName::Check
+                                    } else {
+                                        IconName::Copy
+                                    })
+                                    .label(if done { "Copied" } else { "Copy" })
+                                    .accessibility_label(format!("Copy {var}"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.copy(&name, &field, cx)
+                                    })),
+                                ),
+                        ),
                 );
             }
         }
@@ -727,8 +807,45 @@ fn settle<T>(result: Result<T, ClientError>) -> Settled<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BTreeMap, ClientError, Settled, VaultEntry, matches, removed, settle, short_fields,
+        BTreeMap, ClientError, Phase, Settled, VaultEntry, matches, removed, settle, short_fields,
     };
+
+    fn revealed() -> Phase {
+        Phase::Revealed {
+            name: "github_login".into(),
+            env: BTreeMap::from([
+                ("USERNAME".to_owned(), "octocat".to_owned()),
+                ("PASSWORD".to_owned(), " hunter2 with spaces ".to_owned()),
+            ]),
+            copied: None,
+        }
+    }
+
+    #[test]
+    fn copy_takes_the_exact_value_of_each_revealed_field() {
+        let phase = revealed();
+        assert_eq!(
+            phase.copyable("github_login", "PASSWORD"),
+            Some(" hunter2 with spaces ")
+        );
+        assert_eq!(phase.copyable("github_login", "USERNAME"), Some("octocat"));
+        assert_eq!(phase.copyable("github_login", "TOTP"), None);
+    }
+
+    #[test]
+    fn hidden_entries_show_no_values_and_copy_nothing() {
+        for phase in [
+            Phase::Browsing,
+            Phase::Revealing("github_login".into()),
+            Phase::Unconfirmed("github_login".into()),
+        ] {
+            assert!(phase.revealed("github_login").is_none());
+            assert_eq!(phase.copyable("github_login", "PASSWORD"), None);
+        }
+        let phase = revealed();
+        assert!(phase.revealed("other_login").is_none());
+        assert_eq!(phase.copyable("other_login", "PASSWORD"), None);
+    }
 
     fn api(status: u16, code: &str) -> ClientError {
         ClientError::Api {
