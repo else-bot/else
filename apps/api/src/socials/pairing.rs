@@ -161,13 +161,13 @@ impl Manager {
         progress: Progress,
         stop: CancellationToken,
     ) {
-        let last = match self.link(purpose, provider, &progress, stop.clone()).await {
+        let last = match self.link(purpose, provider, &progress, stop).await {
             Ok(connection) => Pairing::Paired {
                 connection: Box::new((&connection).into()),
             },
-            Err(_) if stop.is_cancelled() => Pairing::Cancelled,
-            Err(Error::Expired) => Pairing::Expired,
-            Err(error) => {
+            Err((_, true)) => Pairing::Cancelled,
+            Err((Error::Expired, false)) => Pairing::Expired,
+            Err((error, false)) => {
                 tracing::warn!(%error, "social pairing failed");
                 Pairing::Failed {
                     message: error.to_string(),
@@ -183,12 +183,17 @@ impl Manager {
         provider: Provider,
         progress: &Progress,
         stop: CancellationToken,
-    ) -> Result<Connection, Error> {
-        let device = store::new_device(&self.db).await?;
+    ) -> Result<Connection, (Error, bool)> {
+        let device = store::new_device(&self.db)
+            .await
+            .map_err(|error| (error, stop.is_cancelled()))?;
         let linked = async {
             let key = DeviceKey::generate()?;
             let vault = Vault::new(self.db.clone(), device, &key);
-            let identity = self.transport.pair(&self.db, vault, progress, stop).await?;
+            let identity = self
+                .transport
+                .pair(&self.db, vault, progress, stop.clone())
+                .await?;
             let secret = Secret::Device { key, store: device };
             let connection = match purpose {
                 Purpose::Setup(setup) => {
@@ -223,8 +228,11 @@ impl Manager {
                 Ok(connection)
             }
             Err(error) => {
+                // Read before the device store goes, so a poll that cancels
+                // an already failed pairing cannot turn it into Cancelled.
+                let cancelled = stop.is_cancelled();
                 let _ = store::drop_device(&self.db, device).await;
-                Err(error)
+                Err((error, cancelled))
             }
         }
     }
