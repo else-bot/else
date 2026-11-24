@@ -371,7 +371,8 @@ fn agent(input: &TurnInput, project: &str, delegation_rules: &str) -> String {
          github on computer_run or computer_job_start instead of a token. Pushing a release, a \
          tag, or to the default branch is external and deleting a remote branch or tag is \
          destructive; run a release script as one external call whose context lists every ref \
-         it may push or delete. Park on tools/call jobs with mcp_wait; never poll. When the owner asks \
+         it may push or delete. Park on jobs with mcp_wait; before it, call mcp_request \
+         events/list and pass an event that means the job stopped. Never poll. When the owner asks \
          to install an MCP, use mcp_install; never write into else.bot's MCP directory or \
          change native provider settings, get the owner's approval for any host software \
          setup it needs, and never put credentials in skills or documentation.\n\n\

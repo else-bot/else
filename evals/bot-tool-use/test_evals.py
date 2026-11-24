@@ -211,6 +211,17 @@ def run(runner):
                         "running_values": ["queued", "in_progress"], "effect": "local",
                         "purpose": "Release workflow run 9001 on acme/widget"},
                     {"status": "waiting", "parked": True})], ""),
+                "mcp-wait-wakes-on-offered-event": ([self.call("mcp_request", {
+                    "id": "t3-code", "method": "tools/call", "effect": "external", "params": {
+                        "name": "delegate_task", "arguments": {"project": "web",
+                                                               "task": "Fix the flaky login test."}}},
+                    {"taskId": "task-42", "childThreadId": "thread-7", "workState": "working"}),
+                    self.call("mcp_wait", {
+                        "id": "t3-code", "tool": "task_status", "arguments": {"taskId": "task-42"},
+                        "status_pointer": "/workState", "running_values": ["working", "waiting_for_children"],
+                        "effect": "local", "purpose": "Flaky login test fix",
+                        "event": {"name": "thread.run_settled", "arguments": {"threadIds": ["thread-7"]}}},
+                    {"status": "waiting", "parked": True})], ""),
                 "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
                 "connect-icloud-from-chat": ([self.call("mail_connect", {"provider": "icloud", "address": "max@icloud.com"},
