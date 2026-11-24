@@ -603,6 +603,25 @@ pub(super) fn turn_status(
     )
 }
 
+/// A Retry the API refused, such as while the provider is signed out. It
+/// shows only while its turn still offers Retry at the attempt the owner
+/// retried, so a later attempt, from any device, or a newer message
+/// retires it.
+pub(super) struct RefusedRetry {
+    pub(super) turn: Uuid,
+    pub(super) attempt: i64,
+    pub(super) reason: String,
+}
+
+impl RefusedRetry {
+    pub(super) fn reason_in(&self, conversation: &crate::model::Conversation) -> Option<&str> {
+        conversation
+            .turn(self.turn)
+            .is_some_and(|turn| turn.retryable && turn.attempt == Some(self.attempt))
+            .then_some(self.reason.as_str())
+    }
+}
+
 /// Retry beside a failed owner message the API marks retryable: the
 /// latest one, after a failure that may pass. It runs the same message
 /// again as a new attempt of its turn.
@@ -1134,8 +1153,11 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{day_label_in, short_stamp_in, stamp_in, stamp_in_row_at};
+    use super::{RefusedRetry, day_label_in, short_stamp_in, stamp_in, stamp_in_row_at};
+    use crate::model::Conversation;
     use chrono::{DateTime, FixedOffset, Utc};
+    use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn stamps_use_the_viewer_zone_and_name_another_year() {
@@ -1201,5 +1223,48 @@ mod tests {
             day_label_in(at("2025-12-31T21:59:00Z"), now),
             "31 December 2025"
         );
+    }
+
+    fn with_turn(status: &str, attempt: i64, retryable: bool) -> Conversation {
+        Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [{"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "user", "text": "Summarize my inbox"}],
+            "turns": [{"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 1,
+                "provider_id": "claude", "status": status, "effect_uncertain": false,
+                "attempt": attempt, "retryable": retryable}],
+            "activity": {"phase": "idle", "active_turn_id": null, "queued_count": 0}
+        })).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_refused_retry_shows_only_while_its_attempt_still_offers_retry() {
+        let refused = RefusedRetry {
+            turn: Uuid::from_u128(10),
+            attempt: 1,
+            reason: "Claude Code is not logged in on the host.".to_owned(),
+        };
+        for (status, attempt, retryable, shown) in [
+            ("failed", 1, true, true),
+            ("queued", 1, false, false),
+            ("running", 2, false, false),
+            ("completed", 2, false, false),
+            ("failed", 2, true, false),
+            ("failed", 1, false, false),
+        ] {
+            assert_eq!(
+                refused
+                    .reason_in(&with_turn(status, attempt, retryable))
+                    .is_some(),
+                shown,
+                "{status} attempt {attempt} retryable {retryable}"
+            );
+        }
+        let other = RefusedRetry {
+            turn: Uuid::from_u128(11),
+            ..refused
+        };
+        assert_eq!(other.reason_in(&with_turn("failed", 1, true)), None);
     }
 }
