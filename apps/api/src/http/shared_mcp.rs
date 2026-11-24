@@ -164,7 +164,9 @@ async fn events_list(state: &AppState, id: &PackageId, params: &Value) -> Result
             "next": "Wait on the MCP's status tool with mcp_wait, without an event.",
         })),
         Err(Failure::Rejected(_)) => Err(Error::Invalid("The MCP refused events/list.")),
-        Err(Failure::Transient(_) | Failure::Unauthorized) => Err(Error::Connection),
+        Err(Failure::Transient(_) | Failure::Unauthorized | Failure::SchemaChanged) => {
+            Err(Error::Connection)
+        }
         Err(Failure::Paused) => Err(Error::Paused),
     }
 }

@@ -16,6 +16,9 @@ use futures_util::stream::BoxStream;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
+use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
+
 use super::{Error, Transport, USER_AGENT};
 use crate::db::task_secrets::{self, Redact};
 
@@ -41,6 +44,9 @@ pub enum Failure {
     Transient(String),
     /// The server answered HTTP 401, so the sign-in needs a new token.
     Unauthorized,
+    /// The event type's schema changed, so the saved cursor and descriptor
+    /// no longer hold; the subscription starts over from a new cursor.
+    SchemaChanged,
     Paused,
 }
 
@@ -60,16 +66,16 @@ impl Failure {
         match self {
             Self::Unsupported(m) | Self::Rejected(m) | Self::Transient(m) => m,
             Self::Unauthorized => "The MCP server refused the sign-in (HTTP 401).",
+            Self::SchemaChanged => "The MCP server changed the event type's schema.",
             Self::Paused => "The MCP library is paused for a backup or update.",
         }
     }
 }
 
 /// Invalid params and SEP-3415's NotFound, Forbidden and Unsupported
-/// refuse a subscription for good. Unsupported with `schema_changed` asks
-/// for `events/list` again, as HeaderMismatch does, so it is transient.
-fn refusal(code: i64, data: &Value) -> bool {
-    matches!(code, -32602 | -32023 | -32024 | -32026) && data["reason"] != "schema_changed"
+/// refuse a subscription for good.
+fn refusal(code: i64) -> bool {
+    matches!(code, -32602 | -32023 | -32024 | -32026)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,17 +156,24 @@ pub enum Pushed {
 
 /// A server's address and the headers every request sends: the package's
 /// filled-in headers and its sign-in.
+#[derive(Clone)]
 pub struct Endpoint {
     client: reqwest::Client,
     url: String,
     headers: HeaderMap,
     redact: Vec<Redact>,
+    revoked: CancellationToken,
 }
 
 impl Endpoint {
     /// `config` already holds the sign-in and filled task secrets; `redact`
-    /// lists the values to keep out of logs and results.
-    pub(super) fn new(config: &Transport, mut redact: Vec<Redact>) -> Result<Self, Error> {
+    /// lists the values to keep out of logs and results. `revoked` is
+    /// cancelled once the package's configuration or sign-in changes.
+    pub(super) fn new(
+        config: &Transport,
+        mut redact: Vec<Redact>,
+        revoked: CancellationToken,
+    ) -> Result<Self, Error> {
         let Transport::Http { url, headers, .. } = config else {
             return Err(Error::Invalid(
                 "MCP events need an HTTP MCP; this one runs over stdio.",
@@ -176,6 +189,17 @@ impl Endpoint {
             sent.insert(name, value);
         }
         redact.extend(super::transport::credentials(config));
+        let bearer: Vec<Redact> = redact
+            .iter()
+            .filter_map(|r| {
+                let token = r.value.strip_prefix("Bearer ")?;
+                (token.len() >= task_secrets::MIN_REDACTED).then(|| Redact {
+                    name: r.name.clone(),
+                    value: Zeroizing::new(token.to_owned()),
+                })
+            })
+            .collect();
+        redact.extend(bearer);
         redact.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
@@ -189,7 +213,14 @@ impl Endpoint {
             url: url.clone(),
             headers: sent,
             redact,
+            revoked,
         })
+    }
+
+    /// Cancelled once the package's configuration or sign-in changes, after
+    /// which nothing this endpoint receives may settle a wait.
+    pub fn revoked(&self) -> &CancellationToken {
+        &self.revoked
     }
 
     fn redacted(&self, text: &str) -> String {
@@ -208,7 +239,9 @@ impl Endpoint {
         let message = format!("{text} ({code})");
         if code == -32601 {
             Failure::Unsupported(message)
-        } else if refusal(code, &error["data"]) {
+        } else if code == -32026 && error["data"]["reason"] == "schema_changed" {
+            Failure::SchemaChanged
+        } else if refusal(code) {
             Failure::Rejected(message)
         } else {
             Failure::Transient(message)
@@ -354,7 +387,12 @@ impl Endpoint {
             events.retain(|event| {
                 let valid = Descriptor::parse(event).is_some();
                 if !valid {
-                    tracing::warn!(event = %event["name"], "an MCP event type has invalid x-mcp-header annotations");
+                    let name: String = self
+                        .redacted(event["name"].as_str().unwrap_or_default())
+                        .chars()
+                        .take(200)
+                        .collect();
+                    tracing::warn!(event = %name, "an MCP event type has invalid x-mcp-header annotations");
                 }
                 valid
             });
@@ -435,11 +473,21 @@ impl Endpoint {
                 .unwrap_or(u64::MAX)
                 .into(),
         );
-        let opening = self.post(
-            "events/stream",
-            params,
-            descriptor.headers_for(subscription)?,
-        );
+        let headers = descriptor.headers_for(subscription)?;
+        let opening = async {
+            let response = self.post("events/stream", params, headers).await?;
+            if is_sse(&response) {
+                return Ok(response);
+            }
+            let bytes = bounded_body(response).await?;
+            let message: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                Failure::Unsupported("The MCP server did not open an event stream.".into())
+            })?;
+            Err(message
+                .get("error")
+                .map(|error| self.rpc_failure(error))
+                .unwrap_or_else(|| Failure::Transient("The event stream closed at once.".into())))
+        };
         let response = tokio::time::timeout(REQUEST_TIMEOUT, opening)
             .await
             .unwrap_or_else(|_| {
@@ -447,16 +495,6 @@ impl Endpoint {
                     "The event stream did not open in time.".into(),
                 ))
             })?;
-        if !is_sse(&response) {
-            let bytes = bounded_body(response).await?;
-            let message: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                Failure::Unsupported("The MCP server did not open an event stream.".into())
-            })?;
-            return Err(message
-                .get("error")
-                .map(|error| self.rpc_failure(error))
-                .unwrap_or_else(|| Failure::Transient("The event stream closed at once.".into())));
-        }
         Ok(PushStream {
             endpoint: self,
             frames: Frames::new(response),
@@ -466,8 +504,9 @@ impl Endpoint {
 
 impl Descriptor {
     /// `None` when an `x-mcp-header` annotation breaks the transport's
-    /// rules: an empty or non-token name, one used twice, or one on a value
-    /// that is not a string, number or boolean.
+    /// rules: an empty or non-token name, one used twice, one on a value
+    /// that is not a string, integer or boolean, or one outside a chain of
+    /// object properties, such as under `items` or `anyOf`.
     fn parse(descriptor: &Value) -> Option<Self> {
         let offered = |mode: &str| {
             descriptor["delivery"]
@@ -481,6 +520,9 @@ impl Descriptor {
             .collect();
         let mut headers = Vec::new();
         annotated(&descriptor["inputSchema"], &mut Vec::new(), &mut headers)?;
+        if annotations(&descriptor["inputSchema"]) != headers.len() {
+            return None;
+        }
         let mut names: Vec<String> = headers
             .iter()
             .map(|(_, h)| h.to_ascii_lowercase())
@@ -533,11 +575,9 @@ fn annotated(
         path.push(property.clone());
         if let Some(header) = schema.get("x-mcp-header") {
             let header = header.as_str()?;
-            let primitive = schema.get("type").is_none_or(|t| {
-                ["string", "number", "integer", "boolean"]
-                    .iter()
-                    .any(|p| t == p)
-            });
+            let primitive = schema
+                .get("type")
+                .is_none_or(|t| ["string", "integer", "boolean"].iter().any(|p| t == p));
             if header.is_empty() || !header.bytes().all(is_token) || !primitive {
                 return None;
             }
@@ -547,6 +587,17 @@ fn annotated(
         path.pop();
     }
     Some(())
+}
+
+fn annotations(schema: &Value) -> usize {
+    match schema {
+        Value::Object(map) => {
+            usize::from(map.contains_key("x-mcp-header"))
+                + map.values().map(annotations).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(annotations).sum(),
+        _ => 0,
+    }
 }
 
 /// An RFC 9110 token character, the only kind a header name may hold.
@@ -645,7 +696,12 @@ impl Frames {
                 return Err(too_large());
             }
             match self.body.next().await {
-                Some(Ok(chunk)) => self.buffer.extend_from_slice(&chunk),
+                Some(Ok(chunk)) => {
+                    if self.buffer.len() + self.data.len() + chunk.len() > MAX_BYTES {
+                        return Err(too_large());
+                    }
+                    self.buffer.extend_from_slice(&chunk);
+                }
                 Some(Err(_)) => {
                     return Err(Failure::Transient("The MCP stream broke off.".into()));
                 }
@@ -704,7 +760,8 @@ impl PushStream<'_> {
                 Some("notifications/events/terminated") => {
                     return Err(match self.endpoint.rpc_failure(&params["error"]) {
                         Failure::Unsupported(m) | Failure::Rejected(m) => Failure::Rejected(m),
-                        other => other,
+                        Failure::SchemaChanged => Failure::SchemaChanged,
+                        other => Failure::Transient(other.message().to_owned()),
                     });
                 }
                 _ => {}
@@ -772,6 +829,12 @@ mod tests {
         };
         assert!(with(json!({ "a": { "type": "string", "x-mcp-header": "Bad Name" } })).is_none());
         assert!(with(json!({ "a": { "type": "array", "x-mcp-header": "List" } })).is_none());
+        assert!(with(json!({ "a": { "type": "number", "x-mcp-header": "Ratio" } })).is_none());
+        assert!(
+            with(json!({ "a": { "type": "array",
+                                "items": { "type": "string", "x-mcp-header": "Item" } } }))
+            .is_none()
+        );
         assert!(
             with(json!({ "a": { "type": "string", "x-mcp-header": "Region" },
                          "b": { "type": "string", "x-mcp-header": "region" } }))
@@ -789,9 +852,9 @@ mod tests {
                 "Bearer mcp-test-token".into(),
             )]),
         };
-        let endpoint = Endpoint::new(&config, Vec::new()).unwrap();
+        let endpoint = Endpoint::new(&config, Vec::new(), CancellationToken::new()).unwrap();
         let failure = endpoint.rpc_failure(&json!({
-            "code": -32024, "message": "Forbidden for Bearer mcp-test-token",
+            "code": -32024, "message": "Forbidden for mcp-test-token",
         }));
         let Failure::Rejected(message) = failure else {
             panic!("Forbidden refuses the subscription: {failure:?}");
@@ -800,7 +863,7 @@ mod tests {
         let changed = endpoint.rpc_failure(&json!({
             "code": -32026, "message": "Unsupported", "data": { "reason": "schema_changed" },
         }));
-        assert!(matches!(changed, Failure::Transient(_)), "{changed:?}");
+        assert!(matches!(changed, Failure::SchemaChanged), "{changed:?}");
     }
 
     #[test]

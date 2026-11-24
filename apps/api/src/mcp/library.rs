@@ -377,12 +377,35 @@ impl Library {
         self.on_installed(id, Admit::Turn, move |live, config| {
             Box::pin(async move {
                 let (transport, secrets) = live.filled(config).await?;
-                let signed_in = live
-                    .session(config)
-                    .await?
-                    .authorized(&transport, rejected)
-                    .await?;
-                super::events::Endpoint::new(&signed_in, secrets)
+                let session = live.session(config).await?;
+                let signed_in = session.authorized(&transport, rejected).await?;
+                super::events::Endpoint::new(&signed_in, secrets, session.revoked())
+            })
+        })
+        .await
+    }
+
+    /// Run `accept` inside `id`'s actor while `opened` still matches the
+    /// package's configuration and sign-in, so no package change lands
+    /// between the check and what `accept` commits. `None` when it no
+    /// longer matches.
+    pub async fn while_current<R: Send + 'static>(
+        &self,
+        id: &PackageId,
+        opened: &super::events::Endpoint,
+        accept: impl FnOnce() -> BoxFuture<'static, R> + Send + 'static,
+    ) -> Result<Option<R>, Error> {
+        let opened = opened.clone();
+        self.on_installed(id, Admit::Turn, move |live, config| {
+            Box::pin(async move {
+                let (transport, secrets) = live.filled(config).await?;
+                let session = live.session(config).await?;
+                let signed_in = session.authorized(&transport, false).await?;
+                let current = super::events::Endpoint::new(&signed_in, secrets, session.revoked())?;
+                if opened.revoked().is_cancelled() || !current.same_target(&opened) {
+                    return Ok(None);
+                }
+                Ok(Some(accept().await))
             })
         })
         .await

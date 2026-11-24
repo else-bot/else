@@ -17,13 +17,16 @@ use crate::mcp::events::{
 use crate::mcp::{Library, PackageId};
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// The part of [`START_TIMEOUT`] a first poll may take, so push still gets
+/// a try.
+const START_POLL_TIMEOUT: Duration = Duration::from_secs(8);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Push streams that end before delivering anything, after which polling
 /// takes over when the event offers it.
 const PUSH_ATTEMPTS: u32 = 3;
-/// How long a push stream stays open before it reopens with the package's
-/// current configuration and sign-in.
+/// Task secrets change without closing the package's session, so a stream
+/// reopens this often to pick them up.
 const STREAM_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 /// Whether subscription task `task` can replay every event it misses, so its
@@ -82,33 +85,53 @@ pub(super) async fn start(
     event: &EventSpec,
 ) -> Result<Option<String>, Failure> {
     let starting = async {
-        let endpoint = endpoint(library, mcp_id, false).await?;
-        let descriptor = descriptor(&endpoint, mcp_id, &event.name).await?;
-        let subscription = subscription(event);
-        let push = descriptor.delivery.contains(&Delivery::Push);
-        if descriptor.delivery.contains(&Delivery::Poll) {
-            match endpoint.poll(&subscription, &descriptor, None).await {
-                Ok(Polled {
-                    cursor: Some(cursor),
-                    ..
-                }) => return Ok(Some(cursor)),
-                Ok(_) if !push => return Err(unreplayable(&event.name)),
-                Err(failure) if !push || matches!(failure, Failure::Paused) => {
-                    return Err(failure);
-                }
-                _ => {}
-            }
-        }
-        let mut stream = endpoint.stream(&subscription, &descriptor, None).await?;
-        loop {
-            if let Pushed::Active { cursor, .. } = stream.next().await? {
-                return Ok(cursor);
-            }
+        match head(library, mcp_id, event, false).await {
+            Err(Failure::Unauthorized) => head(library, mcp_id, event, true).await,
+            started => started,
         }
     };
     tokio::time::timeout(START_TIMEOUT, starting)
         .await
         .unwrap_or_else(|_| Err(Failure::Transient("Subscribing timed out.".into())))
+}
+
+/// The server's current position in `event`'s stream: an empty poll, or a
+/// push stream's confirmation when polling is not offered or fails.
+async fn head(
+    library: &Library,
+    mcp_id: &str,
+    event: &EventSpec,
+    rejected: bool,
+) -> Result<Option<String>, Failure> {
+    let endpoint = endpoint(library, mcp_id, rejected).await?;
+    let descriptor = descriptor(&endpoint, mcp_id, &event.name).await?;
+    let subscription = subscription(event);
+    let push = descriptor.delivery.contains(&Delivery::Push);
+    if descriptor.delivery.contains(&Delivery::Poll) {
+        let polled = tokio::time::timeout(
+            START_POLL_TIMEOUT,
+            endpoint.poll(&subscription, &descriptor, None),
+        )
+        .await
+        .unwrap_or_else(|_| Err(Failure::Transient("The first poll timed out.".into())));
+        match polled {
+            Ok(Polled {
+                cursor: Some(cursor),
+                ..
+            }) => return Ok(Some(cursor)),
+            Ok(_) if !push => return Err(unreplayable(&event.name)),
+            Err(failure) if !push || matches!(failure, Failure::Paused | Failure::Unauthorized) => {
+                return Err(failure);
+            }
+            _ => {}
+        }
+    }
+    let mut stream = endpoint.stream(&subscription, &descriptor, None).await?;
+    loop {
+        if let Pushed::Active { cursor, .. } = stream.next().await? {
+            return Ok(cursor);
+        }
+    }
 }
 
 enum Ended {
@@ -124,13 +147,15 @@ enum Ended {
     /// Subscribe again at once from the saved cursor, which replays what
     /// the reopening misses.
     Reopen,
+    /// The saved cursor no longer holds: start from the server's position
+    /// now and check the status for what was skipped.
+    Restart,
 }
 
 struct Watch {
     state: Arc<AppState>,
     wait: Watched,
     report: mpsc::Sender<Liveness>,
-    /// At [`PUSH_ATTEMPTS`], push is off and polling takes over.
     push_failures: u32,
     /// The server refused the last token, so the next one is refreshed.
     rejected: bool,
@@ -151,6 +176,7 @@ impl Watch {
     fn ended(&mut self, failure: Failure, held: bool) -> Ended {
         match failure {
             Failure::Unsupported(reason) | Failure::Rejected(reason) => Ended::Refused(reason),
+            Failure::SchemaChanged => Ended::Restart,
             failure => {
                 self.rejected |= matches!(failure, Failure::Unauthorized);
                 Ended::Broke {
@@ -189,41 +215,64 @@ impl Watch {
         self.changed(change, cursor)
     }
 
-    /// The server skipped events before `cursor`, so the job may have
-    /// stopped unseen: the wait's status calls resume until one sees it
-    /// running.
     async fn gap(&mut self, cursor: Option<String>) -> Result<(), Ended> {
-        let change = mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref()).await;
+        let change =
+            mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref(), false).await;
         self.changed(change, cursor)
     }
 
-    /// Settle the wait on `event` if it is the one waited for. `opened` is
-    /// the endpoint a push stream was opened with, which must still match
-    /// the package's current one.
-    async fn offer(&mut self, event: Occurrence, opened: Option<&Endpoint>) -> Result<(), Ended> {
+    async fn restart(&mut self) -> Ended {
+        let started = start(&self.state.mcps, &self.wait.mcp_id, &self.wait.event).await;
+        let cursor = match started {
+            Ok(cursor) => cursor,
+            Err(failure) => return self.ended(failure, false),
+        };
+        let change =
+            mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref(), true).await;
+        match change {
+            Ok(EventChange::Applied(_)) => {
+                self.wait.cursor = cursor;
+                Ended::Reopen
+            }
+            Ok(EventChange::Ended) => Ended::Done,
+            Err(error) => Ended::Broke {
+                reason: format!("Saving the event position failed: {error}"),
+                held: false,
+            },
+        }
+    }
+
+    /// Settle the wait on `event` if it is the one waited for, inside the
+    /// package's actor and only while `received` still matches the package's
+    /// configuration and sign-in.
+    async fn offer(&mut self, event: Occurrence, received: &Endpoint) -> Result<(), Ended> {
         let spec = &self.wait.event;
         if event.name != spec.name || !matches(&event.data, &spec.matching) {
             return self.advance(event.cursor).await;
         }
-        if let Some(opened) = opened {
-            match endpoint(&self.state.mcps, &self.wait.mcp_id, false).await {
-                Ok(current) if current.same_target(opened) => {}
-                Ok(_) => return Err(Ended::Reopen),
-                Err(failure) => return Err(self.ended(failure, true)),
-            }
-        }
-        let settled =
-            mcp_waits::settle_on_event(&self.state.db, self.wait.id, &event.raw.to_string()).await;
+        let Ok(id) = PackageId::try_from(self.wait.mcp_id.clone()) else {
+            return Err(Ended::Refused("The wait names no valid MCP.".into()));
+        };
+        let (db, wait, raw) = (self.state.db.clone(), self.wait.id, event.raw.to_string());
+        let settled = self
+            .state
+            .mcps
+            .while_current(&id, received, move || {
+                Box::pin(async move { mcp_waits::settle_on_event(&db, wait, &raw).await })
+            })
+            .await;
         match settled {
-            Ok(EventChange::Applied(_)) => {
+            Ok(Some(Ok(EventChange::Applied(_)))) => {
                 self.state.scheduler.wake();
                 Err(Ended::Done)
             }
-            Ok(EventChange::Ended) => Err(Ended::Done),
-            Err(error) => Err(Ended::Broke {
+            Ok(Some(Ok(EventChange::Ended))) => Err(Ended::Done),
+            Ok(None) => Err(Ended::Reopen),
+            Ok(Some(Err(error))) => Err(Ended::Broke {
                 reason: format!("Settling the wait failed: {error}"),
                 held: true,
             }),
+            Err(error) => Err(self.ended(error.into(), true)),
         }
     }
 
@@ -264,37 +313,37 @@ impl Watch {
                 return self.ended(failure, false);
             }
         };
-        // Held once a message follows the confirmation, so a stream that
-        // confirms and closes counts as a failure.
-        let mut held = false;
+        let mut received_after_confirmation = false;
         // A stream silent for three heartbeats is dead (SEP-3415).
         let mut heartbeat = SUGGESTED_HEARTBEAT;
         let reopen = tokio::time::Instant::now() + STREAM_LIFETIME;
         loop {
             let next = tokio::select! {
-                next = tokio::time::timeout(heartbeat * 3, stream.next()) => next,
+                biased;
+                () = endpoint.revoked().cancelled() => return Ended::Reopen,
                 () = tokio::time::sleep_until(reopen) => return Ended::Reopen,
+                next = tokio::time::timeout(heartbeat * 3, stream.next()) => next,
             };
             let next = match next {
                 Ok(Ok(next)) => next,
                 Ok(Err(failure)) => {
-                    if !held {
+                    if !received_after_confirmation {
                         self.push_failures += 1;
                     }
-                    return self.ended(failure, held);
+                    return self.ended(failure, received_after_confirmation);
                 }
                 Err(_) => {
-                    if !held {
+                    if !received_after_confirmation {
                         self.push_failures += 1;
                     }
                     return Ended::Broke {
                         reason: "The event stream went silent.".into(),
-                        held,
+                        held: received_after_confirmation,
                     };
                 }
             };
-            if !held && !matches!(next, Pushed::Active { .. }) {
-                held = true;
+            if !received_after_confirmation && !matches!(next, Pushed::Active { .. }) {
+                received_after_confirmation = true;
                 self.push_failures = 0;
             }
             let step = match next {
@@ -314,7 +363,7 @@ impl Watch {
                     }
                     saved
                 }
-                Pushed::Event(event) => self.offer(event, Some(endpoint)).await,
+                Pushed::Event(event) => self.offer(event, endpoint).await,
                 Pushed::Heartbeat { cursor } => self.advance(cursor).await,
                 Pushed::Error(error) => {
                     tracing::debug!(wait = %self.wait.id, %error, "an MCP event delivery failed");
@@ -331,23 +380,20 @@ impl Watch {
         let subscription = subscription(&self.wait.event);
         let mut held = false;
         loop {
-            // A fresh endpoint each time, so a new sign-in or configuration
-            // applies.
             let rejected = std::mem::take(&mut self.rejected);
-            let polled = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
-                Ok(endpoint) => {
-                    endpoint
-                        .poll(&subscription, descriptor, self.wait.cursor.as_deref())
-                        .await
-                }
-                Err(failure) => Err(failure),
+            let endpoint = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
+                Ok(endpoint) => endpoint,
+                Err(failure) => return self.ended(failure, held),
             };
+            let polled = endpoint
+                .poll(&subscription, descriptor, self.wait.cursor.as_deref())
+                .await;
             let polled = match polled {
                 Ok(polled) => polled,
                 Err(failure) => return self.ended(failure, held),
             };
             for event in polled.events {
-                if let Err(ended) = self.offer(event, None).await {
+                if let Err(ended) = self.offer(event, &endpoint).await {
                     return ended;
                 }
             }
@@ -387,12 +433,11 @@ pub(super) async fn watch(state: Arc<AppState>, wait: Watched, report: mpsc::Sen
     let id = watch.wait.id;
     let mut backoff = MIN_BACKOFF;
     loop {
-        let ended = watch.subscribe().await;
-        if matches!(ended, Ended::Reopen) {
-            backoff = MIN_BACKOFF;
-            continue;
-        }
+        let mut ended = watch.subscribe().await;
         watch.report(false).await;
+        if matches!(ended, Ended::Restart) {
+            ended = watch.restart().await;
+        }
         match ended {
             Ended::Done => return,
             Ended::Refused(reason) => {
@@ -413,7 +458,7 @@ pub(super) async fn watch(state: Arc<AppState>, wait: Watched, report: mpsc::Sen
                 tokio::time::sleep(backoff + jitter).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
-            Ended::Reopen => {}
+            Ended::Reopen | Ended::Restart => backoff = MIN_BACKOFF,
         }
     }
 }

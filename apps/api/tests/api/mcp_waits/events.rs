@@ -35,6 +35,9 @@ struct Server {
     polls: AtomicUsize,
     /// End every stream with `notifications/events/terminated`.
     terminate: AtomicBool,
+    /// Streams resuming from a cursor to end as if the event type's schema
+    /// changed since that cursor.
+    schema_changes: AtomicUsize,
     /// Report a gap on the next poll.
     gap: AtomicBool,
     /// The cursor each poll or stream asked for.
@@ -58,6 +61,7 @@ impl Server {
             fail_status: AtomicBool::new(false),
             polls: AtomicUsize::new(0),
             terminate: AtomicBool::new(false),
+            schema_changes: AtomicUsize::new(0),
             gap: AtomicBool::new(false),
             asked: Mutex::new(Vec::new()),
             streams_opened: AtomicUsize::new(0),
@@ -203,7 +207,12 @@ async fn handle(
                 .drop_streams
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok();
-            let terminate = server.terminate.load(Ordering::SeqCst);
+            let schema_changed = !params["cursor"].is_null()
+                && server
+                    .schema_changes
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok();
+            let terminate = server.terminate.load(Ordering::SeqCst) || schema_changed;
             let changes = server.published.subscribe();
             let open = Open(server.clone());
             let state = (open, id, start, false, changes);
@@ -226,9 +235,15 @@ async fn handle(
                         return None;
                     }
                     if terminate {
+                        let error = if schema_changed {
+                            json!({ "code": -32026, "message": "Unsupported",
+                                    "data": { "feature": "payloadSchema", "reason": "schema_changed" } })
+                        } else {
+                            json!({ "code": -32023, "message": "NotFound", "data": { "kind": "event" } })
+                        };
                         let end = notification(
                             "notifications/events/terminated",
-                            json!({ "error": { "code": -32023, "message": "NotFound", "data": { "kind": "event" } } }),
+                            json!({ "error": error }),
                             &id,
                         );
                         return Some((Ok(end), (open, id, usize::MAX, true, changes)));
@@ -443,7 +458,7 @@ async fn a_server_without_events_keeps_checking_the_status_tool() {
     assert_eq!(listed["events"], json!([]), "{listed}");
     assert!(listed["unsupported"].is_string(), "{listed}");
     assert_eq!(parked["event"]["status"], "unavailable", "{parked}");
-    assert_eq!(event_row(app, turn).await.1, None);
+    assert_eq!(event_row(app, turn).await.1.as_deref(), Some("dropped"));
     *server.job.lock().unwrap() = "result_available";
     check_now(app).await;
     app.wait_turn(turn, &["completed"]).await;
@@ -617,5 +632,102 @@ async fn a_reply_carries_the_same_event_wait_and_parks_anew_on_a_different_event
     assert_eq!(
         carried(app, turn).await,
         vec![(1, "pending".into()), (3, "pending".into())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_the_mcp_out_ends_its_event_stream_and_a_new_one_settles_the_wait() {
+    let server = Server::new(true, &["push"]);
+    let (h, main, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count(
+        "the bootstrap and watcher streams open",
+        &server.streams_opened,
+        2,
+    )
+    .await;
+    until_count("the bootstrap stream ends", &server.streams_closed, 1).await;
+    let signed_out = app
+        .owner(
+            "DELETE",
+            &format!("/v1/bots/{main}/mcp/t3-code/connection"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        signed_out.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        signed_out.body
+    );
+    until_count("the watcher's stream ends", &server.streams_closed, 2).await;
+    until_count(
+        "a stream opens with the new sign-in",
+        &server.streams_opened,
+        3,
+    )
+    .await;
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_event_schema_restarts_from_the_head_and_checks_the_status() {
+    let server = Server::new(true, &["push"]);
+    server.publish("t2");
+    server.schema_changes.store(1, Ordering::SeqCst);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("the restart checks the status", &server.status_calls, 2).await;
+    until_event_status(app, turn, "watching").await;
+    let asked = server.asked.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [Value::Null, json!("1"), Value::Null, json!("1")],
+        "the second stream starts from the head the restart took"
+    );
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_check_chosen_before_a_gap_leaves_the_gap_due() {
+    let server = Server::new(true, &["poll"]);
+    let (h, _, turn, parked, _) = parked(&server).await;
+    let db = h.app.stop().await;
+    let pool = &db.pool;
+    let id: Uuid = parked["wait_id"].as_str().unwrap().parse().unwrap();
+    let stale = mcp_waits::Due {
+        id,
+        mcp_id: "t3-code".into(),
+        tool: "task_status".into(),
+        arguments: json!({ "taskId": "WEB-284" }),
+        status_pointer: "/workState".into(),
+        running_values: vec![json!("working")],
+        gap: None,
+    };
+    let opened = mcp_waits::open_gap(pool, id, Some("9"), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        opened,
+        mcp_waits::EventChange::Applied(mcp_waits::EventStatus::Gap)
+    );
+    let running = mcp_waits::Check::Running(r#"{"workState":"working"}"#.into());
+    assert!(!mcp_waits::record(pool, &stale, &running).await.unwrap());
+    let (status, cursor, due): (Option<String>, Option<String>, bool) = sqlx::query_as(
+        "SELECT event_status, event_cursor,
+             next_check_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         FROM mcp_waits WHERE turn_id = ?1",
+    )
+    .bind(turn)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_deref(), cursor.as_deref(), due),
+        (Some("gap"), Some("9"), true)
     );
 }

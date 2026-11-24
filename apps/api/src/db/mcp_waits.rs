@@ -160,11 +160,11 @@ pub async fn caller(pool: &SqlitePool, turn_id: Uuid) -> Result<super::turns::Ca
 
 /// Park `attempt` of `turn_id` on `spec`, whose first check returned
 /// `first` and found the job running. `subscribed` holds where the event's
-/// subscription starts, or `None` when it could not start and the wait
-/// uses status calls only. A retry of the same wait in this attempt returns
-/// its id, and a pending wait on the same status from an earlier attempt
+/// subscription starts, or `None` when it could not start, which stores the
+/// event as dropped. A retry of the same wait in this attempt returns its
+/// id, and a pending wait on the same status from an earlier attempt
 /// returns [`Created::Carried`]; either counts as the same only when it
-/// watches the same event or none.
+/// names the same event or none.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -200,9 +200,7 @@ pub async fn create(
             && *tool == spec.tool
             && *arguments == spec.arguments
             && *pointer == spec.status_pointer
-            && event
-                .as_ref()
-                .is_none_or(|Json(event)| spec.event.as_ref() == Some(event))
+            && event.as_ref().map(|Json(event)| event) == spec.event.as_ref()
     };
     if let Some(own) = waits.iter().find(|wait| wait.1 == caller.attempt) {
         return if same(&own) {
@@ -225,7 +223,8 @@ pub async fn create(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
              strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+' || ?12 || ' minutes'),
              strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+' || ?11 || ' seconds'), ?13,
-             ?14, CASE WHEN ?14 IS NULL THEN NULL ELSE 'watching' END, ?15)",
+             ?14, CASE WHEN ?14 IS NULL THEN NULL WHEN ?16 THEN 'watching' ELSE 'dropped' END,
+             ?15)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -240,8 +239,9 @@ pub async fn create(
     .bind(spec.interval_seconds)
     .bind(spec.timeout_minutes)
     .bind(bounded(first))
-    .bind(subscribed.and(spec.event.as_ref()).map(Json))
+    .bind(spec.event.as_ref().map(Json))
     .bind(subscribed.flatten())
+    .bind(subscribed.is_some())
     .execute(&mut *tx)
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
@@ -316,8 +316,8 @@ pub async fn due(
 /// running values, failed for good, or ran out of time. Settling requeues
 /// the waiting turn. A wait no longer pending is left as it is, so a check
 /// that races a cancellation changes nothing. A check that sees the job
-/// running closes `wait.gap` unless a newer gap opened. True when it
-/// settled.
+/// running closes `wait.gap`; a check chosen before a newer gap leaves that
+/// gap and its due time alone. True when it settled.
 pub async fn record(pool: &SqlitePool, wait: &Due, check: &Check) -> Result<bool, sqlx::Error> {
     let (result, finished, failed, permanent) = match check {
         Check::Running(result) => (result.as_str(), false, false, false),
@@ -336,8 +336,10 @@ pub async fn record(pool: &SqlitePool, wait: &Due, check: &Check) -> Result<bool
                  WHEN ?3 AND (?5 OR failures + 1 >= ?6) THEN 'failed'
                  WHEN deadline_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') THEN 'expired'
                  ELSE 'pending' END,
-             next_check_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now',
-                 '+' || interval_seconds || ' seconds'),
+             next_check_at = CASE WHEN event_status = 'gap' AND event_gap IS NOT ?7
+                 THEN next_check_at
+                 ELSE strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now',
+                     '+' || interval_seconds || ' seconds') END,
              event_status = CASE WHEN NOT ?3 AND NOT ?4 AND event_gap = ?7
                  THEN 'watching' ELSE event_status END,
              event_gap = CASE WHEN NOT ?3 AND NOT ?4 AND event_gap = ?7
@@ -437,14 +439,18 @@ pub async fn advance(
 
 /// Save `cursor` after the server skipped events before it, and make wait
 /// `id`'s status call due now. Status calls go on until one sees the job
-/// running.
+/// running. `reset` replaces the cursor even with none, after the old one
+/// stopped holding.
 pub async fn open_gap(
     pool: &SqlitePool,
     id: Uuid,
     cursor: Option<&str>,
+    reset: bool,
 ) -> Result<EventChange, sqlx::Error> {
     sqlx::query_scalar(
-        "UPDATE mcp_waits SET event_cursor = coalesce(?2, event_cursor), event_status = 'gap',
+        "UPDATE mcp_waits SET
+             event_cursor = CASE WHEN ?4 THEN ?2 ELSE coalesce(?2, event_cursor) END,
+             event_status = 'gap',
              event_gap = ?3,
              next_check_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'pending' AND event_status IN ('watching', 'gap')
@@ -453,6 +459,7 @@ pub async fn open_gap(
     .bind(id)
     .bind(cursor)
     .bind(Uuid::new_v4().to_string())
+    .bind(reset)
     .fetch_optional(pool)
     .await
     .map(EventChange::from)

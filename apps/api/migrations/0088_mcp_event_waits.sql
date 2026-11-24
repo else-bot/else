@@ -2,7 +2,7 @@
 -- stopped; status calls remain the fallback. `event_status` is `watching`
 -- while the watcher subscribes, `gap` once the server reported skipped
 -- events and before a status call has seen the job running, and `dropped`
--- once the server refused the subscription for good. `event_gap` names
+-- when the subscription could not start or the server refused it for good. `event_gap` names
 -- the gap, so a status call that started before a newer gap cannot clear
 -- it. `event_cursor` is where a new subscription resumes.
 ALTER TABLE mcp_waits ADD COLUMN event TEXT
