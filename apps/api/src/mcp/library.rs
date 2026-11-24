@@ -365,6 +365,20 @@ impl Library {
         .await
     }
 
+    /// Where to send `id`'s MCP events requests, signed in as the package's
+    /// shared account. The requests run outside the package actor, so a
+    /// long push stream never holds its mailbox.
+    pub async fn events_endpoint(&self, id: &PackageId) -> Result<super::events::Endpoint, Error> {
+        self.on_installed(id, Admit::Turn, |live, config| {
+            Box::pin(async move {
+                let (transport, secrets) = live.filled(config).await?;
+                let signed_in = live.session(config).await?.authorized(&transport).await?;
+                super::events::Endpoint::new(&signed_in, secrets)
+            })
+        })
+        .await
+    }
+
     pub async fn git_token(&self, id: &PackageId) -> Result<zeroize::Zeroizing<String>, Error> {
         self.on_installed(id, Admit::Turn, |live, config| {
             Box::pin(async move {

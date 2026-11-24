@@ -265,18 +265,38 @@ impl Session {
         }
     }
 
+    /// `config` with the saved sign-in's access token, when there is one.
+    fn signed_in(&self, config: &Transport) -> Transport {
+        let mut sent = config.clone();
+        if let State::Authorized(credential) = &self.state
+            && let Transport::Http { headers, .. } = &mut sent
+        {
+            headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+            headers.insert(
+                "Authorization".into(),
+                format!("Bearer {}", credential.token.access_token().secret()),
+            );
+        }
+        sent
+    }
+
+    /// `config` signed in with a fresh token, for requests made outside the
+    /// shared connection, such as MCP events.
+    pub(super) async fn authorized(&mut self, config: &Transport) -> Result<Transport, Error> {
+        self.status();
+        if matches!(
+            self.state,
+            State::Required(_) | State::Authorizing(_) | State::ReauthRequired(_)
+        ) {
+            return Err(Error::AuthRequired(Box::new(self.status())));
+        }
+        self.refresh(false).await?;
+        Ok(self.signed_in(config))
+    }
+
     async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
         if self.connection.is_none() {
-            let mut sent = config.clone();
-            if let State::Authorized(credential) = &self.state
-                && let Transport::Http { headers, .. } = &mut sent
-            {
-                headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
-                headers.insert(
-                    "Authorization".into(),
-                    format!("Bearer {}", credential.token.access_token().secret()),
-                );
-            }
+            let sent = self.signed_in(config);
             let connection = transport::connect(
                 &sent,
                 self.store.path(),

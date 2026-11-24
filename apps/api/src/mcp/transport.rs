@@ -41,7 +41,7 @@ pub(super) struct Connection {
 
 /// The header and environment values `config` sends, which may be
 /// credentials a server echoes back in an error.
-fn credentials(config: &Transport) -> Vec<Redact> {
+pub(super) fn credentials(config: &Transport) -> Vec<Redact> {
     let values = match config {
         Transport::Http { headers, .. } => headers,
         Transport::Stdio { env, .. } => env,
