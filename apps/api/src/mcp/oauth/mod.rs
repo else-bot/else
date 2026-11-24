@@ -265,7 +265,6 @@ impl Session {
         }
     }
 
-    /// `config` with the saved sign-in's access token, when there is one.
     fn signed_in(&self, config: &Transport) -> Transport {
         let mut sent = config.clone();
         if let State::Authorized(credential) = &self.state
@@ -281,8 +280,13 @@ impl Session {
     }
 
     /// `config` signed in with a fresh token, for requests made outside the
-    /// shared connection, such as MCP events.
-    pub(super) async fn authorized(&mut self, config: &Transport) -> Result<Transport, Error> {
+    /// shared connection, such as MCP events. `rejected` refreshes the token
+    /// even before it expires, after the server refused it.
+    pub(super) async fn authorized(
+        &mut self,
+        config: &Transport,
+        rejected: bool,
+    ) -> Result<Transport, Error> {
         self.status();
         if matches!(
             self.state,
@@ -290,7 +294,7 @@ impl Session {
         ) {
             return Err(Error::AuthRequired(Box::new(self.status())));
         }
-        self.refresh(false).await?;
+        self.refresh(rejected).await?;
         Ok(self.signed_in(config))
     }
 

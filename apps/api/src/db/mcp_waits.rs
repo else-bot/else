@@ -13,8 +13,7 @@
 //!
 //! A wait may also watch an MCP event that means the job stopped. While the
 //! watcher holds a live subscription for it, status calls pause, and a
-//! matching event settles the wait as `finished`. If the server refuses
-//! the subscription for good, the event is dropped and status calls go on.
+//! matching event before the deadline settles the wait as `finished`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -80,26 +79,25 @@ pub struct EventSpec {
     pub matching: Map<String, Value>,
 }
 
-/// Whether a wait still watches its event, as stored in
-/// `mcp_waits.event_status`.
+/// A wait's event lifecycle, as stored in `mcp_waits.event_status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum EventStatus {
     Watching,
+    /// The server skipped events, so status calls go on until one sees the
+    /// job still running.
+    Gap,
     /// The server refused the subscription for good; only status calls
     /// check the job.
     Dropped,
 }
 
-/// A pending wait whose event the watcher subscribes to.
 #[derive(Debug, Clone)]
 pub struct Watched {
+    pub id: Uuid,
+    pub mcp_id: String,
     pub event: EventSpec,
-    /// The last position the server reported, where a new subscription
-    /// resumes.
     pub cursor: Option<String>,
-    /// The status call, for a check after the server reports a gap.
-    pub status: Due,
 }
 
 /// A pending wait the watcher should check now.
@@ -111,6 +109,9 @@ pub struct Due {
     pub arguments: Value,
     pub status_pointer: String,
     pub running_values: Vec<Value>,
+    /// The event gap open when this check was chosen, which a check that
+    /// sees the job running closes.
+    pub gap: Option<String>,
 }
 
 /// The result of one status call.
@@ -158,37 +159,50 @@ pub async fn caller(pool: &SqlitePool, turn_id: Uuid) -> Result<super::turns::Ca
 }
 
 /// Park `attempt` of `turn_id` on `spec`, whose first check returned
-/// `first` and found the job running. `cursor` is where its event's
-/// subscription starts. A retry of the same wait in this attempt returns
+/// `first` and found the job running. `subscribed` holds where the event's
+/// subscription starts, or `None` when it could not start and the wait
+/// uses status calls only. A retry of the same wait in this attempt returns
 /// its id, and a pending wait on the same status from an earlier attempt
-/// returns [`Created::Carried`].
+/// returns [`Created::Carried`]; either counts as the same only when it
+/// watches the same event or none.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
     attempt: i32,
     spec: &Spec,
     first: &str,
-    cursor: Option<&str>,
+    subscribed: Option<Option<&str>>,
 ) -> Result<Created, CreateError> {
-    type Row = (Uuid, i32, String, String, Json<Value>, String);
+    type Row = (
+        Uuid,
+        i32,
+        String,
+        String,
+        Json<Value>,
+        String,
+        Option<Json<EventSpec>>,
+    );
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = super::turns::asking_caller(&mut tx, turn_id)
         .await?
         .filter(|caller| caller.attempt == attempt)
         .ok_or(CreateError::NotRunning)?;
     let waits: Vec<Row> = sqlx::query_as(
-        "SELECT id, attempt, mcp_id, tool, arguments, status_pointer FROM mcp_waits
+        "SELECT id, attempt, mcp_id, tool, arguments, status_pointer, event FROM mcp_waits
          WHERE turn_id = ?1 AND (attempt = ?2 OR status = 'pending')",
     )
     .bind(turn_id)
     .bind(caller.attempt)
     .fetch_all(&mut *tx)
     .await?;
-    let same = |(_, _, mcp_id, tool, Json(arguments), pointer): &&Row| {
+    let same = |(_, _, mcp_id, tool, Json(arguments), pointer, event): &&Row| {
         *mcp_id == spec.mcp_id
             && *tool == spec.tool
             && *arguments == spec.arguments
             && *pointer == spec.status_pointer
+            && event
+                .as_ref()
+                .is_none_or(|Json(event)| spec.event.as_ref() == Some(event))
     };
     if let Some(own) = waits.iter().find(|wait| wait.1 == caller.attempt) {
         return if same(&own) {
@@ -226,8 +240,8 @@ pub async fn create(
     .bind(spec.interval_seconds)
     .bind(spec.timeout_minutes)
     .bind(bounded(first))
-    .bind(spec.event.as_ref().map(Json))
-    .bind(cursor)
+    .bind(subscribed.and(spec.event.as_ref()).map(Json))
+    .bind(subscribed.flatten())
     .execute(&mut *tx)
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
@@ -237,24 +251,35 @@ pub async fn create(
 
 /// Pending waits whose next check is due: the oldest of each package not
 /// in `busy`, at most `limit` packages, so one package with many waits
-/// cannot hide another. Waits in `live` have a live event subscription and
-/// need no status call.
+/// cannot hide another. A wait in `live` has a live event subscription and
+/// needs no status call unless the server reported a gap.
 pub async fn due(
     pool: &SqlitePool,
     busy: &[String],
     live: &[Uuid],
     limit: usize,
 ) -> Result<Vec<Due>, sqlx::Error> {
-    type Row = (Uuid, String, String, Json<Value>, String, Json<Vec<Value>>);
+    type Row = (
+        Uuid,
+        String,
+        String,
+        Json<Value>,
+        String,
+        Json<Vec<Value>>,
+        Option<EventStatus>,
+        Option<String>,
+    );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, mcp_id, tool, arguments, status_pointer, running_values FROM (
+        "SELECT id, mcp_id, tool, arguments, status_pointer, running_values, event_status,
+             event_gap FROM (
              SELECT *, row_number() OVER (PARTITION BY mcp_id ORDER BY next_check_at, id) AS rank
              FROM mcp_waits
              WHERE status = 'pending'
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                AND deadline_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                AND mcp_id NOT IN (SELECT value FROM json_each(?1))
-               AND id NOT IN (SELECT unhex(replace(value, '-', '')) FROM json_each(?3))
+               AND (event_status IS NOT 'watching'
+                    OR id NOT IN (SELECT unhex(replace(value, '-', '')) FROM json_each(?3)))
          ) WHERE rank = 1 ORDER BY next_check_at, id LIMIT ?2",
     )
     .bind(Json(busy))
@@ -265,13 +290,23 @@ pub async fn due(
     Ok(rows
         .into_iter()
         .map(
-            |(id, mcp_id, tool, Json(arguments), status_pointer, Json(running_values))| Due {
+            |(
+                id,
+                mcp_id,
+                tool,
+                Json(arguments),
+                status_pointer,
+                Json(running_values),
+                event_status,
+                event_gap,
+            )| Due {
                 id,
                 mcp_id,
                 tool,
                 arguments,
                 status_pointer,
                 running_values,
+                gap: event_gap.filter(|_| event_status == Some(EventStatus::Gap)),
             },
         )
         .collect())
@@ -280,8 +315,10 @@ pub async fn due(
 /// Record one check of a pending wait and settle it when the job left its
 /// running values, failed for good, or ran out of time. Settling requeues
 /// the waiting turn. A wait no longer pending is left as it is, so a check
-/// that races a cancellation changes nothing. True when it settled.
-pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, sqlx::Error> {
+/// that races a cancellation changes nothing. A check that sees the job
+/// running closes `wait.gap` unless a newer gap opened. True when it
+/// settled.
+pub async fn record(pool: &SqlitePool, wait: &Due, check: &Check) -> Result<bool, sqlx::Error> {
     let (result, finished, failed, permanent) = match check {
         Check::Running(result) => (result.as_str(), false, false, false),
         Check::Finished(result) => (result.as_str(), true, false, false),
@@ -300,16 +337,21 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
                  WHEN deadline_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') THEN 'expired'
                  ELSE 'pending' END,
              next_check_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now',
-                 '+' || interval_seconds || ' seconds')
+                 '+' || interval_seconds || ' seconds'),
+             event_status = CASE WHEN NOT ?3 AND NOT ?4 AND event_gap = ?7
+                 THEN 'watching' ELSE event_status END,
+             event_gap = CASE WHEN NOT ?3 AND NOT ?4 AND event_gap = ?7
+                 THEN NULL ELSE event_gap END
          WHERE id = ?1 AND status = 'pending'
          RETURNING turn_id, bot_id, status",
     )
-    .bind(id)
+    .bind(wait.id)
     .bind(bounded(result))
     .bind(failed)
     .bind(finished)
     .bind(permanent)
     .bind(MAX_FAILURES)
+    .bind(wait.gap.as_deref())
     .fetch_optional(&mut *tx)
     .await?;
     let Some((turn_id, bot_id, status)) = settled else {
@@ -325,7 +367,7 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
         "UPDATE mcp_waits SET settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
     )
-    .bind(id)
+    .bind(wait.id)
     .execute(&mut *tx)
     .await?;
     super::turns::lifecycle::continue_waiting(&mut tx, turn_id).await?;
@@ -334,127 +376,127 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
     Ok(true)
 }
 
-/// The pending waits that watch an event.
 pub async fn watching(pool: &SqlitePool) -> Result<Vec<Watched>, sqlx::Error> {
-    type Row = (
-        Uuid,
-        String,
-        String,
-        Json<Value>,
-        String,
-        Json<Vec<Value>>,
-        Json<EventSpec>,
-        Option<String>,
-    );
+    type Row = (Uuid, String, Json<EventSpec>, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, mcp_id, tool, arguments, status_pointer, running_values, event, event_cursor
-         FROM mcp_waits WHERE status = 'pending' AND event_status = 'watching'
+        "SELECT id, mcp_id, event, event_cursor FROM mcp_waits
+         WHERE status = 'pending' AND event_status IN ('watching', 'gap')
          ORDER BY created_at, id",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(
-            |(
-                id,
-                mcp_id,
-                tool,
-                Json(arguments),
-                status_pointer,
-                Json(running),
-                Json(event),
-                cursor,
-            )| {
-                Watched {
-                    event,
-                    cursor,
-                    status: Due {
-                        id,
-                        mcp_id,
-                        tool,
-                        arguments,
-                        status_pointer,
-                        running_values: running,
-                    },
-                }
-            },
-        )
+        .map(|(id, mcp_id, Json(event), cursor)| Watched {
+            id,
+            mcp_id,
+            event,
+            cursor,
+        })
         .collect())
 }
 
-/// What became of an event transition on wait `id`.
+pub async fn event_status(pool: &SqlitePool, id: Uuid) -> Result<Option<EventStatus>, sqlx::Error> {
+    sqlx::query_scalar("SELECT event_status FROM mcp_waits WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map(Option::flatten)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventChange {
-    Applied,
-    /// The wait no longer waits, or no longer watches its event, so its
-    /// subscription should end.
+    Applied(EventStatus),
+    /// The wait no longer waits, no longer watches its event, or is past
+    /// its deadline, so its subscription should end.
     Ended,
 }
 
-impl EventChange {
-    fn of(changed: bool) -> Self {
-        if changed { Self::Applied } else { Self::Ended }
+impl From<Option<EventStatus>> for EventChange {
+    fn from(status: Option<EventStatus>) -> Self {
+        status.map_or(Self::Ended, Self::Applied)
     }
 }
 
-/// Save the position wait `id`'s subscription reached.
 pub async fn advance(
     pool: &SqlitePool,
     id: Uuid,
     cursor: Option<&str>,
 ) -> Result<EventChange, sqlx::Error> {
-    let changed = sqlx::query(
+    sqlx::query_scalar(
         "UPDATE mcp_waits SET event_cursor = ?2
-         WHERE id = ?1 AND status = 'pending' AND event_status = 'watching'",
+         WHERE id = ?1 AND status = 'pending' AND event_status IN ('watching', 'gap')
+         RETURNING event_status",
     )
     .bind(id)
     .bind(cursor)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(EventChange::of(changed == 1))
+    .fetch_optional(pool)
+    .await
+    .map(EventChange::from)
+}
+
+/// Save `cursor` after the server skipped events before it, and make wait
+/// `id`'s status call due now. Status calls go on until one sees the job
+/// running.
+pub async fn open_gap(
+    pool: &SqlitePool,
+    id: Uuid,
+    cursor: Option<&str>,
+) -> Result<EventChange, sqlx::Error> {
+    sqlx::query_scalar(
+        "UPDATE mcp_waits SET event_cursor = coalesce(?2, event_cursor), event_status = 'gap',
+             event_gap = ?3,
+             next_check_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'pending' AND event_status IN ('watching', 'gap')
+         RETURNING event_status",
+    )
+    .bind(id)
+    .bind(cursor)
+    .bind(Uuid::new_v4().to_string())
+    .fetch_optional(pool)
+    .await
+    .map(EventChange::from)
 }
 
 /// Stop watching wait `id`'s event after the server refused it for good.
-/// Status calls go on checking the job.
 pub async fn drop_event(pool: &SqlitePool, id: Uuid) -> Result<EventChange, sqlx::Error> {
-    let changed = sqlx::query(
-        "UPDATE mcp_waits SET event_status = 'dropped'
-         WHERE id = ?1 AND status = 'pending' AND event_status = 'watching'",
+    sqlx::query_scalar(
+        "UPDATE mcp_waits SET event_status = 'dropped', event_gap = NULL
+         WHERE id = ?1 AND status = 'pending' AND event_status IN ('watching', 'gap')
+         RETURNING event_status",
     )
     .bind(id)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(EventChange::of(changed == 1))
+    .fetch_optional(pool)
+    .await
+    .map(EventChange::from)
 }
 
 /// Settle wait `id` as `finished` on a matching `event`, kept as its result,
-/// and requeue its turn.
+/// and requeue its turn. A wait past its deadline is left to expire.
 pub async fn settle_on_event(
     pool: &SqlitePool,
     id: Uuid,
     event: &str,
 ) -> Result<EventChange, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let settled: Option<(Uuid, Uuid)> = sqlx::query_as(
+    let settled: Option<(Uuid, Uuid, EventStatus)> = sqlx::query_as(
         "UPDATE mcp_waits SET status = 'finished', last_result = ?2,
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status = 'pending' AND event_status = 'watching'
-         RETURNING turn_id, bot_id",
+         WHERE id = ?1 AND status = 'pending' AND event_status IN ('watching', 'gap')
+           AND deadline_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         RETURNING turn_id, bot_id, event_status",
     )
     .bind(id)
     .bind(bounded(event))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((turn_id, bot_id)) = settled else {
+    let Some((turn_id, bot_id, status)) = settled else {
         return Ok(EventChange::Ended);
     };
     super::turns::lifecycle::continue_waiting(&mut tx, turn_id).await?;
     events::turn_changed(&mut tx, bot_id, turn_id).await?;
     tx.commit().await?;
-    Ok(EventChange::Applied)
+    Ok(EventChange::Applied(status))
 }
 
 /// Settle every pending wait past its deadline without another status

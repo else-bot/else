@@ -12,6 +12,8 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 
+use else_api::db::mcp_waits;
+
 const EVENT: &str = "thread.run_settled";
 
 /// A Streamable HTTP MCP server on 2026-07-28 with Events beside the older
@@ -26,6 +28,11 @@ struct Server {
     published: tokio::sync::watch::Sender<usize>,
     /// Streams to end right after they confirm.
     drop_streams: AtomicUsize,
+    /// End the open stream after its next event.
+    drop_after_event: AtomicBool,
+    /// Answer status calls with an error.
+    fail_status: AtomicBool,
+    polls: AtomicUsize,
     /// End every stream with `notifications/events/terminated`.
     terminate: AtomicBool,
     /// Report a gap on the next poll.
@@ -47,6 +54,9 @@ impl Server {
             log: Mutex::new(Vec::new()),
             published: tokio::sync::watch::channel(0).0,
             drop_streams: AtomicUsize::new(0),
+            drop_after_event: AtomicBool::new(false),
+            fail_status: AtomicBool::new(false),
+            polls: AtomicUsize::new(0),
             terminate: AtomicBool::new(false),
             gap: AtomicBool::new(false),
             asked: Mutex::new(Vec::new()),
@@ -145,6 +155,9 @@ async fn handle(
         ),
         "tools/call" => {
             server.status_calls.fetch_add(1, Ordering::SeqCst);
+            if server.fail_status.load(Ordering::SeqCst) {
+                return reply(&id, json!({ "isError": true, "content": [] }));
+            }
             let work = *server.job.lock().unwrap();
             reply(
                 &id,
@@ -169,6 +182,7 @@ async fn handle(
             }] }),
         ),
         "events/poll" => {
+            server.polls.fetch_add(1, Ordering::SeqCst);
             server.asked.lock().unwrap().push(params["cursor"].clone());
             let log = server.log.lock().unwrap().clone();
             let from = server.position(&params["cursor"]).min(log.len());
@@ -228,7 +242,12 @@ async fn handle(
                             let mut params = event;
                             params["cursor"] = json!((at + 1).to_string());
                             let sent = notification("notifications/events/event", params, &id);
-                            return Some((Ok(sent), (open, id, at + 1, true, changes)));
+                            let after = if server.drop_after_event.swap(false, Ordering::SeqCst) {
+                                usize::MAX
+                            } else {
+                                at + 1
+                            };
+                            return Some((Ok(sent), (open, id, after, true, changes)));
                         }
                         if tokio::time::timeout(Duration::from_secs(1), changes.changed())
                             .await
@@ -364,20 +383,42 @@ async fn an_event_wait_settles_when_its_event_arrives_without_status_calls() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_stream_resumes_from_the_saved_cursor_without_missing_the_event() {
     let server = Server::new(true, &["push", "poll"]);
-    server.drop_streams.store(1, Ordering::SeqCst);
     let (h, _, turn, _, _) = parked(&server).await;
     let app = &h.app;
+    until_count("the push stream opens", &server.streams_opened, 1).await;
+    server.drop_after_event.store(true, Ordering::SeqCst);
+    server.publish("t2");
     until_count("the first stream ends", &server.streams_closed, 1).await;
+    until_count("the stream reopens", &server.streams_opened, 2).await;
     server.publish("t1");
     app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await.0, "finished");
     let asked = server.asked.lock().unwrap().clone();
     assert_eq!(
         asked,
-        [Value::Null, json!("0"), json!("0")],
-        "mcp_wait started at the head; both streams resumed from it"
+        [Value::Null, json!("0"), json!("1")],
+        "mcp_wait started at the head, and the second stream resumed after t2's event"
+    );
+    let packet = h.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("run-1"),
+        "t1's event is the result: {packet}"
     );
     assert_eq!(server.status_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_streams_that_end_at_once_give_way_to_polling() {
+    let server = Server::new(true, &["push", "poll"]);
+    server.drop_streams.store(3, Ordering::SeqCst);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("polling takes over", &server.polls, 2).await;
+    assert_eq!(server.streams_opened.load(Ordering::SeqCst), 3);
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    assert_eq!(event_row(app, turn).await.1.as_deref(), Some("watching"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -411,19 +452,62 @@ async fn a_server_without_events_keeps_checking_the_status_tool() {
     assert_eq!(server.streams_opened.load(Ordering::SeqCst), 0);
 }
 
+async fn until_event_status(app: &TestApp, turn: Uuid, status: &str) {
+    common::until(
+        &format!("the event wait is {status}"),
+        common::poll(|| async {
+            (event_row(app, turn).await.1.as_deref() == Some(status)).then_some(())
+        }),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn polling_watches_an_event_without_push_and_a_gap_checks_the_status_once() {
+async fn a_gap_checks_the_status_until_a_check_sees_the_job_running() {
     let server = Server::new(true, &["poll"]);
     let (h, _, turn, _, _) = parked(&server).await;
     let app = &h.app;
+    server.fail_status.store(true, Ordering::SeqCst);
     server.gap.store(true, Ordering::SeqCst);
-    until_count("the gap triggers one status call", &server.status_calls, 2).await;
-    assert_eq!(event_row(app, turn).await.0, "pending");
+    until_count("the gap makes a status call due", &server.status_calls, 2).await;
+    common::never_polled(
+        "a failed status call closes the gap",
+        Duration::from_secs(1),
+        || async {
+            let status = event_row(app, turn).await.1;
+            (status.as_deref() != Some("gap")).then_some(status)
+        },
+    )
+    .await;
+
+    server.fail_status.store(false, Ordering::SeqCst);
+    check_now(app).await;
+    until_event_status(app, turn, "watching").await;
+    let calls = server.status_calls.load(Ordering::SeqCst);
+    check_now(app).await;
+    common::never_polled(
+        "a status call once the gap closed",
+        Duration::from_secs(3),
+        || async { (server.status_calls.load(Ordering::SeqCst) > calls).then_some(()) },
+    )
+    .await;
     server.publish("t1");
     app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await.0, "finished");
-    assert_eq!(server.status_calls.load(Ordering::SeqCst), 2);
     assert_eq!(server.streams_opened.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_subscription_the_server_ends_switches_to_polling_when_offered() {
+    let server = Server::new(true, &["push", "poll"]);
+    server.terminate.store(true, Ordering::SeqCst);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("polling takes over", &server.polls, 2).await;
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    assert_eq!(server.streams_opened.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -432,13 +516,7 @@ async fn a_subscription_the_server_ends_falls_back_to_status_calls() {
     server.terminate.store(true, Ordering::SeqCst);
     let (h, _, turn, _, _) = parked(&server).await;
     let app = &h.app;
-    common::until(
-        "the terminated subscription is dropped",
-        common::poll(|| async {
-            (event_row(app, turn).await.1.as_deref() == Some("dropped")).then_some(())
-        }),
-    )
-    .await;
+    until_event_status(app, turn, "dropped").await;
     *server.job.lock().unwrap() = "result_available";
     check_now(app).await;
     app.wait_turn(turn, &["completed"]).await;
@@ -461,6 +539,11 @@ async fn a_stopped_or_expired_event_wait_ends_its_subscription_and_ignores_later
         .await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
     app.wait_turn(turn, &["completed"]).await;
+    let id: Uuid = wait.parse().unwrap();
+    let settled = mcp_waits::settle_on_event(&app.db.pool, id, "{}")
+        .await
+        .unwrap();
+    assert_eq!(settled, mcp_waits::EventChange::Ended, "Stop came first");
     until_count("Stop ends the stream", &server.streams_closed, 1).await;
     server.publish("t1");
     common::never_polled(
@@ -479,6 +562,7 @@ async fn a_stopped_or_expired_event_wait_ends_its_subscription_and_ignores_later
     h.release(turn).await;
     app.wait_turn(turn, &["waiting"]).await;
     until_count("the second wait's stream opens", &server.streams_opened, 2).await;
+    let late: Uuid = parked.result["wait_id"].as_str().unwrap().parse().unwrap();
     sqlx::query(
         "UPDATE mcp_waits SET deadline_at = '2000-01-01T00:00:00.000+00:00' WHERE turn_id = ?1",
     )
@@ -486,7 +570,52 @@ async fn a_stopped_or_expired_event_wait_ends_its_subscription_and_ignores_later
     .execute(&app.db.pool)
     .await
     .unwrap();
+    let settled = mcp_waits::settle_on_event(&app.db.pool, late, "{}")
+        .await
+        .unwrap();
+    assert_eq!(
+        settled,
+        mcp_waits::EventChange::Ended,
+        "the deadline passed"
+    );
     app.wait_turn(turn, &["completed"]).await;
     assert_eq!(wait_row(app, turn).await.0, "expired");
     until_count("expiry ends the stream", &server.streams_closed, 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_carries_the_same_event_wait_and_parks_anew_on_a_different_event() {
+    let server = Server::new(true, &["push", "poll"]);
+    let url = server.clone().serve().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    tool(app, &token, "mcp_install", installed(&url)).await.ok();
+    let parked = tool(app, &token, "mcp_wait", event_wait()).await.result;
+    assert_eq!(parked["status"], "waiting", "{parked}");
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+
+    follow(app, &main, turn).await;
+    let token = h.continued(turn, &token).await;
+    let same = tool(app, &token, "mcp_wait", event_wait()).await;
+    assert_eq!(same.result["wait_id"], parked["wait_id"], "{}", same.body);
+    assert_eq!(same.result["event"]["status"], "watching", "{}", same.body);
+    h.release(turn).await;
+    rests_after(app, turn, 2, "waiting", "the reply carries the wait").await;
+
+    follow(app, &main, turn).await;
+    let token = h.continued(turn, &token).await;
+    let mut other = event_wait();
+    other["event"]["match"] = json!({ "/threadId": "t2" });
+    let anew = tool(app, &token, "mcp_wait", other).await;
+    assert_eq!(anew.result["status"], "waiting", "{}", anew.body);
+    assert_ne!(anew.result["wait_id"], parked["wait_id"], "{}", anew.body);
+    h.release(turn).await;
+    rests_after(app, turn, 3, "waiting", "the reply parks on the new event").await;
+    assert_eq!(
+        carried(app, turn).await,
+        vec![(1, "pending".into()), (3, "pending".into())]
+    );
 }

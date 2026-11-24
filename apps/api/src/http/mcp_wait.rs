@@ -21,7 +21,7 @@ use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
 use crate::app::questions::{ApprovalKind, Effect};
-use crate::db::mcp_waits::{self, Check, CreateError, Due, EventSpec, Spec};
+use crate::db::mcp_waits::{self, Check, CreateError, Due, EventSpec, EventStatus, Spec};
 use crate::grants::Grant;
 use crate::http::waits::{Next, waited};
 use crate::mcp::{Error, Library, PackageId};
@@ -319,7 +319,7 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, args: &Value) -> ToolR
 }
 
 async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
-    let (mut spec, approval) = match parse(args) {
+    let (spec, approval) = match parse(args) {
         Ok(parsed) => parsed,
         Err(message) => return Err(Refusal::text(message)),
     };
@@ -368,8 +368,8 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
                 .logged(format!("{log} refused{note}")));
         }
     }
-    // Subscribed before the first status call, so an event of a job that
-    // stops in between is not missed.
+    // The subscription's start comes before the first status call, so
+    // when the server returns a cursor, an event between the two is replayed.
     let watch = match &spec.event {
         None => None,
         Some(event) => Some(events::start(library, &spec.mcp_id, event).await),
@@ -411,13 +411,9 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         }
         Some(Check::Running(result)) => result,
     };
-    let cursor = match &watch {
-        Some(Ok(cursor)) => cursor.clone(),
-        Some(Err(_)) => {
-            spec.event = None;
-            None
-        }
-        None => None,
+    let subscribed = match &watch {
+        Some(Ok(cursor)) => Some(cursor.as_deref()),
+        Some(Err(_)) | None => None,
     };
     let created = match mcp_waits::create(
         &state.db,
@@ -425,7 +421,7 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         caller.attempt,
         &spec,
         &first,
-        cursor.as_deref(),
+        subscribed,
     )
     .await
     {
@@ -440,16 +436,27 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         &NEXT,
     )
     .await;
-    match watch {
-        Some(Ok(_)) => value["event"] = json!({ "status": "watching" }),
-        Some(Err(reason)) => {
-            value["event"] = json!({
-                "status": "unavailable",
-                "reason": mcp_waits::bounded(reason.message()),
-                "next": "else.bot checks the status tool instead; nothing else to do.",
-            });
-        }
-        None => {}
+    if spec.event.is_some() {
+        let watching = mcp_waits::event_status(&state.db, created.id()).await;
+        value["event"] = match (watching, &watch) {
+            (Ok(Some(EventStatus::Watching | EventStatus::Gap)), _) => {
+                json!({ "status": "watching" })
+            }
+            (watching, watch) => {
+                let reason = match (watching, watch) {
+                    (_, Some(Err(failure))) => failure.message().to_owned(),
+                    (Ok(Some(EventStatus::Dropped)), _) => {
+                        "The MCP server refused the event subscription.".to_owned()
+                    }
+                    _ => "This wait was parked without an event.".to_owned(),
+                };
+                json!({
+                    "status": "unavailable",
+                    "reason": mcp_waits::bounded(&reason),
+                    "next": "else.bot checks the status tool instead; nothing else to do.",
+                })
+            }
+        };
     }
     let log = format!("{log} {} {}{note}", created.status(), created.id());
     Ok(Done::json(value).parked(created.parked()).logged(log))
@@ -500,7 +507,7 @@ async fn check_and_record(state: Arc<AppState>, wait: Due) {
         Err(Unqualified::Paused) => return,
         Err(Unqualified::Refused { message, permanent }) => Check::Failed { message, permanent },
     };
-    match mcp_waits::record(&state.db, wait.id, &result).await {
+    match mcp_waits::record(&state.db, &wait, &result).await {
         Ok(true) => state.scheduler.wake(),
         Ok(false) => {}
         Err(error) => {
@@ -547,12 +554,11 @@ pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
                 }
                 continue;
             }
-            Some(report) = reports.recv() => {
-                match report {
-                    events::Liveness::Live(wait) if by_wait.contains_key(&wait) => {
+            Some(events::Liveness { task, live: now }) = reports.recv() => {
+                if let Some(&wait) = watched.get(&task) {
+                    if now {
                         live.insert(wait);
-                    }
-                    events::Liveness::Live(wait) | events::Liveness::Down(wait) => {
+                    } else {
                         live.remove(&wait);
                     }
                 }
@@ -567,14 +573,14 @@ pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
         }
         match mcp_waits::watching(&state.db).await {
             Ok(waits) => {
-                let current: HashSet<Uuid> = waits.iter().map(|w| w.status.id).collect();
+                let current: HashSet<Uuid> = waits.iter().map(|w| w.id).collect();
                 for (wait, task) in &by_wait {
                     if !current.contains(wait) {
                         task.abort();
                     }
                 }
                 for wait in waits {
-                    let id = wait.status.id;
+                    let id = wait.id;
                     if by_wait.contains_key(&id) || by_wait.len() >= MAX_SUBSCRIPTIONS {
                         continue;
                     }

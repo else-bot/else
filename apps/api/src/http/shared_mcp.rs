@@ -135,19 +135,26 @@ async fn events_list(state: &AppState, id: &PackageId, params: &Value) -> Result
     {
         return Err(Error::Invalid("events/list takes only a string cursor."));
     }
-    let endpoint = match state.mcps.events_endpoint(id).await {
-        Err(Error::Invalid(reason)) => {
-            return Ok(json!({ "events": [], "unsupported": reason }));
+    let mut rejected = false;
+    let listed = loop {
+        let endpoint = match state.mcps.events_endpoint(id, rejected).await {
+            Err(Error::Invalid(reason)) => {
+                return Ok(json!({ "events": [], "unsupported": reason }));
+            }
+            other => other?,
+        };
+        let listed = match endpoint.offers_events().await {
+            Ok(true) => endpoint.list(cursor).await,
+            Ok(false) => Err(Failure::Unsupported(format!(
+                "{} does not offer MCP events.",
+                String::from(id.clone())
+            ))),
+            Err(failure) => Err(failure),
+        };
+        match listed {
+            Err(Failure::Unauthorized) if !rejected => rejected = true,
+            listed => break listed,
         }
-        other => other?,
-    };
-    let listed = match endpoint.offers_events().await {
-        Ok(true) => endpoint.list(cursor).await,
-        Ok(false) => Err(Failure::Unsupported(format!(
-            "{} does not offer MCP events.",
-            String::from(id.clone())
-        ))),
-        Err(failure) => Err(failure),
     };
     match listed {
         Ok(page) => Ok(page),
@@ -157,7 +164,7 @@ async fn events_list(state: &AppState, id: &PackageId, params: &Value) -> Result
             "next": "Wait on the MCP's status tool with mcp_wait, without an event.",
         })),
         Err(Failure::Rejected(_)) => Err(Error::Invalid("The MCP refused events/list.")),
-        Err(Failure::Transient(_)) => Err(Error::Connection),
+        Err(Failure::Transient(_) | Failure::Unauthorized) => Err(Error::Connection),
         Err(Failure::Paused) => Err(Error::Paused),
     }
 }

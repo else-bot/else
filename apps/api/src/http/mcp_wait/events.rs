@@ -1,34 +1,36 @@
-//! An event wait's subscription: push first, polling when the server
-//! offers only that or push keeps failing. The status call covers every
-//! moment the subscription is not live, so no wait is lost to a dropped
-//! stream, a restart, or a server that stops offering the event.
+//! An event wait's subscription. Push comes first; polling takes over when
+//! the event offers only that, or push keeps failing or is refused. A wait
+//! counts as live only while a saved cursor lets a reconnect replay what it
+//! misses; at every other moment its status calls check the job.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use super::super::AppState;
 use crate::db::mcp_waits::{self, EventChange, EventSpec, Watched};
 use crate::mcp::events::{
-    Delivery, Descriptor, Endpoint, Failure, Occurrence, Pushed, SUGGESTED_HEARTBEAT, Subscription,
-    matches,
+    Delivery, Descriptor, Endpoint, Failure, Occurrence, Polled, Pushed, SUGGESTED_HEARTBEAT,
+    Subscription, matches,
 };
 use crate::mcp::{Library, PackageId};
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// Push streams that fail before they open, after which polling takes over
-/// when the event offers it.
+/// Push streams that end before delivering anything, after which polling
+/// takes over when the event offers it.
 const PUSH_ATTEMPTS: u32 = 3;
+/// How long a push stream stays open before it reopens with the package's
+/// current configuration and sign-in.
+const STREAM_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
-/// Whether a wait's subscription can see every event, so its status calls
-/// can pause.
-pub(super) enum Liveness {
-    Live(Uuid),
-    Down(Uuid),
+/// Whether subscription task `task` can replay every event it misses, so its
+/// wait's status calls can pause.
+pub(super) struct Liveness {
+    pub task: tokio::task::Id,
+    pub live: bool,
 }
 
 fn subscription(event: &EventSpec) -> Subscription {
@@ -38,10 +40,16 @@ fn subscription(event: &EventSpec) -> Subscription {
     }
 }
 
-async fn endpoint(library: &Library, mcp_id: &str) -> Result<Endpoint, Failure> {
+fn unreplayable(name: &str) -> Failure {
+    Failure::Unsupported(format!(
+        "{name} cannot be replayed, so polling it cannot see an event."
+    ))
+}
+
+async fn endpoint(library: &Library, mcp_id: &str, rejected: bool) -> Result<Endpoint, Failure> {
     let id = PackageId::try_from(mcp_id.to_owned())
         .map_err(|message| Failure::Rejected(message.into()))?;
-    Ok(library.events_endpoint(&id).await?)
+    Ok(library.events_endpoint(&id, rejected).await?)
 }
 
 /// The server's descriptor of `event`, once it confirms it offers events
@@ -54,7 +62,7 @@ async fn descriptor(endpoint: &Endpoint, mcp_id: &str, name: &str) -> Result<Des
     }
     let descriptor = endpoint.descriptor(name).await?.ok_or_else(|| {
         Failure::Rejected(format!(
-            "{mcp_id} has no event type named {name}; see events/list."
+            "{mcp_id} has no usable event type named {name}; see events/list."
         ))
     })?;
     if descriptor.delivery.is_empty() {
@@ -65,27 +73,31 @@ async fn descriptor(endpoint: &Endpoint, mcp_id: &str, name: &str) -> Result<Des
     Ok(descriptor)
 }
 
-/// Subscribe to `event` for a new wait and return where its subscription
-/// starts, before the first status call. An error means the wait uses
-/// status calls only.
+/// Subscribe to `event` for a new wait and return the cursor its
+/// subscription starts from. An error means the wait uses status calls
+/// only.
 pub(super) async fn start(
     library: &Library,
     mcp_id: &str,
     event: &EventSpec,
 ) -> Result<Option<String>, Failure> {
     let starting = async {
-        let endpoint = endpoint(library, mcp_id).await?;
+        let endpoint = endpoint(library, mcp_id, false).await?;
         let descriptor = descriptor(&endpoint, mcp_id, &event.name).await?;
         let subscription = subscription(event);
+        let push = descriptor.delivery.contains(&Delivery::Push);
         if descriptor.delivery.contains(&Delivery::Poll) {
-            let polled = endpoint.poll(&subscription, &descriptor, None).await?;
-            if polled.cursor.is_some() || descriptor.delivery.contains(&Delivery::Push) {
-                return Ok(polled.cursor);
+            match endpoint.poll(&subscription, &descriptor, None).await {
+                Ok(Polled {
+                    cursor: Some(cursor),
+                    ..
+                }) => return Ok(Some(cursor)),
+                Ok(_) if !push => return Err(unreplayable(&event.name)),
+                Err(failure) if !push || matches!(failure, Failure::Paused) => {
+                    return Err(failure);
+                }
+                _ => {}
             }
-            return Err(Failure::Unsupported(format!(
-                "{} cannot be replayed, so polling it cannot see an event.",
-                event.name
-            )));
         }
         let mut stream = endpoint.stream(&subscription, &descriptor, None).await?;
         loop {
@@ -99,115 +111,144 @@ pub(super) async fn start(
         .unwrap_or_else(|_| Err(Failure::Transient("Subscribing timed out.".into())))
 }
 
-/// How one subscription ended.
 enum Ended {
     /// The wait settled or no longer watches its event.
     Done,
-    /// The server refused it for good.
     Refused(String),
-    /// It broke and may work again. `opened` when it had been live.
-    Broke { reason: String, opened: bool },
+    /// It broke and may work again. `held` when it had worked, which
+    /// resets the backoff.
+    Broke {
+        reason: String,
+        held: bool,
+    },
+    /// Subscribe again at once from the saved cursor, which replays what
+    /// the reopening misses.
+    Reopen,
 }
 
-impl From<Failure> for Ended {
-    fn from(failure: Failure) -> Self {
-        match failure {
-            Failure::Unsupported(reason) | Failure::Rejected(reason) => Self::Refused(reason),
-            Failure::Transient(reason) => Self::Broke {
-                reason,
-                opened: false,
-            },
-            Failure::Paused => Self::Broke {
-                reason: Failure::Paused.message().into(),
-                opened: false,
-            },
-        }
-    }
-}
-
-/// One wait's subscription state across reconnects.
 struct Watch {
     state: Arc<AppState>,
     wait: Watched,
     report: mpsc::Sender<Liveness>,
+    /// At [`PUSH_ATTEMPTS`], push is off and polling takes over.
     push_failures: u32,
+    /// The server refused the last token, so the next one is refreshed.
+    rejected: bool,
 }
 
 impl Watch {
-    fn id(&self) -> Uuid {
-        self.wait.status.id
+    async fn report(&self, live: bool) {
+        let task = tokio::task::id();
+        let _ = self.report.send(Liveness { task, live }).await;
     }
 
-    async fn report(&self, liveness: Liveness) {
-        let _ = self.report.send(liveness).await;
-    }
-
-    /// Save a new position. `Ended` stops the subscription.
-    async fn advance(&mut self, cursor: Option<String>) -> Result<(), Ended> {
-        if cursor == self.wait.cursor {
-            return Ok(());
+    async fn report_live(&self) {
+        if self.wait.cursor.is_some() {
+            self.report(true).await;
         }
-        match mcp_waits::advance(&self.state.db, self.id(), cursor.as_deref()).await {
-            Ok(EventChange::Applied) => {
-                self.wait.cursor = cursor;
+    }
+
+    fn ended(&mut self, failure: Failure, held: bool) -> Ended {
+        match failure {
+            Failure::Unsupported(reason) | Failure::Rejected(reason) => Ended::Refused(reason),
+            failure => {
+                self.rejected |= matches!(failure, Failure::Unauthorized);
+                Ended::Broke {
+                    reason: failure.message().to_owned(),
+                    held,
+                }
+            }
+        }
+    }
+
+    fn changed(
+        &mut self,
+        change: Result<EventChange, sqlx::Error>,
+        cursor: Option<String>,
+    ) -> Result<(), Ended> {
+        match change {
+            Ok(EventChange::Applied(_)) => {
+                if cursor.is_some() {
+                    self.wait.cursor = cursor;
+                }
                 Ok(())
             }
             Ok(EventChange::Ended) => Err(Ended::Done),
             Err(error) => Err(Ended::Broke {
                 reason: format!("Saving the event position failed: {error}"),
-                opened: true,
+                held: true,
             }),
         }
     }
 
-    /// Settle the wait on `event` if it is the one waited for.
-    async fn offer(&mut self, event: Occurrence) -> Result<(), Ended> {
+    async fn advance(&mut self, cursor: Option<String>) -> Result<(), Ended> {
+        if cursor.is_none() || cursor == self.wait.cursor {
+            return Ok(());
+        }
+        let change = mcp_waits::advance(&self.state.db, self.wait.id, cursor.as_deref()).await;
+        self.changed(change, cursor)
+    }
+
+    /// The server skipped events before `cursor`, so the job may have
+    /// stopped unseen: the wait's status calls resume until one sees it
+    /// running.
+    async fn gap(&mut self, cursor: Option<String>) -> Result<(), Ended> {
+        let change = mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref()).await;
+        self.changed(change, cursor)
+    }
+
+    /// Settle the wait on `event` if it is the one waited for. `opened` is
+    /// the endpoint a push stream was opened with, which must still match
+    /// the package's current one.
+    async fn offer(&mut self, event: Occurrence, opened: Option<&Endpoint>) -> Result<(), Ended> {
         let spec = &self.wait.event;
         if event.name != spec.name || !matches(&event.data, &spec.matching) {
             return self.advance(event.cursor).await;
         }
-        match mcp_waits::settle_on_event(&self.state.db, self.id(), &event.raw.to_string()).await {
-            Ok(EventChange::Applied) => {
+        if let Some(opened) = opened {
+            match endpoint(&self.state.mcps, &self.wait.mcp_id, false).await {
+                Ok(current) if current.same_target(opened) => {}
+                Ok(_) => return Err(Ended::Reopen),
+                Err(failure) => return Err(self.ended(failure, true)),
+            }
+        }
+        let settled =
+            mcp_waits::settle_on_event(&self.state.db, self.wait.id, &event.raw.to_string()).await;
+        match settled {
+            Ok(EventChange::Applied(_)) => {
                 self.state.scheduler.wake();
                 Err(Ended::Done)
             }
             Ok(EventChange::Ended) => Err(Ended::Done),
             Err(error) => Err(Ended::Broke {
                 reason: format!("Settling the wait failed: {error}"),
-                opened: true,
+                held: true,
             }),
         }
     }
 
-    /// The server skipped events, so the job may have stopped unseen: call
-    /// the status tool once.
-    async fn gap(&self) {
-        super::check_and_record(self.state.clone(), self.wait.status.clone()).await;
-    }
-
-    /// Mark the subscription live once it can replay what it misses.
-    async fn opened(&self) {
-        if self.wait.cursor.is_some() {
-            self.report(Liveness::Live(self.id())).await;
-        }
-    }
-
     async fn subscribe(&mut self) -> Ended {
-        let mcp_id = self.wait.status.mcp_id.clone();
-        let endpoint = match endpoint(&self.state.mcps, &mcp_id).await {
+        let rejected = std::mem::take(&mut self.rejected);
+        let endpoint = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
             Ok(endpoint) => endpoint,
-            Err(failure) => return failure.into(),
+            Err(failure) => return self.ended(failure, false),
         };
-        let descriptor = match descriptor(&endpoint, &mcp_id, &self.wait.event.name).await {
+        let descriptor = match descriptor(&endpoint, &self.wait.mcp_id, &self.wait.event.name).await
+        {
             Ok(descriptor) => descriptor,
-            Err(failure) => return failure.into(),
+            Err(failure) => return self.ended(failure, false),
         };
         let push = descriptor.delivery.contains(&Delivery::Push);
         let poll = descriptor.delivery.contains(&Delivery::Poll);
-        if push && (self.push_failures < PUSH_ATTEMPTS || !poll) {
-            self.push(&endpoint, &descriptor).await
-        } else {
-            self.poll(&descriptor).await
+        if !push || (poll && self.push_failures >= PUSH_ATTEMPTS) {
+            return self.poll(&descriptor).await;
+        }
+        match self.push(&endpoint, &descriptor).await {
+            Ended::Refused(reason) if poll => {
+                self.push_failures = PUSH_ATTEMPTS;
+                Ended::Broke { reason, held: true }
+            }
+            ended => ended,
         }
     }
 
@@ -220,31 +261,42 @@ impl Watch {
             Ok(stream) => stream,
             Err(failure) => {
                 self.push_failures += 1;
-                return failure.into();
+                return self.ended(failure, false);
             }
         };
-        let mut opened = false;
+        // Held once a message follows the confirmation, so a stream that
+        // confirms and closes counts as a failure.
+        let mut held = false;
         // A stream silent for three heartbeats is dead (SEP-3415).
         let mut heartbeat = SUGGESTED_HEARTBEAT;
+        let reopen = tokio::time::Instant::now() + STREAM_LIFETIME;
         loop {
-            let next = match tokio::time::timeout(heartbeat * 3, stream.next()).await {
+            let next = tokio::select! {
+                next = tokio::time::timeout(heartbeat * 3, stream.next()) => next,
+                () = tokio::time::sleep_until(reopen) => return Ended::Reopen,
+            };
+            let next = match next {
                 Ok(Ok(next)) => next,
                 Ok(Err(failure)) => {
-                    if !opened {
+                    if !held {
                         self.push_failures += 1;
                     }
-                    return match Ended::from(failure) {
-                        Ended::Broke { reason, .. } => Ended::Broke { reason, opened },
-                        ended => ended,
-                    };
+                    return self.ended(failure, held);
                 }
                 Err(_) => {
+                    if !held {
+                        self.push_failures += 1;
+                    }
                     return Ended::Broke {
                         reason: "The event stream went silent.".into(),
-                        opened,
+                        held,
                     };
                 }
             };
+            if !held && !matches!(next, Pushed::Active { .. }) {
+                held = true;
+                self.push_failures = 0;
+            }
             let step = match next {
                 Pushed::Active {
                     cursor,
@@ -252,21 +304,20 @@ impl Watch {
                     heartbeat: granted,
                 } => {
                     heartbeat = granted;
-                    opened = true;
-                    self.push_failures = 0;
-                    let saved = self.advance(cursor).await;
+                    let saved = if truncated {
+                        self.gap(cursor).await
+                    } else {
+                        self.advance(cursor).await
+                    };
                     if saved.is_ok() {
-                        self.opened().await;
-                        if truncated {
-                            self.gap().await;
-                        }
+                        self.report_live().await;
                     }
                     saved
                 }
-                Pushed::Event(event) => self.offer(event).await,
+                Pushed::Event(event) => self.offer(event, Some(endpoint)).await,
                 Pushed::Heartbeat { cursor } => self.advance(cursor).await,
                 Pushed::Error(error) => {
-                    tracing::debug!(wait = %self.id(), %error, "an MCP event delivery failed");
+                    tracing::debug!(wait = %self.wait.id, %error, "an MCP event delivery failed");
                     Ok(())
                 }
             };
@@ -277,12 +328,13 @@ impl Watch {
     }
 
     async fn poll(&mut self, descriptor: &Descriptor) -> Ended {
-        let mcp_id = self.wait.status.mcp_id.clone();
         let subscription = subscription(&self.wait.event);
-        let mut opened = false;
+        let mut held = false;
         loop {
-            // A fresh endpoint each time, so a refreshed sign-in applies.
-            let polled = match endpoint(&self.state.mcps, &mcp_id).await {
+            // A fresh endpoint each time, so a new sign-in or configuration
+            // applies.
+            let rejected = std::mem::take(&mut self.rejected);
+            let polled = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
                 Ok(endpoint) => {
                     endpoint
                         .poll(&subscription, descriptor, self.wait.cursor.as_deref())
@@ -292,33 +344,27 @@ impl Watch {
             };
             let polled = match polled {
                 Ok(polled) => polled,
-                Err(failure) => {
-                    return match Ended::from(failure) {
-                        Ended::Broke { reason, .. } => Ended::Broke { reason, opened },
-                        ended => ended,
-                    };
-                }
+                Err(failure) => return self.ended(failure, held),
             };
             for event in polled.events {
-                if let Err(ended) = self.offer(event).await {
+                if let Err(ended) = self.offer(event, None).await {
                     return ended;
                 }
             }
             if polled.cursor.is_none() {
-                return Ended::Refused(format!(
-                    "{} cannot be replayed, so polling it cannot see an event.",
-                    self.wait.event.name
-                ));
+                return Ended::Refused(unreplayable(&self.wait.event.name).message().to_owned());
             }
-            if let Err(ended) = self.advance(polled.cursor).await {
+            let saved = if polled.truncated {
+                self.gap(polled.cursor).await
+            } else {
+                self.advance(polled.cursor).await
+            };
+            if let Err(ended) = saved {
                 return ended;
             }
-            if !opened {
-                opened = true;
-                self.opened().await;
-            }
-            if polled.truncated {
-                self.gap().await;
+            if !held {
+                held = true;
+                self.report_live().await;
             }
             if !polled.has_more {
                 tokio::time::sleep(polled.next_poll).await;
@@ -327,40 +373,47 @@ impl Watch {
     }
 }
 
-/// Keep wait `wait`'s event subscription until the wait settles, stops
-/// watching, or the server refuses the subscription for good, which drops
-/// the event and leaves the wait to its status calls.
+/// Keep `wait`'s event subscription until the wait settles, stops watching,
+/// or the server refuses the subscription for good, which drops the event
+/// and leaves the wait to its status calls.
 pub(super) async fn watch(state: Arc<AppState>, wait: Watched, report: mpsc::Sender<Liveness>) {
     let mut watch = Watch {
         state,
         wait,
         report,
         push_failures: 0,
+        rejected: false,
     };
+    let id = watch.wait.id;
     let mut backoff = MIN_BACKOFF;
     loop {
         let ended = watch.subscribe().await;
-        watch.report(Liveness::Down(watch.id())).await;
+        if matches!(ended, Ended::Reopen) {
+            backoff = MIN_BACKOFF;
+            continue;
+        }
+        watch.report(false).await;
         match ended {
             Ended::Done => return,
             Ended::Refused(reason) => {
-                tracing::warn!(wait = %watch.id(), %reason, "an MCP event wait uses status calls only");
-                if let Err(error) = mcp_waits::drop_event(&watch.state.db, watch.id()).await {
-                    tracing::warn!(wait = %watch.id(), %error, "dropping an MCP event failed");
+                tracing::warn!(wait = %id, %reason, "an MCP event wait uses status calls only");
+                if let Err(error) = mcp_waits::drop_event(&watch.state.db, id).await {
+                    tracing::warn!(wait = %id, %error, "dropping an MCP event failed");
                 }
                 return;
             }
-            Ended::Broke { reason, opened } => {
-                tracing::debug!(wait = %watch.id(), %reason, "an MCP event subscription broke");
-                if opened {
+            Ended::Broke { reason, held } => {
+                tracing::debug!(wait = %id, %reason, "an MCP event subscription broke");
+                if held {
                     backoff = MIN_BACKOFF;
                 }
                 let jitter = Duration::from_millis(
-                    u64::try_from(Uuid::new_v4().as_u128() % 1000).unwrap_or_default(),
+                    u64::try_from(uuid::Uuid::new_v4().as_u128() % 1000).unwrap_or_default(),
                 );
                 tokio::time::sleep(backoff + jitter).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
+            Ended::Reopen => {}
         }
     }
 }
