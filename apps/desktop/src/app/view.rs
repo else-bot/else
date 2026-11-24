@@ -824,7 +824,7 @@ impl ElseApp {
         }
         if let Some(reason) = view
             .and_then(|v| v.conversation.as_ref())
-            .zip(self.refused_retry.as_ref())
+            .zip(self.refused_retries.get(&bot.id))
             .and_then(|(conversation, refused)| refused.reason_in(conversation))
         {
             notices = notices.child(

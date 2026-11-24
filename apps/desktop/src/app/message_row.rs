@@ -603,10 +603,9 @@ pub(super) fn turn_status(
     )
 }
 
-/// A Retry the API refused, such as while the provider is signed out. It
-/// shows only while its turn still offers Retry at the attempt the owner
-/// retried, so a later attempt, from any device, or a newer message
-/// retires it.
+/// A Retry the API refused, such as while the provider is signed out. Its
+/// reason goes stale once the turn moves past that attempt, from any device,
+/// or a newer message takes Retry away.
 pub(super) struct RefusedRetry {
     pub(super) turn: Uuid,
     pub(super) attempt: i64,
