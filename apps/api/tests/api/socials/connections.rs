@@ -435,3 +435,155 @@ async fn a_message_wakes_only_bots_whose_enabled_trigger_matches_it() {
         "paused triggers and the bot's own messages wake nobody"
     );
 }
+
+/// The owner's standing setup: the mail bot passes certain newsletters to a
+/// WhatsApp bot, which posts them to a group once the owner approves.
+#[tokio::test]
+async fn a_task_handed_on_from_an_email_drafts_a_message_only_the_owner_can_release() {
+    let fake = Arc::new(Fake::default());
+    let h = harness(TestApp::builder().social(fake.clone())).await;
+    let app = &h.app;
+    let db = &app.db;
+    let router = app.router.clone();
+    let (status, created) = http(
+        &router,
+        "POST",
+        "/v1/connectors/socials/connections",
+        common::TOKEN,
+        json!({"provider":"telegram","token":"private-owner-bot-token"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    let connection = created["connection"]["id"].as_str().unwrap().to_owned();
+    destinations(db, connection.parse().unwrap()).await;
+    let inbox: Uuid = app.main_bot().await.parse().unwrap();
+    let poster = app.create_bot("Poster").await;
+    let mail = insert_turn(db, inbox, ItemKind::Connector, TurnStatus::Queued, GATE).await;
+    app.scheduler.wake();
+    let (_, mail_grant) = h.started(mail).await;
+    let delegated = tool(
+        app,
+        &mail_grant,
+        "delegate",
+        json!({ "target_bot_id": poster,
+                "task": format!("{GATE_EVERY_ATTEMPT} Post this newsletter to Team."),
+                "title": "Newsletter" }),
+    )
+    .await;
+    assert_eq!(delegated.result["status"], "pending", "{}", delegated.body);
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(mail)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    h.release(mail).await;
+    let (_, grant) = h.started(child).await;
+
+    let listed = social_result(tool(app, &grant, "social_connections", json!({})).await);
+    assert_eq!(
+        listed["connections"][0]["destinations"][0]["id"], "100",
+        "the task can name the chat it drafts for: {listed}"
+    );
+    for (name, args) in [
+        (
+            "ask_owner",
+            json!({ "question": "Post it?", "choices": ["Yes", "No"] }),
+        ),
+        (
+            "request_secret",
+            json!({ "label": "Token", "reason": "Post" }),
+        ),
+        (
+            "social_action",
+            json!({ "connection_id": connection,
+                    "command": { "operation": "history", "destination": "100" } }),
+        ),
+        (
+            "social_connect",
+            json!({ "provider": "telegram", "reason": "Post" }),
+        ),
+        ("mail_accounts", json!({})),
+        (
+            "draft_email",
+            json!({ "from": "a@example.com", "to": ["b@example.com"], "subject": "Hi",
+                    "body": "Hi" }),
+        ),
+        (
+            "computer_run",
+            json!({ "command": "true", "effect": "read" }),
+        ),
+        ("memory_search", json!({ "query": "newsletter" })),
+    ] {
+        let refused = tool(app, &grant, name, args).await;
+        assert!(
+            refused.error,
+            "{name} must stay out of an email task: {}",
+            refused.body
+        );
+    }
+    let unconnected = tool(
+        app,
+        &grant,
+        "draft_message",
+        json!({ "platform": "telegram", "destination": "Team", "body": "Newsletter" }),
+    )
+    .await;
+    assert!(
+        unconnected.error,
+        "without its own tools to send, it drafts only for a connection: {}",
+        unconnected.body
+    );
+    let proposed = social_result(
+        tool(
+            app,
+            &grant,
+            "draft_message",
+            json!({ "platform": "telegram", "account_id": connection, "destination": "100",
+                    "body": "This week's newsletter" }),
+        )
+        .await,
+    );
+    assert_eq!(proposed["status"], "pending", "{proposed}");
+    let draft = proposed["draft"]["draft_id"].as_str().unwrap().to_owned();
+    h.release(child).await;
+    app.wait_turn(child, &["waiting"]).await;
+    let early = tool(app, &grant, "send_draft", json!({ "draft_id": draft })).await;
+    assert!(
+        early.error,
+        "nothing is sent before approval: {}",
+        early.body
+    );
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{poster}/conversation"), None)
+        .await;
+    let card = snapshot.body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == child.to_string())
+        .expect("the task's turn is in its bot's chat")["outgoing_drafts"][0]
+        .clone();
+    assert_eq!(card["status"], "pending", "{card}");
+    assert_eq!(
+        card["from_email"], true,
+        "the card warns that its content and destination came from mail: {card}"
+    );
+
+    let (status, approved) = http(
+        &router,
+        "POST",
+        &format!("/v1/bots/{poster}/outgoing-drafts/{draft}/approve"),
+        common::TOKEN,
+        json!({"version":1}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
+    let grant = h.continued(child, &grant).await;
+    let sent = social_result(tool(app, &grant, "send_draft", json!({ "draft_id": draft })).await);
+    assert_eq!(sent["status"], "sent", "{sent}");
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(*fake.sent_to.lock().unwrap(), vec!["100".to_owned()]);
+}
