@@ -15,6 +15,8 @@ use crate::mcp::events::{
     Subscription, matches,
 };
 use crate::mcp::{Library, PackageId};
+use futures_util::future::BoxFuture;
+use sqlx::SqlitePool;
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 /// The part of [`START_TIMEOUT`] a first poll may take, so push still gets
@@ -207,18 +209,75 @@ impl Watch {
         }
     }
 
-    async fn advance(&mut self, cursor: Option<String>) -> Result<(), Ended> {
+    /// Run `write` inside the package's actor while `by`, the endpoint
+    /// whose response caused it, still matches the package's configuration
+    /// and sign-in. A stale endpoint reopens instead.
+    async fn guarded<R: Send + 'static>(
+        &mut self,
+        by: &Endpoint,
+        write: impl FnOnce(SqlitePool) -> BoxFuture<'static, Result<R, sqlx::Error>> + Send + 'static,
+    ) -> Result<R, Ended> {
+        let Ok(id) = PackageId::try_from(self.wait.mcp_id.clone()) else {
+            return Err(Ended::Refused("The wait names no valid MCP.".into()));
+        };
+        let db = self.state.db.clone();
+        match self
+            .state
+            .mcps
+            .while_current(&id, by, move || write(db))
+            .await
+        {
+            Ok(Some(Ok(written))) => Ok(written),
+            Ok(Some(Err(error))) => Err(Ended::Broke {
+                reason: format!("Saving the event wait failed: {error}"),
+                held: true,
+            }),
+            Ok(None) => Err(Ended::Reopen),
+            Err(error) => Err(self.ended(error.into(), true)),
+        }
+    }
+
+    async fn advance(&mut self, cursor: Option<String>, by: &Endpoint) -> Result<(), Ended> {
         if cursor.is_none() || cursor == self.wait.cursor {
             return Ok(());
         }
-        let change = mcp_waits::advance(&self.state.db, self.wait.id, cursor.as_deref()).await;
-        self.changed(change, cursor)
+        let (wait, saved) = (self.wait.id, cursor.clone());
+        let change = self
+            .guarded(by, move |db| {
+                Box::pin(async move { mcp_waits::advance(&db, wait, saved.as_deref()).await })
+            })
+            .await?;
+        self.changed(Ok(change), cursor)
     }
 
-    async fn gap(&mut self, cursor: Option<String>) -> Result<(), Ended> {
-        let change =
-            mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref(), false).await;
-        self.changed(change, cursor)
+    async fn gap(&mut self, cursor: Option<String>, by: &Endpoint) -> Result<(), Ended> {
+        let (wait, saved) = (self.wait.id, cursor.clone());
+        let change = self
+            .guarded(by, move |db| {
+                Box::pin(
+                    async move { mcp_waits::open_gap(&db, wait, saved.as_deref(), false).await },
+                )
+            })
+            .await?;
+        self.changed(Ok(change), cursor)
+    }
+
+    /// Drop the event after a refusal that came through `by`, unless `by`
+    /// is stale, so an old sign-in cannot turn events off for a new one.
+    async fn refuse(&mut self, by: &Endpoint, reason: String) -> Ended {
+        let wait = self.wait.id;
+        let dropped = self
+            .guarded(by, move |db| {
+                Box::pin(async move { mcp_waits::drop_event(&db, wait).await })
+            })
+            .await;
+        match dropped {
+            Ok(_) => {
+                tracing::warn!(%wait, %reason, "an MCP event wait uses status calls only");
+                Ended::Done
+            }
+            Err(ended) => ended,
+        }
     }
 
     async fn restart(&mut self) -> Ended {
@@ -248,32 +307,18 @@ impl Watch {
     async fn offer(&mut self, event: Occurrence, received: &Endpoint) -> Result<(), Ended> {
         let spec = &self.wait.event;
         if event.name != spec.name || !matches(&event.data, &spec.matching) {
-            return self.advance(event.cursor).await;
+            return self.advance(event.cursor, received).await;
         }
-        let Ok(id) = PackageId::try_from(self.wait.mcp_id.clone()) else {
-            return Err(Ended::Refused("The wait names no valid MCP.".into()));
-        };
-        let (db, wait, raw) = (self.state.db.clone(), self.wait.id, event.raw.to_string());
+        let (wait, raw) = (self.wait.id, event.raw.to_string());
         let settled = self
-            .state
-            .mcps
-            .while_current(&id, received, move || {
+            .guarded(received, move |db| {
                 Box::pin(async move { mcp_waits::settle_on_event(&db, wait, &raw).await })
             })
-            .await;
-        match settled {
-            Ok(Some(Ok(EventChange::Applied(_)))) => {
-                self.state.scheduler.wake();
-                Err(Ended::Done)
-            }
-            Ok(Some(Ok(EventChange::Ended))) => Err(Ended::Done),
-            Ok(None) => Err(Ended::Reopen),
-            Ok(Some(Err(error))) => Err(Ended::Broke {
-                reason: format!("Settling the wait failed: {error}"),
-                held: true,
-            }),
-            Err(error) => Err(self.ended(error.into(), true)),
+            .await?;
+        if matches!(settled, EventChange::Applied(_)) {
+            self.state.scheduler.wake();
         }
+        Err(Ended::Done)
     }
 
     async fn subscribe(&mut self) -> Ended {
@@ -282,31 +327,47 @@ impl Watch {
             Ok(endpoint) => endpoint,
             Err(failure) => return self.ended(failure, false),
         };
-        let descriptor = match descriptor(&endpoint, &self.wait.mcp_id, &self.wait.event.name).await
-        {
+        let described = tokio::select! {
+            biased;
+            () = endpoint.revoked().cancelled() => return Ended::Reopen,
+            described = descriptor(&endpoint, &self.wait.mcp_id, &self.wait.event.name) => described,
+        };
+        let descriptor = match described {
             Ok(descriptor) => descriptor,
-            Err(failure) => return self.ended(failure, false),
+            Err(failure) => {
+                return match self.ended(failure, false) {
+                    Ended::Refused(reason) => self.refuse(&endpoint, reason).await,
+                    ended => ended,
+                };
+            }
         };
         let push = descriptor.delivery.contains(&Delivery::Push);
         let poll = descriptor.delivery.contains(&Delivery::Poll);
-        if !push || (poll && self.push_failures >= PUSH_ATTEMPTS) {
-            return self.poll(&descriptor).await;
-        }
-        match self.push(&endpoint, &descriptor).await {
-            Ended::Refused(reason) if poll => {
-                self.push_failures = PUSH_ATTEMPTS;
-                Ended::Broke { reason, held: true }
+        let ended = if !push || (poll && self.push_failures >= PUSH_ATTEMPTS) {
+            self.poll(&descriptor).await
+        } else {
+            match self.push(&endpoint, &descriptor).await {
+                Ended::Refused(reason) if poll => {
+                    self.push_failures = PUSH_ATTEMPTS;
+                    return Ended::Broke { reason, held: true };
+                }
+                ended => ended,
             }
+        };
+        match ended {
+            Ended::Refused(reason) => self.refuse(&endpoint, reason).await,
             ended => ended,
         }
     }
 
     async fn push(&mut self, endpoint: &Endpoint, descriptor: &Descriptor) -> Ended {
         let subscription = subscription(&self.wait.event);
-        let mut stream = match endpoint
-            .stream(&subscription, descriptor, self.wait.cursor.as_deref())
-            .await
-        {
+        let opened = tokio::select! {
+            biased;
+            () = endpoint.revoked().cancelled() => return Ended::Reopen,
+            opened = endpoint.stream(&subscription, descriptor, self.wait.cursor.as_deref()) => opened,
+        };
+        let mut stream = match opened {
             Ok(stream) => stream,
             Err(failure) => {
                 self.push_failures += 1;
@@ -354,9 +415,9 @@ impl Watch {
                 } => {
                     heartbeat = granted;
                     let saved = if truncated {
-                        self.gap(cursor).await
+                        self.gap(cursor, endpoint).await
                     } else {
-                        self.advance(cursor).await
+                        self.advance(cursor, endpoint).await
                     };
                     if saved.is_ok() {
                         self.report_live().await;
@@ -364,7 +425,7 @@ impl Watch {
                     saved
                 }
                 Pushed::Event(event) => self.offer(event, endpoint).await,
-                Pushed::Heartbeat { cursor } => self.advance(cursor).await,
+                Pushed::Heartbeat { cursor } => self.advance(cursor, endpoint).await,
                 Pushed::Error(error) => {
                     tracing::debug!(wait = %self.wait.id, %error, "an MCP event delivery failed");
                     Ok(())
@@ -385,9 +446,11 @@ impl Watch {
                 Ok(endpoint) => endpoint,
                 Err(failure) => return self.ended(failure, held),
             };
-            let polled = endpoint
-                .poll(&subscription, descriptor, self.wait.cursor.as_deref())
-                .await;
+            let polled = tokio::select! {
+                biased;
+                () = endpoint.revoked().cancelled() => return Ended::Reopen,
+                polled = endpoint.poll(&subscription, descriptor, self.wait.cursor.as_deref()) => polled,
+            };
             let polled = match polled {
                 Ok(polled) => polled,
                 Err(failure) => return self.ended(failure, held),
@@ -401,9 +464,9 @@ impl Watch {
                 return Ended::Refused(unreplayable(&self.wait.event.name).message().to_owned());
             }
             let saved = if polled.truncated {
-                self.gap(polled.cursor).await
+                self.gap(polled.cursor, &endpoint).await
             } else {
-                self.advance(polled.cursor).await
+                self.advance(polled.cursor, &endpoint).await
             };
             if let Err(ended) = saved {
                 return ended;
@@ -413,7 +476,11 @@ impl Watch {
                 self.report_live().await;
             }
             if !polled.has_more {
-                tokio::time::sleep(polled.next_poll).await;
+                tokio::select! {
+                    biased;
+                    () = endpoint.revoked().cancelled() => return Ended::Reopen,
+                    () = tokio::time::sleep(polled.next_poll) => {}
+                }
             }
         }
     }

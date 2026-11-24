@@ -33,6 +33,8 @@ struct Server {
     /// Answer status calls with an error.
     fail_status: AtomicBool,
     polls: AtomicUsize,
+    /// The next poll waits for this, then answers Forbidden.
+    stalled_poll: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// End every stream with `notifications/events/terminated`.
     terminate: AtomicBool,
     /// Streams resuming from a cursor to end as if the event type's schema
@@ -60,6 +62,7 @@ impl Server {
             drop_after_event: AtomicBool::new(false),
             fail_status: AtomicBool::new(false),
             polls: AtomicUsize::new(0),
+            stalled_poll: Mutex::new(None),
             terminate: AtomicBool::new(false),
             schema_changes: AtomicUsize::new(0),
             gap: AtomicBool::new(false),
@@ -186,7 +189,14 @@ async fn handle(
             }] }),
         ),
         "events/poll" => {
+            let stalled = server.stalled_poll.lock().unwrap().take();
             server.polls.fetch_add(1, Ordering::SeqCst);
+            if let Some(release) = stalled {
+                let _ = release.await;
+                return axum::Json(json!({ "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32024, "message": "Forbidden" } }))
+                .into_response();
+            }
             server.asked.lock().unwrap().push(params["cursor"].clone());
             let log = server.log.lock().unwrap().clone();
             let from = server.position(&params["cursor"]).min(log.len());
@@ -681,6 +691,7 @@ async fn a_changed_event_schema_restarts_from_the_head_and_checks_the_status() {
     let app = &h.app;
     until_count("the restart checks the status", &server.status_calls, 2).await;
     until_event_status(app, turn, "watching").await;
+    until_count("the stream reopens", &server.streams_opened, 4).await;
     let asked = server.asked.lock().unwrap().clone();
     assert_eq!(
         asked,
@@ -730,4 +741,45 @@ async fn a_status_check_chosen_before_a_gap_leaves_the_gap_due() {
         (status.as_deref(), cursor.as_deref(), due),
         (Some("gap"), Some("9"), true)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_from_before_a_sign_out_keeps_the_event() {
+    let server = Server::new(true, &["poll"]);
+    let (h, main, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("the watcher polls", &server.polls, 2).await;
+    let (release, stalled) = tokio::sync::oneshot::channel();
+    *server.stalled_poll.lock().unwrap() = Some(stalled);
+    common::until(
+        "a poll stalls",
+        common::poll(|| async { server.stalled_poll.lock().unwrap().is_none().then_some(()) }),
+    )
+    .await;
+    let signed_out = app
+        .owner(
+            "DELETE",
+            &format!("/v1/bots/{main}/mcp/t3-code/connection"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        signed_out.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        signed_out.body
+    );
+    let _ = release.send(());
+    common::never_polled(
+        "the old sign-in's refusal drops the event",
+        Duration::from_secs(2),
+        || async {
+            let status = event_row(app, turn).await.1;
+            (status.as_deref() != Some("watching")).then_some(status)
+        },
+    )
+    .await;
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
 }

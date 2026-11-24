@@ -589,15 +589,52 @@ fn annotated(
     Some(())
 }
 
+/// Every `x-mcp-header` annotation in `schema`, wherever a subschema may
+/// sit, so one outside a chain of properties can be found.
 fn annotations(schema: &Value) -> usize {
-    match schema {
-        Value::Object(map) => {
-            usize::from(map.contains_key("x-mcp-header"))
-                + map.values().map(annotations).sum::<usize>()
-        }
-        Value::Array(items) => items.iter().map(annotations).sum(),
-        _ => 0,
-    }
+    const MAPS: [&str; 5] = [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    ];
+    const SCHEMAS: [&str; 15] = [
+        "items",
+        "prefixItems",
+        "additionalItems",
+        "additionalProperties",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "allOf",
+        "anyOf",
+        "oneOf",
+    ];
+    let Some(map) = schema.as_object() else {
+        return 0;
+    };
+    let nested = |value: &Value| match value {
+        Value::Array(schemas) => schemas.iter().map(annotations).sum(),
+        schema => annotations(schema),
+    };
+    usize::from(map.contains_key("x-mcp-header"))
+        + MAPS
+            .iter()
+            .filter_map(|key| map.get(*key)?.as_object())
+            .flat_map(|schemas| schemas.values())
+            .map(annotations)
+            .sum::<usize>()
+        + SCHEMAS
+            .iter()
+            .filter_map(|key| map.get(*key))
+            .map(nested)
+            .sum::<usize>()
 }
 
 /// An RFC 9110 token character, the only kind a header name may hold.
@@ -650,10 +687,12 @@ fn too_large() -> Failure {
     Failure::Transient("An MCP stream message exceeds the 2 MiB limit.".into())
 }
 
-/// The JSON-RPC messages of an SSE body, each at most 2 MiB.
+/// The JSON-RPC messages of an SSE body. Each line and each message is at
+/// most 2 MiB, checked before it is copied.
 struct Frames {
     body: BoxStream<'static, reqwest::Result<axum::body::Bytes>>,
-    buffer: Vec<u8>,
+    rest: axum::body::Bytes,
+    line: Vec<u8>,
     data: String,
 }
 
@@ -661,53 +700,63 @@ impl Frames {
     fn new(response: reqwest::Response) -> Self {
         Self {
             body: response.bytes_stream().boxed(),
-            buffer: Vec::new(),
+            rest: axum::body::Bytes::new(),
+            line: Vec::new(),
             data: String::new(),
         }
     }
 
     async fn next(&mut self) -> Result<Option<Value>, Failure> {
         loop {
-            while let Some(end) = self.buffer.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = self.buffer.drain(..=end).collect();
-                let line = String::from_utf8_lossy(&line);
-                let line = line.trim_end_matches(['\n', '\r']);
-                if line.is_empty() {
-                    let data = std::mem::take(&mut self.data);
-                    if data.is_empty() {
-                        continue;
-                    }
-                    return serde_json::from_str(&data).map(Some).map_err(|_| {
-                        Failure::Transient("The MCP stream sent a message that is not JSON.".into())
-                    });
+            while !self.rest.is_empty() {
+                let end = self.rest.iter().position(|&b| b == b'\n');
+                let take = end.map_or(self.rest.len(), |end| end + 1);
+                if self.line.len() + take > MAX_BYTES {
+                    return Err(too_large());
                 }
-                if let Some(value) = line.strip_prefix("data:") {
-                    let value = value.strip_prefix(' ').unwrap_or(value);
-                    if self.data.len() + value.len() + 1 > MAX_BYTES {
-                        return Err(too_large());
-                    }
-                    if !self.data.is_empty() {
-                        self.data.push('\n');
-                    }
-                    self.data.push_str(value);
+                self.line.extend_from_slice(&self.rest.split_to(take));
+                if end.is_none() {
+                    break;
                 }
-            }
-            if self.buffer.len() + self.data.len() > MAX_BYTES {
-                return Err(too_large());
+                let line = std::mem::take(&mut self.line);
+                if let Some(message) = self.ended_line(&line)? {
+                    return Ok(Some(message));
+                }
             }
             match self.body.next().await {
-                Some(Ok(chunk)) => {
-                    if self.buffer.len() + self.data.len() + chunk.len() > MAX_BYTES {
-                        return Err(too_large());
-                    }
-                    self.buffer.extend_from_slice(&chunk);
-                }
+                Some(Ok(chunk)) => self.rest = chunk,
                 Some(Err(_)) => {
                     return Err(Failure::Transient("The MCP stream broke off.".into()));
                 }
                 None => return Ok(None),
             }
         }
+    }
+
+    /// A message when `line` is the blank line that ends one.
+    fn ended_line(&mut self, line: &[u8]) -> Result<Option<Value>, Failure> {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.is_empty() {
+            let data = std::mem::take(&mut self.data);
+            if data.is_empty() {
+                return Ok(None);
+            }
+            return serde_json::from_str(&data).map(Some).map_err(|_| {
+                Failure::Transient("The MCP stream sent a message that is not JSON.".into())
+            });
+        }
+        if let Some(value) = line.strip_prefix("data:") {
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            if self.data.len() + value.len() + 1 > MAX_BYTES {
+                return Err(too_large());
+            }
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(value);
+        }
+        Ok(None)
     }
 }
 
@@ -831,6 +880,10 @@ mod tests {
         assert!(with(json!({ "a": { "type": "array", "x-mcp-header": "List" } })).is_none());
         assert!(with(json!({ "a": { "type": "number", "x-mcp-header": "Ratio" } })).is_none());
         assert!(
+            with(json!({ "x-mcp-header": { "type": "string" } })).is_some(),
+            "a property may be named x-mcp-header"
+        );
+        assert!(
             with(json!({ "a": { "type": "array",
                                 "items": { "type": "string", "x-mcp-header": "Item" } } }))
             .is_none()
@@ -864,6 +917,25 @@ mod tests {
             "code": -32026, "message": "Unsupported", "data": { "reason": "schema_changed" },
         }));
         assert!(matches!(changed, Failure::SchemaChanged), "{changed:?}");
+    }
+
+    #[tokio::test]
+    async fn two_messages_just_under_the_limit_both_arrive() {
+        let near = "x".repeat(MAX_BYTES - 16);
+        let first = format!("data: \"{near}\"");
+        let body = vec![
+            Ok(axum::body::Bytes::from(first)),
+            Ok(axum::body::Bytes::from("\n\ndata: 2\n\n")),
+        ];
+        let mut frames = Frames {
+            body: futures_util::stream::iter(body).boxed(),
+            rest: axum::body::Bytes::new(),
+            line: Vec::new(),
+            data: String::new(),
+        };
+        assert_eq!(frames.next().await.unwrap(), Some(Value::String(near)));
+        assert_eq!(frames.next().await.unwrap(), Some(json!(2)));
+        assert_eq!(frames.next().await.unwrap(), None);
     }
 
     #[test]
