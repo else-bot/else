@@ -285,6 +285,15 @@ pub(super) async fn draft_email(state: &AppState, grant: &Grant, args: &Value) -
 }
 
 pub(super) async fn draft_message(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    // A draft without a connection is sent with the bot's own tools after
+    // start_draft_send, which a turn that cannot ask the owner lacks.
+    if !grant.allows(Tool::AskOwner) && args.get("account_id").is_none_or(Value::is_null) {
+        return Err(Refusal::text(
+            "INVALID_DRAFT: this task sends only through a native connection. Pass account_id \
+             and a destination from social_connections.",
+        )
+        .logged("rejected INVALID_DRAFT"));
+    }
     let content = social_destination(state, grant, Message::parse(args)).await?;
     draft(state, grant, args, content).await
 }
@@ -590,8 +599,8 @@ pub(super) async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolR
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
     let channels = Channels {
-        mail: grant.allows(Tool::Mail),
-        social: grant.allows(Tool::Social),
+        mail: grant.allows(Tool::Mail) && grant.allows(Tool::DraftEmail),
+        social: grant.allows(Tool::DraftMessage),
     };
     let row = send::send_connected(
         &state.db,

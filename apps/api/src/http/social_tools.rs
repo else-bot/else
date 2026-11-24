@@ -5,7 +5,7 @@ use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
     app::questions::{ApprovalKind, Spec},
-    grants::Grant,
+    grants::{Grant, Tool},
     socials::{store, types::*},
 };
 use else_wire::socials as wire;
@@ -136,6 +136,8 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let triggers = store::triggers(&mut *s.db.acquire().await.map_err(Error::from)?, g.bot_id)
         .await
         .map_err(Error::from)?;
+    // A grant that may only draft sees where it may send, nothing more.
+    let drafts_only = !g.allows(Tool::Social);
     let mut list = Vec::new();
     for c in store::connections(&s.db).await? {
         let access = {
@@ -164,6 +166,14 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
                 })
             })
             .collect::<Vec<_>>();
+        if drafts_only {
+            list.push(json!({
+                "connection": wire::Connection::from(&c),
+                "destinations": destinations,
+                "sending": "draft_message with account_id then exact approved send_draft"
+            }));
+            continue;
+        }
         let no_chats = destinations.is_empty().then_some(
             "No chats seen yet. A chat appears once it sends the bot a message. Use a public Telegram channel or group by its @username or t.me link as the destination; it is then listed with can_send, which is true when the bot may post there.",
         );

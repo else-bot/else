@@ -380,6 +380,10 @@ pub struct OutgoingDraft {
     /// What "Approve always" would cover; none for an email or an X reply.
     #[serde(default)]
     pub kind: Option<DraftKind>,
+    /// Drafted by a task handed on from an email: its content and
+    /// destination came from untrusted mail.
+    #[serde(default)]
+    pub from_email: bool,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
@@ -393,6 +397,15 @@ pub struct DraftResponse {
 }
 
 impl OutgoingDraft {
+    /// The warning its card shows when untrusted mail chose its content and
+    /// destination.
+    pub fn provenance_note(&self) -> Option<&'static str> {
+        self.from_email.then_some(
+            "Drafted for a task handed on from an email. Its text and destination came from \
+             that mail, so check both before you approve it.",
+        )
+    }
+
     /// Open on its card for the owner to edit, approve, or discard. A draft
     /// on a channel this build does not know stays closed: its card cannot
     /// show what the owner would approve.
@@ -531,6 +544,7 @@ mod draft_card_tests {
             delivery: None,
             superseded_by: None,
             kind: None,
+            from_email: false,
             created_at: None,
             updated_at: Utc::now(),
             settled_at: None,

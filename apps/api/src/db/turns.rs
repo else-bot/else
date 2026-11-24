@@ -1017,6 +1017,25 @@ pub async fn may_ask_owner(
         ))
 }
 
+/// Whether `caller` may open a draft card: wherever it [`may_ask_owner`],
+/// and in a task an email turn handed on, since the owner reads and
+/// approves the draft before anything is sent.
+pub async fn may_draft(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    caller: &Caller,
+) -> Result<bool, sqlx::Error> {
+    use crate::app::providers::Origin;
+    Ok(caller.owner_conversation
+        || matches!(
+            super::delegations::origin(conn, turn_id).await?,
+            Origin::OwnerRequest
+                | Origin::RoutineRun
+                | Origin::WebhookWake
+                | Origin::ConnectorEvent
+        ))
+}
+
 /// SQL condition: attempt `attempt` of turn `turn` (SQL expressions)
 /// delegated, waits on a job, asked for a secret, or asked the owner. It
 /// must end and asks nothing more.

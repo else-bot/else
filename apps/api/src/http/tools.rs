@@ -34,8 +34,9 @@ fn revoked() -> ApiError {
     )
 }
 
-pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result<(), ApiError> {
-    if !grant.allows(tool) {
+/// Admit a call that any one of `needs` allows on a live, unparked turn.
+pub(crate) async fn check(state: &AppState, grant: &Grant, needs: &[Tool]) -> Result<(), ApiError> {
+    if !grant.allows_any(needs) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "tool_not_allowed",
@@ -76,7 +77,7 @@ async fn history(
 ) -> Result<Json<Items>, ApiError> {
     let Query(query) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use before_seq and limit only."))?;
-    check(&state, &grant, Tool::ReadHistory).await?;
+    check(&state, &grant, &[Tool::ReadHistory]).await?;
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
@@ -98,7 +99,7 @@ async fn item(
     Extension(grant): Extension<Grant>,
     ApiPath(item_id): ApiPath<Uuid>,
 ) -> Result<Json<ItemEnvelope>, ApiError> {
-    check(&state, &grant, Tool::ReadHistory).await?;
+    check(&state, &grant, &[Tool::ReadHistory]).await?;
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.id = ?2 AND {GRANT_ITEMS} AND i.kind <> 'routine'"

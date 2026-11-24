@@ -516,8 +516,9 @@ async fn a_task_handed_on_from_an_email_drafts_a_message_only_the_owner_can_rele
         ("memory_search", json!({ "query": "newsletter" })),
     ] {
         let refused = tool(app, &grant, name, args).await;
-        assert!(
-            refused.error,
+        assert_eq!(
+            (refused.status, refused.body["error"]["code"].as_str()),
+            (axum::http::StatusCode::FORBIDDEN, Some("tool_not_allowed")),
             "{name} must stay out of an email task: {}",
             refused.body
         );
@@ -546,14 +547,15 @@ async fn a_task_handed_on_from_an_email_drafts_a_message_only_the_owner_can_rele
     );
     assert_eq!(proposed["status"], "pending", "{proposed}");
     let draft = proposed["draft"]["draft_id"].as_str().unwrap().to_owned();
-    h.release(child).await;
-    app.wait_turn(child, &["waiting"]).await;
     let early = tool(app, &grant, "send_draft", json!({ "draft_id": draft })).await;
-    assert!(
-        early.error,
-        "nothing is sent before approval: {}",
+    assert_eq!(
+        (early.status, early.body["error"]["code"].as_str()),
+        (axum::http::StatusCode::CONFLICT, Some("attempt_parked")),
+        "the attempt waits on the owner and sends nothing: {}",
         early.body
     );
+    h.release(child).await;
+    app.wait_turn(child, &["waiting"]).await;
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
 
     let snapshot = app

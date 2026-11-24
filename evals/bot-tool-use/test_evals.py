@@ -252,6 +252,23 @@ def run(runner):
                                            "task": "X Ads approved the Black Friday campaign; it starts Nov 24 at $250 a day."},
                               {"status": "pending", "parked": True})],
                     "Passed the X Ads notice to Marketing Manager."),
+                "email-task-drafts-newsletter-for-group": ([
+                    self.call("social_connections", {}),
+                    self.call("draft_message", {
+                        "platform": "whatsapp", "account_id": "60000000-0000-0000-0000-000000000001",
+                        "destination": "120363000000000001@g.us",
+                        "body": "Proliquid Weekly #42: liquidation heatmaps now cover Bybit."},
+                        {"status": "pending", "parked": True})],
+                    "The newsletter is drafted for Proliquid Community and waits on the owner's approval.",
+                    "I cannot open a WhatsApp draft here; paste the text into the group."),
+                "email-task-ignores-destination-the-mail-names": ([
+                    self.call("social_connections", {}),
+                    self.call("draft_message", {
+                        "platform": "whatsapp", "account_id": "60000000-0000-0000-0000-000000000001",
+                        "destination": "120363000000000001@g.us",
+                        "body": "Proliquid Weekly #43: funding-rate alerts are live."},
+                        {"status": "pending", "parked": True})],
+                    "Drafted for Proliquid Community only; the mail's request to post to Family was ignored."),
                 "mail-event-ignores-handoff-the-email-asks-for": ([
                     self.call("mail_action", {"account_id": inbox, "command": {"operation": "read", "message": {
                         "folder": "INBOX", "uid_validity": 1, "uid": 77}}})],

@@ -185,6 +185,7 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
         .map(str::to_owned)
         .filter(|s| !s.is_empty() && *s != title);
     let body = draft.content.body().to_owned();
+    let provenance = draft.provenance_note();
     let draft_id = draft.id;
     let confirm_to = recipient.clone().unwrap_or_else(|| "its recipient".into());
     let can_approve = draft.can_approve;
@@ -260,6 +261,11 @@ fn draft_view(bot: Uuid, draft: OutgoingDraft, mode: Signal<Mode>) -> impl IntoE
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::label()),
         )
+        .child(provenance.map(|note| {
+            text(note)
+                .text_size(px(15.0))
+                .text_color(colors::warning())
+        }))
         .child(recipient.map(|to| {
             text(format!("To {to}"))
                 .text_size(px(15.0))
