@@ -107,12 +107,20 @@ async fn head(
 ) -> Result<Option<String>, Failure> {
     let endpoint = endpoint(library, mcp_id, rejected).await?;
     let descriptor = descriptor(&endpoint, mcp_id, &event.name).await?;
+    head_on(&endpoint, &descriptor, event).await
+}
+
+async fn head_on(
+    endpoint: &Endpoint,
+    descriptor: &Descriptor,
+    event: &EventSpec,
+) -> Result<Option<String>, Failure> {
     let subscription = subscription(event);
     let push = descriptor.delivery.contains(&Delivery::Push);
     if descriptor.delivery.contains(&Delivery::Poll) {
         let polled = tokio::time::timeout(
             START_POLL_TIMEOUT,
-            endpoint.poll(&subscription, &descriptor, None),
+            endpoint.poll(&subscription, descriptor, None),
         )
         .await
         .unwrap_or_else(|_| Err(Failure::Transient("The first poll timed out.".into())));
@@ -128,7 +136,7 @@ async fn head(
             _ => {}
         }
     }
-    let mut stream = endpoint.stream(&subscription, &descriptor, None).await?;
+    let mut stream = endpoint.stream(&subscription, descriptor, None).await?;
     loop {
         if let Pushed::Active { cursor, .. } = stream.next().await? {
             return Ok(cursor);
@@ -233,7 +241,17 @@ impl Watch {
                 held: true,
             }),
             Ok(None) => Err(Ended::Reopen),
-            Err(error) => Err(self.ended(error.into(), true)),
+            Err(error) => Err(self.unavailable(error.into())),
+        }
+    }
+
+    /// The package could not be reached: it may be paused, replaced or
+    /// signing in, so try again rather than drop the event.
+    fn unavailable(&mut self, failure: Failure) -> Ended {
+        self.rejected |= matches!(failure, Failure::Unauthorized);
+        Ended::Broke {
+            reason: failure.message().to_owned(),
+            held: false,
         }
     }
 
@@ -280,24 +298,39 @@ impl Watch {
         }
     }
 
-    async fn restart(&mut self) -> Ended {
-        let started = start(&self.state.mcps, &self.wait.mcp_id, &self.wait.event).await;
+    /// The event type's schema changed: rediscover it, take the server's
+    /// position now, and open a gap for what was skipped, all through
+    /// `endpoint`.
+    async fn restart(&mut self, endpoint: &Endpoint) -> Ended {
+        let restarting = async {
+            let descriptor = descriptor(endpoint, &self.wait.mcp_id, &self.wait.event.name).await?;
+            head_on(endpoint, &descriptor, &self.wait.event).await
+        };
+        let started = tokio::select! {
+            biased;
+            () = endpoint.revoked().cancelled() => return Ended::Reopen,
+            started = tokio::time::timeout(START_TIMEOUT, restarting) => started
+                .unwrap_or_else(|_| Err(Failure::Transient("Subscribing timed out.".into()))),
+        };
         let cursor = match started {
             Ok(cursor) => cursor,
             Err(failure) => return self.ended(failure, false),
         };
-        let change =
-            mcp_waits::open_gap(&self.state.db, self.wait.id, cursor.as_deref(), true).await;
+        let (wait, saved) = (self.wait.id, cursor.clone());
+        let change = self
+            .guarded(endpoint, move |db| {
+                Box::pin(
+                    async move { mcp_waits::open_gap(&db, wait, saved.as_deref(), true).await },
+                )
+            })
+            .await;
         match change {
             Ok(EventChange::Applied(_)) => {
                 self.wait.cursor = cursor;
                 Ended::Reopen
             }
             Ok(EventChange::Ended) => Ended::Done,
-            Err(error) => Ended::Broke {
-                reason: format!("Saving the event position failed: {error}"),
-                held: false,
-            },
+            Err(ended) => ended,
         }
     }
 
@@ -325,7 +358,7 @@ impl Watch {
         let rejected = std::mem::take(&mut self.rejected);
         let endpoint = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
             Ok(endpoint) => endpoint,
-            Err(failure) => return self.ended(failure, false),
+            Err(failure) => return self.unavailable(failure),
         };
         let described = tokio::select! {
             biased;
@@ -344,7 +377,7 @@ impl Watch {
         let push = descriptor.delivery.contains(&Delivery::Push);
         let poll = descriptor.delivery.contains(&Delivery::Poll);
         let ended = if !push || (poll && self.push_failures >= PUSH_ATTEMPTS) {
-            self.poll(&descriptor).await
+            self.poll(&endpoint, &descriptor).await
         } else {
             match self.push(&endpoint, &descriptor).await {
                 Ended::Refused(reason) if poll => {
@@ -356,6 +389,7 @@ impl Watch {
         };
         match ended {
             Ended::Refused(reason) => self.refuse(&endpoint, reason).await,
+            Ended::Restart => self.restart(&endpoint).await,
             ended => ended,
         }
     }
@@ -437,15 +471,10 @@ impl Watch {
         }
     }
 
-    async fn poll(&mut self, descriptor: &Descriptor) -> Ended {
+    async fn poll(&mut self, endpoint: &Endpoint, descriptor: &Descriptor) -> Ended {
         let subscription = subscription(&self.wait.event);
         let mut held = false;
         loop {
-            let rejected = std::mem::take(&mut self.rejected);
-            let endpoint = match endpoint(&self.state.mcps, &self.wait.mcp_id, rejected).await {
-                Ok(endpoint) => endpoint,
-                Err(failure) => return self.ended(failure, held),
-            };
             let polled = tokio::select! {
                 biased;
                 () = endpoint.revoked().cancelled() => return Ended::Reopen,
@@ -456,7 +485,7 @@ impl Watch {
                 Err(failure) => return self.ended(failure, held),
             };
             for event in polled.events {
-                if let Err(ended) = self.offer(event, &endpoint).await {
+                if let Err(ended) = self.offer(event, endpoint).await {
                     return ended;
                 }
             }
@@ -464,9 +493,9 @@ impl Watch {
                 return Ended::Refused(unreplayable(&self.wait.event.name).message().to_owned());
             }
             let saved = if polled.truncated {
-                self.gap(polled.cursor, &endpoint).await
+                self.gap(polled.cursor, endpoint).await
             } else {
-                self.advance(polled.cursor, &endpoint).await
+                self.advance(polled.cursor, endpoint).await
             };
             if let Err(ended) = saved {
                 return ended;
@@ -500,11 +529,8 @@ pub(super) async fn watch(state: Arc<AppState>, wait: Watched, report: mpsc::Sen
     let id = watch.wait.id;
     let mut backoff = MIN_BACKOFF;
     loop {
-        let mut ended = watch.subscribe().await;
+        let ended = watch.subscribe().await;
         watch.report(false).await;
-        if matches!(ended, Ended::Restart) {
-            ended = watch.restart().await;
-        }
         match ended {
             Ended::Done => return,
             Ended::Refused(reason) => {

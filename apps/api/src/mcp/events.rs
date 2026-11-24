@@ -599,8 +599,9 @@ fn annotations(schema: &Value) -> usize {
         "definitions",
         "dependentSchemas",
     ];
-    const SCHEMAS: [&str; 15] = [
+    const SCHEMAS: [&str; 16] = [
         "items",
+        "contentSchema",
         "prefixItems",
         "additionalItems",
         "additionalProperties",
@@ -882,6 +883,11 @@ mod tests {
         assert!(
             with(json!({ "x-mcp-header": { "type": "string" } })).is_some(),
             "a property may be named x-mcp-header"
+        );
+        assert!(
+            with(json!({ "a": { "type": "string",
+                                "contentSchema": { "x-mcp-header": "Inner" } } }))
+            .is_none()
         );
         assert!(
             with(json!({ "a": { "type": "array",
