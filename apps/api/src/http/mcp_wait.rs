@@ -1,15 +1,19 @@
 //! `mcp_wait`: park a request on a long-running job in an installed MCP,
-//! and the watcher that repeats its status call until the job stops.
+//! and the watcher that repeats its status call until the job stops, or
+//! wakes on an MCP event that says it did.
+
+mod events;
 
 use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -17,27 +21,32 @@ use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
 use crate::app::questions::{ApprovalKind, Effect};
-use crate::db::mcp_waits::{self, Check, CreateError, Due, Spec};
+use crate::db::mcp_waits::{self, Check, CreateError, Due, EventSpec, Spec};
 use crate::grants::Grant;
 use crate::http::waits::{Next, waited};
 use crate::mcp::{Error, Library, PackageId};
+use uuid::Uuid;
 
 const NAME: &str = ToolId::McpWait.def().name;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const CONCURRENT_CHECKS: usize = 4;
+/// Event subscriptions held at once; other event waits use status calls.
+const MAX_SUBSCRIPTIONS: usize = 32;
+const MAX_MATCHES: usize = 8;
 
 pub fn schema() -> Value {
     json!({
-        "description": "Park until a job you started through mcp_request stops, instead of polling or \
-            blocking (such as T3 Code's t3_thread_wait): name the MCP's read-only status tool \
-            (such as task_status) and arguments, a JSON pointer to the status, and the values \
-            meaning it still runs. If still running, this parks and else.bot rechecks for you, \
-            in delegated tasks too. Other tools fail NOT_REPEATABLE.",
+        "description": "Park until a job you started through mcp_request stops; never poll or block \
+            (such as t3_thread_wait). Name the MCP's read-only status tool (such as task_status), \
+            its arguments, a JSON pointer to the status and the values meaning it still runs. \
+            Call events/list first and pass an event meaning the job stopped, such as \
+            thread.run_settled. Works in delegated tasks. Other tools fail NOT_REPEATABLE.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+                "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                        "description": "The installed MCP's id, such as t3-code; not a name for the wait." },
                 "tool": { "type": "string", "minLength": 1, "maxLength": 200,
                           "description": "The MCP's read-only status tool, such as task_status." },
                 "arguments": { "type": "object",
@@ -59,6 +68,21 @@ pub fn schema() -> Value {
                 "timeout_minutes": { "type": "integer", "minimum": 1,
                                      "maximum": mcp_waits::MAX_TIMEOUT_MINUTES,
                                      "description": "When to stop waiting; default 240." },
+                "event": {
+                    "type": "object",
+                    "description": "An event type from mcp_request events/list that means the job \
+                        stopped, such as T3 Code's thread.run_settled. else.bot wakes on it; the \
+                        status tool stays the fallback.",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+                        "arguments": { "type": "object",
+                                       "description": "Subscription arguments per the event's inputSchema, such as {\"threadIds\":[\"...\"]}." },
+                        "match": { "type": "object", "maxProperties": MAX_MATCHES,
+                                   "description": "JSON pointers into the event's data and the values they must equal, such as {\"/threadId\":\"...\"}." },
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false,
+                },
             },
             "required": ["id", "tool", "status_pointer", "running_values", "effect", "purpose"],
             "additionalProperties": false,
@@ -79,12 +103,22 @@ struct Args {
     purpose: String,
     interval_seconds: Option<u32>,
     timeout_minutes: Option<u32>,
+    event: Option<EventArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventArgs {
+    name: String,
+    arguments: Option<Value>,
+    #[serde(rename = "match")]
+    matching: Option<serde_json::Map<String, Value>>,
 }
 
 /// The spec, and the approval its first call needs, if any.
 fn parse(args: &Value) -> Result<(Spec, Option<ApprovalKind>), String> {
     let args: Args = serde_json::from_value(args.clone())
-        .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds and timeout_minutes.".to_owned())?;
+        .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds, timeout_minutes and event.".to_owned())?;
     let approval = args.effect.approval();
     let text = |s: &str, max: usize| !s.trim().is_empty() && s.len() <= max && !s.contains('\0');
     if !text(&args.tool, 200) {
@@ -118,6 +152,33 @@ fn parse(args: &Value) -> Result<(Spec, Option<ApprovalKind>), String> {
     if !(1..=mcp_waits::MAX_TIMEOUT_MINUTES).contains(&timeout_minutes) {
         return Err("timeout_minutes is 1 to 1440.".into());
     }
+    let event = match args.event {
+        None => None,
+        Some(event) => {
+            if !text(&event.name, 200) {
+                return Err("event.name is an event type from events/list.".into());
+            }
+            let arguments = event.arguments.unwrap_or_else(|| json!({}));
+            if !arguments.is_object() {
+                return Err("event.arguments is an object.".into());
+            }
+            let matching = event.matching.unwrap_or_default();
+            if matching.len() > MAX_MATCHES
+                || matching
+                    .keys()
+                    .any(|p| !(p.is_empty() || p.starts_with('/')) || p.len() > 200)
+            {
+                return Err(
+                    "event.match maps at most 8 JSON pointers such as /threadId to values.".into(),
+                );
+            }
+            Some(EventSpec {
+                name: event.name,
+                arguments,
+                matching,
+            })
+        }
+    };
     let spec = Spec {
         mcp_id: args.id.into(),
         tool: args.tool,
@@ -127,6 +188,7 @@ fn parse(args: &Value) -> Result<(Spec, Option<ApprovalKind>), String> {
         purpose: args.purpose.trim().to_owned(),
         interval_seconds,
         timeout_minutes,
+        event,
     };
     Ok((spec, approval))
 }
@@ -257,7 +319,7 @@ pub(crate) async fn call(state: &AppState, grant: &Grant, args: &Value) -> ToolR
 }
 
 async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
-    let (spec, approval) = match parse(args) {
+    let (mut spec, approval) = match parse(args) {
         Ok(parsed) => parsed,
         Err(message) => return Err(Refusal::text(message)),
     };
@@ -306,6 +368,12 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
                 .logged(format!("{log} refused{note}")));
         }
     }
+    // Subscribed before the first status call, so an event of a job that
+    // stops in between is not missed.
+    let watch = match &spec.event {
+        None => None,
+        Some(event) => Some(events::start(library, &spec.mcp_id, event).await),
+    };
     let first = check(
         library,
         &spec.mcp_id,
@@ -343,12 +411,28 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         }
         Some(Check::Running(result)) => result,
     };
-    let created =
-        match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
-            Ok(created) => created,
-            Err(error) => return refused(error, &log),
-        };
-    let value = waited(
+    let cursor = match &watch {
+        Some(Ok(cursor)) => cursor.clone(),
+        Some(Err(_)) => {
+            spec.event = None;
+            None
+        }
+        None => None,
+    };
+    let created = match mcp_waits::create(
+        &state.db,
+        grant.turn_id,
+        caller.attempt,
+        &spec,
+        &first,
+        cursor.as_deref(),
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(error) => return refused(error, &log),
+    };
+    let mut value = waited(
         state,
         grant.turn_id,
         created,
@@ -356,6 +440,17 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
         &NEXT,
     )
     .await;
+    match watch {
+        Some(Ok(_)) => value["event"] = json!({ "status": "watching" }),
+        Some(Err(reason)) => {
+            value["event"] = json!({
+                "status": "unavailable",
+                "reason": mcp_waits::bounded(reason.message()),
+                "next": "else.bot checks the status tool instead; nothing else to do.",
+            });
+        }
+        None => {}
+    }
     let log = format!("{log} {} {}{note}", created.status(), created.id());
     Ok(Done::json(value).parked(created.parked()).logged(log))
 }
@@ -416,11 +511,18 @@ async fn check_and_record(state: Arc<AppState>, wait: Due) {
 
 /// Check due waits until `stop`. Each package has at most one check in
 /// flight, since its actor serves requests one at a time, so a slow server
-/// holds one slot. Waits are durable: a restart picks up where the last
-/// check left off, and stopping abandons checks in flight.
+/// holds one slot. Each event wait gets one subscription task, and a wait
+/// whose subscription is live needs no status calls. Waits are durable: a
+/// restart picks up where the last check or event left off, and stopping
+/// abandons checks and subscriptions in flight.
 pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
     let mut checks = JoinSet::new();
     let mut busy: HashMap<tokio::task::Id, String> = HashMap::new();
+    let mut subscriptions = JoinSet::new();
+    let mut watched: HashMap<tokio::task::Id, Uuid> = HashMap::new();
+    let mut by_wait: HashMap<Uuid, tokio::task::AbortHandle> = HashMap::new();
+    let (report, mut reports) = mpsc::channel(64);
+    let mut live: HashSet<Uuid> = HashSet::new();
     let mut scan = tokio::time::interval(SCAN_INTERVAL);
     scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -434,6 +536,28 @@ pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
                 busy.remove(&id);
                 continue;
             }
+            Some(ended) = subscriptions.join_next_with_id() => {
+                let id = match ended {
+                    Ok((id, ())) => id,
+                    Err(error) => error.id(),
+                };
+                if let Some(wait) = watched.remove(&id) {
+                    by_wait.remove(&wait);
+                    live.remove(&wait);
+                }
+                continue;
+            }
+            Some(report) = reports.recv() => {
+                match report {
+                    events::Liveness::Live(wait) if by_wait.contains_key(&wait) => {
+                        live.insert(wait);
+                    }
+                    events::Liveness::Live(wait) | events::Liveness::Down(wait) => {
+                        live.remove(&wait);
+                    }
+                }
+                continue;
+            }
             _ = scan.tick() => {}
         }
         match mcp_waits::expire(&state.db).await {
@@ -441,12 +565,34 @@ pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
             Ok(_) => state.scheduler.wake(),
             Err(error) => tracing::warn!(%error, "expiring MCP waits failed"),
         }
+        match mcp_waits::watching(&state.db).await {
+            Ok(waits) => {
+                let current: HashSet<Uuid> = waits.iter().map(|w| w.status.id).collect();
+                for (wait, task) in &by_wait {
+                    if !current.contains(wait) {
+                        task.abort();
+                    }
+                }
+                for wait in waits {
+                    let id = wait.status.id;
+                    if by_wait.contains_key(&id) || by_wait.len() >= MAX_SUBSCRIPTIONS {
+                        continue;
+                    }
+                    let task =
+                        subscriptions.spawn(events::watch(state.clone(), wait, report.clone()));
+                    watched.insert(task.id(), id);
+                    by_wait.insert(id, task);
+                }
+            }
+            Err(error) => tracing::warn!(%error, "listing MCP event waits failed"),
+        }
         let free = CONCURRENT_CHECKS.saturating_sub(checks.len());
         if free == 0 {
             continue;
         }
         let busy_packages: Vec<String> = busy.values().cloned().collect();
-        let due = match mcp_waits::due(&state.db, &busy_packages, free).await {
+        let live_waits: Vec<Uuid> = live.iter().copied().collect();
+        let due = match mcp_waits::due(&state.db, &busy_packages, &live_waits, free).await {
             Ok(due) => due,
             Err(error) => {
                 tracing::warn!(%error, "listing due MCP waits failed");

@@ -1,0 +1,492 @@
+//! Waits that wake on an MCP event (SEP-3415) instead of status calls, and
+//! fall back to status calls whenever the event cannot be watched.
+
+use super::*;
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
+use futures_util::stream;
+
+const EVENT: &str = "thread.run_settled";
+
+/// A Streamable HTTP MCP server on 2026-07-28 with Events beside the older
+/// handshake, as T3 Code serves them. Its event log is the hub: a cursor is
+/// the number of events before it.
+struct Server {
+    offers_events: bool,
+    delivery: Vec<&'static str>,
+    job: Mutex<&'static str>,
+    status_calls: AtomicUsize,
+    log: Mutex<Vec<Value>>,
+    published: tokio::sync::watch::Sender<usize>,
+    /// Streams to end right after they confirm.
+    drop_streams: AtomicUsize,
+    /// End every stream with `notifications/events/terminated`.
+    terminate: AtomicBool,
+    /// Report a gap on the next poll.
+    gap: AtomicBool,
+    /// The cursor each poll or stream asked for.
+    asked: Mutex<Vec<Value>>,
+    streams_opened: AtomicUsize,
+    streams_closed: AtomicUsize,
+    violations: Mutex<Vec<String>>,
+}
+
+impl Server {
+    fn new(offers_events: bool, delivery: &[&'static str]) -> Arc<Self> {
+        Arc::new(Self {
+            offers_events,
+            delivery: delivery.to_vec(),
+            job: Mutex::new("working"),
+            status_calls: AtomicUsize::new(0),
+            log: Mutex::new(Vec::new()),
+            published: tokio::sync::watch::channel(0).0,
+            drop_streams: AtomicUsize::new(0),
+            terminate: AtomicBool::new(false),
+            gap: AtomicBool::new(false),
+            asked: Mutex::new(Vec::new()),
+            streams_opened: AtomicUsize::new(0),
+            streams_closed: AtomicUsize::new(0),
+            violations: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn publish(&self, thread: &str) {
+        let mut log = self.log.lock().unwrap();
+        let n = log.len();
+        log.push(json!({
+            "eventId": format!("evt_{n}"), "name": EVENT, "timestamp": "2026-11-24T10:00:00Z",
+            "data": { "type": EVENT, "threadId": thread, "runId": format!("run-{n}"),
+                      "outcome": "completed" },
+        }));
+        self.published.send_replace(log.len());
+    }
+
+    fn position(&self, cursor: &Value) -> usize {
+        cursor
+            .as_str()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or_else(|| self.log.lock().unwrap().len())
+    }
+
+    fn violation(&self, what: String) {
+        self.violations.lock().unwrap().push(what);
+    }
+
+    async fn serve(self: Arc<Self>) -> String {
+        let router = axum::Router::new()
+            .route("/mcp", axum::routing::post(handle))
+            .with_state(self);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{address}/mcp")
+    }
+}
+
+/// Counts a push stream as closed once the client drops it.
+struct Open(Arc<Server>);
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.streams_closed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn reply(id: &Value, result: Value) -> Response {
+    axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
+fn notification(method: &str, mut params: Value, id: &Value) -> Event {
+    params["_meta"] = json!({ "io.modelcontextprotocol/subscriptionId": id });
+    Event::default()
+        .data(json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string())
+}
+
+async fn handle(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    axum::Json(message): axum::Json<Value>,
+) -> Response {
+    let Some(id) = message.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let method = message["method"].as_str().unwrap_or_default().to_owned();
+    let params = message["params"].clone();
+    if method.starts_with("events/") || method == "server/discover" {
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        let meta = &params["_meta"];
+        if header("mcp-protocol-version") != Some("2026-07-28")
+            || header("mcp-method") != Some(method.as_str())
+            || meta["io.modelcontextprotocol/protocolVersion"] != "2026-07-28"
+            || !meta["io.modelcontextprotocol/clientCapabilities"].is_object()
+            || (method != "events/list"
+                && method != "server/discover"
+                && header("mcp-name") != params["name"].as_str())
+        {
+            server.violation(format!("{method}: {headers:?} {params}"));
+        }
+    }
+    match method.as_str() {
+        "initialize" => reply(
+            &id,
+            json!({ "protocolVersion": params["protocolVersion"], "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "t3", "version": "1" } }),
+        ),
+        "tools/list" => reply(
+            &id,
+            json!({ "tools": [{ "name": "task_status", "inputSchema": { "type": "object" },
+                                "annotations": { "readOnlyHint": true } }] }),
+        ),
+        "tools/call" => {
+            server.status_calls.fetch_add(1, Ordering::SeqCst);
+            let work = *server.job.lock().unwrap();
+            reply(
+                &id,
+                json!({ "content": [], "structuredContent": { "workState": work } }),
+            )
+        }
+        "server/discover" if server.offers_events => reply(
+            &id,
+            json!({ "resultType": "complete", "supportedVersions": ["2026-07-28"],
+                    "capabilities": { "tools": {}, "extensions": { "io.modelcontextprotocol/events": {} } },
+                    "ttlMs": 0, "cacheScope": "private" }),
+        ),
+        "server/discover" => axum::Json(json!({ "jsonrpc": "2.0", "id": id,
+            "error": { "code": -32601, "message": "Method not found" } }))
+        .into_response(),
+        "events/list" => reply(
+            &id,
+            json!({ "resultType": "complete", "events": [{
+                "name": EVENT, "description": "A thread's turn ended.", "delivery": server.delivery,
+                "inputSchema": { "type": "object", "properties": { "threadIds": { "type": "array" } } },
+                "payloadSchema": { "type": "object" },
+            }] }),
+        ),
+        "events/poll" => {
+            server.asked.lock().unwrap().push(params["cursor"].clone());
+            let log = server.log.lock().unwrap().clone();
+            let from = server.position(&params["cursor"]).min(log.len());
+            let fresh = params["cursor"].is_null();
+            let events = if fresh { vec![] } else { log[from..].to_vec() };
+            reply(
+                &id,
+                json!({ "resultType": "complete", "events": events, "cursor": log.len().to_string(),
+                        "truncated": server.gap.swap(false, Ordering::SeqCst),
+                        "hasMore": false, "nextPollMs": 200 }),
+            )
+        }
+        "events/stream" => {
+            server.asked.lock().unwrap().push(params["cursor"].clone());
+            server.streams_opened.fetch_add(1, Ordering::SeqCst);
+            let start = server.position(&params["cursor"]);
+            let drop_now = server
+                .drop_streams
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            let terminate = server.terminate.load(Ordering::SeqCst);
+            let changes = server.published.subscribe();
+            let open = Open(server.clone());
+            let state = (open, id, start, false, changes);
+            let events = stream::unfold(
+                state,
+                move |(open, id, at, active, mut changes)| async move {
+                    let server = open.0.clone();
+                    if !active {
+                        let confirm = notification(
+                            "notifications/events/active",
+                            json!({ "cursor": at.to_string(), "truncated": false, "heartbeatMs": 1000 }),
+                            &id,
+                        );
+                        return Some((
+                            Ok::<_, std::convert::Infallible>(confirm),
+                            (open, id, at, true, changes),
+                        ));
+                    }
+                    if drop_now {
+                        return None;
+                    }
+                    if terminate {
+                        let end = notification(
+                            "notifications/events/terminated",
+                            json!({ "error": { "code": -32023, "message": "NotFound", "data": { "kind": "event" } } }),
+                            &id,
+                        );
+                        return Some((Ok(end), (open, id, usize::MAX, true, changes)));
+                    }
+                    if at == usize::MAX {
+                        return None;
+                    }
+                    loop {
+                        let next = server.log.lock().unwrap().get(at).cloned();
+                        if let Some(event) = next {
+                            let mut params = event;
+                            params["cursor"] = json!((at + 1).to_string());
+                            let sent = notification("notifications/events/event", params, &id);
+                            return Some((Ok(sent), (open, id, at + 1, true, changes)));
+                        }
+                        if tokio::time::timeout(Duration::from_secs(1), changes.changed())
+                            .await
+                            .is_err()
+                        {
+                            let beat = notification(
+                                "notifications/events/heartbeat",
+                                json!({ "cursor": at.to_string() }),
+                                &id,
+                            );
+                            return Some((Ok(beat), (open, id, at, true, changes)));
+                        }
+                    }
+                },
+            );
+            Sse::new(events).into_response()
+        }
+        _ => reply(&id, json!({})),
+    }
+}
+
+fn installed(url: &str) -> Value {
+    json!({"id":"t3-code","name":"T3 Code","description":"Delegate coding tasks","skill":"Check tasks with task_status.","documentation":"task_status {taskId}","config":{"type":"http","url":url}})
+}
+
+fn event_wait() -> Value {
+    let mut args = wait_args();
+    args["event"] = json!({ "name": EVENT, "arguments": { "threadIds": ["t1"] },
+                            "match": { "/threadId": "t1" } });
+    args
+}
+
+async fn event_row(app: &TestApp, turn: Uuid) -> (String, Option<String>, Option<String>) {
+    sqlx::query_as("SELECT status, event_status, event_cursor FROM mcp_waits WHERE turn_id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn until_count(what: &str, counter: &AtomicUsize, at_least: usize) {
+    common::until(
+        what,
+        common::poll(|| async { (counter.load(Ordering::SeqCst) >= at_least).then_some(()) }),
+    )
+    .await;
+}
+
+/// Park the main bot on an event wait against `server`. Returns the
+/// harness, bot, turn, the park result and what `events/list` listed.
+async fn parked(server: &Arc<Server>) -> (common::recorder::Harness, String, Uuid, Value, Value) {
+    let url = server.clone().serve().await;
+    let h = harness(TestApp::builder()).await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    tool(&h.app, &token, "mcp_install", installed(&url))
+        .await
+        .ok();
+    let listed = tool(
+        &h.app,
+        &token,
+        "mcp_request",
+        json!({ "id": "t3-code", "method": "events/list", "params": {} }),
+    )
+    .await;
+    assert!(!listed.error, "{}", listed.body);
+    let parked = tool(&h.app, &token, "mcp_wait", event_wait()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    h.app.wait_turn(turn, &["waiting"]).await;
+    (
+        h,
+        main,
+        turn,
+        parked.result,
+        listed.result["result"].clone(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_wait_settles_when_its_event_arrives_without_status_calls() {
+    let server = Server::new(true, &["webhook", "push", "poll"]);
+    let (h, _, turn, parked, listed) = parked(&server).await;
+    let app = &h.app;
+    assert_eq!(listed["events"][0]["name"], EVENT, "{listed}");
+    assert_eq!(parked["event"]["status"], "watching", "{parked}");
+    until_count("the push stream opens", &server.streams_opened, 1).await;
+
+    server.publish("t2");
+    common::until(
+        "the other thread's event advances the cursor",
+        common::poll(|| async {
+            (event_row(app, turn).await.2.as_deref() == Some("1")).then_some(())
+        }),
+    )
+    .await;
+    assert_eq!(
+        event_row(app, turn).await.0,
+        "pending",
+        "another thread's run"
+    );
+    check_now(app).await;
+    common::never_polled(
+        "a status call while the subscription is live",
+        Duration::from_secs(3),
+        || async { (server.status_calls.load(Ordering::SeqCst) > 1).then_some(()) },
+    )
+    .await;
+
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    let (status, delivered, _) = wait_row(app, turn).await;
+    assert_eq!((status.as_str(), delivered), ("finished", Some(2)));
+    assert_eq!(
+        server.status_calls.load(Ordering::SeqCst),
+        1,
+        "only the call inside mcp_wait checked the status"
+    );
+    let packet = h.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("run-1"),
+        "the event is the result: {packet}"
+    );
+    until_count(
+        "the settled wait ends its stream",
+        &server.streams_closed,
+        1,
+    )
+    .await;
+    assert_eq!(*server.violations.lock().unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_stream_resumes_from_the_saved_cursor_without_missing_the_event() {
+    let server = Server::new(true, &["push", "poll"]);
+    server.drop_streams.store(1, Ordering::SeqCst);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("the first stream ends", &server.streams_closed, 1).await;
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    let asked = server.asked.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [Value::Null, json!("0"), json!("0")],
+        "mcp_wait started at the head; both streams resumed from it"
+    );
+    assert_eq!(server.status_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_wait_resumes_after_a_restart() {
+    let server = Server::new(true, &["push", "poll"]);
+    let (h, _, turn, _, _) = parked(&server).await;
+    until_count("the push stream opens", &server.streams_opened, 1).await;
+    let db = h.app.stop().await;
+    server.publish("t1");
+    let h = harness(TestApp::builder().db(db)).await;
+    let app = &h.app;
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    assert_eq!(server.asked.lock().unwrap().last(), Some(&json!("0")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_events_keeps_checking_the_status_tool() {
+    let server = Server::new(false, &[]);
+    let (h, _, turn, parked, listed) = parked(&server).await;
+    let app = &h.app;
+    assert_eq!(listed["events"], json!([]), "{listed}");
+    assert!(listed["unsupported"].is_string(), "{listed}");
+    assert_eq!(parked["event"]["status"], "unavailable", "{parked}");
+    assert_eq!(event_row(app, turn).await.1, None);
+    *server.job.lock().unwrap() = "result_available";
+    check_now(app).await;
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    assert_eq!(server.status_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.streams_opened.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn polling_watches_an_event_without_push_and_a_gap_checks_the_status_once() {
+    let server = Server::new(true, &["poll"]);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    server.gap.store(true, Ordering::SeqCst);
+    until_count("the gap triggers one status call", &server.status_calls, 2).await;
+    assert_eq!(event_row(app, turn).await.0, "pending");
+    server.publish("t1");
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+    assert_eq!(server.status_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.streams_opened.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_the_server_ends_falls_back_to_status_calls() {
+    let server = Server::new(true, &["push"]);
+    server.terminate.store(true, Ordering::SeqCst);
+    let (h, _, turn, _, _) = parked(&server).await;
+    let app = &h.app;
+    common::until(
+        "the terminated subscription is dropped",
+        common::poll(|| async {
+            (event_row(app, turn).await.1.as_deref() == Some("dropped")).then_some(())
+        }),
+    )
+    .await;
+    *server.job.lock().unwrap() = "result_available";
+    check_now(app).await;
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_or_expired_event_wait_ends_its_subscription_and_ignores_later_events() {
+    let server = Server::new(true, &["push"]);
+    let (h, main, turn, parked, _) = parked(&server).await;
+    let app = &h.app;
+    until_count("the push stream opens", &server.streams_opened, 1).await;
+    let wait = parked["wait_id"].as_str().unwrap();
+    let stopped = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/waits/{wait}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+    app.wait_turn(turn, &["completed"]).await;
+    until_count("Stop ends the stream", &server.streams_closed, 1).await;
+    server.publish("t1");
+    common::never_polled(
+        "a later event settles the stopped wait",
+        Duration::from_secs(1),
+        || async {
+            let status = wait_row(app, turn).await.0;
+            (status != "stopped").then_some(status)
+        },
+    )
+    .await;
+
+    let (turn, token) = h.running(&main, GATE).await;
+    let parked = tool(app, &token, "mcp_wait", event_wait()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(turn, &["waiting"]).await;
+    until_count("the second wait's stream opens", &server.streams_opened, 2).await;
+    sqlx::query(
+        "UPDATE mcp_waits SET deadline_at = '2000-01-01T00:00:00.000+00:00' WHERE turn_id = ?1",
+    )
+    .bind(turn)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "expired");
+    until_count("expiry ends the stream", &server.streams_closed, 2).await;
+}

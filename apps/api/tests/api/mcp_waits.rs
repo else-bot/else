@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod checks;
 mod delegated;
+mod events;
 mod replies;
 mod stops;
 

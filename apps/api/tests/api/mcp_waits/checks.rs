@@ -212,11 +212,11 @@ async fn a_busy_package_with_many_due_waits_does_not_hide_another_package() {
         ids.sort();
         ids
     };
-    let busy = else_api::db::mcp_waits::due(&app.db.pool, &["t3-code".into()], 3)
+    let busy = else_api::db::mcp_waits::due(&app.db.pool, &["t3-code".into()], &[], 3)
         .await
         .unwrap();
     assert_eq!(packages(busy), ["linear"]);
-    let idle = else_api::db::mcp_waits::due(&app.db.pool, &[], 3)
+    let idle = else_api::db::mcp_waits::due(&app.db.pool, &[], &[], 3)
         .await
         .unwrap();
     assert_eq!(packages(idle), ["linear", "t3-code"], "one per package");
