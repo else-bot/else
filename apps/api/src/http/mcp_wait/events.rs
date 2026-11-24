@@ -389,7 +389,13 @@ impl Watch {
         };
         match ended {
             Ended::Refused(reason) => self.refuse(&endpoint, reason).await,
-            Ended::Restart => self.restart(&endpoint).await,
+            Ended::Restart => {
+                self.report(false).await;
+                match self.restart(&endpoint).await {
+                    Ended::Refused(reason) => self.refuse(&endpoint, reason).await,
+                    ended => ended,
+                }
+            }
             ended => ended,
         }
     }
@@ -475,6 +481,11 @@ impl Watch {
         let subscription = subscription(&self.wait.event);
         let mut held = false;
         loop {
+            // Task secrets change without revoking the endpoint, so each
+            // poll first confirms it still sends the current headers.
+            if let Err(ended) = self.guarded(endpoint, |_| Box::pin(async { Ok(()) })).await {
+                return ended;
+            }
             let polled = tokio::select! {
                 biased;
                 () = endpoint.revoked().cancelled() => return Ended::Reopen,
