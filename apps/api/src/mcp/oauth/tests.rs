@@ -29,6 +29,7 @@ fn session(store: Store, state: State) -> Session {
         state,
         connection: None,
         client: None,
+        revoked: Default::default(),
     }
 }
 

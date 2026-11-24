@@ -1,5 +1,6 @@
 //! Shared MCP packages. Each package actor owns its files and live connection.
 
+pub mod events;
 mod library;
 pub mod oauth;
 mod transport;

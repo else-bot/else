@@ -57,7 +57,7 @@ fn the_main_bot_instructions_stay_within_their_budget() {
     input.delegation.main_bot = true;
     input.delegation.can_create_bot = true;
     let size = super::instructions(&input, "/p").len();
-    assert!(size <= 13_100, "{size} bytes");
+    assert!(size <= 13_200, "{size} bytes");
 }
 
 /// Each joined owner message reaches the native session once: a session

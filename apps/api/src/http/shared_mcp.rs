@@ -97,7 +97,7 @@ pub(super) fn request_schema() -> Value {
         names and short descriptions; params {\"names\":[...]} returns the schemas you need. \
         tools/call takes {name,arguments} and effect; destructive and external calls may \
         park. Results over 10 KB are cut, the whole one saved as a file. Never repeat a mutation after a timeout. \
-        Use mcp_wait for jobs that keep running.".to_owned(),"inputSchema":{"type":"object","properties":{"id":id(),"method":{"type":"string","enum":["tools/list","tools/call","resources/list","resources/templates/list","resources/read","prompts/list","prompts/get"]},"params":{"type":"object"},"effect":{"type":"string","enum":["local","destructive","external"]},"purpose":{"type":"string","maxLength":300},"context":{"type":"string","maxLength":4000}},"required":["id","method","params"],"additionalProperties":false},"annotations":{"readOnlyHint":false}})
+        Use mcp_wait for jobs that keep running.".to_owned(),"inputSchema":{"type":"object","properties":{"id":id(),"method":{"type":"string","enum":["tools/list","tools/call","resources/list","resources/templates/list","resources/read","prompts/list","prompts/get",EVENTS_LIST]},"params":{"type":"object"},"effect":{"type":"string","enum":["local","destructive","external"]},"purpose":{"type":"string","maxLength":300},"context":{"type":"string","maxLength":4000}},"required":["id","method","params"],"additionalProperties":false},"annotations":{"readOnlyHint":false}})
 }
 
 #[derive(Deserialize)]
@@ -117,6 +117,60 @@ struct RequestArgs {
     context: Option<String>,
 }
 
+/// The MCP Events method bots may call, to find events `mcp_wait` can wake on.
+const EVENTS_LIST: &str = "events/list";
+
+/// One `events/list` page from the server's Events extension. A server
+/// without it answers with no events and says so.
+async fn events_list(state: &AppState, id: &PackageId, params: &Value) -> Result<Value, Error> {
+    use crate::mcp::events::Failure;
+    let cursor = match params.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(cursor)) => Some(cursor.as_str()),
+        Some(_) => return Err(Error::Invalid("events/list takes only a string cursor.")),
+    };
+    if params
+        .as_object()
+        .is_some_and(|p| p.keys().any(|k| k != "cursor"))
+    {
+        return Err(Error::Invalid("events/list takes only a string cursor."));
+    }
+    let mut rejected = false;
+    let listed = loop {
+        let endpoint = match state.mcps.events_endpoint(id, rejected).await {
+            Err(Error::Invalid(reason)) => {
+                return Ok(json!({ "events": [], "unsupported": reason }));
+            }
+            other => other?,
+        };
+        let listed = match endpoint.offers_events().await {
+            Ok(true) => endpoint.list(cursor).await,
+            Ok(false) => Err(Failure::Unsupported(format!(
+                "{} does not offer MCP events.",
+                String::from(id.clone())
+            ))),
+            Err(failure) => Err(failure),
+        };
+        match listed {
+            Err(Failure::Unauthorized) if !rejected => rejected = true,
+            listed => break listed,
+        }
+    };
+    match listed {
+        Ok(page) => Ok(page),
+        Err(Failure::Unsupported(reason)) => Ok(json!({
+            "events": [],
+            "unsupported": reason,
+            "next": "Wait on the MCP's status tool with mcp_wait, without an event.",
+        })),
+        Err(Failure::Rejected(_)) => Err(Error::Invalid("The MCP refused events/list.")),
+        Err(Failure::Transient(_) | Failure::Unauthorized | Failure::SchemaChanged) => {
+            Err(Error::Connection)
+        }
+        Err(Failure::Paused) => Err(Error::Paused),
+    }
+}
+
 /// Pages of `tools/list` read while looking for named tools.
 const MAX_TOOL_PAGES: usize = 20;
 /// Tools one `tools/list` may name.
@@ -133,6 +187,9 @@ async fn list_or_request(
     mut params: Value,
 ) -> Result<(Value, bool), Error> {
     use super::mcp_result::{IndexCursor, named_response, named_tools, tool_index};
+    if method == EVENTS_LIST {
+        return Ok((events_list(state, id, &params).await?, true));
+    }
     if method != "tools/list" {
         return Ok((state.mcps.request(id, method, params).await?, true));
     }
@@ -272,7 +329,8 @@ async fn run(c: Call<'_>, op: Op) -> ToolResult {
             }
             let request = match serde_json::from_value::<RequestArgs>(args.clone()) {
                 Ok(request)
-                    if METHODS.contains(&request.method.as_str())
+                    if (METHODS.contains(&request.method.as_str())
+                        || request.method == EVENTS_LIST)
                         && request.params.is_object()
                         && request
                             .purpose

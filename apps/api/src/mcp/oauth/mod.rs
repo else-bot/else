@@ -51,6 +51,10 @@ pub(super) struct Session {
     client: Option<Arc<RegisteredClient>>,
     state: State,
     connection: Option<Open>,
+    /// Cancelled whenever the connection closes, which every sign-in,
+    /// configuration or package change does, so requests made outside the
+    /// connection, such as MCP event streams, end too.
+    revoked: tokio_util::sync::CancellationToken,
 }
 
 /// A live connection and the filled config it was opened with, so a task
@@ -76,6 +80,7 @@ impl Session {
             client,
             state,
             connection: None,
+            revoked: tokio_util::sync::CancellationToken::new(),
         })
     }
 
@@ -265,18 +270,46 @@ impl Session {
         }
     }
 
+    fn signed_in(&self, config: &Transport) -> Transport {
+        let mut sent = config.clone();
+        if let State::Authorized(credential) = &self.state
+            && let Transport::Http { headers, .. } = &mut sent
+        {
+            headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+            headers.insert(
+                "Authorization".into(),
+                format!("Bearer {}", credential.token.access_token().secret()),
+            );
+        }
+        sent
+    }
+
+    /// `config` signed in with a fresh token, for requests made outside the
+    /// shared connection, such as MCP events. `rejected` refreshes the token
+    /// even before it expires, after the server refused it.
+    pub(super) async fn authorized(
+        &mut self,
+        config: &Transport,
+        rejected: bool,
+    ) -> Result<Transport, Error> {
+        self.status();
+        if matches!(
+            self.state,
+            State::Required(_) | State::Authorizing(_) | State::ReauthRequired(_)
+        ) {
+            return Err(Error::AuthRequired(Box::new(self.status())));
+        }
+        self.refresh(rejected).await?;
+        Ok(self.signed_in(config))
+    }
+
+    pub(super) fn revoked(&self) -> tokio_util::sync::CancellationToken {
+        self.revoked.clone()
+    }
+
     async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
         if self.connection.is_none() {
-            let mut sent = config.clone();
-            if let State::Authorized(credential) = &self.state
-                && let Transport::Http { headers, .. } = &mut sent
-            {
-                headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
-                headers.insert(
-                    "Authorization".into(),
-                    format!("Bearer {}", credential.token.access_token().secret()),
-                );
-            }
+            let sent = self.signed_in(config);
             let connection = transport::connect(
                 &sent,
                 self.store.path(),
@@ -493,6 +526,7 @@ impl Session {
     }
 
     pub(super) async fn close(&mut self) {
+        std::mem::take(&mut self.revoked).cancel();
         if let Some(mut open) = self.connection.take() {
             open.connection.shutdown().await;
         }
