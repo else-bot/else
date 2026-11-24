@@ -285,8 +285,44 @@ pub(super) async fn draft_email(state: &AppState, grant: &Grant, args: &Value) -
 }
 
 pub(super) async fn draft_message(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    if grant.drafts_only() {
+        drafts_only(state, args).await?;
+    }
     let content = social_destination(state, grant, Message::parse(args)).await?;
     draft(state, grant, args, content).await
+}
+
+/// What a draft-only task may draft: a message through a native connection
+/// to a chat that connection already lists, with no files. It has no host
+/// tools to send an unconnected draft, and mail chose what it asks for, so
+/// it may neither look up a new chat nor read the bot's files.
+async fn drafts_only(state: &AppState, args: &Value) -> Result<(), Refusal> {
+    let refused =
+        |why: &str| Refusal::text(format!("INVALID_DRAFT: {why}")).logged("rejected INVALID_DRAFT");
+    if args
+        .get("attachments")
+        .is_some_and(|files| !files.is_null())
+    {
+        return Err(refused("this task cannot attach files."));
+    }
+    let account = args["account_id"]
+        .as_str()
+        .and_then(|id| id.parse::<Uuid>().ok());
+    let (Some(account), Some(destination)) = (account, args["destination"].as_str()) else {
+        return Err(refused(
+            "this task sends only through a native connection. Pass account_id and a \
+             destination id from social_connections.",
+        ));
+    };
+    let listed = crate::socials::store::destinations(&state.db, account)
+        .await
+        .map_err(|e| Refusal::text(e.to_string()))?;
+    if !listed.iter().any(|chat| chat.id == destination) {
+        return Err(refused(
+            "name a chat by the id social_connections lists for that connection.",
+        ));
+    }
+    Ok(())
 }
 
 /// A native social draft names its chat by ID, so the owner approves the
@@ -590,8 +626,8 @@ pub(super) async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolR
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
     let channels = Channels {
-        mail: grant.allows(Tool::Mail),
-        social: grant.allows(Tool::Social),
+        mail: grant.allows(Tool::Mail) && grant.allows(Tool::DraftEmail),
+        social: grant.allows(Tool::DraftMessage),
     };
     let row = send::send_connected(
         &state.db,

@@ -43,9 +43,15 @@ pub enum Tool {
     /// Ask the owner a question or for permission (owner conversations only).
     AskOwner,
     /// Draft an email for the owner's approval card and send an approved
-    /// draft (`send_draft` also needs its channel's Mail or Social): owner
-    /// work, and mail events, whose drafts the owner reviews.
+    /// one (a connected account's `send_draft` also needs Mail): owner work,
+    /// and mail events, whose drafts the owner reviews.
     DraftEmail,
+    /// Draft a message or post for the owner's approval card, list the
+    /// native chats it may name, and send an approved one through its
+    /// connection: owner work, and tasks handed on from email, whose drafts
+    /// the owner reviews. Asking, connecting, and other social reads and
+    /// actions need their own grants.
+    DraftMessage,
     /// Check a host action against the owner's approvals; the gate decides
     /// whether this turn may use a saved grant or show a card.
     AskPermission,
@@ -81,6 +87,18 @@ pub struct Grant {
 impl Grant {
     pub fn allows(&self, tool: Tool) -> bool {
         self.tools.contains(&tool)
+    }
+
+    /// Drafts messages without the social tools: a task handed on from
+    /// email, which names only chats its connection already lists and
+    /// attaches no files.
+    pub fn drafts_only(&self) -> bool {
+        self.allows(Tool::DraftMessage) && !self.allows(Tool::Social)
+    }
+
+    /// Whether it holds any of `tools`.
+    pub fn allows_any(&self, tools: &[Tool]) -> bool {
+        tools.iter().any(|tool| self.allows(*tool))
     }
 }
 

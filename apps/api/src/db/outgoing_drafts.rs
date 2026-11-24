@@ -79,6 +79,9 @@ pub struct OutgoingDraft {
     /// The action of the connected send this approval claimed. Settling the
     /// draft keeps it, while `delivery` may come to name an earlier send.
     pub claim_action_id: Option<Uuid>,
+    /// Drafted by a task an email turn handed on, so its content and
+    /// destination came from untrusted mail.
+    pub from_email: bool,
 }
 
 impl From<&OutgoingDraft> for else_wire::outgoing::OutgoingDraft {
@@ -102,6 +105,7 @@ impl From<&OutgoingDraft> for else_wire::outgoing::OutgoingDraft {
             result_detail: draft.result_detail.clone(),
             superseded_by: draft.superseded_by,
             kind: draft.kind.as_deref().cloned().map(Into::into),
+            from_email: draft.from_email,
             created_at: Some(draft.created_at),
             updated_at: draft.updated_at,
             settled_at: draft.settled_at,
@@ -148,7 +152,12 @@ const SELECT: &str = concat!(
             AND c.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')) AS in_reply,
         d.approval_source, d.approved_version, d.approved_item_id, d.approved_at, d.delivery,
         d.result_detail, d.superseded_by, d.created_at, d.updated_at, d.settled_at,
-        d.send_turn_id, d.context_turn_id, d.context_version, d.claim_action_id, ",
+        d.send_turn_id, d.context_turn_id, d.context_version, d.claim_action_id,
+        EXISTS (SELECT 1 FROM delegations dl JOIN turns r ON r.id = dl.root_turn_id
+                JOIN items ri ON ri.id = r.owner_item_id
+            WHERE dl.child_turn_id = d.turn_id AND ri.kind = 'connector'
+              AND NOT EXISTS (SELECT 1 FROM social_deliveries sd WHERE sd.turn_id = r.id))
+            AS from_email, ",
     kind!(),
     " AS kind
     FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id"
@@ -171,7 +180,7 @@ pub enum DraftError {
     #[error("the draft has {0} attachments the approval did not name")]
     FilesUnseen(usize),
     #[error(
-        "only the owner's own conversation or a task delegated for an owner request can draft for approval"
+        "only the owner's own conversation, a task delegated for an owner request, or a task handed on from an email can draft for approval"
     )]
     NotAllowed,
     #[error("a revision keeps its draft's channel ({0})")]
@@ -276,11 +285,13 @@ pub async fn for_turns(
     Ok(super::holds::by_turn(rows, |row| row.turn_id))
 }
 
+/// The running caller of `turn_id`, if it may draft for the owner's
+/// approval and send what they approve.
 async fn caller(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<turns::Caller, DraftError> {
     let caller = turns::asking_caller(conn, turn_id)
         .await?
         .ok_or(DraftError::NotRunning)?;
-    if !turns::may_ask_owner(conn, turn_id, &caller).await? {
+    if !turns::may_draft(conn, turn_id, &caller).await? {
         return Err(DraftError::NotAllowed);
     }
     Ok(caller)
@@ -730,6 +741,10 @@ pub async fn confirm(
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
+    // Reading an owner message as approval needs a turn that answers them.
+    if !turns::may_ask_owner(&mut tx, turn_id, &caller).await? {
+        return Err(DraftError::NotAllowed);
+    }
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
     if draft.status == Status::Approved
         && draft.send_turn_id == Some(turn_id)

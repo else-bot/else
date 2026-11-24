@@ -23,6 +23,8 @@ pub enum Turn {
     /// A task the main bot delegated to Research for an owner request, one
     /// hop deep, so it may hand part of its work to GitHub.
     HandingTask,
+    /// A task the Inbox bot handed on to Research from an incoming email.
+    EmailTask,
 }
 
 /// A representative turn. Keep schemas on the same path as MCP tools/list.
@@ -68,6 +70,12 @@ pub fn export(turn: Turn) -> Value {
             }),
             ..DelegationContext::default()
         },
+        Turn::EmailTask => DelegationContext {
+            origin: Origin::ConnectorEvent,
+            task_depth: 1,
+            delegated_by: Some((Uuid::from_u128(1), "Inbox".into())),
+            ..DelegationContext::default()
+        },
         Turn::MailEvent => DelegationContext {
             origin: Origin::ConnectorEvent,
             registry: vec![(Uuid::from_u128(5), "Marketing Manager".into())],
@@ -82,7 +90,8 @@ pub fn export(turn: Turn) -> Value {
             | Turn::RoutineTask
             | Turn::MailEvent
             | Turn::AnsweredTask
-            | Turn::HandingTask => Uuid::from_u128(4),
+            | Turn::HandingTask
+            | Turn::EmailTask => Uuid::from_u128(4),
         },
         conversation_id: Uuid::from_u128(2),
         turn_id: Uuid::from_u128(3),
@@ -93,7 +102,8 @@ pub fn export(turn: Turn) -> Value {
             | Turn::RoutineTask
             | Turn::MailEvent
             | Turn::AnsweredTask
-            | Turn::HandingTask => "Research".into(),
+            | Turn::HandingTask
+            | Turn::EmailTask => "Research".into(),
         },
         text: "Help me with my tasks.".into(),
         parts: vec![],
@@ -130,7 +140,13 @@ pub fn export(turn: Turn) -> Value {
         handoff: None,
         jobs: vec![],
         run: None,
-        rules: None,
+        // The owner's standing setup, as an email task reads it: its own
+        // conversation holds none of the owner's chat.
+        rules: (turn == Turn::EmailTask).then(|| {
+            "## Newsletters\nWhen Inbox hands you the Proliquid weekly newsletter, post it to \
+             the Proliquid Community WhatsApp group once the owner approves the draft.\n"
+                .to_owned()
+        }),
     };
     let instructions = crate::providers::prompt::instructions(&input, "/eval/project");
     let deferred: Vec<Value> = super::tool_search::deferred()

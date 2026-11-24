@@ -116,7 +116,8 @@ impl ToolId {
 pub struct ToolDef {
     pub id: ToolId,
     pub name: &'static str,
-    pub needs: Tool,
+    /// The grants that each admit a call; holding any one is enough.
+    pub needs: &'static [Tool],
     pub listing: Listing,
     pub approval: Approval,
     pub loggable: fn(&Value) -> Value,
@@ -172,15 +173,15 @@ impl EffectRule {
 }
 
 impl ToolDef {
-    const fn listed(id: ToolId, name: &'static str, needs: Tool) -> Self {
+    const fn listed(id: ToolId, name: &'static str, needs: &'static [Tool]) -> Self {
         Self::new(id, name, needs, Listing::Listed { parks: false })
     }
 
-    const fn deferred(id: ToolId, name: &'static str, needs: Tool) -> Self {
+    const fn deferred(id: ToolId, name: &'static str, needs: &'static [Tool]) -> Self {
         Self::new(id, name, needs, Listing::Deferred)
     }
 
-    const fn new(id: ToolId, name: &'static str, needs: Tool, listing: Listing) -> Self {
+    const fn new(id: ToolId, name: &'static str, needs: &'static [Tool], listing: Listing) -> Self {
         Self {
             id,
             name,
@@ -328,11 +329,11 @@ fn input(args: &Value) -> Value {
 }
 
 pub const TOOLS: &[ToolDef] = &[
-    ToolDef::listed(ToolId::McpList, "mcp_list", Tool::Mcp),
-    ToolDef::listed(ToolId::McpInstall, "mcp_install", Tool::ManageMcp)
+    ToolDef::listed(ToolId::McpList, "mcp_list", &[Tool::Mcp]),
+    ToolDef::listed(ToolId::McpInstall, "mcp_install", &[Tool::ManageMcp])
         .parking()
         .logs(|args| json!({ "id": args["id"], "name": args["name"] })),
-    ToolDef::listed(ToolId::McpRequest, "mcp_request", Tool::Mcp)
+    ToolDef::listed(ToolId::McpRequest, "mcp_request", &[Tool::Mcp])
         .parking()
         .logs(|args| {
             json!({
@@ -342,62 +343,77 @@ pub const TOOLS: &[ToolDef] = &[
                 "effect": args["effect"],
             })
         }),
-    ToolDef::listed(ToolId::McpWait, "mcp_wait", Tool::Mcp)
+    ToolDef::listed(ToolId::McpWait, "mcp_wait", &[Tool::Mcp])
         .parking()
         .logs(|args| json!({ "id": args["id"], "tool": args["tool"] })),
-    ToolDef::listed(ToolId::McpConnect, "mcp_connect", Tool::Mcp)
+    ToolDef::listed(ToolId::McpConnect, "mcp_connect", &[Tool::Mcp])
         .parking()
         .logs(by_id),
-    ToolDef::listed(ToolId::SkillInstall, "skill_install", Tool::ManageMcp).parking(),
-    ToolDef::listed(ToolId::SkillRead, "skill_read", Tool::Mcp),
-    ToolDef::listed(ToolId::MemoryBots, "memory_bots", Tool::ReadMemory),
-    ToolDef::listed(ToolId::MemorySearch, "memory_search", Tool::ReadMemory),
-    ToolDef::listed(ToolId::MemoryRead, "memory_read", Tool::ReadMemory),
-    ToolDef::listed(ToolId::MemoryView, "memory_view", Tool::ReadMemory),
-    ToolDef::listed(ToolId::Delegate, "delegate", Tool::Delegate).parking(),
-    ToolDef::listed(ToolId::Council, "council", Tool::Delegate).parking(),
-    ToolDef::listed(ToolId::RequestSecret, "request_secret", Tool::RequestSecret).parking(),
-    ToolDef::listed(ToolId::AskOwner, "ask_owner", Tool::AskOwner).parking(),
-    ToolDef::listed(ToolId::AskPermission, "ask_permission", Tool::AskPermission).parking(),
-    ToolDef::listed(ToolId::DeleteBot, "delete_bot", Tool::EditBot).parking(),
-    ToolDef::listed(ToolId::DraftEmail, "draft_email", Tool::DraftEmail).parking(),
-    ToolDef::listed(ToolId::DraftMessage, "draft_message", Tool::AskOwner).parking(),
-    ToolDef::listed(ToolId::WebhookCreate, "webhook_create", Tool::Routines).parking(),
-    ToolDef::listed(ToolId::MailTriggerSet, "mail_trigger_set", Tool::Routines).parking(),
-    ToolDef::listed(ToolId::WebhookUpdate, "webhook_update", Tool::Routines).parking(),
-    ToolDef::listed(ToolId::SocialConnect, "social_connect", Tool::AskOwner)
+    ToolDef::listed(ToolId::SkillInstall, "skill_install", &[Tool::ManageMcp]).parking(),
+    ToolDef::listed(ToolId::SkillRead, "skill_read", &[Tool::Mcp]),
+    ToolDef::listed(ToolId::MemoryBots, "memory_bots", &[Tool::ReadMemory]),
+    ToolDef::listed(ToolId::MemorySearch, "memory_search", &[Tool::ReadMemory]),
+    ToolDef::listed(ToolId::MemoryRead, "memory_read", &[Tool::ReadMemory]),
+    ToolDef::listed(ToolId::MemoryView, "memory_view", &[Tool::ReadMemory]),
+    ToolDef::listed(ToolId::Delegate, "delegate", &[Tool::Delegate]).parking(),
+    ToolDef::listed(ToolId::Council, "council", &[Tool::Delegate]).parking(),
+    ToolDef::listed(
+        ToolId::RequestSecret,
+        "request_secret",
+        &[Tool::RequestSecret],
+    )
+    .parking(),
+    ToolDef::listed(ToolId::AskOwner, "ask_owner", &[Tool::AskOwner]).parking(),
+    ToolDef::listed(
+        ToolId::AskPermission,
+        "ask_permission",
+        &[Tool::AskPermission],
+    )
+    .parking(),
+    ToolDef::listed(ToolId::DeleteBot, "delete_bot", &[Tool::EditBot]).parking(),
+    ToolDef::listed(ToolId::DraftEmail, "draft_email", &[Tool::DraftEmail]).parking(),
+    ToolDef::listed(ToolId::DraftMessage, "draft_message", &[Tool::DraftMessage]).parking(),
+    ToolDef::listed(ToolId::WebhookCreate, "webhook_create", &[Tool::Routines]).parking(),
+    ToolDef::listed(
+        ToolId::MailTriggerSet,
+        "mail_trigger_set",
+        &[Tool::Routines],
+    )
+    .parking(),
+    ToolDef::listed(ToolId::WebhookUpdate, "webhook_update", &[Tool::Routines]).parking(),
+    ToolDef::listed(ToolId::SocialConnect, "social_connect", &[Tool::AskOwner])
         .parking()
         .logs(|args| json!({ "provider": args["provider"], "reason": args["reason"] })),
-    ToolDef::listed(ToolId::SocialAction, "social_action", Tool::Social)
+    ToolDef::listed(ToolId::SocialAction, "social_action", &[Tool::Social])
         .parking()
         .logs(social_action),
-    ToolDef::listed(ToolId::ComputerRun, "computer_run", Tool::Computer)
+    ToolDef::listed(ToolId::ComputerRun, "computer_run", &[Tool::Computer])
         .parking()
         .computer(EffectRule::Required)
         .standing(),
     ToolDef::listed(
         ToolId::ComputerJobStart,
         "computer_job_start",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .parking()
     .computer(EffectRule::Required)
     .standing(),
-    ToolDef::listed(ToolId::ComputerJob, "computer_job", Tool::Computer)
+    ToolDef::listed(ToolId::ComputerJob, "computer_job", &[Tool::Computer])
         .parking()
         .computer(EffectRule::Undeclared)
         .standing(),
     ToolDef::listed(
         ToolId::ComputerWatchStart,
         "computer_watch_start",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .computer(EffectRule::Undeclared)
     .standing(),
     ToolDef::listed(
         ToolId::ComputerWriteFile,
         "computer_write_file",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .parking()
     .computer(EffectRule::Required)
@@ -405,46 +421,55 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef::listed(
         ToolId::ComputerReadFile,
         "computer_read_file",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .computer(EffectRule::Undeclared)
     .standing(),
-    ToolDef::listed(ToolId::ComputerFetch, "computer_fetch", Tool::Computer)
+    ToolDef::listed(ToolId::ComputerFetch, "computer_fetch", &[Tool::Computer])
         .computer(EffectRule::Undeclared)
         .standing(),
-    ToolDef::listed(ToolId::ComputerBrowser, "computer_browser", Tool::Computer)
-        .parking()
-        .computer(EffectRule::BrowserAction)
-        .standing()
-        .logs(browser),
+    ToolDef::listed(
+        ToolId::ComputerBrowser,
+        "computer_browser",
+        &[Tool::Computer],
+    )
+    .parking()
+    .computer(EffectRule::BrowserAction)
+    .standing()
+    .logs(browser),
     ToolDef::listed(
         ToolId::ComputerScreenshot,
         "computer_screenshot",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .computer(EffectRule::Undeclared)
     .standing(),
-    ToolDef::listed(ToolId::ComputerInput, "computer_input", Tool::Computer)
+    ToolDef::listed(ToolId::ComputerInput, "computer_input", &[Tool::Computer])
         .parking()
         .computer(EffectRule::Required)
         .standing()
         .logs(input),
     // A resize takes host memory, so only a grant for its size covers it.
-    ToolDef::listed(ToolId::ComputerResize, "computer_resize", Tool::Computer)
+    ToolDef::listed(ToolId::ComputerResize, "computer_resize", &[Tool::Computer])
         .parking()
         .computer(EffectRule::Undeclared),
-    ToolDef::listed(ToolId::ComputerHandoff, "computer_handoff", Tool::Computer).parking(),
+    ToolDef::listed(
+        ToolId::ComputerHandoff,
+        "computer_handoff",
+        &[Tool::Computer],
+    )
+    .parking(),
     // Every turn may read its history; the tool itself admits only the turn
     // it serves: a running delegated task or routine run.
-    ToolDef::listed(ToolId::NotifyOwner, "notify_owner", Tool::ReadHistory),
-    ToolDef::listed(ToolId::MailAccounts, "mail_accounts", Tool::Mail).logs(nothing),
-    ToolDef::listed(ToolId::MailConnect, "mail_connect", Tool::AskOwner)
+    ToolDef::listed(ToolId::NotifyOwner, "notify_owner", &[Tool::ReadHistory]),
+    ToolDef::listed(ToolId::MailAccounts, "mail_accounts", &[Tool::Mail]).logs(nothing),
+    ToolDef::listed(ToolId::MailConnect, "mail_connect", &[Tool::AskOwner])
         .parking()
         .logs(|args| json!({ "provider": args["provider"] })),
-    ToolDef::listed(ToolId::MailDisconnect, "mail_disconnect", Tool::AskOwner)
+    ToolDef::listed(ToolId::MailDisconnect, "mail_disconnect", &[Tool::AskOwner])
         .parking()
         .logs(|args| json!({ "account_id": args["account_id"] })),
-    ToolDef::listed(ToolId::MailAction, "mail_action", Tool::Mail)
+    ToolDef::listed(ToolId::MailAction, "mail_action", &[Tool::Mail])
         .parking()
         .logs(|args| {
             json!({
@@ -453,109 +478,135 @@ pub const TOOLS: &[ToolDef] = &[
                 "operation": args["command"]["operation"],
             })
         }),
-    ToolDef::listed(ToolId::MailActionStatus, "mail_action_status", Tool::Mail),
+    ToolDef::listed(
+        ToolId::MailActionStatus,
+        "mail_action_status",
+        &[Tool::Mail],
+    ),
+    // A task that may only draft messages lists the chats it may name.
     ToolDef::listed(
         ToolId::SocialConnections,
         "social_connections",
-        Tool::Social,
+        &[Tool::Social, Tool::DraftMessage],
     )
     .logs(nothing),
     ToolDef::listed(
         ToolId::SocialActionStatus,
         "social_action_status",
-        Tool::Social,
+        &[Tool::Social],
     )
     .logs(social_action),
-    ToolDef::listed(ToolId::RulesUpdate, "rules_update", Tool::Rules),
+    ToolDef::listed(ToolId::RulesUpdate, "rules_update", &[Tool::Rules]),
     // Previews read the project, which only turns with the computer may do.
-    ToolDef::listed(ToolId::VisualPreview, "visual_preview", Tool::Computer),
+    ToolDef::listed(ToolId::VisualPreview, "visual_preview", &[Tool::Computer]),
     ToolDef::deferred(
         ToolId::McpConnectionStatus,
         "mcp_connection_status",
-        Tool::Mcp,
+        &[Tool::Mcp],
     )
     .logs(by_id),
-    ToolDef::deferred(ToolId::MemoryZoom, "memory_zoom", Tool::ReadMemory),
-    ToolDef::deferred(ToolId::MemoryDate, "memory_date", Tool::ReadMemory),
-    ToolDef::deferred(ToolId::ElseStatus, "else_status", Tool::Diagnose),
-    ToolDef::deferred(ToolId::ListBots, "list_bots", Tool::Delegate),
-    ToolDef::deferred(ToolId::CreateBot, "create_bot", Tool::CreateBot),
+    ToolDef::deferred(ToolId::MemoryZoom, "memory_zoom", &[Tool::ReadMemory]),
+    ToolDef::deferred(ToolId::MemoryDate, "memory_date", &[Tool::ReadMemory]),
+    ToolDef::deferred(ToolId::ElseStatus, "else_status", &[Tool::Diagnose]),
+    ToolDef::deferred(ToolId::ListBots, "list_bots", &[Tool::Delegate]),
+    ToolDef::deferred(ToolId::CreateBot, "create_bot", &[Tool::CreateBot]),
     ToolDef::deferred(
         ToolId::DelegationUpdate,
         "delegation_update",
-        Tool::Delegate,
+        &[Tool::Delegate],
     ),
     ToolDef::deferred(
         ToolId::DelegationCancel,
         "delegation_cancel",
-        Tool::Delegate,
+        &[Tool::Delegate],
     ),
-    ToolDef::deferred(ToolId::RenameBot, "rename_bot", Tool::EditBot),
-    ToolDef::deferred(ToolId::SetBotModel, "set_bot_model", Tool::EditBot),
+    ToolDef::deferred(ToolId::RenameBot, "rename_bot", &[Tool::EditBot]),
+    ToolDef::deferred(ToolId::SetBotModel, "set_bot_model", &[Tool::EditBot]),
     ToolDef::deferred(
         ToolId::ConfirmPermission,
         "confirm_permission",
-        Tool::AskOwner,
+        &[Tool::AskOwner],
     ),
     ToolDef::deferred(
         ToolId::ConfirmDraftApproval,
         "confirm_draft_approval",
-        Tool::AskOwner,
+        &[Tool::AskOwner],
     ),
-    ToolDef::deferred(ToolId::StartDraftSend, "start_draft_send", Tool::AskOwner),
-    // Sending also needs the draft's channel: Mail or Social.
-    ToolDef::deferred(ToolId::SendDraft, "send_draft", Tool::DraftEmail),
-    ToolDef::deferred(ToolId::ReportDraftSend, "report_draft_send", Tool::AskOwner),
-    ToolDef::deferred(ToolId::RoutineCreate, "routine_create", Tool::Routines),
-    ToolDef::deferred(ToolId::RoutineList, "routine_list", Tool::Routines),
-    ToolDef::deferred(ToolId::RoutineUpdate, "routine_update", Tool::Routines),
-    ToolDef::deferred(ToolId::RoutineDelete, "routine_delete", Tool::Routines),
-    ToolDef::deferred(ToolId::RoutineRun, "routine_run", Tool::Routines),
-    ToolDef::deferred(ToolId::ReminderCreate, "reminder_create", Tool::Routines),
+    ToolDef::deferred(
+        ToolId::StartDraftSend,
+        "start_draft_send",
+        &[Tool::AskOwner],
+    ),
+    // Sending also needs the draft's channel: Mail for an email,
+    // DraftMessage for a message or post.
+    ToolDef::deferred(
+        ToolId::SendDraft,
+        "send_draft",
+        &[Tool::DraftEmail, Tool::DraftMessage],
+    ),
+    ToolDef::deferred(
+        ToolId::ReportDraftSend,
+        "report_draft_send",
+        &[Tool::AskOwner],
+    ),
+    ToolDef::deferred(ToolId::RoutineCreate, "routine_create", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::RoutineList, "routine_list", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::RoutineUpdate, "routine_update", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::RoutineDelete, "routine_delete", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::RoutineRun, "routine_run", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::ReminderCreate, "reminder_create", &[Tool::Routines]),
     // Like notify_owner: the tool admits only a running routine run.
-    ToolDef::deferred(ToolId::NoNews, "no_news", Tool::ReadHistory),
-    ToolDef::deferred(ToolId::WebhookList, "webhook_list", Tool::Routines),
-    ToolDef::deferred(ToolId::WebhookDelete, "webhook_delete", Tool::Routines),
+    ToolDef::deferred(ToolId::NoNews, "no_news", &[Tool::ReadHistory]),
+    ToolDef::deferred(ToolId::WebhookList, "webhook_list", &[Tool::Routines]),
+    ToolDef::deferred(ToolId::WebhookDelete, "webhook_delete", &[Tool::Routines]),
     ToolDef::deferred(
         ToolId::SocialTriggerSet,
         "social_trigger_set",
-        Tool::Routines,
+        &[Tool::Routines],
     ),
     ToolDef::deferred(
         ToolId::SocialTriggerList,
         "social_trigger_list",
-        Tool::Routines,
+        &[Tool::Routines],
     ),
     ToolDef::deferred(
         ToolId::SocialTriggerDelete,
         "social_trigger_delete",
-        Tool::Routines,
+        &[Tool::Routines],
     ),
     ToolDef::deferred(
         ToolId::MailTriggerDelete,
         "mail_trigger_delete",
-        Tool::Routines,
+        &[Tool::Routines],
     ),
     ToolDef::deferred(
         ToolId::ComputerJobCancel,
         "computer_job_cancel",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .computer(EffectRule::Undeclared)
     .standing(),
-    ToolDef::deferred(ToolId::ComputerWatches, "computer_watches", Tool::Computer)
-        .computer(EffectRule::Undeclared)
-        .standing(),
+    ToolDef::deferred(
+        ToolId::ComputerWatches,
+        "computer_watches",
+        &[Tool::Computer],
+    )
+    .computer(EffectRule::Undeclared)
+    .standing(),
     ToolDef::deferred(
         ToolId::ComputerWatchStop,
         "computer_watch_stop",
-        Tool::Computer,
+        &[Tool::Computer],
     )
     .computer(EffectRule::Undeclared)
     .standing(),
-    ToolDef::deferred(ToolId::ComputerSecrets, "computer_secrets", Tool::Computer)
-        .computer(EffectRule::Undeclared)
-        .standing(),
+    ToolDef::deferred(
+        ToolId::ComputerSecrets,
+        "computer_secrets",
+        &[Tool::Computer],
+    )
+    .computer(EffectRule::Undeclared)
+    .standing(),
 ];
 
 pub fn parks(tool: &str, result: &serde_json::Value) -> bool {

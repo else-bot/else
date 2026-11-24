@@ -686,28 +686,38 @@ impl ConversationView {
         let mut card = card
             .when(!draft.can_approve, |card| card.tag("Reply in chat"))
             .child(
-                v_flex().gap_2().children(metadata()).child(
-                    // A deeper fill and a visible edge mark the body as
-                    // editable, apart from the card's read-only lines.
-                    div()
-                        .mt_1()
-                        .rounded(theme.radius)
-                        .bg(if theme.mode.is_dark() {
-                            theme.background.opacity(0.6)
-                        } else {
-                            gpui_kit::white()
-                        })
-                        .border_1()
-                        .border_color(theme.foreground.opacity(0.1))
-                        .hover(|style| style.border_color(theme.foreground.opacity(0.2)))
-                        .child(
-                            Textarea::new(&form.body)
-                                .appearance(false)
-                                .line_height(relative(1.5))
-                                .disabled(busy)
-                                .aria_label(draft.content.body_label()),
-                        ),
-                ),
+                v_flex()
+                    .gap_2()
+                    .children(draft.provenance_note().map(|note| {
+                        div()
+                            .text_size(px(13.))
+                            .whitespace_normal()
+                            .text_color(theme.warning)
+                            .child(note)
+                    }))
+                    .children(metadata())
+                    .child(
+                        // A deeper fill and a visible edge mark the body as
+                        // editable, apart from the card's read-only lines.
+                        div()
+                            .mt_1()
+                            .rounded(theme.radius)
+                            .bg(if theme.mode.is_dark() {
+                                theme.background.opacity(0.6)
+                            } else {
+                                gpui_kit::white()
+                            })
+                            .border_1()
+                            .border_color(theme.foreground.opacity(0.1))
+                            .hover(|style| style.border_color(theme.foreground.opacity(0.2)))
+                            .child(
+                                Textarea::new(&form.body)
+                                    .appearance(false)
+                                    .line_height(relative(1.5))
+                                    .disabled(busy)
+                                    .aria_label(draft.content.body_label()),
+                            ),
+                    ),
             );
         if !form.files.is_empty() {
             card = card.child(self.render_draft_files(draft, &form.files, true, busy, cx));

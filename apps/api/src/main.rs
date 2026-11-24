@@ -93,6 +93,8 @@ enum ContextKind {
     DelegatedAnswerTask,
     /// A task one hop deep, which may hand part of its work on
     HandingTask,
+    /// A task an incoming-mail turn handed on to another bot
+    EmailTask,
 }
 
 fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
@@ -104,6 +106,7 @@ fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
         Some(ContextKind::MailEvent) => Turn::MailEvent,
         Some(ContextKind::DelegatedAnswerTask) => Turn::AnsweredTask,
         Some(ContextKind::HandingTask) => Turn::HandingTask,
+        Some(ContextKind::EmailTask) => Turn::EmailTask,
     }
 }
 

@@ -52,7 +52,7 @@ fn tools(delegation: &DelegationContext) -> Vec<Tool> {
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
     }
     if delegation.email_task() {
-        return vec![Tool::ReadHistory];
+        return vec![Tool::ReadHistory, Tool::DraftMessage];
     }
     if delegation.origin == Origin::ConnectorEvent {
         return vec![
@@ -78,6 +78,7 @@ fn tools(delegation: &DelegationContext) -> Vec<Tool> {
             Tool::RequestSecret,
             Tool::AskOwner,
             Tool::DraftEmail,
+            Tool::DraftMessage,
         ]);
     }
     if delegation.can_delegate() {
@@ -180,8 +181,9 @@ impl DelegationContext {
 
     /// A task an email turn handed on. Its task text came from email and its
     /// reply goes back to a turn that can send mail, so it gets no memory,
-    /// mail, computer records or tools beyond its own history. Its bot's
-    /// rules still apply to it.
+    /// mail, computer records or tools beyond its own history and drafting
+    /// a message the owner approves on a card, which sends nothing by
+    /// itself. Its bot's rules still apply to it.
     pub fn email_task(&self) -> bool {
         self.origin == Origin::ConnectorEvent && self.delegated_task()
     }
@@ -362,6 +364,23 @@ mod tests {
         assert!(task(Origin::OwnerRequest).contains(&Tool::DraftEmail));
         assert!(task(Origin::RoutineRun).contains(&Tool::DraftEmail));
         assert!(!task(Origin::Other).contains(&Tool::DraftEmail));
+    }
+
+    #[test]
+    fn a_task_handed_on_from_an_email_may_only_draft_a_message() {
+        assert_eq!(
+            task(Origin::ConnectorEvent),
+            vec![Tool::ReadHistory, Tool::DraftMessage]
+        );
+        for origin in [Origin::ConnectorEvent, Origin::SocialEvent] {
+            let event = turn_tools(&DelegationContext {
+                origin,
+                ..DelegationContext::default()
+            });
+            assert!(!event.contains(&Tool::DraftMessage), "{origin:?}");
+        }
+        assert!(!task(Origin::Other).contains(&Tool::DraftMessage));
+        assert!(task(Origin::OwnerRequest).contains(&Tool::DraftMessage));
     }
 
     #[test]
