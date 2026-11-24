@@ -140,7 +140,13 @@ pub fn export(turn: Turn) -> Value {
         handoff: None,
         jobs: vec![],
         run: None,
-        rules: None,
+        // The owner's standing setup, as an email task reads it: its own
+        // conversation holds none of the owner's chat.
+        rules: (turn == Turn::EmailTask).then(|| {
+            "## Newsletters\nWhen Inbox hands you the Proliquid weekly newsletter, post it to \
+             the Proliquid Community WhatsApp group once the owner approves the draft.\n"
+                .to_owned()
+        }),
     };
     let instructions = crate::providers::prompt::instructions(&input, "/eval/project");
     let deferred: Vec<Value> = super::tool_search::deferred()

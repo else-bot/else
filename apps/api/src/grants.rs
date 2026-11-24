@@ -89,6 +89,13 @@ impl Grant {
         self.tools.contains(&tool)
     }
 
+    /// Drafts messages without the social tools: a task handed on from
+    /// email, which names only chats its connection already lists and
+    /// attaches no files.
+    pub fn drafts_only(&self) -> bool {
+        self.allows(Tool::DraftMessage) && !self.allows(Tool::Social)
+    }
+
     /// Whether it holds any of `tools`.
     pub fn allows_any(&self, tools: &[Tool]) -> bool {
         tools.iter().any(|tool| self.allows(*tool))

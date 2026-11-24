@@ -5,7 +5,7 @@ use crate::app::tools::ToolId;
 use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
     app::questions::{ApprovalKind, Spec},
-    grants::{Grant, Tool},
+    grants::Grant,
     socials::{store, types::*},
 };
 use else_wire::socials as wire;
@@ -137,7 +137,7 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
         .await
         .map_err(Error::from)?;
     // A grant that may only draft sees where it may send, nothing more.
-    let drafts_only = !g.allows(Tool::Social);
+    let drafts_only = g.drafts_only();
     let mut list = Vec::new();
     for c in store::connections(&s.db).await? {
         let access = {
@@ -168,7 +168,11 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
             .collect::<Vec<_>>();
         if drafts_only {
             list.push(json!({
-                "connection": wire::Connection::from(&c),
+                "connection": {
+                    "id": c.id,
+                    "provider": c.provider,
+                    "display_name": c.display_name,
+                },
                 "destinations": destinations,
                 "sending": "draft_message with account_id then exact approved send_draft"
             }));

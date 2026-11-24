@@ -485,6 +485,13 @@ async fn a_task_handed_on_from_an_email_drafts_a_message_only_the_owner_can_rele
         listed["connections"][0]["destinations"][0]["id"], "100",
         "the task can name the chat it drafts for: {listed}"
     );
+    assert!(
+        listed["connections"][0]["connection"]
+            .get("instructions")
+            .is_none()
+            && listed["connections"][0].get("capabilities").is_none(),
+        "it sees where it may send and nothing of the owner's setup: {listed}"
+    );
     for (name, args) in [
         (
             "ask_owner",
@@ -523,18 +530,34 @@ async fn a_task_handed_on_from_an_email_drafts_a_message_only_the_owner_can_rele
             refused.body
         );
     }
-    let unconnected = tool(
-        app,
-        &grant,
-        "draft_message",
-        json!({ "platform": "telegram", "destination": "Team", "body": "Newsletter" }),
-    )
-    .await;
-    assert!(
-        unconnected.error,
-        "without its own tools to send, it drafts only for a connection: {}",
-        unconnected.body
-    );
+    for (why, args) in [
+        (
+            "without its own tools to send, it drafts only for a connection",
+            json!({ "platform": "telegram", "destination": "Team", "body": "Newsletter" }),
+        ),
+        (
+            "mail cannot make it look up a chat",
+            json!({ "platform": "telegram", "account_id": connection,
+                    "destination": "@elsewhere", "body": "Newsletter" }),
+        ),
+        (
+            "it names only a chat the connection lists",
+            json!({ "platform": "telegram", "account_id": connection,
+                    "destination": "999", "body": "Newsletter" }),
+        ),
+        (
+            "it reads none of the bot's files",
+            json!({ "platform": "telegram", "account_id": connection, "destination": "100",
+                    "body": "Newsletter", "attachments": [{ "path": "notes.md" }] }),
+        ),
+    ] {
+        let refused = tool(app, &grant, "draft_message", args).await;
+        assert!(
+            refused.error && refused.code() == "INVALID_DRAFT",
+            "{why}: {}",
+            refused.body
+        );
+    }
     let proposed = social_result(
         tool(
             app,
